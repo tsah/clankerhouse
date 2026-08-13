@@ -3,9 +3,12 @@
 set -uo pipefail
 
 progress_prefix=$'CLANKERHOUSE_PROGRESS\t'
-target=${1:-}
-name=${2:-session}
+target=${1:-${CLANKERHOUSE_TARGET:-}}
+if [[ -z "$target" && -n "${TMUX_PANE:-}" ]]; then
+    target=$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}' 2>/dev/null || true)
+fi
 [[ "$target" =~ ^\$[0-9]+$ ]] || { printf 'Unable to resolve tmux session: %q\n' "$target" >&2; exit 2; }
+name=${2:-$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null || printf session)}
 
 steps=()
 errors=()

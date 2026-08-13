@@ -27,8 +27,7 @@ if [ "$(option @clankerhouse-bindings on)" != off ]; then
 
     tmux bind-key -n "$open_key" display-popup -E -w 90% -h 80% "$runtime_root/bin/clankerhouse"
     tmux bind-key -n "$spawn_key" display-popup -E -w 90% -h 80% -d '#{pane_current_path}' "CLANKERHOUSE_MODE=spawn '$runtime_root/bin/clankerhouse'"
-    tmux bind-key -n "$delete_key" if-shell "'$runtime_root/bin/clankerhouse-tui-active' #{q:pane_id}" \
-        'send-keys Escape d' \
-        "display-popup -E -w 64 -h 16 '$runtime_root/bin/clankerhouse-stop-popup' #{q:session_id} #{q:session_name}"
+    tmux bind-key -n "$delete_key" run-shell \
+        "'$runtime_root/bin/clankerhouse-delete' '#{pane_id}' '#{session_id}'"
     tmux bind-key -n "$stop_key" run-shell "'$runtime_root/bin/clankerhouse-stop-current-session' #{q:session_id}"
 fi

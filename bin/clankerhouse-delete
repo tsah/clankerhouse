@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -euo pipefail
+
+pane=${1:-}
+session=${2:-}
+[[ "$pane" =~ ^%[0-9]+$ ]] || exit 2
+[[ "$session" =~ ^\$[0-9]+$ ]] || exit 2
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if "$script_dir/clankerhouse-tui-active" "$pane"; then
+    exec tmux send-keys -t "$pane" Escape d
+fi
+
+exec tmux display-popup -E -t "$pane" -w 64 -h 16 \
+    -e "CLANKERHOUSE_TARGET=$session" \
+    "$script_dir/clankerhouse-stop-popup"

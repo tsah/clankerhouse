@@ -30,18 +30,92 @@ pane=$(tmux -S "$socket" list-panes -t delete-me -F '#{pane_id}')
 tmux -S "$socket" set-option -p -t "$pane" @clankerhouse_clanker_id clanker-popup-qa
 tmux -S "$socket" new-session -d -s survivor 'sleep 60'
 session_id=$(tmux -S "$socket" display-message -p -t delete-me:0 '#{session_id}')
+server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
+tmux -S "$socket" set-option -g @clankerhouse-home "$repo"
+TMUX="$socket,$server_pid,0" "$repo/clankerhouse.tmux"
 
-# tmux may deliver the triggering Alt-D escape sequence to the new popup.
-printf dy | env TMUX="$socket,0,0" CLANKERHOUSE_CLANKERS="$root/clankers" \
-    script -qfec "$repo/bin/clankerhouse-stop-popup '$session_id' delete-me" "$root/output" >/dev/null
+# Exercise the public key binding through a real attached tmux client. Writing
+# Escape+d to its PTY reproduces the terminal path that a direct script call
+# cannot: tmux consumes Alt-D, creates the popup, and supplies its target context.
+SOCKET="$socket" OUTPUT="$root/output" python3 - <<'PY'
+import fcntl
+import os
+import pty
+import signal
+import struct
+import subprocess
+import termios
+import time
 
-! tmux -S "$socket" has-session -t '=delete-me' 2>/dev/null
+socket = os.environ["SOCKET"]
+output_path = os.environ["OUTPUT"]
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["TERM"] = "xterm-256color"
+    os.execvp("tmux", ["tmux", "-S", socket, "attach-session", "-t", "delete-me"])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)
+output = bytearray()
+
+def drain():
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return
+            output.extend(chunk)
+        except BlockingIOError:
+            return
+        except OSError:
+            return
+
+def session_exists(name):
+    return subprocess.run(
+        ["tmux", "-S", socket, "has-session", "-t", f"={name}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+try:
+    time.sleep(0.3)
+    drain()
+    os.write(fd, b"\x1bd")
+    time.sleep(0.3)
+    drain()
+    os.write(fd, b"y")
+    deadline = time.monotonic() + 5
+    while session_exists("delete-me") and time.monotonic() < deadline:
+        time.sleep(0.05)
+        drain()
+    drain()
+finally:
+    with open(output_path, "wb") as stream:
+        stream.write(output)
+    try:
+        os.write(fd, b"\x02d")
+    except OSError:
+        pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+if session_exists("delete-me"):
+    print(output.decode("utf-8", errors="replace")[-2000:])
+    raise SystemExit("Alt-D popup did not remain open and confirm deletion")
+PY
+
 tmux -S "$socket" has-session -t '=survivor'
 grep -q 'Destroying session' "$root/output"
 grep -q 'Finding tracked clankers' "$root/output"
 grep -q 'Persisting stop intent' "$root/output"
 grep -q 'Stop intents persisted' "$root/output"
-grep -F 'bin/clankerhouse-tui-active' "$repo/clankerhouse.tmux" >/dev/null
-grep -F 'bin/clankerhouse-stop-popup' "$repo/clankerhouse.tmux" >/dev/null
+grep -F 'bin/clankerhouse-delete' "$repo/clankerhouse.tmux" >/dev/null
+grep -F 'clankerhouse-tui-active' "$repo/bin/clankerhouse-delete" >/dev/null
+grep -F 'clankerhouse-stop-popup' "$repo/bin/clankerhouse-delete" >/dev/null
 
 printf 'Clankerhouse standalone stop popup QA passed: confirmation, animated detailed progress, durable stop intent, target deletion, and surviving-session preservation behave correctly.\n'

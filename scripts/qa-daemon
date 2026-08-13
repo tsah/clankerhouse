@@ -46,7 +46,7 @@ server_pid=$!
 daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
 cache="$runtime/clankerhouse-$uid/state.json"
 for _ in {1..100}; do
-    [[ -S "$daemon_socket" && -s "$cache" ]] && break
+    [[ -S "$daemon_socket" && -s "$cache" && "$(stat -c '%a' "$daemon_socket")" == "600" ]] && break
     kill -0 "$server_pid" 2>/dev/null || {
         printf 'Clankerhouse daemon exited during startup:\n' >&2
         cat "$root/server.log" >&2
@@ -55,7 +55,7 @@ for _ in {1..100}; do
     sleep 0.05
 done
 [[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
-[[ "$(stat -c '%a' "$daemon_socket")" == "600" ]] || { printf 'Expected mode 600 daemon socket\n' >&2; exit 1; }
+[[ "$(stat -c '%a' "$daemon_socket")" == "600" ]] || { printf 'Expected mode 600 daemon socket, got %s\n' "$(stat -c '%a' "$daemon_socket")" >&2; exit 1; }
 
 transport_result=$(bun --eval '
   const [modulePath, socketPath] = process.argv.slice(1)

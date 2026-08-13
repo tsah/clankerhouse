@@ -19,7 +19,8 @@ mkdir -p "$root"
 "$root/prefix/bin/clankerhouse-doctor" >/dev/null
 "$root/prefix/bin/clankers" help >/dev/null
 tmux -S "$socket" new-session -d -s qa 'sleep 30'
-tmux -S "$socket" run-shell "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
+server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
+TMUX="$socket,$server_pid,0" "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
 sleep 0.2
 [[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$root/prefix/lib/clankerhouse" ]]
 tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse/bin/clankerhouse" >/dev/null

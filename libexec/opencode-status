@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import argparse
 import hashlib
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -98,14 +99,22 @@ def api_get(port, path, timeout):
 
 def opencode2_api_get(path, cwd=None, timeout=3):
     try:
-        result = subprocess.run(
-            ["opencode2", "api", "get", path],
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        # Bun extracts OpenTUI's native library for every short-lived CLI call
+        # but does not remove it afterward. Isolate the extraction so the
+        # temporary directory is removed as soon as the API call exits.
+        with tempfile.TemporaryDirectory(prefix="opencode2-api-") as bun_tmpdir:
+            env = os.environ.copy()
+            env["BUN_TMPDIR"] = bun_tmpdir
+            env["TMPDIR"] = bun_tmpdir
+            result = subprocess.run(
+                ["opencode2", "api", "get", path],
+                cwd=cwd,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         if result.returncode != 0:
             return None
         payload = json.loads(result.stdout)

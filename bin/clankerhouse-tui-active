@@ -1,0 +1,16 @@
+#!/bin/bash
+
+set -euo pipefail
+
+pane=${1:-}
+[[ "$pane" =~ ^%[0-9]+$ ]] || exit 1
+
+while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || continue
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+    [[ "$cmdline" == *"src/main.tsx"* && "$cmdline" != *"--server"* ]] || continue
+    process_pane=$(tr '\0' '\n' < "/proc/$pid/environ" | awk -F= '$1 == "TMUX_PANE" { print substr($0, index($0, "=") + 1); exit }')
+    [[ "$process_pane" == "$pane" ]] && exit 0
+done < <(pgrep -u "$(id -u)" -f 'bun.*src/main\.tsx' 2>/dev/null || true)
+
+exit 1

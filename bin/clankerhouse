@@ -1,0 +1,5 @@
+#!/bin/sh
+# Clankerhouse interactive workshop and clanker navigator.
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$script_dir/clankerhouse-picker" "$@"

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+. "$(CDPATH= cd -- "$(dirname -- "$0")/../libexec" && pwd)/clankerhouse-env"
+exec bun "$CLANKERHOUSE_HOME/src/cli.ts" "$@"

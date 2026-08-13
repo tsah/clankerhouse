@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+args=(); while (($#)); do case "$1" in --base|--copy|--profile|--clanker-name|--parent) args+=("$1" "$2"); shift 2;; --wait|--no-parent) args+=("$1"); shift;; --) shift; break;; *) break;; esac; done
+(($#)) || { echo "Usage: workshop-pi [options] BRANCH [PROMPT]" >&2; exit 2; }
+branch=$1; shift
+exec "$(dirname "$0")/clankers" workshop spawn --name "$branch" --harness pi "${args[@]}" --prompt "${*:-Ready for instructions.}"

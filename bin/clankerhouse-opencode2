@@ -1,0 +1,46 @@
+#!/bin/bash
+
+set -euo pipefail
+
+session_id=""
+profile=""
+while (($#)); do
+    case "$1" in
+        --session) session_id=$2; shift 2 ;;
+        --profile) profile=$2; shift 2 ;;
+        --) shift; break ;;
+        *) echo "Usage: clankerhouse-opencode2 [--session ID] [--profile NAME] -- DIRECTORY PROMPT" >&2; exit 2 ;;
+    esac
+done
+
+[[ $# -eq 2 ]] || { echo "Usage: clankerhouse-opencode2 [--session ID] [--profile NAME] -- DIRECTORY PROMPT" >&2; exit 2; }
+directory=$1
+prompt=$2
+
+bun_tmpdir=${XDG_CACHE_HOME:-$HOME/.cache}/opencode2/bun-tmp
+install -d -m 700 "$bun_tmpdir"
+export BUN_TMPDIR=$bun_tmpdir
+
+api() {
+    opencode2 api "$@"
+}
+
+if [[ -z "$session_id" ]]; then
+    payload=$(jq -cn --arg directory "$directory" --arg profile "$profile" \
+        '{location: {directory: $directory}} + (if $profile == "" then {} else {agent: $profile} end)')
+    session_id=$(api post /api/session --data "$payload" | jq -er '.data.id')
+
+    if [[ -n "${CLANKER_ID:-}" ]]; then
+        clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
+        attest=(recovery attest "$CLANKER_ID" --session-id "$session_id")
+        [[ -z "${CLANKER_RECOVERY_ATTEMPT:-}" ]] || attest+=(--attempt "$CLANKER_RECOVERY_ATTEMPT")
+        "$clankers_cli" "${attest[@]}" >/dev/null
+    fi
+    [[ -z "${TMUX_PANE:-}" ]] || tmux set-option -p -t "$TMUX_PANE" @clankerhouse_harness_session_id "$session_id"
+fi
+
+payload=$(jq -cn --arg text "$prompt" '{text: $text, resume: true}')
+api post "/api/session/$session_id/prompt" --data "$payload" >/dev/null
+
+export CLANKER_SESSION_ID=$session_id
+exec opencode2 --session "$session_id" "$directory"

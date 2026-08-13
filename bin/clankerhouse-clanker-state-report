@@ -1,0 +1,143 @@
+#!/bin/bash
+
+set -euo pipefail
+
+harness="${1:-}"
+state="${2:-}"
+
+case "$harness" in
+    claude|pi|codex|opencode) ;;
+    *) exit 0 ;;
+esac
+
+case "$state" in
+    working|idle|done|blocked|unknown) ;;
+    release) state="unknown" ;;
+    *) exit 0 ;;
+esac
+
+pane="${TMUX_PANE:-}"
+[[ -n "$pane" ]] || exit 0
+
+clanker_id=$(tmux show-option -p -qv -t "$pane" @clankerhouse_clanker_id 2>/dev/null || true)
+if [[ -z "$clanker_id" ]]; then
+    clanker_id="${CLANKER_ID:-clanker-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
+    tmux set-option -p -t "$pane" @clankerhouse_clanker_id "$clanker_id" 2>/dev/null || true
+fi
+tmux set-option -p -t "$pane" @dotfiles_harness "$harness" 2>/dev/null || true
+
+state_dir="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)/clanker-state"
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+activity_dir="${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/activity"
+activity_path=$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || pwd -P)
+
+# Consume hook stdin so callers that provide JSON never block on a full pipe.
+hook_input=$(cat 2>/dev/null || true)
+harness_session_id=$(HOOK_INPUT="$hook_input" python3 - <<'PY'
+import json
+import os
+try:
+    payload = json.loads(os.environ.get("HOOK_INPUT", "") or "{}")
+except Exception:
+    payload = {}
+value = payload.get("session_id") or payload.get("sessionID") or ""
+print(value if isinstance(value, str) else "")
+PY
+)
+expected_session_id="${CLANKER_SESSION_ID:-}"
+recovery_attempt_id="${CLANKER_RECOVERY_ATTEMPT:-}"
+if [[ -n "$harness_session_id" ]]; then
+    tmux set-option -p -t "$pane" @clankerhouse_harness_session_id "$harness_session_id" 2>/dev/null || true
+fi
+if [[ -n "$recovery_attempt_id" ]]; then
+    tmux set-option -p -t "$pane" @clankerhouse_recovery_attempt "$recovery_attempt_id" 2>/dev/null || true
+fi
+
+HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" ACTIVITY_DIR="$activity_dir" ACTIVITY_PATH="$activity_path" python3 - <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import time
+
+harness = os.environ.get("HARNESS", "")
+clanker_id = os.environ.get("CLANKER_ID", "")
+state = os.environ.get("STATE", "")
+pane = os.environ.get("PANE", "")
+state_dir = pathlib.Path(os.environ.get("STATE_DIR", ""))
+hook_input = os.environ.get("HOOK_INPUT", "")
+activity_dir = pathlib.Path(os.environ.get("ACTIVITY_DIR", ""))
+activity_path = pathlib.Path(os.environ.get("ACTIVITY_PATH", "")).resolve()
+
+if not harness or not state or not pane or not state_dir:
+    raise SystemExit(0)
+
+payload = {}
+if hook_input.strip():
+    try:
+        payload = json.loads(hook_input)
+    except Exception:
+        payload = {}
+
+safe_pane = re.sub(r"[^A-Za-z0-9_.%-]", "_", pane)
+target = state_dir / f"{safe_pane}.json"
+tmp = state_dir / f"{safe_pane}.{os.getpid()}.tmp"
+try:
+    previous = json.loads(target.read_text(encoding="utf-8"))
+except Exception:
+    previous = {}
+if previous and (
+    previous.get("clankerId") != clanker_id
+    or previous.get("pane") != pane
+    or previous.get("harness") != harness
+):
+    previous = {}
+
+hook_event = payload.get("hook_event_name") if isinstance(payload, dict) else None
+generation = int(previous.get("generation") or 0)
+settled_generation = int(previous.get("settledGeneration") or 0)
+if hook_event == "UserPromptSubmit" or (state == "working" and previous.get("state") not in ("working", "blocked")):
+    generation += 1
+if generation == 0 and state not in ("idle", "unknown"):
+    generation = 1
+if state == "done":
+    settled_generation = generation
+record = {
+    "harness": harness,
+    "clankerId": clanker_id or previous.get("clankerId"),
+    "harnessSessionId": os.environ.get("HARNESS_SESSION_ID") or previous.get("harnessSessionId"),
+    "recoveryAttemptId": os.environ.get("RECOVERY_ATTEMPT_ID") or previous.get("recoveryAttemptId"),
+    "state": state,
+    "pane": pane,
+    "generation": generation,
+    "settledGeneration": settled_generation,
+    "updatedAt": int(time.time() * 1000),
+    "hookEvent": hook_event,
+}
+tmp.write_text(json.dumps(record), encoding="utf-8")
+tmp.chmod(0o600)
+tmp.replace(target)
+
+if activity_dir and activity_path:
+    activity_dir.mkdir(parents=True, exist_ok=True)
+    activity_target = activity_dir / f"{hashlib.sha256(str(activity_path).encode()).hexdigest()}-clanker.json"
+    activity_tmp = activity_dir / f"{activity_target.name}.{os.getpid()}.tmp"
+    activity_tmp.write_text(json.dumps({"path": str(activity_path), "source": "clanker", "updatedAt": record["updatedAt"]}), encoding="utf-8")
+    activity_tmp.replace(activity_target)
+PY
+
+if [[ -n "$harness_session_id" ]]; then
+    if [[ -n "$expected_session_id" && "$expected_session_id" != "$harness_session_id" ]]; then
+        exit 0
+    fi
+    clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
+    attest_args=(recovery attest "$clanker_id" --session-id "$harness_session_id")
+    [[ -n "$recovery_attempt_id" ]] && attest_args+=(--attempt "$recovery_attempt_id")
+    "$clankers_cli" "${attest_args[@]}" >/dev/null 2>&1 || true
+fi
+
+if [[ "$state" == "unknown" ]]; then
+    tmux set-option -p -u -t "$pane" @dotfiles_harness 2>/dev/null || true
+fi

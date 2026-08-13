@@ -1,0 +1,93 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-env"
+
+if ! command -v bun >/dev/null 2>&1; then
+    echo "Clankerhouse requires bun" >&2; exit 1
+fi
+
+cd "$CLANKERHOUSE_HOME" || exit 1
+
+tmux set-option -gq @clankerhouse_open 1
+trap 'tmux set-option -gu @clankerhouse_open 2>/dev/null || true' EXIT
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
+PID_FILE="$STATE_DIR/server.pid"
+CACHE_FILE="$STATE_DIR/state.json"
+LOG_FILE="$STATE_DIR/server.log"
+SOCKET_FILE="$STATE_DIR/server.tmux-socket"
+VERSION_FILE="$STATE_DIR/server.version"
+LOCK_FILE="$STATE_DIR/server.lock"
+CACHE_VERSION=10
+CURRENT_TMUX_SOCKET=${TMUX:-}
+CURRENT_TMUX_SOCKET=${CURRENT_TMUX_SOCKET%%,*}
+
+cache_server_process() {
+    local pid=$1
+    local cmdline=""
+    local cwd=""
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+    [[ "$cwd" == "$PWD" ]] || return 1
+    [[ "$cmdline" == *"bun src/main.tsx --server"* ]]
+}
+
+server_running() {
+    local pid=""
+    [[ -r "$PID_FILE" ]] || return 1
+    pid=$(<"$PID_FILE")
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    cache_server_process "$pid" || return 1
+    # A cache process inherited from another tmux socket cannot observe this
+    # client's sessions or clankers (common after isolated QA runs).
+    [[ -r "$SOCKET_FILE" ]] || return 1
+    [[ "$(<"$SOCKET_FILE")" == "$CURRENT_TMUX_SOCKET" ]] || return 1
+    [[ -r "$VERSION_FILE" ]] || return 1
+    [[ "$(<"$VERSION_FILE")" == "$CACHE_VERSION" ]] || return 1
+    # Restart after local source edits even when the cache schema is unchanged.
+    [[ -z "$(find src -type f -newer "$PID_FILE" -print -quit 2>/dev/null)" ]]
+}
+
+mkdir -p -m 700 "$STATE_DIR"
+if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -O "$STATE_DIR" ]]; then
+    echo "Refusing unsafe Clankerhouse runtime directory: $STATE_DIR" >&2
+    exit 1
+fi
+chmod 700 "$STATE_DIR"
+exec 9>"$LOCK_FILE"
+flock 9
+if ! server_running; then
+    if [[ -r "$PID_FILE" ]]; then
+        old_pid=$(<"$PID_FILE")
+        if [[ "$old_pid" =~ ^[0-9]+$ ]] && cache_server_process "$old_pid"; then
+            kill "$old_pid" 2>/dev/null || true
+            for _ in {1..20}; do
+                kill -0 "$old_pid" 2>/dev/null || break
+                sleep 0.05
+            done
+            if kill -0 "$old_pid" 2>/dev/null; then
+                echo "Clankerhouse could not stop stale cache server $old_pid" >&2
+                exit 1
+            fi
+        fi
+    fi
+    rm -f "$PID_FILE" "$CACHE_FILE" "$VERSION_FILE"
+    printf '%s\n' "$CURRENT_TMUX_SOCKET" > "$SOCKET_FILE"
+    nohup bun src/main.tsx --server >>"$LOG_FILE" 2>&1 &
+fi
+
+for _ in {1..20}; do
+    [[ -s "$CACHE_FILE" ]] && break
+    sleep 0.05
+done
+
+flock -u 9
+exec 9>&-
+
+bun src/main.tsx

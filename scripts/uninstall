@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -euo pipefail
+prefix=${CLANKERHOUSE_PREFIX:-${PREFIX:-$HOME/.local}}
+force=false
+while (($#)); do
+    case "$1" in
+        --prefix) prefix=${2:?}; shift 2 ;;
+        --force) force=true; shift ;;
+        -h|--help) echo "Usage: scripts/uninstall [--prefix PATH] [--force]"; exit 0 ;;
+        *) exit 2 ;;
+    esac
+done
+prefix=$(realpath -m -- "$prefix")
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/installations
+manifest="$state_root/$(printf '%s' "$prefix" | sha256sum | cut -d' ' -f1).files"
+[[ -f "$manifest" ]] || { echo "No managed Clankerhouse installation for $prefix" >&2; exit 1; }
+app="$prefix/lib/clankerhouse"
+if [[ -x "$app/bin/clankerhouse-uninstall-claude-hooks" ]]; then
+    "$app/bin/clankerhouse-uninstall-claude-hooks"
+fi
+
+for unit in clankerhouse-recovery.service clankerhouse-resource-guard.service clankerhouse-spot-watch.service; do
+    if grep -F "/$unit" "$manifest" >/dev/null; then systemctl --user disable --now "$unit" 2>/dev/null || true; fi
+done
+mapfile -t paths < "$manifest"
+for ((index=${#paths[@]} - 1; index >= 0; index--)); do
+    path=${paths[$index]}
+    if [[ -L "$path" || -f "$path" ]]; then rm -f -- "$path"
+    elif [[ -d "$path" ]]; then rm -rf -- "$path"
+    elif [[ "$force" == false ]]; then continue
+    fi
+done
+rm -f "$manifest"
+command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload || true
+printf 'Uninstalled Clankerhouse from %s; runtime and recovery state were preserved.\n' "$prefix"

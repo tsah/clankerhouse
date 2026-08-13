@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-env"
+CLANKERHOUSE_SPOT_CHECKPOINT_COMMAND=${CLANKERHOUSE_SPOT_CHECKPOINT_COMMAND:-"$CLANKERHOUSE_BIN_DIR/clankers recovery checkpoint"}
+export CLANKERHOUSE_SPOT_CHECKPOINT_COMMAND
+exec python3 "$CLANKERHOUSE_HOME/spot_watch.py" "$@"

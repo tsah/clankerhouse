@@ -1,0 +1,17 @@
+[Unit]
+Description=Clankerhouse durable workshop and clanker boot recovery
+Documentation=file:@CLANKERHOUSE_HOME@/README.md
+After=default.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart="@CLANKERHOUSE_BIN@/clankerhouse-recovery" --once
+RemainAfterExit=yes
+Restart=no
+TimeoutStopSec=20s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

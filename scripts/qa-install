@@ -1,0 +1,37 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(realpath -m -- "${CLANKERHOUSE_INSTALL_QA_ROOT:-$HOME/.cache/qa-clankerhouse-install-$(id -u)-$$}")
+case "$root" in "$HOME/.cache/qa-clankerhouse-install-"*) ;; *) echo "Refusing unsafe install QA root: $root" >&2; exit 2;; esac
+socket="$root/tmux.sock"
+cleanup() {
+    HOME="$root/home" XDG_STATE_HOME="$root/state" "$repo/scripts/uninstall" --prefix "$root/integration-prefix" --force >/dev/null 2>&1 || true
+    "$repo/scripts/uninstall" --prefix "$root/prefix" --force >/dev/null 2>&1 || true
+    tmux -S "$socket" kill-server 2>/dev/null || true
+    rm -rf -- "$root"
+}
+trap cleanup EXIT INT TERM
+mkdir -p "$root"
+
+"$repo/scripts/install" --prefix "$root/prefix" --no-enable >/dev/null
+"$root/prefix/bin/clankerhouse-doctor" >/dev/null
+"$root/prefix/bin/clankers" help >/dev/null
+tmux -S "$socket" new-session -d -s qa 'sleep 30'
+tmux -S "$socket" run-shell "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
+sleep 0.2
+[[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$root/prefix/lib/clankerhouse" ]]
+tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse/bin/clankerhouse" >/dev/null
+"$repo/scripts/uninstall" --prefix "$root/prefix" >/dev/null
+[[ ! -e "$root/prefix/lib/clankerhouse" ]]
+
+mkdir -p "$root/home"
+HOME="$root/home" XDG_STATE_HOME="$root/state" "$repo/scripts/install" --prefix "$root/integration-prefix" --integrations --no-enable >/dev/null
+[[ -L "$root/home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
+[[ -L "$root/home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
+[[ -L "$root/home/.agents/skills/clanker-coordination" ]]
+grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"
+HOME="$root/home" XDG_STATE_HOME="$root/state" "$repo/scripts/uninstall" --prefix "$root/integration-prefix" >/dev/null
+! grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"
+printf 'Clankerhouse install QA passed: relocatable prefix install, commands, doctor, TPM bindings, integrations, uninstall, and state preservation behave correctly.\n'

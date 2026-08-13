@@ -1,0 +1,41 @@
+#!/bin/bash
+
+set -euo pipefail
+settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+[[ -f "$settings_file" ]] || exit 0
+SETTINGS_FILE="$settings_file" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["SETTINGS_FILE"])
+data = json.loads(path.read_text(encoding="utf-8") or "{}")
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    raise SystemExit(0)
+for event in list(hooks):
+    entries = hooks[event]
+    if not isinstance(entries, list):
+        continue
+    kept_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            kept_entries.append(entry)
+            continue
+        commands = entry.get("hooks")
+        if isinstance(commands, list):
+            entry["hooks"] = [hook for hook in commands if not (
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and "clankerhouse-clanker-state-report" in str(hook.get("command", ""))
+            )]
+        if entry.get("hooks"):
+            kept_entries.append(entry)
+    if kept_entries:
+        hooks[event] = kept_entries
+    else:
+        del hooks[event]
+if not hooks:
+    data.pop("hooks", None)
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY

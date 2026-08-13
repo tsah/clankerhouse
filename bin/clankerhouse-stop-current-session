@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ -n "${1:-}" ]]; then
+    target=$1
+elif [[ -n "${TMUX_PANE:-}" ]]; then
+    target=$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}')
+else
+    target=$(tmux display-message -p '#{session_id}')
+fi
+if [[ ! "$target" =~ ^\$[0-9]+$ ]]; then
+    printf 'Unable to resolve current tmux session id: %q\n' "$target" >&2
+    exit 2
+fi
+
+tmux switch-client -n 2>/dev/null || true
+exec "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankerhouse-tmux-stop" session "$target"

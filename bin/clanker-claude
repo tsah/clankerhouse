@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+cwd=$PWD; name=claude; args=()
+while (($#)); do
+  case "$1" in
+    --cwd) cwd=$2; shift 2 ;;
+    --name) name=$2; shift 2 ;;
+    --profile|--wait) args+=("$1"); [[ "$1" == --profile ]] && { args+=("$2"); shift; }; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$(dirname "$0")/clankers" spawn --workshop "$cwd" --name "$name" --harness claude "${args[@]}" --prompt "${*:-Ready for instructions.}"

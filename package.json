@@ -1,0 +1,74 @@
+{
+  "name": "clankerhouse",
+  "version": "0.1.0",
+  "description": "Tmux-native workshops, visible harness sessions, and durable recovery",
+  "license": "MIT",
+  "author": "Tsah Weiss",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tsah/clankerhouse.git"
+  },
+  "homepage": "https://github.com/tsah/clankerhouse#readme",
+  "bugs": {
+    "url": "https://github.com/tsah/clankerhouse/issues"
+  },
+  "type": "module",
+  "keywords": [
+    "tmux",
+    "tui",
+    "worktree",
+    "developer-tools"
+  ],
+  "os": [
+    "linux"
+  ],
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "bin": {
+    "clankerhouse": "bin/clankerhouse",
+    "clankers": "bin/clankers",
+    "clankerhouse-doctor": "bin/clankerhouse-doctor"
+  },
+  "scripts": {
+    "start": "bun run src/main.tsx",
+    "server": "bun run src/main.tsx --server",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "test:python": "PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch",
+    "qa:api": "scripts/qa-clanker-api",
+    "qa:daemon": "scripts/qa-daemon",
+    "qa:recovery": "scripts/qa-recovery",
+    "qa:popup": "scripts/qa-stop-popup",
+    "qa:install": "scripts/qa-install",
+    "qa:tui": "scripts/qa",
+    "qa": "bun run check && bun test && bun run test:python && scripts/qa-clanker-api && scripts/qa-daemon && scripts/qa-recovery && scripts/qa-stop-popup && scripts/qa-install && scripts/qa",
+    "doctor": "bin/clankerhouse-doctor"
+  },
+  "files": [
+    "bin",
+    "libexec",
+    "src",
+    "integrations",
+    "share",
+    "docs",
+    "scripts",
+    "tests",
+    "resource_guard.py",
+    "spot_watch.py",
+    "clankerhouse.tmux",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
+  "dependencies": {
+    "@opentui/core": "latest",
+    "@opentui/solid": "^0.2.15",
+    "effect": "latest",
+    "solid-js": "^1.9.13"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

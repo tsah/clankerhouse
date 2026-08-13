@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+progress() {
+    [[ "${CLANKERHOUSE_PROGRESS:-0}" == 1 ]] || return 0
+    printf 'CLANKERHOUSE_PROGRESS\t%s\n' "$1" >&2
+}
+
+kind="${1:-}"
+target="${2:-}"
+[[ "$kind" == pane || "$kind" == session || "$kind" == mark-session ]] && [[ -n "$target" ]] || {
+    echo "Usage: clankerhouse-tmux-stop pane|session|mark-session TARGET" >&2
+    exit 2
+}
+
+clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
+progress "Finding tracked clankers"
+if [[ "$kind" == pane ]]; then
+    ids=$(tmux display-message -p -t "$target" '#{@clankerhouse_clanker_id}' 2>/dev/null || true)
+else
+    ids=$(tmux list-panes -t "$target" -F '#{@clankerhouse_clanker_id}' 2>/dev/null || true)
+fi
+while IFS= read -r clanker_id; do
+    [[ -n "$clanker_id" ]] || continue
+    progress "Persisting stop intent for $clanker_id"
+    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-tmux-stop --no-kill --if-present 2>&1); then
+        printf 'Unable to persist stop intent for %s: %s\n' "$clanker_id" "$stop_output" >&2
+        exit 1
+    fi
+done <<<"$ids"
+progress "Stop intents persisted"
+
+if [[ "$kind" == "mark-session" ]]; then
+    exit 0
+fi
+if [[ "$kind" == pane ]]; then
+    progress "Closing tmux pane"
+    exec tmux kill-pane -t "$target"
+fi
+progress "Closing tmux session"
+exec tmux kill-session -t "$target"

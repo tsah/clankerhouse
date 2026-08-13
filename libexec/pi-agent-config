@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+
+import argparse
+import ast
+import json
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+
+@dataclass
+class AgentConfig:
+    name: str
+    description: str
+    source: str
+    agent_format: str
+    file_path: Path
+    model: str
+    thinking: str
+    tools: List[str]
+    body: str
+
+
+PI_TOOL_NAMES = {"read", "write", "edit", "bash", "grep", "find", "ls"}
+CLAUDE_TO_PI_TOOL_MAP = {
+    "read": "read",
+    "write": "write",
+    "edit": "edit",
+    "multiedit": "edit",
+    "bash": "bash",
+    "grep": "grep",
+    "glob": "find",
+    "find": "find",
+    "ls": "ls",
+    "list": "ls",
+}
+
+
+def strip_wrapping_quotes(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and ((text[0] == '"' and text[-1] == '"') or (text[0] == "'" and text[-1] == "'")):
+        return text[1:-1]
+    return text
+
+
+def parse_inline_value(value: str) -> Any:
+    text = value.strip()
+    if not text:
+        return ""
+
+    if text.startswith("[") and text.endswith("]"):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(text)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                continue
+
+    return strip_wrapping_quotes(text)
+
+
+def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
+    if not content.startswith("---\n"):
+        return {}, content
+
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return {}, content
+
+    end_index = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            end_index = index
+            break
+
+    if end_index is None:
+        return {}, content
+
+    frontmatter_lines = lines[1:end_index]
+    frontmatter: Dict[str, Any] = {}
+    index = 0
+
+    while index < len(frontmatter_lines):
+        raw_line = frontmatter_lines[index].rstrip("\n")
+        stripped = raw_line.strip()
+
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            index += 1
+            continue
+
+        key, raw_value = stripped.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip()
+
+        if value in {"|", ">"}:
+            block_lines: List[str] = []
+            index += 1
+            while index < len(frontmatter_lines):
+                next_line = frontmatter_lines[index].rstrip("\n")
+                if next_line.startswith(" ") or next_line.startswith("\t"):
+                    block_lines.append(next_line.lstrip())
+                    index += 1
+                    continue
+                break
+            frontmatter[key] = "\n".join(block_lines).strip()
+            continue
+
+        if value == "":
+            block_items: List[str] = []
+            next_index = index + 1
+            while next_index < len(frontmatter_lines):
+                next_line = frontmatter_lines[next_index].rstrip("\n")
+                next_stripped = next_line.strip()
+                if not next_stripped:
+                    next_index += 1
+                    continue
+                if not (next_line.startswith(" ") or next_line.startswith("\t")):
+                    break
+                block_items.append(next_stripped)
+                next_index += 1
+
+            if block_items:
+                parsed_items: List[str] = []
+                for item in block_items:
+                    if item.startswith("- "):
+                        parsed_items.append(strip_wrapping_quotes(item[2:].strip()))
+                    else:
+                        parsed_items.append(strip_wrapping_quotes(item))
+                frontmatter[key] = parsed_items
+            else:
+                frontmatter[key] = ""
+
+            index = next_index
+            continue
+
+        frontmatter[key] = parse_inline_value(value)
+        index += 1
+
+    body = "".join(lines[end_index + 1 :])
+    return frontmatter, body
+
+
+def find_nearest_agents_dir(cwd: Path, dirname: str) -> Path | None:
+    current = cwd.resolve()
+    while True:
+        candidate = current / dirname / "agents"
+        if candidate.is_dir():
+            return candidate
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def get_user_agents_dirs(script_path: Path, agent_format_filter: str = "all") -> List[Tuple[Path, str]]:
+    dotfiles_dir = script_path.resolve().parent.parent
+    pi_agent_root = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))).expanduser().resolve()
+
+    candidates: List[Tuple[Path, str]] = [
+        (Path.home() / ".claude" / "agents", "claude"),
+        (pi_agent_root / "agents", "pi"),
+        (dotfiles_dir / "claude" / "agents", "claude"),
+        (dotfiles_dir / "pi" / "agents", "pi"),
+    ]
+
+    result: List[Tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for directory, agent_format in candidates:
+        if agent_format_filter != "all" and agent_format != agent_format_filter:
+            continue
+
+        resolved = directory.expanduser().resolve()
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        result.append((resolved, agent_format))
+    return result
+
+
+def normalize_description(value: Any, fallback: str) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or fallback
+    return fallback
+
+
+def normalize_model(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text.lower() in {"inherit", "parent", "default"}:
+        return ""
+    return text
+
+
+def normalize_thinking(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    if text in {"off", "minimal", "low", "medium", "high", "xhigh"}:
+        return text
+    return ""
+
+
+def value_to_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            parsed = parse_inline_value(text)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return []
+
+
+def normalize_pi_tools(value: Any, disallowed_value: Any) -> List[str]:
+    allowed = value_to_list(value)
+    blocked = {tool.strip().lower() for tool in value_to_list(disallowed_value)}
+
+    if not allowed or "*" in allowed:
+        return []
+
+    tools: List[str] = []
+    for tool in allowed:
+        normalized = tool.strip().lower()
+        if normalized in PI_TOOL_NAMES and normalized not in blocked and normalized not in tools:
+            tools.append(normalized)
+    return tools
+
+
+def normalize_claude_tools(value: Any, disallowed_value: Any) -> List[str]:
+    allowed = value_to_list(value)
+    blocked_raw = value_to_list(disallowed_value)
+
+    blocked: set[str] = set()
+    for tool in blocked_raw:
+        mapped = CLAUDE_TO_PI_TOOL_MAP.get(tool.strip().lower())
+        if mapped:
+            blocked.add(mapped)
+
+    if not allowed or "*" in allowed:
+        return []
+
+    tools: List[str] = []
+    for tool in allowed:
+        mapped = CLAUDE_TO_PI_TOOL_MAP.get(tool.strip().lower())
+        if mapped and mapped not in blocked and mapped not in tools:
+            tools.append(mapped)
+    return tools
+
+
+def load_agents_from_dir(directory: Path, source: str, agent_format: str) -> Dict[str, AgentConfig]:
+    agents: Dict[str, AgentConfig] = {}
+
+    if not directory.is_dir():
+        return agents
+
+    for file_path in sorted(directory.glob("*.md")):
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        frontmatter, body = parse_frontmatter(content)
+        name = str(frontmatter.get("name") or file_path.stem).strip()
+        if not name:
+            continue
+
+        description = normalize_description(frontmatter.get("description"), file_path.stem)
+        model = normalize_model(frontmatter.get("model"))
+        thinking = normalize_thinking(frontmatter.get("thinking"))
+
+        if agent_format == "claude":
+            tools = normalize_claude_tools(frontmatter.get("tools"), frontmatter.get("disallowedTools"))
+        else:
+            tools = normalize_pi_tools(frontmatter.get("tools"), frontmatter.get("disallowedTools"))
+
+        agents[name] = AgentConfig(
+            name=name,
+            description=description,
+            source=source,
+            agent_format=agent_format,
+            file_path=file_path.resolve(),
+            model=model,
+            thinking=thinking,
+            tools=tools,
+            body=body,
+        )
+
+    return agents
+
+
+def discover_agents(cwd: Path, script_path: Path, agent_format_filter: str = "all") -> Dict[str, AgentConfig]:
+    discovered: Dict[str, AgentConfig] = {}
+
+    for directory, agent_format in get_user_agents_dirs(script_path, agent_format_filter):
+        for name, agent in load_agents_from_dir(directory, "user", agent_format).items():
+            discovered[name] = agent
+
+    project_claude_dir = find_nearest_agents_dir(cwd, ".claude")
+    project_pi_dir = find_nearest_agents_dir(cwd, ".pi")
+
+    if agent_format_filter in {"all", "claude"} and project_claude_dir:
+        for name, agent in load_agents_from_dir(project_claude_dir, "project", "claude").items():
+            discovered[name] = agent
+
+    if agent_format_filter in {"all", "pi"} and project_pi_dir:
+        for name, agent in load_agents_from_dir(project_pi_dir, "project", "pi").items():
+            discovered[name] = agent
+
+    return discovered
+
+
+def sanitize_tsv(value: str) -> str:
+    return value.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+
+
+def print_list(agents: Dict[str, AgentConfig], fmt: str) -> int:
+    ordered = [agents[name] for name in sorted(agents)]
+    if fmt == "json":
+        payload = [
+            {
+                "name": agent.name,
+                "description": agent.description,
+                "source": agent.source,
+                "format": agent.agent_format,
+                "file": str(agent.file_path),
+                "model": agent.model,
+                "thinking": agent.thinking,
+                "tools": agent.tools,
+            }
+            for agent in ordered
+        ]
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    for agent in ordered:
+        tools = ",".join(agent.tools)
+        print(
+            "\t".join(
+                [
+                    agent.name,
+                    agent.source,
+                    str(agent.file_path),
+                    agent.model,
+                    agent.thinking,
+                    tools,
+                    sanitize_tsv(agent.description),
+                ]
+            )
+        )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Resolve pi and Claude agent definitions")
+    parser.add_argument("agent", nargs="?", help="Agent name")
+    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory used for project agent discovery")
+    parser.add_argument("--body", action="store_true", help="Print agent body only")
+    parser.add_argument("--list", action="store_true", help="List all discovered agents")
+    parser.add_argument("--format", choices=["tsv", "json"], default="tsv", help="Output format")
+    parser.add_argument("--agent-format", choices=["all", "pi", "claude"], default="all", help="Filter discovered agents by format")
+    args = parser.parse_args()
+
+    script_path = Path(__file__)
+    cwd = Path(args.cwd).expanduser()
+    agents = discover_agents(cwd, script_path, args.agent_format)
+
+    if args.list:
+        return print_list(agents, args.format)
+
+    if not args.agent:
+        parser.error("agent name is required unless --list is used")
+
+    agent = agents.get(args.agent)
+    if not agent:
+        available = ", ".join(sorted(agents)) or "none"
+        print(f"Unknown agent: {args.agent}. Available agents: {available}", file=sys.stderr)
+        return 1
+
+    if args.body:
+        sys.stdout.write(agent.body)
+        return 0
+
+    if args.format == "json":
+        payload = {
+            "name": agent.name,
+            "description": agent.description,
+            "source": agent.source,
+            "format": agent.agent_format,
+            "file": str(agent.file_path),
+            "model": agent.model,
+            "thinking": agent.thinking,
+            "tools": agent.tools,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    print(
+        "\t".join(
+            [
+                agent.name,
+                agent.source,
+                str(agent.file_path),
+                agent.model,
+                agent.thinking,
+                ",".join(agent.tools),
+                sanitize_tsv(agent.description),
+            ]
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,98 @@
+#!/bin/bash
+
+set -euo pipefail
+
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-daemon-$uid-$$"}")
+if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
+    printf 'Refusing unsafe Clankerhouse daemon QA root: %s\n' "$root" >&2
+    exit 1
+fi
+marker="$root.clankerhouse-qa-owned"
+socket="$root/tmux.sock"
+runtime="$root/runtime"
+state_home="$root/state"
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+server_pid=""
+
+cleanup() {
+    if [[ -n "$server_pid" ]]; then
+        kill -TERM "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
+    tmux -S "$socket" kill-server 2>/dev/null || true
+    if [[ -f "$marker" ]]; then rm -rf "$root"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -e "$root" && ! -f "$marker" ]]; then
+    printf 'Refusing to replace unowned Clankerhouse daemon QA root: %s\n' "$root" >&2
+    exit 1
+fi
+rm -rf "$root"
+mkdir -p "$runtime" "$state_home" "$root/work"
+touch "$marker"
+tmux -S "$socket" new-session -d -s qa-daemon -n main -x 100 -y 30 -c "$root/work" "sleep 300"
+
+env \
+    TMUX="$socket,0,0" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_STATE_HOME="$state_home" \
+    CLANKERHOUSE_DEV_ROOT="$root/missing" \
+    CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
+    bun run "$repo/src/main.tsx" --server >"$root/server.log" 2>&1 &
+server_pid=$!
+
+daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
+cache="$runtime/clankerhouse-$uid/state.json"
+for _ in {1..100}; do
+    [[ -S "$daemon_socket" && -s "$cache" ]] && break
+    kill -0 "$server_pid" 2>/dev/null || {
+        printf 'Clankerhouse daemon exited during startup:\n' >&2
+        cat "$root/server.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
+[[ "$(stat -c '%a' "$daemon_socket")" == "600" ]] || { printf 'Expected mode 600 daemon socket\n' >&2; exit 1; }
+
+transport_result=$(bun --eval '
+  const [modulePath, socketPath] = process.argv.slice(1)
+  const { getServerStatus, getSnapshot, refreshProjection } = await import(modulePath)
+  const status = await getServerStatus(socketPath)
+  const before = await getSnapshot(socketPath)
+  const refreshed = await refreshProjection(socketPath)
+  const after = await getSnapshot(socketPath)
+  if (status.protocolVersion !== 1) throw new Error("unexpected protocol version")
+  if (before.version !== 10 || after.version !== 10) throw new Error("unexpected cache version")
+  if (refreshed.revision.source !== after.revision.source || refreshed.revision.sequence !== after.revision.sequence) throw new Error("refresh receipt mismatch")
+  if (before.revision.source === after.revision.source && after.revision.sequence <= before.revision.sequence) throw new Error("revision did not advance")
+  console.log(JSON.stringify({ protocol: status.protocolVersion, revision: after.revision }))
+' "$repo/src/transport/index.ts" "$daemon_socket")
+[[ "$transport_result" == *'"protocol":1'* ]] || { printf 'Unexpected daemon response: %s\n' "$transport_result" >&2; exit 1; }
+
+SOCKET_PATH="$daemon_socket" python3 - <<'PY'
+import json
+import os
+import socket
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(os.environ["SOCKET_PATH"])
+client.sendall(json.dumps({"version": 1, "id": "destructive", "method": "destroy"}).encode() + b"\n")
+response = b""
+while b"\n" not in response:
+    response += client.recv(4096)
+message = json.loads(response.split(b"\n", 1)[0])
+assert message["ok"] is False, message
+assert message["error"]["code"] == "method_not_found", message
+client.close()
+PY
+
+kill -TERM "$server_pid"
+wait "$server_pid"
+server_pid=""
+[[ -s "$cache" ]] || { printf 'Expected JSON fallback cache to remain after shutdown\n' >&2; exit 1; }
+[[ ! -e "$daemon_socket" ]] || { printf 'Expected daemon socket cleanup after shutdown\n' >&2; exit 1; }
+
+printf 'Clankerhouse daemon QA passed: private socket mode, typed status/snapshot/subscription transport, coalesced refresh revisions, destructive-action rejection, JSON fallback, and clean shutdown behave correctly.\n'

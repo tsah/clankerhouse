@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SESSION_NAME="${1:-}"
+PANE_TARGET="${2:-}"
+
+if [[ -z "$SESSION_NAME" ]]; then
+    echo "No tmux session mapped for this opencode instance." >&2
+    exit 1
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is required." >&2
+    exit 1
+fi
+
+if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$SESSION_NAME"
+    if [[ -n "$PANE_TARGET" ]]; then
+        tmux select-pane -t "$PANE_TARGET"
+    fi
+else
+    if [[ -n "$PANE_TARGET" ]]; then
+        tmux attach-session -t "$SESSION_NAME" \; select-pane -t "$PANE_TARGET"
+    else
+        tmux attach-session -t "$SESSION_NAME"
+    fi
+fi

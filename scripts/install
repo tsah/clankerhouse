@@ -1,0 +1,122 @@
+#!/bin/bash
+
+set -euo pipefail
+
+source_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+prefix=${CLANKERHOUSE_PREFIX:-${PREFIX:-$HOME/.local}}
+with_systemd=false
+with_integrations=false
+enable_services=true
+dry_run=false
+force=false
+
+usage() {
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--no-enable] [--dry-run] [--force]"
+}
+while (($#)); do
+    case "$1" in
+        --prefix) prefix=${2:?}; shift 2 ;;
+        --systemd) with_systemd=true; shift ;;
+        --integrations) with_integrations=true; shift ;;
+        --no-enable) enable_services=false; shift ;;
+        --dry-run) dry_run=true; shift ;;
+        --force) force=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+prefix=$(realpath -m -- "$prefix")
+app="$prefix/lib/clankerhouse"
+bin_dir="$prefix/bin"
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/installations
+manifest="$state_root/$(printf '%s' "$prefix" | sha256sum | cut -d' ' -f1).files"
+
+run() { if [[ "$dry_run" == true ]]; then printf '+ '; printf '%q ' "$@"; printf '\n'; else "$@"; fi; }
+managed_or_absent() {
+    local path=$1
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    [[ -f "$manifest" ]] && grep -Fx "$path" "$manifest" >/dev/null && return 0
+    [[ "$force" == true ]]
+}
+
+if ! managed_or_absent "$app"; then
+    echo "Refusing to replace unmanaged installation: $app (use --force)" >&2
+    exit 1
+fi
+if [[ "$dry_run" == true ]]; then
+    echo "Would install Clankerhouse from $source_root to $app"
+    exit 0
+fi
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/clankerhouse-install-XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+mkdir -p "$stage/app"
+tar -C "$source_root" --exclude='./node_modules' --exclude='./__pycache__' --exclude='*.pyc' -cf - . | tar -C "$stage/app" -xf -
+(
+    cd "$stage/app"
+    bun install --frozen-lockfile
+)
+mkdir -p "$prefix/lib" "$bin_dir" "$state_root"
+rm -rf "$app"
+mv "$stage/app" "$app"
+: > "$manifest.next"
+printf '%s\n' "$app" >> "$manifest.next"
+for command in "$app"/bin/*; do
+    [[ -f "$command" && -x "$command" ]] || continue
+    destination="$bin_dir/$(basename "$command")"
+    managed_or_absent "$destination" || { echo "Refusing unmanaged command: $destination" >&2; exit 1; }
+    cat > "$destination" <<EOF
+#!/bin/sh
+export CLANKERHOUSE_HOME='$app'
+exec '$command' "\$@"
+EOF
+    chmod 755 "$destination"
+    printf '%s\n' "$destination" >> "$manifest.next"
+done
+
+if [[ "$with_integrations" == true ]]; then
+    declare -a links=(
+        "$app/integrations/pi/tmux-clanker-lifecycle.ts:$HOME/.pi/agent/extensions/tmux-clanker-lifecycle.ts"
+        "$app/integrations/opencode/clankerhouse-lifecycle.ts:${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/clankerhouse-lifecycle.ts"
+    )
+    for pair in "${links[@]}"; do
+        source=${pair%%:*}; destination=${pair#*:}
+        mkdir -p "$(dirname "$destination")"
+        managed_or_absent "$destination" || { echo "Refusing unmanaged integration: $destination" >&2; exit 1; }
+        ln -sfn "$source" "$destination"
+        printf '%s\n' "$destination" >> "$manifest.next"
+    done
+    for skill_root in "$HOME/.agents/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills"; do
+        destination="$skill_root/clanker-coordination"
+        mkdir -p "$skill_root"
+        managed_or_absent "$destination" || { echo "Refusing unmanaged skill: $destination" >&2; exit 1; }
+        ln -sfn "$app/integrations/skills/clanker-coordination" "$destination"
+        printf '%s\n' "$destination" >> "$manifest.next"
+    done
+    "$app/bin/clankerhouse-install-claude-hooks"
+fi
+
+if [[ "$with_systemd" == true ]]; then
+    unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+    mkdir -p "$unit_dir"
+    for template in "$app"/share/systemd/user/*.service.in; do
+        destination="$unit_dir/$(basename "${template%.in}")"
+        managed_or_absent "$destination" || { echo "Refusing unmanaged unit: $destination" >&2; exit 1; }
+        python3 - "$template" "$destination" "$app" "$bin_dir" <<'PY'
+from pathlib import Path
+import sys
+source, destination, app, bin_dir = sys.argv[1:]
+text = Path(source).read_text().replace("@CLANKERHOUSE_HOME@", app).replace("@CLANKERHOUSE_BIN@", bin_dir)
+Path(destination).write_text(text)
+PY
+        chmod 600 "$destination"
+        printf '%s\n' "$destination" >> "$manifest.next"
+    done
+    systemctl --user daemon-reload
+    if [[ "$enable_services" == true ]]; then
+        systemctl --user enable --now clankerhouse-recovery.service clankerhouse-resource-guard.service clankerhouse-spot-watch.service
+    fi
+fi
+mv "$manifest.next" "$manifest"
+printf 'Installed Clankerhouse at %s\n' "$app"
+printf 'Add %s to PATH or load %s with TPM.\n' "$bin_dir" "$app/clankerhouse.tmux"

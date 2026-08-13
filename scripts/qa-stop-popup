@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(realpath -m -- "${CLANKERHOUSE_STOP_POPUP_QA_ROOT:-/tmp/qa-clankerhouse-stop-popup-$(id -u)-$$}")
+[[ "$root" =~ ^/tmp/qa-clankerhouse-stop-popup-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe stop-popup QA root: $root" >&2; exit 2; }
+marker="$root.clankerhouse-qa-owned"
+[[ ! -e "$root" || -f "$marker" ]] || { echo "Refusing unowned stop-popup QA root: $root" >&2; exit 2; }
+rm -rf -- "$root"
+mkdir -p "$root"
+touch "$marker"
+socket="$root/tmux.sock"
+
+cleanup() {
+    tmux -S "$socket" kill-server 2>/dev/null || true
+    [[ -f "$marker" ]] && rm -rf -- "$root" "$marker"
+}
+trap cleanup EXIT INT TERM
+
+cat > "$root/clankers" <<'SH'
+#!/bin/bash
+sleep 1
+exit 0
+SH
+chmod +x "$root/clankers"
+
+tmux -S "$socket" new-session -d -s delete-me 'sleep 60'
+pane=$(tmux -S "$socket" list-panes -t delete-me -F '#{pane_id}')
+tmux -S "$socket" set-option -p -t "$pane" @clankerhouse_clanker_id clanker-popup-qa
+tmux -S "$socket" new-session -d -s survivor 'sleep 60'
+session_id=$(tmux -S "$socket" display-message -p -t delete-me:0 '#{session_id}')
+
+# tmux may deliver the triggering Alt-D escape sequence to the new popup.
+printf dy | env TMUX="$socket,0,0" CLANKERHOUSE_CLANKERS="$root/clankers" \
+    script -qfec "$repo/bin/clankerhouse-stop-popup '$session_id' delete-me" "$root/output" >/dev/null
+
+! tmux -S "$socket" has-session -t '=delete-me' 2>/dev/null
+tmux -S "$socket" has-session -t '=survivor'
+grep -q 'Destroying session' "$root/output"
+grep -q 'Finding tracked clankers' "$root/output"
+grep -q 'Persisting stop intent' "$root/output"
+grep -q 'Stop intents persisted' "$root/output"
+grep -F 'bin/clankerhouse-tui-active' "$repo/clankerhouse.tmux" >/dev/null
+grep -F 'bin/clankerhouse-stop-popup' "$repo/clankerhouse.tmux" >/dev/null
+
+printf 'Clankerhouse standalone stop popup QA passed: confirmation, animated detailed progress, durable stop intent, target deletion, and surviving-session preservation behave correctly.\n'

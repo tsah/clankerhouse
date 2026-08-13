@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -euo pipefail
+
+settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+reporter="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankerhouse-clanker-state-report"
+
+mkdir -p "$(dirname "$settings_file")"
+
+SETTINGS_FILE="$settings_file" REPORTER="$reporter" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+settings_path = Path(os.environ["SETTINGS_FILE"])
+reporter = os.environ["REPORTER"]
+
+if settings_path.exists():
+    data = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+else:
+    data = {}
+
+hooks = data.setdefault("hooks", {})
+
+desired = {
+    "PermissionRequest": ("*", f"bash '{reporter}' claude blocked"),
+    "PreToolUse": ("*", f"bash '{reporter}' claude working"),
+    "UserPromptSubmit": ("*", f"bash '{reporter}' claude working"),
+    "Stop": ("*", f"bash '{reporter}' claude done"),
+    "SessionEnd": ("*", f"bash '{reporter}' claude unknown"),
+}
+
+for event, (matcher, command) in desired.items():
+    entries = hooks.setdefault(event, [])
+    found = False
+    for entry in entries:
+        if entry.get("matcher") != matcher:
+            continue
+        entry_hooks = entry.setdefault("hooks", [])
+        if any(hook.get("type") == "command" and hook.get("command") == command for hook in entry_hooks):
+            found = True
+            break
+        entry_hooks.append({"type": "command", "command": command, "timeout": 2})
+        found = True
+        break
+    if not found:
+        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": 2}]})
+
+settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY

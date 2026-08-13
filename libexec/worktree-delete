@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+
+progress() {
+  [[ "${CLANKERHOUSE_PROGRESS:-0}" == 1 ]] || return 0
+  printf 'CLANKERHOUSE_PROGRESS\t%s\n' "$1" >&2
+}
+
+assume_yes=false
+if [[ "${1:-}" == "--yes" ]]; then
+  assume_yes=true
+  shift
+fi
+path=${1:?Usage: worktree-delete [--yes] PATH}
+progress "Inspecting Git worktree"
+root=$(git -C "$path" rev-parse --show-toplevel)
+root=$(realpath "$root")
+branch=$(git -C "$root" branch --show-current)
+[[ -n "$branch" ]] || { echo "Refusing detached worktree" >&2; exit 1; }
+status=$(git -C "$root" status --porcelain)
+upstream=$(git -C "$root" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+unsafe=false
+[[ -n "$status" || -z "$upstream" ]] && unsafe=true
+if [[ -n "$upstream" ]] && ! git -C "$root" merge-base --is-ancestor HEAD "$upstream"; then unsafe=true; fi
+if [[ "$assume_yes" == false ]]; then
+  if [[ "$unsafe" == true ]]; then
+    printf "Delete dirty, untracked, or unpushed worktree '%s'? [y/N] " "$branch"; read -r answer
+  else
+    printf "Delete clean, pushed worktree '%s'? [y/N] " "$branch"; read -r answer
+  fi
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo "Aborted."; exit 1; }
+fi
+progress "Finding linked tmux sessions"
+session_ids=()
+while IFS=$'\t' read -r session_id worktree_path directory_path session_path; do
+  [[ -n "$session_id" ]] || continue
+  for candidate in "$worktree_path" "$directory_path" "$session_path"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ "$(realpath "$candidate" 2>/dev/null || printf '%s' "$candidate")" == "$root" ]]; then
+      session_ids+=("$session_id")
+      break
+    fi
+  done
+done < <(tmux list-sessions -F $'#{session_id}\t#{@dotfiles_worktree_path}\t#{@dotfiles_directory_path}\t#{session_path}' 2>/dev/null || true)
+
+# Keep the branch: deleting local branch history is a separate explicit action.
+progress "Removing worktree with Worktrunk"
+wt -C "$root" -y remove --foreground --force --no-delete-branch
+progress "Closing linked tmux sessions"
+kill_failed=false
+for session_id in "${session_ids[@]}"; do
+  if tmux has-session -t "$session_id" 2>/dev/null && ! tmux kill-session -t "$session_id"; then
+    printf 'Worktree was removed, but tmux session %s could not be closed\n' "$session_id" >&2
+    kill_failed=true
+  fi
+done
+[[ "$kill_failed" == false ]]

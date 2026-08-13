@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -uo pipefail
+
+if [[ "${1:-}" != "--" || $# -lt 2 ]]; then
+    echo "Usage: clankerhouse-harness-lifecycle -- COMMAND [ARG ...]" >&2
+    exit 2
+fi
+shift
+
+saw_int=false
+shutdown_signal=false
+
+# The harness remains the foreground command in the pane's process group, so
+# terminal signals reach it directly exactly once. These traps only classify
+# how the foreground command ended; they must not forward a duplicate signal.
+trap 'saw_int=true' INT
+trap 'shutdown_signal=true' HUP TERM
+
+status=0
+"$@" || status=$?
+
+if [[ "${CLANKER_RECOVERY_TRACKED:-}" == "1" && -n "${CLANKER_ID:-}" && -n "${CLANKER_RECOVERY_ATTEMPT:-}" && "$shutdown_signal" == false ]]; then
+    reason=""
+    if [[ "$status" -eq 0 ]]; then
+        reason="clean-harness-exit"
+    elif [[ "$status" -eq 130 && "$saw_int" == true ]]; then
+        reason="user-interrupt-exit"
+    fi
+    if [[ -n "$reason" ]]; then
+        clankers_command=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
+        session_id=${CLANKER_SESSION_ID:-}
+        if [[ -z "$session_id" && -n "${TMUX_PANE:-}" ]]; then
+            session_id=$(tmux show-option -pqv -t "$TMUX_PANE" @clankerhouse_harness_session_id 2>/dev/null || true)
+        fi
+        args=(recovery attest-exit "$CLANKER_ID" --attempt "$CLANKER_RECOVERY_ATTEMPT" --reason "$reason")
+        [[ -z "$session_id" ]] || args+=(--session-id "$session_id")
+        "$clankers_command" "${args[@]}" >/dev/null || true
+    fi
+fi
+
+exit "$status"

@@ -86,7 +86,7 @@ if [[ "$with_integrations" == true ]]; then
         ln -sfn "$source" "$destination"
         printf '%s\n' "$destination" >> "$manifest.next"
     done
-    for skill_root in "$HOME/.agents/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills"; do
+    for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" "$HOME/.codex/skills"; do
         destination="$skill_root/clanker-coordination"
         mkdir -p "$skill_root"
         managed_or_absent "$destination" || { echo "Refusing unmanaged skill: $destination" >&2; exit 1; }

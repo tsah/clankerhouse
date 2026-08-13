@@ -32,6 +32,8 @@ HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/sta
 [[ -L "$root/home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
 [[ -L "$root/home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
 [[ -L "$root/home/.agents/skills/clanker-coordination" ]]
+[[ -L "$root/home/.claude/skills/clanker-coordination" ]]
+[[ -L "$root/home/.codex/skills/clanker-coordination" ]]
 grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"
 HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" "$repo/scripts/uninstall" --prefix "$root/integration-prefix" >/dev/null
 ! grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"

@@ -21,4 +21,4 @@ jobs:
       - run: scripts/qa-daemon
       - run: scripts/qa-recovery
       - run: scripts/qa-stop-popup
-      - run: scripts/qa-install
+      - run: bash -x scripts/qa-install

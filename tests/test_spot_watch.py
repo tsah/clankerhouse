@@ -22,6 +22,7 @@ class MetadataState:
         self.lock = threading.Lock()
         self.token_count = 0
         self.current_token = ""
+        self.valid_tokens = set()
         self.requests = []
         self.responses = {}
         self.reject_once = False
@@ -40,6 +41,7 @@ class MetadataHandler(http.server.BaseHTTPRequestHandler):
             state.token_count += 1
             state.current_token = f"secret-token-{state.token_count}"
             token = state.current_token
+            state.valid_tokens.add(token)
             state.requests.append(("PUT", self.path, self.headers.get("X-aws-ec2-metadata-token-ttl-seconds")))
         self.send_response(200)
         self.end_headers()
@@ -52,7 +54,7 @@ class MetadataHandler(http.server.BaseHTTPRequestHandler):
             state.requests.append(("GET", self.path, supplied))
             reject = state.reject_once
             state.reject_once = False
-            valid = supplied == state.current_token
+            valid = supplied in state.valid_tokens
             response = state.responses.get(self.path)
         if reject or not valid:
             self.send_error(401)

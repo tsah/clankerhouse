@@ -52,7 +52,7 @@ describe("recovery store", () => {
     reopened.close()
 
     const raw = new Database(dbPath, { readonly: true })
-    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 1 })
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
     expect((raw.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal")
     expect(Number((raw.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous)).toBe(2)
     raw.close()
@@ -64,9 +64,9 @@ describe("recovery store", () => {
     const { dbPath } = fixture()
     mkdirSync(dirname(dbPath), { recursive: true })
     const raw = new Database(dbPath, { create: true })
-    raw.exec("PRAGMA user_version = 2")
+    raw.exec("PRAGMA user_version = 3")
     raw.close()
-    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 2/)
+    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 3/)
   })
 
   test("couples desired mutations to append-only journal entries", () => {
@@ -104,6 +104,62 @@ describe("recovery store", () => {
     expect(() => store.setDesiredState("clanker-1", "running", { now: 60 })).toThrow(/tombstoned/)
     expect(() => store.createDesired(desired(), { now: 60 })).toThrow(/tombstoned/)
     expect(store.tombstone("clanker-1", { now: 70 }).revision).toBe(tombstone.revision)
+    store.close()
+  })
+
+  test("durably quarantines repeated automatic recovery and requires an explicit reset", () => {
+    const { dbPath } = fixture()
+    const store = openRecoveryStore({ dbPath })
+    store.createDesired(desired({ harnessSessionId: "pi-session-exact" }), { now: 10 })
+    store.markRecoveryPending("clanker-1", "pane-missing", { now: 20 })
+
+    const first = store.admitRecovery("clanker-1", { automatic: true, bootEpoch: 2, trigger: "hard_reboot", now: 30 })
+    expect(first.admitted).toBe(true)
+    store.finishAttempt(first.attempt!.id, "failed", { error: "launch failed", now: 40 })
+    store.markRecoveryPending("clanker-1", "launch-failed", { now: 50 })
+    store.resetRecovery("clanker-1", "operator verified no tool started", { now: 55 })
+
+    const sameBoot = store.admitRecovery("clanker-1", { automatic: true, bootEpoch: 2, trigger: "hard_reboot", now: 60 })
+    expect(sameBoot).toMatchObject({ admitted: false, reason: "automatic attempt already made this boot" })
+    expect(store.getDesired("clanker-1")?.recoveryCondition).toBe("quarantined")
+
+    store.resetRecovery("clanker-1", "operator reviewed interrupted work", { now: 70 })
+    expect(store.getDesired("clanker-1")).toMatchObject({ recoveryCondition: "pending", quarantineReason: null })
+    const manual = store.admitRecovery("clanker-1", { automatic: false, bootEpoch: 2, trigger: "manual", now: 80 })
+    expect(manual.admitted).toBe(true)
+    store.close()
+
+    const reopened = openRecoveryStore({ dbPath })
+    expect(reopened.getDesired("clanker-1")?.recoveryCondition).toBe("recovering")
+    reopened.close()
+  })
+
+  test("quarantines ambiguous work after a controller or host crash instead of replaying it", () => {
+    const { dbPath } = fixture()
+    const store = openRecoveryStore({ dbPath })
+    store.createDesired(desired({ harnessSessionId: "pi-session-exact" }), { now: 1 })
+    store.markRecoveryPending("clanker-1", "hard-reboot", { now: 2 })
+    store.admitRecovery("clanker-1", { automatic: false, bootEpoch: 1, trigger: "manual", now: 3 })
+    store.close()
+
+    const afterCrash = openRecoveryStore({ dbPath })
+    expect(afterCrash.markRecoveryPending("clanker-1", "owned cgroup missing after reboot", { now: 4 })).toMatchObject({ recoveryCondition: "interrupted_unknown" })
+    expect(afterCrash.admitRecovery("clanker-1", { automatic: true, bootEpoch: 2, trigger: "hard_reboot", now: 5 })).toMatchObject({ admitted: false, reason: "interrupted work requires operator review" })
+    afterCrash.close()
+  })
+
+  test("does not reset the breaker until a recovery is stably settled", () => {
+    const { dbPath } = fixture()
+    const store = openRecoveryStore({ dbPath })
+    store.createDesired(desired({ harnessSessionId: "pi-session-exact" }), { now: 1 })
+    store.markRecoveryPending("clanker-1", "reboot", { now: 2 })
+    const admitted = store.admitRecovery("clanker-1", { automatic: false, bootEpoch: 1, trigger: "manual", now: 10 }).attempt!
+    store.finishAttempt(admitted.id, "succeeded", { now: 20 })
+    expect(store.markRecoverySettled("clanker-1", admitted.id, "idle", { now: 30 })).toBe(false)
+    expect(store.markRecoveryStable("clanker-1", admitted.id, { now: 299_999 })).toBe(false)
+    expect(store.getDesired("clanker-1")?.consecutiveFailures).toBe(1)
+    expect(store.markRecoveryStable("clanker-1", admitted.id, { now: 300_010 })).toBe(true)
+    expect(store.getDesired("clanker-1")).toMatchObject({ recoveryCondition: "healthy", consecutiveFailures: 0 })
     store.close()
   })
 

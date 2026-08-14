@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { applyResourceIncidents, readResourceIncidents, resolveRecoveredClankerIncidents, type ResourceIncident } from "./incidents"
+import { applyResourceIncidents, readResourceIncidents, recordRecoveryIncident, resolveRecoveredClankerIncidents, type ResourceIncident } from "./incidents"
 import type { SessionRow } from "./model"
 
 const roots: string[] = []
@@ -35,6 +35,13 @@ const session = (): SessionRow => ({
 })
 
 describe("resource incidents", () => {
+  test("durably records recovery circuit-breaker incidents", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-incidents-"))
+    roots.push(root)
+    recordRecoveryIncident("recovery_quarantined", { clankerId: "clanker-test", harness: "pi", cwd: "/tmp/work" }, { reason: "attempt limit", attemptNumber: 3 }, root)
+    expect(readResourceIncidents(root)).toMatchObject([{ kind: "recovery_quarantined", evidence: { reason: "attempt limit", attemptNumber: 3 } }])
+  })
+
   test("reads valid open incidents and ignores malformed records", () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-incidents-"))
     roots.push(root)

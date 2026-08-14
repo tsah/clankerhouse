@@ -1,7 +1,8 @@
 import type { DesiredClankerRecord, LaunchSpec, RecoveryHarness } from "./model"
 import { binPath, libexecPath } from "../installation"
+import { ownedHarnessCommand } from "./process-owner"
 
-export const recoveryPrompt = (attemptId: string) => `Clankerhouse recovery attempt ${attemptId}: the previous host or tmux server ended unexpectedly. Resume the existing session and autonomously continue the most recent unfinished user request. Inspect the repository, Git diff and status, test artifacts, and relevant external state before acting. Do not repeat completed or externally visible work solely because this recovery message may have been delivered more than once. Do not wait for a user unless a configured harness permission policy requires it.`
+export const recoveryPrompt = (attemptId: string) => `Clankerhouse recovery attempt ${attemptId}: the previous host or tmux server ended unexpectedly. Inspect existing session and repository state, then autonomously continue from the last settled user request. Never replay an interrupted tool call or assume that a missing result means the operation did not complete. Read-only inspection and local source edits are allowed. Before running tests, lint, builds, indexing, package installation, containers, migrations, or other expensive validation, ask for operator confirmation. Also ask for operator confirmation before commits, pushes, deployments, issue updates, network mutations, or any other externally visible or non-idempotent action.`
 
 const lifecycleWrapper = binPath("clankerhouse-harness-lifecycle")
 const opencode2Launcher = Bun.env.CLANKERHOUSE_OPENCODE_LAUNCHER || binPath("clankerhouse-opencode2")
@@ -12,6 +13,8 @@ const plannotatorEnv = () => [
   `PLANNOTATOR_REMOTE=${Bun.env.PLANNOTATOR_REMOTE || "1"}`,
   `PLANNOTATOR_PORT=${Bun.env.PLANNOTATOR_PORT || "19432-19439"}`,
 ]
+
+const resourceClass = (spec: LaunchSpec) => spec.version === 2 ? spec.resourceClass : "untrusted" as const
 
 const trackedEnvironment = (clankerId: string, sessionId: string | null, attemptId?: string) => [
   ...plannotatorEnv(),
@@ -49,15 +52,17 @@ export interface InitialHarnessCommandInput {
 export const initialHarnessCommand = (input: InitialHarnessCommandInput) => {
   const env = trackedEnvironment(input.clankerId, input.harnessSessionId, input.attemptId)
   const profile = input.launchSpec.profile
+  let command: string[]
   if (input.harness === "pi") {
     if (!input.harnessSessionId) throw new Error("Pi requires a preallocated session id")
-    return ["env", ...env, lifecycleWrapper, "--", "pi", "--session-id", input.harnessSessionId, ...piProfileArgs(input.cwd, profile), input.prompt]
-  }
-  if (input.harness === "claude") {
+    command = ["env", ...env, lifecycleWrapper, "--", "pi", "--session-id", input.harnessSessionId, ...piProfileArgs(input.cwd, profile), input.prompt]
+  } else if (input.harness === "claude") {
     if (!input.harnessSessionId) throw new Error("Claude requires a preallocated session id")
-    return ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--session-id", input.harnessSessionId, ...(profile ? ["--agent", profile] : []), input.prompt]
+    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--session-id", input.harnessSessionId, ...(profile ? ["--agent", profile] : []), input.prompt]
+  } else {
+    command = ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, ...(profile ? ["--profile", profile] : []), "--", input.cwd, input.prompt]
   }
-  return ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, ...(profile ? ["--profile", profile] : []), "--", input.cwd, input.prompt]
+  return input.attemptId ? ownedHarnessCommand(command, input.clankerId, input.attemptId, resourceClass(input.launchSpec)) : command
 }
 
 export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId: string) => {
@@ -65,7 +70,10 @@ export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId:
   const env = trackedEnvironment(desired.clankerId, desired.harnessSessionId, attemptId)
   const prompt = recoveryPrompt(attemptId)
   const profile = desired.launchSpec.profile
-  if (desired.harness === "pi") return ["env", ...env, lifecycleWrapper, "--", "pi", "--session", desired.harnessSessionId, ...piProfileArgs(desired.cwd, profile), prompt]
-  if (desired.harness === "claude") return ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--resume", desired.harnessSessionId, ...(profile ? ["--agent", profile] : []), prompt]
-  return ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, "--session", desired.harnessSessionId, "--", desired.cwd, prompt]
+  const command = desired.harness === "pi"
+    ? ["env", ...env, lifecycleWrapper, "--", "pi", "--session", desired.harnessSessionId, ...piProfileArgs(desired.cwd, profile), prompt]
+    : desired.harness === "claude"
+      ? ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--resume", desired.harnessSessionId, ...(profile ? ["--agent", profile] : []), prompt]
+      : ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, "--session", desired.harnessSessionId, "--", desired.cwd, prompt]
+  return ownedHarnessCommand(command, desired.clankerId, attemptId, resourceClass(desired.launchSpec))
 }

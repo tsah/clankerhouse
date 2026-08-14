@@ -87,12 +87,15 @@ cannot assign clanker identity or authorize destructive actions.
 
 A separate durable recovery control plane stores desired Pi, Claude, and
 OpenCode clankers, exact harness session identities, attempts, leases, and
-append-only journal events under `$XDG_STATE_HOME/clankerhouse`. Its one-shot
-boot reconciler recreates missing workshop windows and automatically resumes and
-continues exact sessions once after a hard reboot. Later pane loss is not
-immediately resurrected, and a clean final Ctrl-C durably opts that clanker out
-of future boot recovery; same-boot recovery requires explicit reconciliation.
-Tombstones, intentional stops, and resource-pressure suspensions take
+append-only journal events under `$XDG_STATE_HOME/clankerhouse`. Its persistent
+controller creates an automatic campaign only after a Linux boot-ID change. It
+admits one missing clanker after a quiet healthy boot, waits for stable liveness,
+and then admits the next. Same-boot pane loss is not enrolled automatically.
+Recovery continues settled work but never replays interrupted tools; expensive
+validation and external effects require confirmation. Repeated or ambiguous
+attempts enter durable quarantine. Tracked harnesses
+are owned by systemd scopes so an intentional stop terminates every descendant.
+Tombstones, intentional stops, quarantine, and resource-pressure suspensions take
 precedence. The snapshot transport remains observational and exposes no recovery
 mutation API.
 

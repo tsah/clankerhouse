@@ -14,7 +14,11 @@ const desired = (harness: DesiredClankerRecord["harness"]): DesiredClankerRecord
   launchSpec: { version: 1, profile: null },
   originalTask: "finish the task",
   desiredState: "running",
-  recoveryPolicyVersion: 1,
+  recoveryPolicyVersion: 2,
+  recoveryCondition: "pending",
+  quarantineReason: null,
+  consecutiveFailures: 0,
+  ownerUnit: null,
   revision: 1,
   createdAt: 1,
   updatedAt: 1,
@@ -32,14 +36,16 @@ describe("harness recovery commands", () => {
     expect(claude[claude.indexOf("--session-id") + 1]).toBe("claude-id")
   })
 
-  test("resumes exact IDs and submits an idempotent continuation", () => {
+  test("resumes exact IDs automatically without replaying expensive or external tools", () => {
     for (const harness of ["pi", "claude", "opencode"] as const) {
       const command = recoveryHarnessCommand(desired(harness), "attempt-7")
       expect(command.some((part) => part.endsWith("/clankerhouse-harness-lifecycle"))).toBe(true)
       expect(command).toContain(desired(harness).harnessSessionId!)
       expect(command.join(" ")).toContain("CLANKER_RECOVERY_ATTEMPT=attempt-7")
-      expect(command.at(-1)).toContain("autonomously continue")
-      expect(command.at(-1)).toContain("Do not repeat completed")
+      expect(command.at(-1)).toContain("Never replay an interrupted tool call")
+      expect(command.at(-1)).toContain("continue from the last settled user request")
+      expect(command.at(-1)).toContain("tests, lint, builds")
+      expect(command.at(-1)).toContain("ask for operator confirmation")
       if (harness === "opencode") expect(command.some((part) => part.endsWith("/clankerhouse-opencode2"))).toBe(true)
     }
   })

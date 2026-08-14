@@ -18,6 +18,7 @@ describe("recovery model validation", () => {
   test("accepts only declarative versioned launch profiles", () => {
     expect(validateLaunchSpec({ version: 1, profile: null })).toEqual({ version: 1, profile: null })
     expect(validateLaunchSpec({ version: 1, profile: "reviewer" })).toEqual({ version: 1, profile: "reviewer" })
+    expect(validateLaunchSpec({ version: 2, profile: "worker", resourceClass: "validation-heavy" })).toEqual({ version: 2, profile: "worker", resourceClass: "validation-heavy" })
     expect(() => validateLaunchSpec({ version: 1, profile: "reviewer", command: "rm -rf /" })).toThrow(/launch spec/)
     expect(() => validateLaunchSpec({ version: 1, profile: null, env: { API_KEY: "secret" } })).toThrow(/launch spec/)
     expect(() => validateLaunchSpec({ version: 2, profile: null })).toThrow(/launch spec/)

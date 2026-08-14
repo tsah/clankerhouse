@@ -57,6 +57,10 @@ class Config:
     generic_percent: float = 7.5
     psi_some: float = 10.0
     psi_full: float = 2.0
+    io_psi_some: float = 10.0
+    io_psi_full: float = 1.0
+    cpu_psi_some: float = 25.0
+    read_limit_bytes_per_second: int = 125 * MIB
     term_grace: float = 5.0
     dry_run: bool = False
     state_home: pathlib.Path = pathlib.Path.home() / ".local/state"
@@ -74,6 +78,10 @@ class Config:
             generic_percent=_env_float(env, "RESOURCE_GUARD_GENERIC_PERCENT", 7.5),
             psi_some=_env_float(env, "RESOURCE_GUARD_PSI_SOME", 10.0),
             psi_full=_env_float(env, "RESOURCE_GUARD_PSI_FULL", 2.0),
+            io_psi_some=_env_float(env, "RESOURCE_GUARD_IO_PSI_SOME", 10.0),
+            io_psi_full=_env_float(env, "RESOURCE_GUARD_IO_PSI_FULL", 1.0),
+            cpu_psi_some=_env_float(env, "RESOURCE_GUARD_CPU_PSI_SOME", 25.0),
+            read_limit_bytes_per_second=_env_int(env, "RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC", 125) * MIB,
             term_grace=_env_float(env, "RESOURCE_GUARD_TERM_GRACE", 5.0),
             dry_run=_env_bool(env, "RESOURCE_GUARD_DRY_RUN"),
             state_home=pathlib.Path(env.get("XDG_STATE_HOME", str(home / ".local/state"))),
@@ -94,6 +102,10 @@ class MemorySample:
     psi_full: float
     threshold_bytes: int
     ec2_swapless: bool
+    io_psi_some: float = 0.0
+    io_psi_full: float = 0.0
+    cpu_psi_some: float = 0.0
+    root_read_bytes_per_second: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -194,6 +206,15 @@ class LinuxSystem:
 
     def alive(self, pid: int) -> bool:
         return self.stat(pid) is not None
+
+    def root_read_bytes(self) -> int:
+        device = os.stat("/").st_dev
+        wanted = (os.major(device), os.minor(device))
+        for line in self.read_text(self.proc / "diskstats").splitlines():
+            fields = line.split()
+            if len(fields) >= 10 and (int(fields[0]), int(fields[1])) == wanted:
+                return int(fields[5]) * 512
+        return 0
 
 
 class TmuxClient:
@@ -303,9 +324,13 @@ class ResourceGuard:
         self.now = now
         self.boot_id = self.system.boot_id()
         self.snapshot_path = self.config.state_dir / "resource-guard-snapshot.json"
+        self.admission_path = self.config.state_dir / "recovery-admission.json"
+        self.metrics_path = self.config.state_dir / "resource-guard-metrics.prom"
         self.incident_dir = self.config.state_dir / "incidents"
         self.snapshot: dict[str, Any] = {}
         self.consecutive = 0
+        self.healthy_since: float | None = None
+        self.previous_root_read: tuple[float, int] | None = None
         self.stop_requested = False
         self._initialize_state()
 
@@ -353,11 +378,15 @@ class ResourceGuard:
                     incident_id=incident_id,
                 )
         acted = bool(previous.get("acted")) if previous.get("boot_id") == self.boot_id else False
+        acted_clankers = list(previous.get("acted_clankers", [])) if previous.get("boot_id") == self.boot_id else []
+        sample_history = list(previous.get("sample_history", []))[-120:] if previous.get("boot_id") == self.boot_id else []
         self.snapshot = {
             "version": 1,
             "boot_id": self.boot_id,
             "clean_shutdown": False,
             "acted": acted,
+            "acted_clankers": acted_clankers,
+            "sample_history": sample_history,
             "started_at": self.now(),
             "consecutive_pressure": 0,
         }
@@ -388,6 +417,64 @@ class ResourceGuard:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+
+    def _write_admission(self, sample: MemorySample, candidates: list[Candidate], healthy: bool) -> None:
+        now_ms = int(self.now() * 1000)
+        if healthy:
+            if self.healthy_since is None:
+                self.healthy_since = self.now()
+        else:
+            self.healthy_since = None
+        payload = {
+            "version": 1,
+            "now": now_ms,
+            "bootObservedAt": int(float(self.snapshot.get("started_at", self.now())) * 1000),
+            "healthySince": int(self.healthy_since * 1000) if self.healthy_since is not None else None,
+            "lastAdmissionAt": self.snapshot.get("last_admission_at"),
+            "activeRecoveries": sum(candidate.state in ("working", "blocked", "unknown") for candidate in candidates),
+            "memoryAvailablePercent": sample.available_bytes * 100.0 / max(1, sample.total_bytes),
+            "memoryPsiSome": sample.psi_some,
+            "ioPsiSome": sample.io_psi_some,
+            "ioPsiFull": sample.io_psi_full,
+            "cpuPsiSome": sample.cpu_psi_some,
+            "rootReadBytesPerSecond": sample.root_read_bytes_per_second,
+            "configuredReadLimitBytesPerSecond": self.config.read_limit_bytes_per_second,
+        }
+        fd, temporary = tempfile.mkstemp(prefix=".recovery-admission-", dir=self.config.state_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.admission_path)
+            self._fsync_dir(self.config.state_dir)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def _write_metrics(self, sample: MemorySample, candidates: list[Candidate]) -> None:
+        lines = [
+            "# TYPE clankerhouse_memory_available_bytes gauge",
+            f"clankerhouse_memory_available_bytes {sample.available_bytes}",
+            "# TYPE clankerhouse_pressure_ratio gauge",
+            f'clankerhouse_pressure_ratio{{resource="memory",scope="some"}} {sample.psi_some / 100.0}',
+            f'clankerhouse_pressure_ratio{{resource="memory",scope="full"}} {sample.psi_full / 100.0}',
+            f'clankerhouse_pressure_ratio{{resource="io",scope="some"}} {sample.io_psi_some / 100.0}',
+            f'clankerhouse_pressure_ratio{{resource="io",scope="full"}} {sample.io_psi_full / 100.0}',
+            f'clankerhouse_pressure_ratio{{resource="cpu",scope="some"}} {sample.cpu_psi_some / 100.0}',
+            "# TYPE clankerhouse_root_read_bytes_per_second gauge",
+            f"clankerhouse_root_read_bytes_per_second {sample.root_read_bytes_per_second}",
+            "# TYPE clankerhouse_tracked_clankers gauge",
+            f"clankerhouse_tracked_clankers {len(candidates)}",
+        ]
+        temporary = self.metrics_path.with_name(f".{self.metrics_path.name}.{os.getpid()}.tmp")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.metrics_path)
 
     def _incident(
         self,
@@ -431,15 +518,33 @@ class ResourceGuard:
                 pass
         return any("amazon" in value or "ec2" in value for value in fields)
 
+    def _pressure(self, resource: str) -> tuple[float, float]:
+        try:
+            return parse_psi(self.system.read_text(self.system.proc / "pressure" / resource))
+        except (OSError, ValueError):
+            return 0.0, 0.0
+
     def sample(self) -> MemorySample:
         memory = parse_meminfo(self.system.read_text(self.system.proc / "meminfo"))
         some, full = parse_psi(self.system.read_text(self.system.proc / "pressure/memory"))
+        io_some, io_full = self._pressure("io")
+        cpu_some, _cpu_full = self._pressure("cpu")
+        read_rate = 0.0
+        reader = getattr(self.system, "root_read_bytes", None)
+        if callable(reader):
+            try:
+                observed_at, read_bytes = self.now(), int(reader())
+                if self.previous_root_read and observed_at > self.previous_root_read[0] and read_bytes >= self.previous_root_read[1]:
+                    read_rate = (read_bytes - self.previous_root_read[1]) / (observed_at - self.previous_root_read[0])
+                self.previous_root_read = (observed_at, read_bytes)
+            except (OSError, ValueError):
+                pass
         ec2_swapless = memory["SwapTotal"] == 0 and self.is_ec2()
         if ec2_swapless:
             threshold = max(self.config.ec2_floor_bytes, int(memory["MemTotal"] * self.config.ec2_percent / 100.0))
         else:
             threshold = int(memory["MemTotal"] * self.config.generic_percent / 100.0)
-        return MemorySample(memory["MemTotal"], memory["MemAvailable"], memory["SwapTotal"], some, full, threshold, ec2_swapless)
+        return MemorySample(memory["MemTotal"], memory["MemAvailable"], memory["SwapTotal"], some, full, threshold, ec2_swapless, io_some, io_full, cpu_some, read_rate)
 
     def _report_state(self, pane: str, harness: str, clanker_id: str) -> tuple[str, int]:
         safe = re.sub(r"[^A-Za-z0-9_.%-]", "_", pane)
@@ -539,11 +644,22 @@ class ResourceGuard:
         )
         return result.returncode == 0
 
-    def mitigate(self, sample: MemorySample, candidates: list[Candidate] | None = None) -> Candidate | None:
-        if self.snapshot.get("acted"):
+    def _owned_scope(self, candidate: Candidate) -> str | None:
+        database = self.config.state_dir / "recovery.sqlite3"
+        if not database.exists():
             return None
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+                row = connection.execute("SELECT owner_unit FROM desired_clankers WHERE clanker_id = ?", (candidate.clanker_id,)).fetchone()
+            unit = row[0] if row else None
+            return unit if isinstance(unit, str) and re.fullmatch(r"clankerhouse-[A-Za-z0-9_.-]+\.scope", unit) else None
+        except (OSError, sqlite3.Error):
+            return None
+
+    def mitigate(self, sample: MemorySample, candidates: list[Candidate] | None = None) -> Candidate | None:
         candidates = self.discover() if candidates is None else candidates
-        selected = self.select(candidates)
+        already_acted = set(self.snapshot.get("acted_clankers", []))
+        selected = self.select([candidate for candidate in candidates if candidate.clanker_id not in already_acted])
         if selected is None:
             self.snapshot["mitigation_skipped"] = "no_non_focused_candidate"
             self._write_snapshot()
@@ -562,12 +678,28 @@ class ResourceGuard:
             self._write_snapshot()
             return None
         self.snapshot["acted"] = True
+        self.snapshot.setdefault("acted_clankers", []).append(selected.clanker_id)
         self.snapshot["selected"] = dataclasses.asdict(selected)
         self._write_snapshot()
+        owner = self._owned_scope(selected)
+        if owner:
+            stopped = subprocess.run(["systemctl", "--user", "stop", owner], check=False, capture_output=True, text=True)
+            verified = subprocess.run(["systemctl", "--user", "show", owner, "--property=ActiveState", "--value"], check=False, capture_output=True, text=True)
+            if stopped.returncode != 0 or (verified.returncode == 0 and verified.stdout.strip() not in ("inactive", "failed")):
+                self._incident("resource_pressure_termination", selected.incident_clanker(), {"reason": "cgroup_cleanup_failed", "ownerUnit": owner, "preIncidentSamples": self.snapshot.get("sample_history", [])})
+                self.snapshot["mitigation_skipped"] = "cgroup_cleanup_failed"
+                self.snapshot["acted_clankers"] = [value for value in self.snapshot.get("acted_clankers", []) if value != selected.clanker_id]
+                self._write_snapshot()
+                return None
+            action = "cgroup_stop"
+            incident = self._incident("resource_pressure_termination", selected.incident_clanker(), {"reason": "sustained_io_pressure" if sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full else "sustained_memory_pressure", "forced": False, "ownerUnit": owner, "preIncidentSamples": self.snapshot.get("sample_history", [])})
+            print(json.dumps({"event": "resource_pressure_termination", "clankerId": selected.clanker_id, "pane": selected.pane, "forced": False, "ownerUnit": owner, "incident": str(incident)}), flush=True)
+            return selected
         try:
             self.system.kill(selected.pid, signal.SIGTERM)
         except OSError:
             self.snapshot["acted"] = False
+            self.snapshot["acted_clankers"] = [value for value in self.snapshot.get("acted_clankers", []) if value != selected.clanker_id]
             self.snapshot["mitigation_skipped"] = "candidate_disappeared_before_signal"
             self._write_snapshot()
             return None
@@ -581,8 +713,9 @@ class ResourceGuard:
             "resource_pressure_termination",
             selected.incident_clanker(),
             {
-                "reason": "sustained_memory_pressure",
+                "reason": "sustained_io_pressure" if sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full else "sustained_memory_pressure",
                 "forced": action == "term_kill",
+                "preIncidentSamples": self.snapshot.get("sample_history", []),
             },
         )
         print(json.dumps({"event": "resource_pressure_termination", "clankerId": selected.clanker_id, "pane": selected.pane, "forced": action == "term_kill", "incident": str(incident)}), flush=True)
@@ -590,16 +723,36 @@ class ResourceGuard:
 
     def run_once(self) -> MemorySample:
         sample = self.sample()
-        pressured = sample.available_bytes <= sample.threshold_bytes and (
+        memory_pressured = sample.available_bytes <= sample.threshold_bytes and (
             sample.psi_some >= self.config.psi_some or sample.psi_full >= self.config.psi_full
         )
+        io_pressured = sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full
+        throughput_pressured = bool(self.config.read_limit_bytes_per_second and sample.root_read_bytes_per_second >= self.config.read_limit_bytes_per_second * 0.75)
+        pressured = memory_pressured or io_pressured or throughput_pressured
         self.consecutive = self.consecutive + 1 if pressured else 0
         candidates = self.discover()
+        healthy = not pressured and sample.cpu_psi_some < self.config.cpu_psi_some
+        self._write_admission(sample, candidates, healthy)
+        self._write_metrics(sample, candidates)
+        history = list(self.snapshot.get("sample_history", []))
+        history.append({
+            "sampled_at": self.now(),
+            "memory_available_bytes": sample.available_bytes,
+            "memory_psi_some": sample.psi_some,
+            "memory_psi_full": sample.psi_full,
+            "io_psi_some": sample.io_psi_some,
+            "io_psi_full": sample.io_psi_full,
+            "cpu_psi_some": sample.cpu_psi_some,
+            "root_read_bytes_per_second": sample.root_read_bytes_per_second,
+            "pressure_kind": "io" if io_pressured or throughput_pressured else "memory" if memory_pressured else None,
+        })
         self.snapshot.update({
             "clean_shutdown": False,
+            "sample_history": history[-120:],
             "sampled_at": self.now(),
             "sample": dataclasses.asdict(sample),
             "consecutive_pressure": self.consecutive,
+            "pressure_kind": "io" if io_pressured or throughput_pressured else "memory" if memory_pressured else None,
             "clankers": [{
                 "pane": candidate.pane,
                 "harness": candidate.harness,
@@ -617,7 +770,7 @@ class ResourceGuard:
             } for candidate in candidates],
         })
         self._write_snapshot()
-        if self.consecutive >= self.config.samples and not self.snapshot.get("acted"):
+        if self.consecutive >= self.config.samples:
             self.mitigate(sample, candidates)
         return sample
 

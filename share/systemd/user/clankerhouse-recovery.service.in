@@ -1,14 +1,15 @@
 [Unit]
 Description=Clankerhouse durable workshop and clanker boot recovery
 Documentation=file:@CLANKERHOUSE_HOME@/README.md
-After=default.target network-online.target
+After=default.target network-online.target clankerhouse-resource-guard.service
 Wants=network-online.target
+Requires=clankerhouse-resource-guard.service
 
 [Service]
-Type=oneshot
-ExecStart="@CLANKERHOUSE_BIN@/clankerhouse-recovery" --once
-RemainAfterExit=yes
-Restart=no
+Type=simple
+ExecStart="@CLANKERHOUSE_BIN@/clankerhouse-recovery"
+Restart=on-failure
+RestartSec=15s
 TimeoutStopSec=20s
 UMask=0077
 NoNewPrivileges=true

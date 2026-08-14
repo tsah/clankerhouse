@@ -23,7 +23,7 @@ fi
 while IFS= read -r clanker_id; do
     [[ -n "$clanker_id" ]] || continue
     progress "Persisting stop intent for $clanker_id"
-    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-tmux-stop --no-kill --if-present 2>&1); then
+    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-tmux-stop --no-pane-kill --if-present 2>&1); then
         printf 'Unable to persist stop intent for %s: %s\n' "$clanker_id" "$stop_output" >&2
         exit 1
     fi

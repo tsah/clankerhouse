@@ -39,10 +39,11 @@
     "qa:api": "scripts/qa-clanker-api",
     "qa:daemon": "scripts/qa-daemon",
     "qa:recovery": "scripts/qa-recovery",
+    "qa:process-owner": "scripts/qa-process-owner",
     "qa:popup": "scripts/qa-stop-popup",
     "qa:install": "scripts/qa-install",
     "qa:tui": "scripts/qa",
-    "qa": "bun run check && bun test && bun run test:python && scripts/qa-clanker-api && scripts/qa-daemon && scripts/qa-recovery && scripts/qa-stop-popup && scripts/qa-install && scripts/qa",
+    "qa": "bun run check && bun test && bun run test:python && scripts/qa-clanker-api && scripts/qa-daemon && scripts/qa-recovery && scripts/qa-process-owner && scripts/qa-stop-popup && scripts/qa-install && scripts/qa",
     "doctor": "bin/clankerhouse-doctor"
   },
   "files": [

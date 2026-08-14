@@ -26,6 +26,7 @@ class FakeSystem:
         self.rss = {}
         self.signals = []
         self.dead_after_term = False
+        self.root_reads = 0
 
     def read_text(self, path):
         try:
@@ -61,6 +62,9 @@ class FakeSystem:
 
     def alive(self, pid):
         return pid in self.stats
+
+    def root_read_bytes(self):
+        return self.root_reads
 
 
 class FakeTmux:
@@ -102,7 +106,7 @@ class ResourceGuardTests(unittest.TestCase):
             now=lambda: self.clock,
         )
 
-    def memory(self, available_kib=400_000, total_kib=8 * 1024 * 1024, swap_kib=0, some=12, full=0):
+    def memory(self, available_kib=400_000, total_kib=8 * 1024 * 1024, swap_kib=0, some=12, full=0, io_some=0, io_full=0, cpu_some=0):
         self.system.files[str(self.system.proc / "meminfo")] = (
             f"MemTotal:       {total_kib} kB\n"
             f"MemAvailable:   {available_kib} kB\n"
@@ -111,6 +115,14 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.files[str(self.system.proc / "pressure/memory")] = (
             f"some avg10={some:.2f} avg60=1.00 avg300=1.00 total=1\n"
             f"full avg10={full:.2f} avg60=0.00 avg300=0.00 total=0\n"
+        )
+        self.system.files[str(self.system.proc / "pressure/io")] = (
+            f"some avg10={io_some:.2f} avg60=1.00 avg300=1.00 total=1\n"
+            f"full avg10={io_full:.2f} avg60=0.00 avg300=0.00 total=0\n"
+        )
+        self.system.files[str(self.system.proc / "pressure/cpu")] = (
+            f"some avg10={cpu_some:.2f} avg60=0.00 avg300=0.00 total=0\n"
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
         )
 
     def add_process(self, pid, parent, harness, start=100):
@@ -175,6 +187,30 @@ class ResourceGuardTests(unittest.TestCase):
         self.assertEqual(self.incidents(), [])
         snapshot = json.loads(guard.snapshot_path.read_text(encoding="utf-8"))
         self.assertEqual(snapshot["mitigation_skipped"], "no_non_focused_candidate")
+
+    def test_pure_io_pressure_trips_with_healthy_memory_and_publishes_admission_block(self):
+        self.memory(available_kib=7 * 1024 * 1024, some=0, io_some=20, io_full=2)
+        guard = self.guard(replace(self.config, samples=1, dry_run=True))
+        sample = guard.run_once()
+        self.assertEqual(sample.io_psi_some, 20)
+        self.assertEqual(guard.consecutive, 1)
+        admission = json.loads((self.config.state_dir / "recovery-admission.json").read_text(encoding="utf-8"))
+        self.assertIsNone(admission["healthySince"])
+        self.assertEqual(admission["ioPsiFull"], 2)
+        metrics = guard.metrics_path.read_text(encoding="utf-8")
+        self.assertIn('clankerhouse_pressure_ratio{resource="io",scope="full"} 0.02', metrics)
+
+    def test_root_read_throughput_preserves_an_ssh_reserve(self):
+        self.memory(available_kib=7 * 1024 * 1024, some=0)
+        guard = self.guard(replace(self.config, samples=1, dry_run=True))
+        guard.run_once()
+        self.clock += 1
+        self.system.root_reads += 100 * 1024 * 1024
+        sample = guard.run_once()
+        self.assertEqual(sample.root_read_bytes_per_second, 100 * 1024 * 1024)
+        self.assertEqual(guard.snapshot["pressure_kind"], "io")
+        admission = json.loads(guard.admission_path.read_text(encoding="utf-8"))
+        self.assertIsNone(admission["healthySince"])
 
     def test_discovers_only_exact_tagged_clankers_and_excludes_focused(self):
         self.add_process(101, 11, "pi")

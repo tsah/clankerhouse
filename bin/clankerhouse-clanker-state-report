@@ -133,7 +133,7 @@ if [[ -n "$harness_session_id" ]]; then
         exit 0
     fi
     clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
-    attest_args=(recovery attest "$clanker_id" --session-id "$harness_session_id")
+    attest_args=(recovery attest "$clanker_id" --session-id "$harness_session_id" --state "$state")
     [[ -n "$recovery_attempt_id" ]] && attest_args+=(--attempt "$recovery_attempt_id")
     "$clankers_cli" "${attest_args[@]}" >/dev/null 2>&1 || true
 fi

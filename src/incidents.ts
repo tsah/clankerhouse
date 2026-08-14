@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { canonicalActivityPath } from "./activity"
 import type { DetailRow, SessionRow, Target } from "./model"
 
-export type IncidentKind = "resource_pressure_termination" | "unclean_boot_clanker_loss"
+export type IncidentKind = "resource_pressure_termination" | "unclean_boot_clanker_loss" | "recovery_quarantined" | "recovery_pressure_suspension" | "recovery_descendant_cleanup_failed" | "aggregate_io_saturation" | "interrupted_tool_requires_confirmation"
 
 export interface ResourceIncident {
   version: 1
@@ -24,12 +24,34 @@ export interface ResourceIncident {
     reason?: string
     forced?: boolean
     previousBootId?: string
+    ownerUnit?: string
+    attemptId?: number
+    attemptNumber?: number
+    bootId?: string
+    memoryPsiSome?: number
+    ioPsiSome?: number
+    ioPsiFull?: number
+    rootReadBytesPerSecond?: number
   }
 }
 
 export const incidentStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse/incidents`
-const incidentKinds = new Set<IncidentKind>(["resource_pressure_termination", "unclean_boot_clanker_loss"])
+const incidentKinds = new Set<IncidentKind>(["resource_pressure_termination", "unclean_boot_clanker_loss", "recovery_quarantined", "recovery_pressure_suspension", "recovery_descendant_cleanup_failed", "aggregate_io_saturation", "interrupted_tool_requires_confirmation"])
 const harnesses = new Set(["pi", "claude", "opencode", "codex"])
+
+export const recordRecoveryIncident = (kind: IncidentKind, clanker: ResourceIncident["clanker"], evidence: NonNullable<ResourceIncident["evidence"]> = {}, directory = incidentStateDirectory) => {
+  if (!incidentKinds.has(kind)) throw new Error(`Unsupported incident kind ${kind}`)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const occurredAt = Date.now()
+  const incident: ResourceIncident = { version: 1, id: randomUUID(), kind, occurredAt, status: "open", clanker, evidence }
+  const path = resolve(directory, `${new Date(occurredAt).toISOString().replace(/[:]/g, "")}-${kind}-${incident.id}.json`)
+  writeFileSync(path, `${JSON.stringify(incident, null, 2)}\n`, { mode: 0o400, flag: "wx" })
+  const descriptor = openSync(path, "r")
+  try { fsyncSync(descriptor) } finally { closeSync(descriptor) }
+  const directoryDescriptor = openSync(directory, "r")
+  try { fsyncSync(directoryDescriptor) } finally { closeSync(directoryDescriptor) }
+  return path
+}
 
 const validIncident = (value: unknown): value is ResourceIncident => {
   if (!value || typeof value !== "object") return false
@@ -80,7 +102,7 @@ export const resolveRecoveredClankerIncidents = (clankerId: string, directory = 
 }
 
 const incidentPath = (incident: ResourceIncident) => incident.clanker.worktreePath || incident.clanker.cwd || ""
-const incidentStatus = (incident: ResourceIncident) => incident.kind === "resource_pressure_termination" ? "terminated" : "lost on reboot"
+const incidentStatus = (incident: ResourceIncident) => incident.kind === "resource_pressure_termination" || incident.kind === "recovery_pressure_suspension" ? "terminated" : incident.kind === "unclean_boot_clanker_loss" ? "lost on reboot" : "recovery blocked"
 const ageFromTimestamp = (timestamp: number, observedAt: number) => {
   const seconds = Math.max(0, Math.floor((observedAt - timestamp) / 1000))
   if (seconds < 60) return `${seconds}s`

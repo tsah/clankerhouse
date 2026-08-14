@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+root=$(mktemp -d /tmp/clankerhouse-process-owner-XXXXXX)
+socket="$root/tmux.sock"
+unit="clankerhouse-qa-${UID}-$$.scope"
+cleanup() {
+    systemctl --user stop "$unit" >/dev/null 2>&1 || true
+    tmux -S "$socket" kill-server >/dev/null 2>&1 || true
+    rm -rf "$root"
+}
+trap cleanup EXIT INT TERM
+
+cat > "$root/tree" <<'SH'
+#!/bin/bash
+set -euo pipefail
+echo $$ > "$QA_ROOT/wrapper.pid"
+setsid bash -c 'echo $$ > "$QA_ROOT/setsid.pid"; sleep 60' &
+(
+    bash -c 'sleep 60' &
+    echo $! > "$QA_ROOT/grandchild.pid"
+    wait
+) &
+wait
+SH
+chmod 755 "$root/tree"
+
+tmux -S "$socket" new-session -d -s qa -n owner "env QA_ROOT='$root' systemd-run --user --scope --quiet --unit='$unit' --property=KillMode=control-group --property=SendSIGKILL=yes --property=CollectMode=inactive-or-failed -- '$root/tree'"
+for _ in {1..100}; do [[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] && break; sleep 0.05; done
+[[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] || { echo "Owned descendants did not start" >&2; exit 1; }
+setsid_pid=$(<"$root/setsid.pid")
+grandchild_pid=$(<"$root/grandchild.pid")
+
+tmux -S "$socket" kill-pane -t qa:owner
+kill -0 "$setsid_pid" 2>/dev/null || { echo "Fixture did not preserve the setsid child after pane loss" >&2; exit 1; }
+systemctl --user stop "$unit"
+for _ in {1..100}; do
+    ! kill -0 "$setsid_pid" 2>/dev/null && ! kill -0 "$grandchild_pid" 2>/dev/null && break
+    sleep 0.05
+done
+! kill -0 "$setsid_pid" 2>/dev/null || { echo "setsid descendant survived scope stop" >&2; exit 1; }
+! kill -0 "$grandchild_pid" 2>/dev/null || { echo "grandchild survived scope stop" >&2; exit 1; }
+printf 'Clankerhouse process-owner QA passed: pane loss cannot escape authoritative cgroup cleanup.\n'

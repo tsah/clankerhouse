@@ -16,13 +16,15 @@ log="$root/harness.log"
 printf 'boot-a\n' > "$boot_file"
 
 recovery_unit="$repo/share/systemd/user/clankerhouse-recovery.service.in"
-grep -Fx 'Type=oneshot' "$recovery_unit" >/dev/null || { echo "Recovery service must be one-shot" >&2; exit 1; }
-grep -Fx 'ExecStart="@CLANKERHOUSE_BIN@/clankerhouse-recovery" --once' "$recovery_unit" >/dev/null || { echo "Recovery service must run one reconciliation" >&2; exit 1; }
-grep -Fx 'RemainAfterExit=yes' "$recovery_unit" >/dev/null || { echo "Recovery service must remain active after reconciliation" >&2; exit 1; }
-if grep -Eq '^Restart=(always|on-failure|on-abnormal|on-abort|on-watchdog)$' "$recovery_unit"; then
-    echo "Recovery service must not restart automatically" >&2
+grep -Fx 'Type=simple' "$recovery_unit" >/dev/null || { echo "Recovery controller must remain active for staggered Spot recovery" >&2; exit 1; }
+grep -Fx 'ExecStart="@CLANKERHOUSE_BIN@/clankerhouse-recovery"' "$recovery_unit" >/dev/null || { echo "Recovery service must run the guarded controller" >&2; exit 1; }
+grep -Fx 'Restart=on-failure' "$recovery_unit" >/dev/null || { echo "Recovery controller must restart only after failure" >&2; exit 1; }
+if grep -Eq '^Restart=(always|on-abnormal|on-abort|on-watchdog)$' "$recovery_unit"; then
+    echo "Recovery service has an unsafe restart policy" >&2
     exit 1
 fi
+grep -F 'After=default.target network-online.target clankerhouse-resource-guard.service' "$recovery_unit" >/dev/null || { echo "Recovery must start after the resource guard" >&2; exit 1; }
+grep -F 'Before=clankerhouse-recovery.service' "$repo/share/systemd/user/clankerhouse-resource-guard.service.in" >/dev/null || { echo "Resource guard must start before recovery" >&2; exit 1; }
 
 cleanup() {
     tmux -S "$socket" kill-server 2>/dev/null || true
@@ -111,9 +113,13 @@ qa_env=(env
     "XDG_RUNTIME_DIR=$root/runtime"
     "XDG_STATE_HOME=$root/state"
     "CLANKERHOUSE_BOOT_ID_PATH=$boot_file"
+    "CLANKERHOUSE_HOME=$repo"
+    "CLANKERHOUSE_BIN_DIR=$repo/bin"
+    "CLANKERHOUSE_LIBEXEC=$repo/libexec"
     "CLANKERHOUSE_CLANKERS=$repo/bin/clankers"
     "CLANKERHOUSE_OPENCODE_LAUNCHER=$root/bin/opencode"
     "CLANKERHOUSE_QA_HARNESS_LOG=$log"
+    "CLANKERHOUSE_PROCESS_OWNER=disabled"
     "DOTFILES_DIR=$repo")
 clankers() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 recover() { "${qa_env[@]}" "$repo/bin/clankerhouse-recovery" --once; }
@@ -149,52 +155,67 @@ wait_for_attested 3
 recover
 wait_for_count 3
 
-# A clanker exiting after the one-shot pass stays down until explicit recovery.
-exited_pane=$(tmux -S "$socket" list-panes -a -F '#{pane_id} #{@clankerhouse_clanker_id}' | awk '$2 ~ /^clanker-/ {print $1; exit}')
+# Abrupt pane loss becomes pending and never launches during reconciliation.
+read -r exited_pane exited_id < <(tmux -S "$socket" list-panes -a -F '#{pane_id} #{@clankerhouse_clanker_id}' | awk '$2 ~ /^clanker-/ {print $1, $2; exit}')
 tmux -S "$socket" kill-pane -t "$exited_pane"
 wait_for_count 2
-sleep 3
-wait_for_count 2
 recover
+wait_for_count 2
+pending_condition=$(clankers recovery status | EXITED_ID="$exited_id" python3 -c 'import json,os,sys; print(next(r["recoveryCondition"] for r in json.load(sys.stdin)["clankers"] if r["clankerId"] == os.environ["EXITED_ID"]))')
+[[ "$pending_condition" == pending ]] || { echo "Missing pane was not made pending" >&2; exit 1; }
+
+# Explicit reviewed recovery admits exactly that clanker and uses inspect-only continuation.
+clankers recovery resume "$exited_id" --force >/dev/null
 wait_for_count 3
 wait_for_attested 4
+[[ "$(awk -F '\t' '$2=="recovery" {count++} END {print count+0}' "$log")" == 1 ]] || { echo "Expected one explicit resume" >&2; exit 1; }
 
-# Explicit same-boot recovery after tmux loss recreates workshops and resumes exact sessions.
-tmux -S "$socket" kill-server
-recover
-wait_for_count 3
-wait_for_attested 7
-[[ "$(awk -F '\t' '$2=="recovery" {count++} END {print count+0}' "$log")" == 4 ]] || { echo "Expected four exact explicit resumes" >&2; cat "$log" >&2; exit 1; }
-
-# A hard boot with an empty runtime directory uses only persistent desired state.
+# Hard reboot creates an automatic campaign and admits only one clanker on a healthy host.
 tmux -S "$socket" kill-server
 rm -rf "$root/runtime"
 mkdir -p "$root/runtime"
 printf 'boot-b\n' > "$boot_file"
+STATE_DIR="$root/state/clankerhouse" python3 - <<'PY'
+import json, os, pathlib, time
+now = int(time.time() * 1000)
+path = pathlib.Path(os.environ["STATE_DIR"])
+path.mkdir(parents=True, exist_ok=True)
+(path / "recovery-admission.json").write_text(json.dumps({
+    "now": now, "bootObservedAt": now - 180000, "healthySince": now - 40000,
+    "lastAdmissionAt": None, "activeRecoveries": 0, "memoryAvailablePercent": 80,
+    "memoryPsiSome": 0, "ioPsiSome": 0, "ioPsiFull": 0, "cpuPsiSome": 0,
+    "rootReadBytesPerSecond": 0, "configuredReadLimitBytesPerSecond": 125 * 1024 * 1024,
+}), encoding="utf-8")
+PY
 recover
-wait_for_count 3
-wait_for_attested 10
+wait_for_count 1
+auto_id=$(tmux -S "$socket" list-panes -a -F '#{@clankerhouse_clanker_id}' | grep '^clanker-' | head -1)
+interrupted_condition=$(clankers recovery status | EXITED_ID="$exited_id" python3 -c 'import json,os,sys; print(next(r["recoveryCondition"] for r in json.load(sys.stdin)["clankers"] if r["clankerId"] == os.environ["EXITED_ID"]))')
+[[ "$interrupted_condition" == interrupted_unknown ]] || { echo "Interrupted recovery was not quarantined for review" >&2; exit 1; }
+if clankers recovery resume "$exited_id" --force >/dev/null 2>&1; then
+    [[ "$(window_count)" == 1 ]] || { echo "Ambiguous work was replayed" >&2; exit 1; }
+fi
 
-# Competing controllers share a durable singleton lease and do not duplicate panes.
-tmux -S "$socket" kill-server
+# Competing controllers do not exceed the global admission or stagger limit.
 recover & first=$!
 recover & second=$!
 wait "$first"
 wait "$second"
-wait_for_count 3
-
-# Intentional stop and pressure suspension survive another tmux-server loss.
-ids=($(clankers recovery status | python3 -c 'import json,sys; print(" ".join(row["clankerId"] for row in json.load(sys.stdin)["clankers"]))'))
-clankers recovery stop "${ids[0]}" --reason qa-stop >/dev/null
-clankers recovery suspend "${ids[1]}" --reason qa-pressure >/dev/null
 wait_for_count 1
-tmux -S "$socket" kill-server
-recover
-wait_for_count 1
-
-# Tombstones are irreversible and cannot be resurrected.
-clankers recovery tombstone "${ids[2]}" --reason qa-delete >/dev/null
+clankers recovery stop "$auto_id" --reason qa-auto-recovery-reviewed >/dev/null
 wait_for_count 0
+
+# Operator review resets ambiguity; global admission permits only one pending clanker.
+clankers recovery unquarantine "$exited_id" --reason qa-reviewed-no-tool-running >/dev/null
+clankers recovery resume "$exited_id" --force >/dev/null
+wait_for_count 1
+clankers recovery stop "$exited_id" --reason qa-stop >/dev/null
+wait_for_count 0
+
+# Intentional stop, pressure suspension, and tombstones remain durable.
+ids=($(clankers recovery status | python3 -c 'import json,sys; print(" ".join(row["clankerId"] for row in json.load(sys.stdin)["clankers"]))'))
+clankers recovery suspend "${ids[1]}" --reason qa-pressure >/dev/null
+clankers recovery tombstone "${ids[2]}" --reason qa-delete >/dev/null
 recover
 wait_for_count 0
 
@@ -215,4 +236,4 @@ after_status=$(git -C "$fixture" status --porcelain=v1)
 [[ "$(stat -c '%a' "$root/state/clankerhouse")" == 700 ]] || { echo "Recovery state directory is not mode 700" >&2; exit 1; }
 [[ "$(stat -c '%a' "$root/state/clankerhouse/recovery.sqlite3")" == 600 ]] || { echo "Recovery database is not mode 600" >&2; exit 1; }
 
-printf 'Clankerhouse recovery QA passed: one-shot service policy, exact Pi/Claude/OpenCode identities, controller adoption, no automatic resurrection after abrupt pane loss, clean-exit opt-out, explicit same-boot recovery, hard-boot recovery without runtime state, automatic boot continuation, lease contention, durable stop/suspension/tombstones, private state permissions, and dirty worktree preservation behave correctly.\n'
+printf 'Clankerhouse recovery QA passed: guarded automatic Spot campaign, exact identities, no interrupted-tool replay, single staggered admission, hard-reboot ambiguity quarantine, lease contention, durable stop/suspension/tombstones, clean-exit opt-out, private state permissions, and dirty worktree preservation behave correctly.\n'

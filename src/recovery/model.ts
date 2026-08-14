@@ -1,21 +1,30 @@
-export const RECOVERY_SCHEMA_VERSION = 1 as const
+export const RECOVERY_SCHEMA_VERSION = 2 as const
 export const RECOVERY_POLICY = Object.freeze({
-  version: 1 as const,
-  maxAttempts: 5,
-  initialBackoffMs: 1_000,
-  maxBackoffMs: 60_000,
+  version: 2 as const,
+  automaticRecovery: true,
+  maxAutomaticAttemptsPerBoot: 1,
+  maxAutomaticAttempts24h: 2,
+  maxConsecutiveFailures: 3,
+  bootQuietPeriodMs: 120_000,
+  healthyWindowMs: 30_000,
+  minimumAdmissionIntervalMs: 60_000,
+  maxActiveRecoveries: 1,
+  stableSettlementMs: 300_000,
+  initialBackoffMs: 30_000,
+  maxBackoffMs: 15 * 60_000,
 })
 
 export type RecoveryHarness = "pi" | "claude" | "opencode"
 export type DesiredClankerState = "running" | "stopped" | "suspended_resource_pressure" | "tombstoned"
+export type RecoveryCondition = "healthy" | "pending" | "recovering" | "interrupted_unknown" | "quarantined" | "suspended"
 export type LeaseScope = { kind: "global" } | { kind: "clanker"; clankerId: string }
 export type RecoveryAttemptStatus = "running" | "succeeded" | "failed" | "abandoned"
 
 /** Declarative launch data only. Commands, environment, and credentials are deliberately not representable. */
-export interface LaunchSpec {
-  version: 1
-  profile: string | null
-}
+export type RecoveryResourceClass = "interactive" | "validation-heavy" | "untrusted"
+export type LaunchSpec =
+  | { version: 1; profile: string | null }
+  | { version: 2; profile: string | null; resourceClass: RecoveryResourceClass }
 
 export interface DesiredClankerInput {
   clankerId: string
@@ -33,7 +42,11 @@ export interface DesiredClankerInput {
 
 export interface DesiredClankerRecord extends Omit<DesiredClankerInput, "desiredState"> {
   desiredState: DesiredClankerState
-  recoveryPolicyVersion: typeof RECOVERY_POLICY.version
+  recoveryPolicyVersion: number
+  recoveryCondition: RecoveryCondition
+  quarantineReason: string | null
+  consecutiveFailures: number
+  ownerUnit: string | null
   revision: number
   createdAt: number
   updatedAt: number
@@ -71,6 +84,8 @@ export interface RecoveryAttempt {
   error: string | null
   startedAt: number
   finishedAt: number | null
+  automatic: boolean
+  bootEpoch: number | null
 }
 
 export interface RuntimeEpochs {
@@ -92,9 +107,14 @@ function assertText(value: unknown, field: string, options: { absolute?: boolean
 export const validateLaunchSpec = (value: unknown): LaunchSpec => {
   if (!plainObject(value)) throw new Error("Invalid launch spec")
   const keys = Object.keys(value).sort()
-  if (keys.length !== 2 || keys[0] !== "profile" || keys[1] !== "version" || value.version !== 1) throw new Error("Invalid launch spec")
   if (value.profile !== null) assertText(value.profile, "launch profile", { max: 128 })
-  return Object.freeze({ version: 1, profile: value.profile as string | null })
+  if (value.version === 1 && keys.length === 2 && keys[0] === "profile" && keys[1] === "version") {
+    return Object.freeze({ version: 1, profile: value.profile as string | null })
+  }
+  if (value.version === 2 && keys.length === 3 && keys[0] === "profile" && keys[1] === "resourceClass" && keys[2] === "version" && ["interactive", "validation-heavy", "untrusted"].includes(String(value.resourceClass))) {
+    return Object.freeze({ version: 2, profile: value.profile as string | null, resourceClass: value.resourceClass as RecoveryResourceClass })
+  }
+  throw new Error("Invalid launch spec")
 }
 
 export const validateDesiredClankerInput = (value: DesiredClankerInput): DesiredClankerInput => {

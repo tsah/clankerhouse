@@ -99,7 +99,7 @@ fi
 if [[ "$with_systemd" == true ]]; then
     unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
     mkdir -p "$unit_dir"
-    for template in "$app"/share/systemd/user/*.service.in; do
+    for template in "$app"/share/systemd/user/*.in; do
         destination="$unit_dir/$(basename "${template%.in}")"
         managed_or_absent "$destination" || { echo "Refusing unmanaged unit: $destination" >&2; exit 1; }
         python3 - "$template" "$destination" "$app" "$bin_dir" <<'PY'

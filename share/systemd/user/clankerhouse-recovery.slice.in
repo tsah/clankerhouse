@@ -1,0 +1,8 @@
+[Unit]
+Description=Clankerhouse aggregate recovery workload budget
+
+[Slice]
+CPUWeight=20
+CPUQuota=400%
+IOWeight=10
+MemoryHigh=50%

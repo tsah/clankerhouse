@@ -84,7 +84,9 @@ The `Alt-K` tmux binding launches Clankerhouse.
 
 Pi, Claude, and OpenCode clankers spawned through `clankers` are recorded in the private SQLite control-plane store at `$XDG_STATE_HOME/clankerhouse/recovery.sqlite3`. Clankerhouse persists desired state and launch intent before creating a pane. Pi and Claude receive preallocated native session IDs; the OpenCode lifecycle plugin binds its generated `ses_…` ID before prompt processing. Lifecycle attestation completes the launch attempt.
 
-`clankerhouse-recovery.service` performs one reconciliation when the user service manager starts. After a hard reboot it recreates missing workshop windows, resumes each exact native harness session once, and immediately submits a recovery-attempt prompt that autonomously inspects Git, tests, and external state before continuing. It then remains `active (exited)`: a later Ctrl-C, harness exit, or tmux pane loss is not resurrected. Same-boot recovery is explicit through `systemctl --user restart clankerhouse-recovery.service` or `clankers recovery reconcile`. Delivery is at-least-once: arbitrary tools cannot provide a general exactly-once guarantee, so the prompt is attempt-tagged and explicitly inspect-before-repeat.
+`clankerhouse-recovery.service` remains active and creates a durable recovery campaign after a Linux boot-ID change. Existing panes are adopted; missing campaign members become `pending`. After the resource guard reports a two-minute quiet boot and 30 seconds of healthy pressure, the controller automatically admits one recovery. It waits for that exact session to remain live for five minutes before admitting the next, with at least 60 seconds between admissions. Later same-boot pane loss is not added to the boot campaign. Set `CLANKERHOUSE_AUTO_RECOVER=0` to disable automatic Spot recovery; `clankers recovery resume CLANKER_ID` remains available for reviewed manual recovery, with `--force` as an explicit pressure-gate override.
+
+Recovery automatically continues from the last settled request, but never replays an interrupted tool call. Read-only inspection and local source edits may continue. Tests, lint, builds, indexing, package installation, containers, migrations, commits, pushes, deployments, network mutations, and other expensive or externally visible operations require operator confirmation. Unknown interrupted work is quarantined. Startup attestation alone does not reset the breaker: five minutes of stable liveness releases the next campaign admission, while an idle/done lifecycle report resets the consecutive-failure count.
 
 Tracked harnesses run through a lifecycle wrapper. A clean process exit, including a final Ctrl-C that actually terminates the harness, is validated against the latest successful recovery attempt and exact native session before durably changing desired state to `stopped`; it will not return on a later boot. Ctrl-C that only cancels an active turn does not stop recovery eligibility. Crashes, SIGHUP/tmux loss, and host SIGTERM leave desired state `running` so boot recovery remains possible. Intentional tmux stops are journaled before destruction. Resource-pressure suspension and irreversible tombstones take precedence over recovery, preventing the controller from undoing deliberate mitigation or deletion. Codex remains visible but is not automatically recoverable because an exact native resume contract is not configured.
 
@@ -92,6 +94,10 @@ Tracked harnesses run through a lifecycle wrapper. A clean process exit, includi
 clankers recovery status
 clankers recovery journal
 clankers recovery reconcile
+clankers recovery pending
+clankers recovery resume CLANKER_ID
+clankers recovery unquarantine CLANKER_ID --reason 'reviewed interrupted work'
+clankers recovery pause-all
 clankers recovery adopt-live
 clankers recovery stop CLANKER_ID
 clankers recovery start CLANKER_ID
@@ -104,11 +110,11 @@ The state database, native harness session stores, repositories, and worktrees m
 
 ## Resource-pressure guard
 
-On Linux, `clankerhouse-resource-guard` samples guest-kernel memory PSI and `MemAvailable` every five seconds. After one minute of sustained pressure it terminates at most one validated, non-focused Pi, Claude, OpenCode, or Codex process per boot. It prefers done/idle clankers, then unknown, blocked, and working clankers; within a state it chooses the largest process tree. The process is revalidated against its tmux pane, UID, ancestry, start time, harness, and stable clanker ID immediately before `SIGTERM`, with `SIGKILL` only after the grace period.
+On Linux, `clankerhouse-resource-guard` samples guest-kernel memory, CPU, and I/O PSI plus `MemAvailable` and root-device read throughput every five seconds. It publishes a durable recovery-admission health record before the recovery reconciler starts. Sustained memory or I/O pressure freezes admission and repeatedly stops validated non-focused clanker workloads until pressure clears. Tracked harnesses run in transient systemd scopes under `clankerhouse-recovery.slice`; stopping a scope uses `KillMode=control-group`, so wrappers, harnesses, daemonized tools, and new process groups are owned and terminated together. Legacy PID validation remains a fallback for pre-migration processes.
 
-Actions are persisted under `$XDG_STATE_HOME/clankerhouse/incidents` and appear in the TUI as a red `×` with `terminated`. The daemon also snapshots working, blocked, and unknown clankers with the Linux boot ID. If a hard reset changes the boot ID without a clean daemon shutdown, the lost sessions reappear as red `×` entries labeled `lost on reboot`. An orderly reboot does not create crash incidents.
+Actions and a bounded pre-incident pressure history are persisted under `$XDG_STATE_HOME/clankerhouse/incidents` and appear in the TUI as a red `×`. The daemon atomically publishes `recovery-admission.json`, `resource-guard-snapshot.json`, and Prometheus text metrics in `resource-guard-metrics.prom`. If a hard reset changes the boot ID without a clean daemon shutdown, lost sessions reappear as red `×` entries labeled `lost on reboot`. An orderly reboot does not create crash incidents.
 
-EC2 needs no special metrics API: PSI and `/proc/meminfo` report pressure inside the instance, which is exactly what the guard needs. On swapless EC2 instances the default reserve is the larger of 512 MiB or 10% of RAM; elsewhere it is 7.5% of RAM. CPU credits and host-level steal time are separate concerns and do not affect this memory-pressure decision.
+EC2 needs no metrics API for enforcement: PSI, `/proc/meminfo`, `/proc/diskstats`, and cgroup statistics report guest pressure. On swapless EC2 instances the memory reserve is the larger of 512 MiB or 10% of RAM. The default configured storage ceiling is 125 MiB/s: admission stops at 50%, mitigation begins at 75%, and significant I/O PSI also trips protection. Set `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC` for other volumes. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit; the recovery slice always receives low CPU and I/O weights. New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. Historical pressure and admission metrics remain available for later budget tuning but never weaken hard safety limits.
 
 ```sh
 systemctl --user status clankerhouse-resource-guard
@@ -116,7 +122,7 @@ journalctl --user -u clankerhouse-resource-guard
 clankerhouse-resource-guard --once --dry-run
 ```
 
-Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTERVAL`, `RESOURCE_GUARD_EC2_FLOOR_MIB`, `RESOURCE_GUARD_EC2_PERCENT`, `RESOURCE_GUARD_GENERIC_PERCENT`, `RESOURCE_GUARD_PSI_SOME`, `RESOURCE_GUARD_PSI_FULL`, and `RESOURCE_GUARD_TERM_GRACE`. Set `RESOURCE_GUARD_DRY_RUN=1` to audit selections without signaling processes. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
+Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTERVAL`, `RESOURCE_GUARD_EC2_FLOOR_MIB`, `RESOURCE_GUARD_EC2_PERCENT`, `RESOURCE_GUARD_GENERIC_PERCENT`, `RESOURCE_GUARD_PSI_SOME`, `RESOURCE_GUARD_PSI_FULL`, `RESOURCE_GUARD_IO_PSI_SOME`, `RESOURCE_GUARD_IO_PSI_FULL`, `RESOURCE_GUARD_CPU_PSI_SOME`, `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC`, and `RESOURCE_GUARD_TERM_GRACE`. Set `RESOURCE_GUARD_DRY_RUN=1` to audit selections without signaling processes. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
 
 Useful CLI inspection/repair commands:
 - `clankers workshop show --cwd PATH`

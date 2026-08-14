@@ -14,6 +14,7 @@ import {
   type ProcessIdentity,
   type RecoveryAttempt,
   type RecoveryAttemptStatus,
+  type RecoveryCondition,
   type RecoveryJournalEntry,
   type RecoveryLease,
   type RuntimeEpochs,
@@ -33,8 +34,12 @@ interface DesiredRow {
   harness_session_id: string | null
   launch_spec: string
   original_task: string
-  policy_version: 1
+  policy_version: number
   desired_state: DesiredClankerState
+  recovery_condition: RecoveryCondition
+  quarantine_reason: string | null
+  consecutive_failures: number
+  owner_unit: string | null
   revision: number
   created_at: number
   updated_at: number
@@ -59,9 +64,11 @@ interface AttemptRow {
   error: string | null
   started_at: number
   finished_at: number | null
+  automatic: number
+  boot_epoch: number | null
 }
 
-const desiredColumns = "clanker_id, harness, workshop_id, workshop_path, tmux_session_name, tmux_window_name, cwd, harness_session_id, launch_spec, original_task, policy_version, desired_state, revision, created_at, updated_at"
+const desiredColumns = "clanker_id, harness, workshop_id, workshop_path, tmux_session_name, tmux_window_name, cwd, harness_session_id, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at"
 
 const desiredFromRow = (row: DesiredRow): DesiredClankerRecord => ({
   clankerId: row.clanker_id,
@@ -76,6 +83,10 @@ const desiredFromRow = (row: DesiredRow): DesiredClankerRecord => ({
   originalTask: row.original_task,
   recoveryPolicyVersion: row.policy_version,
   desiredState: row.desired_state,
+  recoveryCondition: row.recovery_condition,
+  quarantineReason: row.quarantine_reason,
+  consecutiveFailures: row.consecutive_failures,
+  ownerUnit: row.owner_unit,
   revision: row.revision,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -89,6 +100,7 @@ const leaseFromRow = (row: LeaseRow): RecoveryLease => ({
 const attemptFromRow = (row: AttemptRow): RecoveryAttempt => ({
   id: row.id, clankerId: row.clanker_id, attempt: row.attempt_number, trigger: row.trigger,
   status: row.status, error: row.error, startedAt: row.started_at, finishedAt: row.finished_at,
+  automatic: row.automatic === 1, bootEpoch: row.boot_epoch,
 })
 
 const ensurePermissions = (dbPath: string) => {
@@ -101,6 +113,21 @@ const initialize = (db: Database) => {
   const current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
   if (current > RECOVERY_SCHEMA_VERSION) throw new Error(`Unsupported recovery store version ${current}`)
   if (current === RECOVERY_SCHEMA_VERSION) return
+  if (current === 1) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE desired_clankers ADD COLUMN recovery_condition TEXT NOT NULL DEFAULT 'pending' CHECK (recovery_condition IN ('healthy', 'pending', 'recovering', 'interrupted_unknown', 'quarantined', 'suspended'));
+      ALTER TABLE desired_clankers ADD COLUMN quarantine_reason TEXT;
+      ALTER TABLE desired_clankers ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE desired_clankers ADD COLUMN owner_unit TEXT;
+      ALTER TABLE recovery_attempts ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0 CHECK (automatic IN (0, 1));
+      ALTER TABLE recovery_attempts ADD COLUMN boot_epoch INTEGER;
+      UPDATE desired_clankers SET recovery_condition = CASE WHEN desired_state = 'running' THEN 'pending' ELSE 'healthy' END;
+      PRAGMA user_version = 2;
+      COMMIT;
+    `)
+    return
+  }
   if (current !== 0) throw new Error(`Unsupported recovery store version ${current}`)
   db.exec(`
     BEGIN IMMEDIATE;
@@ -115,8 +142,12 @@ const initialize = (db: Database) => {
       harness_session_id TEXT,
       launch_spec TEXT NOT NULL,
       original_task TEXT NOT NULL,
-      policy_version INTEGER NOT NULL CHECK (policy_version = 1),
+      policy_version INTEGER NOT NULL CHECK (policy_version IN (1, 2)),
       desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped', 'suspended_resource_pressure', 'tombstoned')),
+      recovery_condition TEXT NOT NULL CHECK (recovery_condition IN ('healthy', 'pending', 'recovering', 'interrupted_unknown', 'quarantined', 'suspended')),
+      quarantine_reason TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+      owner_unit TEXT,
       revision INTEGER NOT NULL CHECK (revision > 0),
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -145,6 +176,8 @@ const initialize = (db: Database) => {
       error TEXT,
       started_at INTEGER NOT NULL,
       finished_at INTEGER,
+      automatic INTEGER NOT NULL DEFAULT 0 CHECK (automatic IN (0, 1)),
+      boot_epoch INTEGER,
       UNIQUE(clanker_id, attempt_number)
     );
     CREATE INDEX recovery_attempts_clanker_idx ON recovery_attempts(clanker_id, attempt_number);
@@ -167,7 +200,7 @@ const initialize = (db: Database) => {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    PRAGMA user_version = 1;
+    PRAGMA user_version = 2;
     COMMIT;
   `)
 }
@@ -230,7 +263,7 @@ export class RecoveryStore {
     return this.db.transaction(() => {
       const existing = this.getDesired(desired.clankerId)
       if (existing) throw new Error(existing.desiredState === "tombstoned" ? `Clanker ${desired.clankerId} is tombstoned` : `Clanker ${desired.clankerId} already exists`)
-      this.db.query(`INSERT INTO desired_clankers (${desiredColumns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, 1, ?12, ?12)`)
+      this.db.query(`INSERT INTO desired_clankers (${desiredColumns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 2, ?11, 'healthy', NULL, 0, NULL, 1, ?12, ?12)`)
         .run(desired.clankerId, desired.harness, desired.workshopId, desired.workshopPath, desired.tmuxSessionName, desired.tmuxWindowName, desired.cwd, desired.harnessSessionId, JSON.stringify(desired.launchSpec), desired.originalTask, desired.desiredState!, now)
       const record = this.getDesired(desired.clankerId)!
       this.journal(record.clankerId, "desired.created", record.revision, { desiredState: record.desiredState, harness: record.harness }, now)
@@ -319,7 +352,78 @@ export class RecoveryStore {
     return rows.map((row): RecoveryJournalEntry => ({ id: row.id, clankerId: row.clanker_id, event: row.event, revision: row.revision, payload: JSON.parse(row.payload), createdAt: row.created_at }))
   }
 
-  beginAttempt(clankerId: string, trigger: string, options: { now?: number } = {}) {
+  private setRecoveryCondition(clankerId: string, condition: RecoveryCondition, options: { reason?: string | null; ownerUnit?: string | null; resetFailures?: boolean; now?: number } = {}) {
+    const now = this.now(options.now)
+    return this.db.transaction(() => {
+      const current = this.getDesired(clankerId)
+      if (!current) throw new Error(`Unknown clanker ${clankerId}`)
+      const revision = current.revision + 1
+      const reason = condition === "quarantined" ? options.reason || "recovery policy circuit breaker" : null
+      const failures = options.resetFailures ? 0 : current.consecutiveFailures
+      this.db.query("UPDATE desired_clankers SET recovery_condition = ?2, quarantine_reason = ?3, consecutive_failures = ?4, owner_unit = ?5, revision = ?6, updated_at = ?7 WHERE clanker_id = ?1")
+        .run(clankerId, condition, reason, failures, options.ownerUnit ?? current.ownerUnit, revision, now)
+      this.journal(clankerId, `recovery.${condition}`, revision, { from: current.recoveryCondition, to: condition, ...(reason ? { reason } : {}) }, now)
+      return this.getDesired(clankerId)!
+    }).immediate()
+  }
+
+  markRecoveryPending(clankerId: string, reason: string, options: { now?: number } = {}) {
+    if (!reason || reason.trim() !== reason) throw new Error("Invalid recovery pending reason")
+    const current = this.getDesired(clankerId)
+    if (!current) throw new Error(`Unknown clanker ${clankerId}`)
+    if (current.recoveryCondition === "quarantined") return current
+    return this.setRecoveryCondition(clankerId, current.recoveryCondition === "recovering" ? "interrupted_unknown" : "pending", { reason, ownerUnit: null, now: options.now })
+  }
+
+  setRecoveryOwner(clankerId: string, ownerUnit: string, options: { now?: number } = {}) {
+    if (!/^clankerhouse-[A-Za-z0-9_.-]+\.scope$/.test(ownerUnit)) throw new Error("Invalid recovery owner unit")
+    const now = this.now(options.now)
+    const current = this.getDesired(clankerId)
+    if (!current) throw new Error(`Unknown clanker ${clankerId}`)
+    this.db.query("UPDATE desired_clankers SET owner_unit = ?2, updated_at = ?3 WHERE clanker_id = ?1").run(clankerId, ownerUnit, now)
+    this.journal(clankerId, "recovery.owner_assigned", current.revision, { ownerUnit }, now)
+    return this.getDesired(clankerId)!
+  }
+
+  resetRecovery(clankerId: string, reason: string, options: { now?: number } = {}) {
+    if (!reason || reason.trim() !== reason || /[\0\r\n]/.test(reason)) throw new Error("A reset reason is required")
+    const current = this.getDesired(clankerId)
+    if (!current) throw new Error(`Unknown clanker ${clankerId}`)
+    if (current.recoveryCondition !== "quarantined" && current.recoveryCondition !== "interrupted_unknown") throw new Error(`Clanker ${clankerId} is not quarantined`)
+    return this.setRecoveryCondition(clankerId, "pending", { reason, resetFailures: true, ownerUnit: null, now: options.now })
+  }
+
+  admitRecovery(clankerId: string, options: { automatic: boolean; bootEpoch: number; trigger: string; ownerUnit?: string; now?: number }): { admitted: boolean; reason?: string; attempt?: RecoveryAttempt } {
+    const now = this.now(options.now)
+    if (!Number.isSafeInteger(options.bootEpoch) || options.bootEpoch < 0) throw new Error("Invalid boot epoch")
+    return this.db.transaction(() => {
+      const desired = this.getDesired(clankerId)
+      if (!desired) throw new Error(`Unknown clanker ${clankerId}`)
+      if (desired.desiredState !== "running") return { admitted: false, reason: `desired state is ${desired.desiredState}` }
+      if (desired.recoveryCondition === "quarantined") return { admitted: false, reason: desired.quarantineReason || "quarantined" }
+      if (desired.recoveryCondition === "interrupted_unknown") return { admitted: false, reason: "interrupted work requires operator review" }
+      if (options.automatic) {
+        const sameBoot = Number((this.db.query("SELECT COUNT(*) AS count FROM recovery_attempts WHERE clanker_id = ?1 AND automatic = 1 AND boot_epoch = ?2").get(clankerId, options.bootEpoch) as { count: number }).count)
+        const recent = Number((this.db.query("SELECT COUNT(*) AS count FROM recovery_attempts WHERE clanker_id = ?1 AND automatic = 1 AND started_at >= ?2").get(clankerId, now - 86_400_000) as { count: number }).count)
+        let reason: string | undefined
+        if (sameBoot >= RECOVERY_POLICY.maxAutomaticAttemptsPerBoot) reason = "automatic attempt already made this boot"
+        else if (recent >= RECOVERY_POLICY.maxAutomaticAttempts24h) reason = "automatic recovery limit reached in 24 hours"
+        else if (desired.consecutiveFailures >= RECOVERY_POLICY.maxConsecutiveFailures) reason = "consecutive recovery failure limit reached"
+        if (reason) {
+          this.setRecoveryCondition(clankerId, "quarantined", { reason, now })
+          return { admitted: false, reason }
+        }
+      }
+      const attempt = this.beginAttempt(clankerId, options.trigger, { automatic: options.automatic, bootEpoch: options.bootEpoch, now })
+      const revision = desired.revision + 1
+      this.db.query("UPDATE desired_clankers SET recovery_condition = 'recovering', quarantine_reason = NULL, consecutive_failures = consecutive_failures + 1, owner_unit = ?2, revision = ?3, updated_at = ?4 WHERE clanker_id = ?1")
+        .run(clankerId, options.ownerUnit ?? null, revision, now)
+      this.journal(clankerId, "recovery.admitted", revision, { attemptId: attempt.id, attempt: attempt.attempt, automatic: options.automatic, bootEpoch: options.bootEpoch }, now)
+      return { admitted: true, attempt }
+    }).immediate()
+  }
+
+  beginAttempt(clankerId: string, trigger: string, options: { now?: number; automatic?: boolean; bootEpoch?: number | null } = {}) {
     if (!trigger || trigger.trim() !== trigger) throw new Error("Invalid recovery trigger")
     const now = this.now(options.now)
     return this.db.transaction(() => {
@@ -327,8 +431,9 @@ export class RecoveryStore {
       if (!desired) throw new Error(`Unknown clanker ${clankerId}`)
       if (desired.desiredState === "tombstoned") throw new Error(`Clanker ${clankerId} is tombstoned`)
       const next = Number((this.db.query("SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next FROM recovery_attempts WHERE clanker_id = ?1").get(clankerId) as { next: number }).next)
-      const result = this.db.query("INSERT INTO recovery_attempts (clanker_id, attempt_number, trigger, status, error, started_at, finished_at) VALUES (?1, ?2, ?3, 'running', NULL, ?4, NULL)").run(clankerId, next, trigger, now)
-      this.journal(clankerId, "attempt.started", desired.revision, { attempt: next, trigger }, now)
+      const result = this.db.query("INSERT INTO recovery_attempts (clanker_id, attempt_number, trigger, status, error, started_at, finished_at, automatic, boot_epoch) VALUES (?1, ?2, ?3, 'running', NULL, ?4, NULL, ?5, ?6)")
+        .run(clankerId, next, trigger, now, options.automatic ? 1 : 0, options.bootEpoch ?? null)
+      this.journal(clankerId, "attempt.started", desired.revision, { attempt: next, trigger, automatic: Boolean(options.automatic), bootEpoch: options.bootEpoch ?? null }, now)
       return this.getAttempt(Number(result.lastInsertRowid))!
     }).immediate()
   }
@@ -349,13 +454,52 @@ export class RecoveryStore {
     }).immediate()
   }
 
+  markRecoveryStable(clankerId: string, attemptId: number, options: { now?: number } = {}) {
+    const now = this.now(options.now)
+    return this.db.transaction(() => {
+      const desired = this.getDesired(clankerId)
+      const attempt = this.getAttempt(attemptId)
+      const latest = this.attemptsFor(clankerId).at(-1)
+      if (!desired || !attempt || attempt.clankerId !== clankerId || latest?.id !== attemptId || attempt.status !== "succeeded") return false
+      if (desired.recoveryCondition !== "recovering" || now - attempt.startedAt < RECOVERY_POLICY.stableSettlementMs) return false
+      const revision = desired.revision + 1
+      const settledObserved = this.getMetadata<boolean>(`recovery.settled_attempt.${attemptId}`) === true
+      this.db.query("UPDATE desired_clankers SET recovery_condition = 'healthy', quarantine_reason = NULL, consecutive_failures = CASE WHEN ?2 = 1 THEN 0 ELSE consecutive_failures END, revision = ?3, updated_at = ?4 WHERE clanker_id = ?1")
+        .run(clankerId, settledObserved ? 1 : 0, revision, now)
+      this.journal(clankerId, "recovery.stable", revision, { attemptId, attempt: attempt.attempt, stableForMs: now - attempt.startedAt, settledObserved }, now)
+      return true
+    }).immediate()
+  }
+
+  markRecoverySettled(clankerId: string, attemptId: number, state: string, options: { now?: number } = {}) {
+    if (state !== "idle" && state !== "done") return false
+    const now = this.now(options.now)
+    return this.db.transaction(() => {
+      const desired = this.getDesired(clankerId)
+      const attempt = this.getAttempt(attemptId)
+      const latest = this.attemptsFor(clankerId).at(-1)
+      if (!desired || !attempt || attempt.clankerId !== clankerId || latest?.id !== attemptId || attempt.status !== "succeeded") return false
+      if (desired.recoveryCondition !== "recovering" && desired.recoveryCondition !== "healthy") return false
+      if (now - attempt.startedAt < RECOVERY_POLICY.stableSettlementMs) {
+        this.setMetadata(`recovery.settled_attempt.${attemptId}`, true, { now })
+        this.journal(clankerId, "recovery.settlement_observed", desired.revision, { attemptId, attempt: attempt.attempt, state }, now)
+        return false
+      }
+      const revision = desired.revision + 1
+      this.db.query("UPDATE desired_clankers SET recovery_condition = 'healthy', quarantine_reason = NULL, consecutive_failures = 0, revision = ?2, updated_at = ?3 WHERE clanker_id = ?1")
+        .run(clankerId, revision, now)
+      this.journal(clankerId, "recovery.settled", revision, { attemptId, attempt: attempt.attempt, state, stableForMs: now - attempt.startedAt }, now)
+      return true
+    }).immediate()
+  }
+
   getAttempt(id: number) {
-    const row = this.db.query("SELECT id, clanker_id, attempt_number, trigger, status, error, started_at, finished_at FROM recovery_attempts WHERE id = ?1").get(id) as AttemptRow | null
+    const row = this.db.query("SELECT id, clanker_id, attempt_number, trigger, status, error, started_at, finished_at, automatic, boot_epoch FROM recovery_attempts WHERE id = ?1").get(id) as AttemptRow | null
     return row ? attemptFromRow(row) : undefined
   }
 
   attemptsFor(clankerId: string) {
-    return (this.db.query("SELECT id, clanker_id, attempt_number, trigger, status, error, started_at, finished_at FROM recovery_attempts WHERE clanker_id = ?1 ORDER BY attempt_number").all(clankerId) as AttemptRow[]).map(attemptFromRow)
+    return (this.db.query("SELECT id, clanker_id, attempt_number, trigger, status, error, started_at, finished_at, automatic, boot_epoch FROM recovery_attempts WHERE clanker_id = ?1 ORDER BY attempt_number").all(clankerId) as AttemptRow[]).map(attemptFromRow)
   }
 
   acquireLease(input: AcquireLeaseInput) {

@@ -1,6 +1,6 @@
 # Clankerhouse restart and Spot recovery QA
 
-This plan validates one-shot automatic continuation at user-service startup after Linux reboot, plus explicit recovery after controller or tmux-server loss and EC2 Spot checkpoint handling. It must never inspect, signal, or mutate real workshops, clankers, tmux servers, worktrees, harness sessions, or AWS resources.
+This plan validates guarded automatic recovery after a Spot/Linux reboot, explicit single-clanker recovery for later same-boot loss, process-scope cleanup, and EC2 Spot checkpoint handling. It must never inspect, signal, or mutate real workshops, clankers, tmux servers, worktrees, harness sessions, or AWS resources.
 
 ## Safety boundary
 
@@ -27,6 +27,7 @@ PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watc
 scripts/qa-clanker-api
 scripts/qa-daemon
 scripts/qa-recovery
+scripts/qa-process-owner
 scripts/qa
 ```
 
@@ -37,15 +38,18 @@ scripts/qa
 1. Pi and Claude receive preallocated exact native session IDs before launch.
 2. OpenCode durably attests its generated session ID before fake prompt work begins.
 3. Restarting only the recovery controller adopts panes without duplication.
-4. Abrupt pane loss after the one-shot pass remains absent until an explicit recovery command.
-5. A clean harness exit durably changes desired state to `stopped` and remains absent even after explicit or next-boot recovery.
-6. Explicit recovery after killing the private tmux server recreates the workshop and resumes all three exact sessions with an idempotent continuation.
-7. Changing the simulated Linux boot ID and deleting runtime state recovers from persistent state alone.
-8. Competing controllers hold a durable singleton lease and launch at most one pane per clanker.
-9. Intentional stop, resource-pressure suspension, and tombstones prevent resurrection.
-10. Dirty and untracked Git state remains byte-for-byte unchanged.
-11. The recovery directory and database remain mode `0700` and `0600` respectively.
-12. No operation touches the user's real tmux socket or harness session stores.
+4. Same-boot pane loss becomes durable pending/interrupted state and is not added to the boot campaign.
+5. A clean harness exit durably changes desired state to `stopped` and remains absent after reboot.
+6. A hard reboot creates a durable campaign and automatically admits at most one stale session after healthy boot gates.
+7. Settled local work continues automatically, while interrupted tools, expensive validation, and external effects are never replayed automatically.
+8. Repeated automatic failure, same-boot retry, and unresolved running attempts enter durable quarantine.
+9. Competing controllers and simultaneous manual requests cannot exceed the global admission limit.
+10. Killing a pane followed by stop removes wrapper, harness, `setsid`, and double-fork descendants from the owned cgroup.
+11. Healthy memory with pure I/O pressure blocks admission and triggers mitigation.
+12. Circuit-breaker, incident, attempt, and pressure snapshots survive a simulated reboot.
+13. Intentional stop, resource suspension, quarantine, and tombstones prevent resurrection.
+14. Dirty/untracked Git state and native harness session files remain preserved.
+15. No operation touches the user's real tmux socket, cgroups, or harness stores.
 
 Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, command construction, and IMDSv2 token/404/401/rebalance/interruption behavior.
 

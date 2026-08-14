@@ -3,8 +3,10 @@ import { createHash } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
-import { resolveRecoveredClankerIncidents } from "./incidents"
+import { recordRecoveryIncident, resolveRecoveredClankerIncidents } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
+import type { RecoveryResourceClass } from "./recovery/model"
+import { stopOwnedHarness } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
@@ -59,6 +61,12 @@ const harness = (value: string | undefined): Harness => {
   const selected = value || "pi"
   if (!["pi", "claude", "opencode", "codex"].includes(selected)) throw new Error(`Unsupported harness: ${selected}`)
   return selected as Harness
+}
+
+const resourceClass = (value: string | undefined): RecoveryResourceClass | undefined => {
+  if (value === undefined) return undefined
+  if (["interactive", "validation-heavy", "untrusted"].includes(value)) return value as RecoveryResourceClass
+  throw new Error("--resource-class must be interactive, validation-heavy, or untrusted")
 }
 
 const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) => {
@@ -179,7 +187,7 @@ const usage = `Usage:
   clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
-  clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--prompt TEXT]
+  clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION] [--timeout SECONDS]
@@ -187,6 +195,9 @@ const usage = `Usage:
   clankers result CLANKER_ID [--generation GENERATION]
   clankers recovery status|journal|reconcile|checkpoint
   clankers recovery attest-exit CLANKER_ID --attempt ID [--session-id ID]
+  clankers recovery pending|pause-all
+  clankers recovery resume CLANKER_ID [--force]
+  clankers recovery unquarantine CLANKER_ID --reason TEXT
   clankers recovery stop|start|suspend|tombstone CLANKER_ID`
 
 export async function runClankersCli(argv = process.argv.slice(2)) {
@@ -202,6 +213,29 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       if (subcommand === "status") return console.log(JSON.stringify({ epochs: store.runtimeEpochs(), tmuxServerEpoch: store.getMetadata("runtime.tmux_server_epoch") ?? null, clankers: store.listDesired({ includeTombstoned: true }).map((row) => ({ ...row, originalTask: undefined })), attempts: store.listDesired({ includeTombstoned: true }).flatMap((row) => store.attemptsFor(row.clankerId)) }))
       if (subcommand === "journal") return console.log(JSON.stringify(store.journalEntries({ afterId: nonNegativeNumber(parsed.take("--after"), "--after"), limit: nonNegativeNumber(parsed.take("--limit"), "--limit") })))
       if (subcommand === "reconcile") return console.log(JSON.stringify(await reconcileRecovery(store, { trigger: parsed.take("--reason") || "manual" })))
+      if (subcommand === "pending") return console.log(JSON.stringify(store.listDesired().filter((row) => row.recoveryCondition !== "healthy")))
+      if (subcommand === "pause-all") {
+        const reason = parsed.take("--reason") || "operator-paused-all"
+        const live = await listClankers()
+        const paused = []
+        for (const row of store.listDesired().filter((candidate) => candidate.desiredState === "running")) {
+          const desired = store.setDesiredState(row.clankerId, "suspended_resource_pressure", { reason })
+          if (desired.ownerUnit) stopOwnedHarness(desired.ownerUnit)
+          for (const match of live.filter((candidate) => candidate.id === row.clankerId)) Bun.spawnSync(["tmux", "kill-pane", "-t", match.pane], { stdout: "ignore", stderr: "ignore" })
+          paused.push(row.clankerId)
+        }
+        return console.log(JSON.stringify({ paused }))
+      }
+      if (subcommand === "resume") {
+        const id = requiredClankerId(parsed)
+        return console.log(JSON.stringify(await reconcileRecovery(store, { trigger: "manual", clankerId: id, allowLaunch: true, automatic: false, bypassAdmission: parsed.has("--force") })))
+      }
+      if (subcommand === "unquarantine") {
+        const id = requiredClankerId(parsed)
+        const reason = parsed.take("--reason")
+        if (!reason) throw new Error("--reason is required")
+        return console.log(JSON.stringify(store.resetRecovery(id, reason)))
+      }
       if (subcommand === "adopt-live") return console.log(JSON.stringify(await adoptLivePiSessions(store)))
       if (subcommand === "checkpoint") {
         store.setMetadata("checkpoint.latest", { reason: parsed.take("--reason") || "manual", deadline: parsed.take("--deadline") || null, createdAt: Date.now() })
@@ -217,12 +251,14 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         } else {
           desired = store.bindHarnessSession(id, sessionId)
         }
+        const reportState = parsed.take("--state")
         const attemptId = nonNegativeNumber(parsed.take("--attempt"), "--attempt")
         if (attemptId !== undefined) {
           const attempt = store.getAttempt(attemptId)
           if (!attempt || attempt.clankerId !== id) throw new Error(`Recovery attempt ${attemptId} does not belong to ${id}`)
           store.finishAttempt(attemptId, "succeeded")
-          resolveRecoveredClankerIncidents(id)
+          if (reportState) store.markRecoverySettled(id, attemptId, reportState)
+          if (store.getDesired(id)?.recoveryCondition === "healthy") resolveRecoveredClankerIncidents(id)
         }
         return console.log(JSON.stringify({ clankerId: id, harnessSessionId: desired.harnessSessionId, attested: true }))
       }
@@ -242,16 +278,26 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         const id = requiredClankerId(parsed)
         const state = subcommand === "start" ? "running" : subcommand === "suspend" ? "suspended_resource_pressure" : subcommand === "tombstone" ? "tombstoned" : "stopped"
         const noKill = parsed.has("--no-kill")
+        const noPaneKill = parsed.has("--no-pane-kill")
         if (parsed.has("--if-present") && !store.getDesired(id)) return console.log(JSON.stringify({ clankerId: id, tracked: false }))
         const desired = store.setDesiredState(id, state, { reason: parsed.take("--reason") || subcommand })
         if (!noKill && (subcommand === "stop" || subcommand === "suspend" || subcommand === "tombstone")) {
-          const matches = (await listClankers()).filter((row) => row.id === id)
-          if (matches.length > 1) throw new Error(`Ambiguous live panes for ${id}`)
-          if (matches.length === 1) Bun.spawnSync(["tmux", "kill-pane", "-t", matches[0]!.pane], { stdout: "ignore", stderr: "ignore" })
+          if (desired.ownerUnit) {
+            try { stopOwnedHarness(desired.ownerUnit) }
+            catch (error) {
+              recordRecoveryIncident("recovery_descendant_cleanup_failed", { clankerId: desired.clankerId, harness: desired.harness, worktreePath: desired.workshopPath, cwd: desired.cwd }, { reason: error instanceof Error ? error.message : String(error), ownerUnit: desired.ownerUnit })
+              throw error
+            }
+          }
+          if (!noPaneKill) {
+            const matches = (await listClankers()).filter((row) => row.id === id)
+            if (matches.length > 1) throw new Error(`Ambiguous live panes for ${id}`)
+            if (matches.length === 1) Bun.spawnSync(["tmux", "kill-pane", "-t", matches[0]!.pane], { stdout: "ignore", stderr: "ignore" })
+          }
         }
         return console.log(JSON.stringify(desired))
       }
-      throw new Error("Usage: clankers recovery status|journal|reconcile|checkpoint|attest|attest-exit|stop|start|suspend|tombstone ...")
+      throw new Error("Usage: clankers recovery status|journal|reconcile|pending|pause-all|resume|unquarantine|checkpoint|attest|attest-exit|stop|start|suspend|tombstone ...")
     } finally { store.close() }
   }
 
@@ -262,7 +308,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       const name = parsed.take("--name")
       if (!name) throw new Error("--name is required")
       const selectedHarness = harness(parsed.take("--harness"))
-      const base = parsed.take("--base"); const copy = parsed.take("--copy"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
+      const base = parsed.take("--base"); const copy = parsed.take("--copy"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
       if (parentWorkshopId && noParent) throw new Error("--parent and --no-parent are mutually exclusive")
       const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
       const result = await spawnWorkshop(selectedHarness, name, prompt, {
@@ -270,6 +316,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         copy,
         window,
         profile,
+        resourceClass: selectedResourceClass,
         wait,
         parentWorkshopId,
         noParent,
@@ -296,9 +343,9 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const selector = parsed.take("--workshop")
     const name = parsed.take("--name")
     if (!selector || !name) throw new Error("--workshop and --name are required")
-    const selectedHarness = harness(parsed.take("--harness")); const profile = parsed.take("--profile"); const wait = parsed.has("--wait")
+    const selectedHarness = harness(parsed.take("--harness")); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait")
     const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
-    return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, profile, name, wait)))
+    return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, profile, name, wait, selectedResourceClass)))
   }
 
   throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|result ...")

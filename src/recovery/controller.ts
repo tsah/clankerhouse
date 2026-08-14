@@ -4,7 +4,10 @@ import { realpathSync } from "node:fs"
 import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from "./model"
 import { initialHarnessCommand, recoveryHarnessCommand } from "./harness"
 import { openRecoveryStore, type RecoveryStore } from "./store"
+import { recordRecoveryIncident } from "../incidents"
 import { parseTmuxFields, tmuxFields } from "../tmux-fields"
+import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
+import { recoveryUnitName } from "./process-owner"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
@@ -78,22 +81,25 @@ const backoffRemaining = (desired: DesiredClankerRecord, store: RecoveryStore, n
   const attempts = store.attemptsFor(desired.clankerId)
   const latest = attempts.at(-1)
   if (!latest || latest.status === "succeeded" || latest.status === "running" || !latest.finishedAt) return 0
-  const exponent = Math.min(Math.max(0, latest.attempt - 1), RECOVERY_POLICY.maxAttempts - 1)
+  const exponent = Math.min(Math.max(0, latest.attempt - 1), RECOVERY_POLICY.maxConsecutiveFailures - 1)
   const delay = Math.min(RECOVERY_POLICY.maxBackoffMs, RECOVERY_POLICY.initialBackoffMs * (2 ** exponent))
   return Math.max(0, latest.finishedAt + delay - now)
 }
 
-export interface ReconcileResult { launched: string[]; adopted: string[]; skipped: Array<{ clankerId: string; reason: string }> }
+export interface ReconcileResult { launched: string[]; adopted: string[]; pending: string[]; skipped: Array<{ clankerId: string; reason: string }> }
+export interface ReconcileOptions { trigger?: string; now?: number; allowLaunch?: boolean; automatic?: boolean; automaticCandidates?: string[]; clankerId?: string; bootEpoch?: number; hostState?: RecoveryHostState; bypassAdmission?: boolean }
 
-export const reconcileRecovery = async (providedStore?: RecoveryStore, options: { trigger?: string; now?: number } = {}): Promise<ReconcileResult> => {
+export const reconcileRecovery = async (providedStore?: RecoveryStore, options: ReconcileOptions = {}): Promise<ReconcileResult> => {
   const ownStore = !providedStore
   const store = providedStore ?? openRecoveryStore()
-  const result: ReconcileResult = { launched: [], adopted: [], skipped: [] }
+  const result: ReconcileResult = { launched: [], adopted: [], pending: [], skipped: [] }
   try {
     const now = options.now ?? Date.now()
     let panes = await observePanes()
-    for (const desired of store.listDesired()) {
-      if (desired.desiredState !== "running") continue
+    for (const original of store.listDesired()) {
+      if (options.clankerId && original.clankerId !== options.clankerId) continue
+      if (original.desiredState !== "running") continue
+      let desired = original
       const matching = panes.filter((pane) => pane.clankerId === desired.clankerId)
       if (matching.length > 1) {
         result.skipped.push({ clankerId: desired.clankerId, reason: "ambiguous duplicate live panes" })
@@ -103,7 +109,27 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         const pane = matching[0]!
         if (pane.harness && pane.harness !== desired.harness) result.skipped.push({ clankerId: desired.clankerId, reason: "live harness mismatch" })
         else if (pane.harnessSessionId && desired.harnessSessionId && pane.harnessSessionId !== desired.harnessSessionId) result.skipped.push({ clankerId: desired.clankerId, reason: "live harness session mismatch" })
-        else result.adopted.push(desired.clankerId)
+        else {
+          const latest = store.attemptsFor(desired.clankerId).at(-1)
+          if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
+          result.adopted.push(desired.clankerId)
+        }
+        continue
+      }
+      if (desired.recoveryCondition === "healthy" || desired.recoveryCondition === "recovering") {
+        desired = store.markRecoveryPending(desired.clankerId, "no owned live pane", { now })
+        if (desired.recoveryCondition === "interrupted_unknown") {
+          recordRecoveryIncident("interrupted_tool_requires_confirmation", { clankerId: desired.clankerId, harness: desired.harness, worktreePath: desired.workshopPath, cwd: desired.cwd }, { reason: "owned recovery process disappeared before a settled checkpoint" })
+        }
+      }
+      const automaticCandidate = !options.automaticCandidates || options.automaticCandidates.includes(desired.clankerId)
+      if (!options.allowLaunch || (options.automatic && !automaticCandidate)) {
+        result.pending.push(desired.clankerId)
+        result.skipped.push({ clankerId: desired.clankerId, reason: desired.recoveryCondition === "interrupted_unknown" ? "interrupted work requires operator review" : "manual resume required" })
+        continue
+      }
+      if (desired.recoveryCondition === "interrupted_unknown" || desired.recoveryCondition === "quarantined") {
+        result.skipped.push({ clankerId: desired.clankerId, reason: desired.recoveryCondition === "quarantined" ? desired.quarantineReason || "quarantined" : "interrupted work requires reset after operator review" })
         continue
       }
       const remaining = backoffRemaining(desired, store, now)
@@ -111,12 +137,39 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         result.skipped.push({ clankerId: desired.clankerId, reason: `backoff ${remaining}ms` })
         continue
       }
+      const activeRecoveries = store.listDesired().filter((row) => row.desiredState === "running" && row.recoveryCondition === "recovering").length
+      if (!options.bypassAdmission) {
+        const host = options.hostState ?? readRecoveryHostState()
+        if (!host) {
+          result.skipped.push({ clankerId: desired.clankerId, reason: "resource guard has not published admission health" })
+          continue
+        }
+        const decision = recoveryAdmissionDecision({ ...host, now, activeRecoveries, lastAdmissionAt: store.getMetadata<number>("recovery.last_admission_at") ?? host.lastAdmissionAt })
+        if (!decision.admit) {
+          result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
+          continue
+        }
+      } else if (activeRecoveries >= RECOVERY_POLICY.maxActiveRecoveries) {
+        result.skipped.push({ clankerId: desired.clankerId, reason: "global recovery admission limit reached" })
+        continue
+      }
       for (const previous of store.attemptsFor(desired.clankerId).filter((attempt) => attempt.status === "running")) {
-        store.finishAttempt(previous.id, "abandoned", { error: "no live pane attested the attempt", now })
+        store.finishAttempt(previous.id, "abandoned", { error: "operator admitted recovery after interrupted attempt", now })
       }
       const previousSucceeded = store.attemptsFor(desired.clankerId).some((attempt) => attempt.status === "succeeded")
-      const attempt = store.beginAttempt(desired.clankerId, previousSucceeded ? options.trigger || "recovery" : "initial", { now })
+      const admission = store.admitRecovery(desired.clankerId, { automatic: Boolean(options.automatic), bootEpoch: options.bootEpoch ?? store.runtimeEpochs().bootEpoch, trigger: previousSucceeded ? options.trigger || "recovery" : "initial", now })
+      if (!admission.admitted || !admission.attempt) {
+        const current = store.getDesired(desired.clankerId)
+        if (current?.recoveryCondition === "quarantined") {
+          recordRecoveryIncident("recovery_quarantined", { clankerId: current.clankerId, harness: current.harness, worktreePath: current.workshopPath, cwd: current.cwd }, { reason: admission.reason || "recovery policy circuit breaker" })
+        }
+        result.skipped.push({ clankerId: desired.clankerId, reason: admission.reason || "recovery admission denied" })
+        continue
+      }
+      const attempt = admission.attempt
       const attemptId = String(attempt.id)
+      store.setRecoveryOwner(desired.clankerId, recoveryUnitName(desired.clankerId, attemptId), { now })
+      store.setMetadata("recovery.last_admission_at", now, { now })
       try {
         const session = await ensureWorkshop(desired)
         const windowName = await nextWindowName(session, desired.tmuxWindowName)
@@ -155,10 +208,45 @@ const tmuxServerEpoch = async () => {
   return epoch
 }
 
+export interface RecoveryCampaign {
+  version: 1
+  bootEpoch: number
+  bootId: string
+  startedAt: number
+  pending: string[]
+  blocked: Array<{ clankerId: string; reason: string }>
+  status: "active" | "completed" | "completed_with_blocks"
+}
+
+export const startRecoveryCampaign = (bootEpoch: number, bootId: string, candidates: string[], startedAt: number): RecoveryCampaign => ({
+  version: 1,
+  bootEpoch,
+  bootId,
+  startedAt,
+  pending: [...candidates],
+  blocked: [],
+  status: "active",
+})
+
+export const advanceRecoveryCampaign = (campaign: RecoveryCampaign, desiredRows: DesiredClankerRecord[], adopted: string[]): RecoveryCampaign => {
+  const blocked = [...campaign.blocked]
+  const byId = new Map(desiredRows.map((row) => [row.clankerId, row]))
+  const pending = campaign.pending.filter((clankerId) => {
+    const desired = byId.get(clankerId)
+    if (!desired || desired.desiredState !== "running") return false
+    if (desired.recoveryCondition === "quarantined" || desired.recoveryCondition === "interrupted_unknown") {
+      if (!blocked.some((row) => row.clankerId === clankerId)) blocked.push({ clankerId, reason: desired.quarantineReason || desired.recoveryCondition })
+      return false
+    }
+    return !(desired.recoveryCondition === "healthy" && adopted.includes(clankerId))
+  })
+  return { ...campaign, pending, blocked, status: pending.length ? "active" : blocked.length ? "completed_with_blocks" : "completed" }
+}
+
 export class RecoveryController {
   readonly ownerToken = randomUUID()
   private stopped = false
-  constructor(readonly store = openRecoveryStore(), readonly intervalMs = Number(Bun.env.CLANKERHOUSE_RECOVERY_INTERVAL_MS || 2_000)) {}
+  constructor(readonly store = openRecoveryStore(), readonly intervalMs = Number(Bun.env.CLANKERHOUSE_RECOVERY_INTERVAL_MS || 10_000)) {}
 
   stop() { this.stopped = true }
 
@@ -169,11 +257,30 @@ export class RecoveryController {
       const lease = this.store.acquireLease({ ...identity, scope, ownerToken: this.ownerToken, ttlMs: Math.max(10_000, this.intervalMs * 4) })
       if (lease) {
         const previousBoot = this.store.runtimeEpochs().bootId
-        this.store.observeBoot(identity.bootId)
+        const epochs = this.store.observeBoot(identity.bootId)
+        const hardReboot = Boolean(previousBoot && previousBoot !== identity.bootId)
         const beforeServerEpoch = await tmuxServerEpoch()
         const recordedServerEpoch = this.store.getMetadata<string>("runtime.tmux_server_epoch")
-        let trigger = previousBoot && previousBoot !== identity.bootId ? "hard_reboot" : recordedServerEpoch && beforeServerEpoch && recordedServerEpoch !== beforeServerEpoch ? "tmux_restart" : "reconcile"
-        await reconcileRecovery(this.store, { trigger })
+        const trigger = hardReboot ? "hard_reboot" : recordedServerEpoch && beforeServerEpoch && recordedServerEpoch !== beforeServerEpoch ? "tmux_restart" : "reconcile"
+        const automaticEnabled = Bun.env.CLANKERHOUSE_AUTO_RECOVER === undefined ? RECOVERY_POLICY.automaticRecovery : Bun.env.CLANKERHOUSE_AUTO_RECOVER !== "0"
+        let campaign = this.store.getMetadata<RecoveryCampaign>("recovery.campaign")
+        if (hardReboot && automaticEnabled && campaign?.bootEpoch !== epochs.bootEpoch) {
+          campaign = startRecoveryCampaign(epochs.bootEpoch, identity.bootId, this.store.listDesired().filter((row) => row.desiredState === "running").map((row) => row.clankerId), Date.now())
+          this.store.setMetadata("recovery.last_admission_at", null)
+          this.store.setMetadata("recovery.campaign", campaign)
+        }
+        const activeCampaign = automaticEnabled && campaign?.status === "active" && campaign.bootEpoch === epochs.bootEpoch ? campaign : undefined
+        const result = await reconcileRecovery(this.store, {
+          trigger,
+          allowLaunch: Boolean(activeCampaign),
+          automatic: Boolean(activeCampaign),
+          automaticCandidates: activeCampaign?.pending,
+          bootEpoch: epochs.bootEpoch,
+        })
+        if (activeCampaign) {
+          campaign = advanceRecoveryCampaign(activeCampaign, this.store.listDesired({ includeTombstoned: true }), result.adopted)
+          if (JSON.stringify(campaign) !== JSON.stringify(activeCampaign)) this.store.setMetadata("recovery.campaign", campaign)
+        }
         const serverEpoch = await tmuxServerEpoch()
         if (serverEpoch && serverEpoch !== recordedServerEpoch) {
           if (recordedServerEpoch) this.store.advanceTmuxEpoch()

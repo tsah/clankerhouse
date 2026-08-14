@@ -4,6 +4,8 @@ import { basename, dirname, resolve } from "node:path"
 import { markDirectoryActivity } from "./activity"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { initialHarnessCommand } from "./recovery/harness"
+import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
+import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore } from "./recovery/store"
 import { parseTmuxFields, tmuxFields } from "./tmux-fields"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, workshopForId, workshopForPath } from "./workshop"
@@ -86,7 +88,7 @@ const codexCommand = (prompt: string, clankerId: string) => [
   prompt,
 ]
 
-export async function spawnClanker(harness: Harness, cwd: string, prompt: string, profile?: string, requestedName?: string, wait = false) {
+export async function spawnClanker(harness: Harness, cwd: string, prompt: string, profile?: string, requestedName?: string, wait = false, resourceClass?: RecoveryResourceClass) {
   if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
   const id = await identity(cwd)
   const session = await ensureSession(id)
@@ -104,6 +106,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
     const workshop = workshopForPath(id.path)
     const store = openRecoveryStore()
     try {
+      const launchSpec: LaunchSpec = resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
       store.createDesired({
         clankerId,
         harness: recoverableHarness,
@@ -113,11 +116,13 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
         tmuxWindowName: name,
         cwd: id.path,
         harnessSessionId,
-        launchSpec: { version: 1, profile: profile || null },
+        launchSpec,
         originalTask: prompt,
       })
       const attempt = store.beginAttempt(clankerId, "initial")
-      argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec: { version: 1, profile: profile || null }, attemptId: String(attempt.id) })
+      const attemptId = String(attempt.id)
+      store.setRecoveryOwner(clankerId, recoveryUnitName(clankerId, attemptId))
+      argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId })
     } finally { store.close() }
   }
   const result = await command(["tmux", "new-window", "-d", "-P", "-F", tmuxFields("#{window_id}", "#{pane_id}"), "-t", `=${session}`, "-n", name, "-c", id.path, ...argv])
@@ -186,10 +191,10 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 
-export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean } = {}) {
+export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; resourceClass?: RecoveryResourceClass; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean } = {}) {
   const parent = await resolveWorkshopParent(options)
   const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy })
-  return spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait)
+  return spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass)
 }
 
 export async function ensureDirectorySession(directory: string) {

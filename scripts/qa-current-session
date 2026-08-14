@@ -1,0 +1,83 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+uid=$(id -u)
+root=$(mktemp -d "/tmp/qa-clankerhouse-current-$uid-XXXXXX")
+inner_socket="$root/inner.sock"
+outer_socket="$root/outer.sock"
+runtime="$root/runtime"
+cache="$runtime/clankerhouse-$uid/state.json"
+
+cleanup() {
+    server_pid_file="$runtime/clankerhouse-$uid/server.pid"
+    if [[ -r "$server_pid_file" ]]; then
+        server_pid=$(<"$server_pid_file")
+        if [[ "$server_pid" =~ ^[0-9]+$ ]] && tr '\0' '\n' < "/proc/$server_pid/environ" 2>/dev/null | grep -Fx "XDG_RUNTIME_DIR=$runtime" >/dev/null; then
+            kill "$server_pid" 2>/dev/null || true
+        fi
+    fi
+    tmux -S "$outer_socket" kill-server 2>/dev/null || true
+    tmux -S "$inner_socket" kill-server 2>/dev/null || true
+    rm -rf "$root"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$(dirname "$cache")"
+cat > "$cache" <<'JSON'
+{"version":10,"sessions":[
+  {"name":"qa-working","path":"/tmp/qa-working","recency":200,"target":{"type":"tmux_session","session":"qa-working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"qa-working","windowId":"@1","pane":"%1"}}]},
+  {"name":"qa-extract-workers","path":"/tmp/qa-extract-workers","recency":100,"target":{"type":"tmux_session","session":"qa-extract-workers"},"details":[{"kind":"clanker","state":"idle","target":{"type":"tmux_window","session":"qa-extract-workers","windowId":"@2","pane":"%2"}}]}
+]}
+JSON
+
+tmux -S "$inner_socket" -f /dev/null new-session -d -s qa-working -n main -x 100 -y 24 "sleep 300"
+tmux -S "$inner_socket" new-session -d -s qa-extract-workers -n main -x 100 -y 24 "sleep 300"
+inner_pid=$(tmux -S "$inner_socket" display-message -p '#{pid}')
+TMUX="$inner_socket,$inner_pid,0" CLANKERHOUSE_HOME="$repo" "$repo/clankerhouse.tmux"
+
+tmux -S "$outer_socket" -f /dev/null new-session -d -s harness -n client -x 100 -y 24 \
+    "env -u TMUX tmux -S '$inner_socket' attach-session -t qa-working"
+outer_pane=$(tmux -S "$outer_socket" display-message -p -t harness:client '#{pane_id}')
+
+inner_client=""
+for _ in {1..100}; do
+    inner_client=$(tmux -S "$inner_socket" list-clients -F '#{client_name}' 2>/dev/null | head -n 1)
+    [[ -n "$inner_client" ]] && break
+    sleep 0.05
+done
+[[ -n "$inner_client" ]] || { echo "Nested tmux client did not attach" >&2; exit 1; }
+
+tmux -S "$inner_socket" set-environment -g XDG_RUNTIME_DIR "$runtime"
+tmux -S "$inner_socket" set-environment -g CLANKERHOUSE_HOME "$repo"
+tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-extract-workers
+[[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-extract-workers" ]]
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-k
+
+capture=""
+for _ in {1..600}; do
+    capture=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -100)
+    [[ "$capture" == *"Clankerhouse · Jump"* && "$capture" == *" targets"* ]] && break
+    sleep 0.05
+done
+
+CAPTURE="$capture" python3 - <<'PY'
+import os
+
+lines = os.environ["CAPTURE"].splitlines()
+for binding in ("Alt-R rename", "Alt-A attach", "Alt-L detach"):
+    assert binding in os.environ["CAPTURE"], f"{binding} missing from popup:\n" + os.environ["CAPTURE"]
+selected = [line for line in lines if "qa-extract-workers" in line and (">" in line or "›" in line)]
+assert selected, "qa-extract-workers was not selected:\n" + os.environ["CAPTURE"]
+working = next(i for i, line in enumerate(lines) if "qa-working" in line)
+current = next(i for i, line in enumerate(lines) if "qa-extract-workers" in line)
+assert current > working, "current session was not nearest the bottom prompt:\n" + os.environ["CAPTURE"]
+rendered_rows = [
+    i for i, line in enumerate(lines)
+    if "││" in line and any(glyph in line for glyph in ("○", "✓", "×", "◆", "◐", "◓", "◑", "◒"))
+]
+assert rendered_rows and current == max(rendered_rows), "another target sorted below the current session:\n" + os.environ["CAPTURE"]
+PY
+
+printf 'Clankerhouse current-session QA passed: Alt-K selected and prioritized qa-extract-workers with rename/attach/detach controls.\n'

@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# Give the legacy popup a useful first frame while Bun loads OpenTUI.
+if [[ ${1:-} != "--ensure-server" && -t 1 ]]; then
+    printf '\033[2J\033[H\033[38;2;56;189;248mClankerhouse - Loading\033[0m\n'
+fi
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/../libexec/clankerhouse-env"
@@ -29,12 +34,26 @@ CURRENT_TMUX_SOCKET=${CURRENT_TMUX_SOCKET%%,*}
 cache_server_process() {
     local pid=$1
     local cmdline=""
-    local cwd=""
     [[ -r "/proc/$pid/cmdline" ]] || return 1
     cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+    [[ "$cmdline" == *"bun src/main.tsx --server"* ]]
+}
+
+current_cache_server_process() {
+    local pid=$1
+    local cwd=""
+    cache_server_process "$pid" || return 1
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
     [[ "$cwd" == "$PWD" ]] || return 1
-    [[ "$cmdline" == *"bun src/main.tsx --server"* ]]
+}
+
+cache_server_uses_current_tmux() {
+    local pid=$1
+    local process_tmux=""
+    [[ -r "/proc/$pid/environ" ]] || return 1
+    process_tmux=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^TMUX=//p' | head -n 1)
+    process_tmux=${process_tmux%%,*}
+    [[ "$process_tmux" == "$CURRENT_TMUX_SOCKET" ]]
 }
 
 server_running() {
@@ -43,7 +62,7 @@ server_running() {
     pid=$(<"$PID_FILE")
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    cache_server_process "$pid" || return 1
+    current_cache_server_process "$pid" || return 1
     # A cache process inherited from another tmux socket cannot observe this
     # client's sessions or clankers (common after isolated QA runs).
     [[ -r "$SOCKET_FILE" ]] || return 1
@@ -63,21 +82,28 @@ chmod 700 "$STATE_DIR"
 exec 9>"$LOCK_FILE"
 flock 9
 if ! server_running; then
-    if [[ -r "$PID_FILE" ]]; then
-        old_pid=$(<"$PID_FILE")
-        if [[ "$old_pid" =~ ^[0-9]+$ ]] && cache_server_process "$old_pid"; then
+    stale_pids=()
+    while read -r old_pid; do
+        [[ "$old_pid" =~ ^[0-9]+$ ]] || continue
+        if cache_server_process "$old_pid" && cache_server_uses_current_tmux "$old_pid"; then
+            stale_pids+=("$old_pid")
             kill "$old_pid" 2>/dev/null || true
-            for _ in {1..20}; do
-                kill -0 "$old_pid" 2>/dev/null || break
-                sleep 0.05
-            done
-            if kill -0 "$old_pid" 2>/dev/null; then
-                echo "Clankerhouse could not stop stale cache server $old_pid" >&2
-                exit 1
-            fi
         fi
-    fi
-    rm -f "$PID_FILE" "$CACHE_FILE" "$VERSION_FILE"
+    done < <(pgrep -f '^bun src/main\.tsx --server$' || true)
+    for _ in {1..100}; do
+        alive=false
+        for old_pid in "${stale_pids[@]}"; do
+            kill -0 "$old_pid" 2>/dev/null && alive=true
+        done
+        [[ "$alive" == false ]] && break
+        sleep 0.05
+    done
+    for old_pid in "${stale_pids[@]}"; do
+        if kill -0 "$old_pid" 2>/dev/null; then
+            kill -KILL "$old_pid" 2>/dev/null || true
+        fi
+    done
+    rm -f "$PID_FILE" "$CACHE_FILE" "$VERSION_FILE" "$STATE_DIR/daemon.sock"
     printf '%s\n' "$CURRENT_TMUX_SOCKET" > "$SOCKET_FILE"
     nohup bun src/main.tsx --server >>"$LOG_FILE" 2>&1 &
 fi
@@ -87,7 +113,19 @@ for _ in {1..20}; do
     sleep 0.05
 done
 
+if [[ ${1:-} == "--ensure-server" && ! -s "$CACHE_FILE" ]]; then
+    for _ in {1..600}; do
+        [[ -s "$CACHE_FILE" ]] && break
+        sleep 0.05
+    done
+fi
+
 flock -u 9
 exec 9>&-
+
+if [[ ${1:-} == "--ensure-server" ]]; then
+    [[ -s "$CACHE_FILE" ]]
+    exit
+fi
 
 bun src/main.tsx

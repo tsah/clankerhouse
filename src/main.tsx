@@ -9,13 +9,15 @@ import type { ActivityRecord } from "./activity"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
 import { attachWorkshopToParent, attachmentCandidatesForWorkshop, detachWorkshopFromParent, readLineageSnapshot } from "./workshop"
-import { buildTreeRows, defaultExpandedLineageSessions, fuzzyResult, normalizeReportedState, sessionSortRank, sessionState, structuredSearch } from "./model"
+import { buildTreeRows, defaultExpandedLineageSessions, fuzzyResult, normalizeReportedState, sessionSortRank, sessionState, structuredSearch, targetKey } from "./model"
 import type { ClankerState, DetailRow, ReportedClankerState, SessionRow, Target, TreeRow } from "./model"
 import { pickSelection, refreshSessionsAuthoritatively, selectedItem, treeRowAnchor, visibleSlice } from "./picker"
 import { advanceProjection, parseProjectionSnapshot, shouldApplyProjection } from "./projection"
 import type { ProjectionRevision, ProjectionSnapshot } from "./projection"
 import { detailStatusLabel, ellipsize, inlineSummaryWidth, jumpFooterAction, prefixedLabelWidth, sessionMeta, treePrefix, usesNeutralStateGlyph, visibleInlineSummary } from "./presentation"
 import { planRepositoryIdentities, readRepositoryIdentityCache, writeRepositoryIdentityCache } from "./repository-cache"
+import { TmuxMultiplexer } from "./multiplexer"
+import { openResourceRegistry } from "./resource-registry"
 import { discoverForegroundAgent } from "./server/process-discovery"
 import type { ForegroundAgentHarness } from "./server/process-discovery"
 import { isCodexWindow, projectResources } from "./server/project"
@@ -40,11 +42,6 @@ const clankerStateDir = `${runtimeDir}/clanker-state`
 // Read reports from clankers that were already running before the rename.
 const previousClankerStateDir = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/alt-k-tui-${process.getuid?.() ?? Bun.env.USER ?? "user"}/agent-state`
 const seenStateDir = `${runtimeDir}/seen-state`
-const detectedTmuxSocket = Bun.env.TMUX?.split(",")[0] || Bun.spawnSync(["tmux", "display-message", "-p", "#{socket_path}"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim() || "default"
-const currentTmuxServerKey = () => {
-  const epoch = Bun.spawnSync(["tmux", "show-options", "-gqv", "@clankerhouse_server_epoch"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim()
-  return `tmux:${detectedTmuxSocket}:${epoch || "legacy"}`
-}
 const refreshMs = Number(Bun.env.CLANKERHOUSE_REFRESH_MS ?? 1500) || 1500
 const cacheVersion = 10
 const projectionSource = randomUUID()
@@ -105,40 +102,52 @@ const ageFromUnixSeconds = (seconds: number) => {
   return `${Math.floor(diff / 86400)}d`
 }
 
-const collectTmuxSessions = runCommand(["tmux", "list-sessions", "-F", tmuxFields("#{session_name}", "#{session_last_attached}", "#{session_activity}", "#{session_created}", "#{@dotfiles_worktree_path}", "#{@dotfiles_directory_path}", "#{session_path}", "#{session_attached}", "#{@dotfiles_workshop_id}", "#{@dotfiles_workshop_parent_id}", "#{@dotfiles_workspace_id}", "#{@dotfiles_workspace_parent_id}")]).pipe(
-  Effect.map((output) => parseTmuxRows(output).map((parts): TmuxSession => {
-    const worktreePath = parts[4] ?? ""
-    const directoryPath = parts[5] ?? ""
-    const sessionPath = parts[6] ?? ""
-    const rawPath = worktreePath || directoryPath || sessionPath
-    const path = rawPath ? canonicalActivityPath(rawPath) : ""
-    return {
-      name: parts[0] ?? "",
-      recency: Math.max(Number(parts[1] ?? 0) || 0, Number(parts[2] ?? 0) || 0, Number(parts[3] ?? 0) || 0),
-      path,
-      attached: Number(parts[7] ?? 0) > 0,
-      worktreePath,
-      directoryPath,
-      workshopId: parts[8] || parts[10] || undefined,
-      parentWorkshopId: parts[9] || parts[11] || undefined,
-    }
-  }).filter((session) => session.name.length > 0)),
-)
+const collectMultiplexerResources = Effect.tryPromise({
+  try: async () => {
+    const snapshot = await new TmuxMultiplexer().observe()
+    const sessions: TmuxSession[] = snapshot.sessions.map((session) => ({
+      id: session.id,
+      name: session.nativeName,
+      recency: session.recency,
+      path: session.path ? canonicalActivityPath(session.path) : "",
+      attached: session.attached,
+      worktreePath: session.worktreePath,
+      directoryPath: session.directoryPath,
+      workshopId: session.workshopId,
+      parentWorkshopId: session.parentWorkshopId,
+      resourceId: session.resourceId,
+      displayName: session.displayName,
+    }))
+    const windows: TmuxWindow[] = snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => ({
+      session: session.nativeName,
+      sessionId: session.id,
+      id: window.id,
+      index: window.index,
+      name: window.nativeName,
+      pane: pane.id,
+      pid: pane.pid,
+      command: pane.command,
+      title: pane.title,
+      activity: pane.activity,
+      active: window.active && pane.active,
+      windowResourceId: window.resourceId,
+      windowDisplayName: window.displayName,
+      terminalId: pane.terminalId,
+      terminalDisplayName: pane.displayName,
+      clankerId: pane.clankerId,
+      explicitHarness: pane.harness,
+      harnessSessionId: pane.harnessSessionId,
+    }))))
+    return { instanceId: snapshot.instanceId, sessions, windows }
+  },
+  catch: (error) => error instanceof Error ? error : new Error(String(error)),
+})
 
-const collectTmuxWindows = runCommand(["tmux", "list-windows", "-a", "-F", tmuxFields("#{session_name}", "#{window_id}", "#{window_index}", "#{window_name}", "#{pane_id}", "#{pane_pid}", "#{pane_current_command}", "#{pane_title}", "#{window_activity}", "#{window_active}")]).pipe(
-  Effect.map((output) => parseTmuxRows(output).map((parts): TmuxWindow => ({
-    session: parts[0] ?? "",
-    id: parts[1] ?? "",
-    index: parts[2] ?? "",
-    name: parts[3] ?? "",
-    pane: parts[4] ?? "",
-    pid: parts[5] ?? "",
-    command: (parts[6] ?? "").toLowerCase(),
-    title: parts[7] ?? "",
-    activity: Number(parts[8] ?? 0) || 0,
-    active: parts[9] === "1",
-  })).filter((window) => window.session.length > 0)),
-)
+const readManagedResources = () => {
+  const registry = openResourceRegistry()
+  try { return new Map(registry.list().map((resource) => [resource.id, resource])) }
+  finally { registry.close() }
+}
 
 const collectOpencode = runCommand([Bun.env.CLANKERHOUSE_OPENCODE_STATUS || libexecPath("opencode-status"), "--tsv"], { allowFailure: true }).pipe(
   Effect.map((output) => parseTsv(output).map((parts): OpencodeStatus | undefined => {
@@ -306,19 +315,20 @@ const applyProjectEffect = (effect: ProjectEffect) => {
 }
 
 const collectSessions = Effect.all([
-  collectTmuxSessions,
-  collectTmuxWindows,
+  collectMultiplexerResources,
   collectOpencode,
   collectDirectories,
   collectClankerReports,
   Effect.sync(readSeenState),
   Effect.sync(readLineageSnapshot),
   Effect.sync(readResourceIncidents),
+  Effect.sync(readManagedResources),
 ], { concurrency: "unbounded" }).pipe(
-  Effect.flatMap(([sessions, windows, opencodes, directories, clankerReports, seen, lineage, incidents]) => Effect.all([
-    Effect.forEach(sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }),
+  Effect.flatMap(([multiplexer, opencodes, directories, clankerReports, seen, lineage, incidents, managedResources]) => Effect.all([
+    Effect.succeed(multiplexer),
+    Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }),
     Effect.forEach(
-      windows,
+      multiplexer.windows,
       (window): Effect.Effect<readonly [string, ForegroundAgentHarness | undefined], Error> => {
         const discovery = discoverForegroundAgent(Number(window.pid))
         if (discovery) return Effect.succeed([window.pane, discovery.harness] as const)
@@ -327,14 +337,14 @@ const collectSessions = Effect.all([
       },
       { concurrency: 8 },
     ),
-  ], { concurrency: "unbounded" }).pipe(Effect.map(([gitMetas, harnessDetections]) => {
+  ], { concurrency: "unbounded" }).pipe(Effect.map(([resources, gitMetas, harnessDetections]) => {
     const detectedHarnessByPane = new Map<string, ForegroundAgentHarness>()
     for (const [pane, harness] of harnessDetections) {
       if (harness) detectedHarnessByPane.set(pane, harness)
     }
     const projection = projectResources({
-      sessions,
-      windows,
+      sessions: resources.sessions,
+      windows: resources.windows,
       opencodes,
       directories,
       clankerReports,
@@ -344,8 +354,9 @@ const collectSessions = Effect.all([
       gitMetaByPath: new Map(gitMetas),
       detectedHarnessByPane,
       codexPanes: new Set([...detectedHarnessByPane].flatMap(([pane, harness]) => harness === "codex" ? [pane] : [])),
+      managedResources,
       observedAt: Date.now(),
-      tmuxServerKey: currentTmuxServerKey(),
+      tmuxServerKey: resources.instanceId,
       home: Bun.env.HOME,
     })
     for (const effect of projection.effects) applyProjectEffect(effect)
@@ -561,6 +572,9 @@ const dumpState = collectSessions.pipe(
   Effect.flatMap((sessions) => Effect.sync(() => {
     console.log(JSON.stringify(sessions.map((session) => ({
       name: session.name,
+      resourceId: session.resourceId,
+      management: session.management,
+      location: session.target.type === "tmux_session" ? session.target.location : undefined,
       path: session.path,
       state: sessionState(session),
       recency: session.recency,
@@ -575,7 +589,7 @@ const dumpState = collectSessions.pipe(
       lineageLabel: session.lineageLabel,
       clankers: session.details
         .filter((detail) => detail.kind === "clanker")
-        .map((detail) => ({ harness: detail.harness, state: detail.state, status: detail.status, detail: detail.detail, title: detail.title })),
+        .map((detail) => ({ harness: detail.harness, state: detail.state, status: detail.status, detail: detail.detail, title: detail.title, terminalId: detail.terminalId, clankerId: detail.clankerId, location: detail.target.type !== "directory" ? detail.target.location : undefined })),
     })), null, 2))
   })),
 )
@@ -644,36 +658,12 @@ const enterAction = (target: Target) => {
   }
 }
 const openTarget = (target: Target) => {
-  const command = (() => {
-    switch (target.type) {
-      case "opencode": return [libexecPath("opencode-attach-target"), target.session, target.pane]
-      case "tmux_session": return ["tmux", process.env.TMUX ? "switch-client" : "attach-session", "-t", target.session]
-      case "tmux_window": return process.env.TMUX
-        ? ["sh", "-c", "tmux switch-client -t \"$1\" && tmux select-window -t \"$2\"", "sh", target.session, target.windowId]
-        : ["tmux", "attach-session", "-t", target.session, ";", "select-window", "-t", target.windowId]
-      case "directory": return ["sh", "-c", "name=$(clankers workshop ensure --cwd \"$1\") && tmux ${TMUX:+switch-client} ${TMUX:-attach-session} -t \"=$name\"", "sh", target.path]
-    }
-  })()
-  return runCommand(command).pipe(Effect.asVoid)
+  return runCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(target)]).pipe(Effect.asVoid)
 }
 
 const openTargetSync = (target: Target | undefined) => {
   if (!target) return false
-  switch (target.type) {
-    case "opencode": return Bun.spawnSync([libexecPath("opencode-attach-target"), target.session, target.pane], { cwd: repoRoot, stdout: "ignore", stderr: "ignore" }).exitCode === 0
-    case "tmux_session": return Bun.spawnSync(["tmux", process.env.TMUX ? "switch-client" : "attach-session", "-t", target.session], { cwd: repoRoot, stdout: "ignore", stderr: "ignore" }).exitCode === 0
-    case "tmux_window": return Bun.spawnSync(
-        process.env.TMUX
-          ? ["sh", "-c", "tmux switch-client -t \"$1\" && tmux select-window -t \"$2\"", "sh", target.session, target.windowId]
-          : ["tmux", "attach-session", "-t", target.session, ";", "select-window", "-t", target.windowId],
-        { cwd: repoRoot, stdout: "ignore", stderr: "ignore" },
-      ).exitCode === 0
-    case "directory": {
-      const created = Bun.spawnSync([binPath("clankers"), "workshop", "ensure", "--cwd", target.path], { cwd: repoRoot, stdout: "pipe", stderr: "ignore" })
-      const name = created.stdout.toString().trim()
-      return Boolean(name) && Bun.spawnSync(["tmux", process.env.TMUX ? "switch-client" : "attach-session", "-t", `=${name}`], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
-    }
-  }
+  return Bun.spawnSync([binPath("clankers"), "target", "open", "--json", JSON.stringify(target)], { cwd: repoRoot, stdout: "ignore", stderr: "ignore" }).exitCode === 0
 }
 
 const paneForTargetSync = (target: Target) => {
@@ -846,16 +836,20 @@ function PickerRowView(props: { name: string; meta: string; selected: boolean; q
 function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevision; repositories: SessionRow[]; refreshRepositories: (sessions: SessionRow[]) => Promise<SessionRow[]>; currentSession: string; onOpen: (target: Target | undefined) => void }) {
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
+  const currentSessionIdentities = new Set(props.currentSession.split("\t"))
+  const prioritySessionKeys = new Set(props.sessions
+    .filter((session) => session.target.type === "tmux_session" && (currentSessionIdentities.has(session.target.location?.nativeSessionId || "") || currentSessionIdentities.has(session.target.session)))
+    .map((session) => targetKey(session.target)))
   const initialExpandedLineage = defaultExpandedLineageSessions(props.sessions)
   const initialExpandedDetails = new Set<string>()
-  const initialRows = buildTreeRows(props.sessions, "", { expandedLineageSessions: initialExpandedLineage, expandedDetailSessions: initialExpandedDetails, bottomUp: true })
+  const initialRows = buildTreeRows(props.sessions, "", { expandedLineageSessions: initialExpandedLineage, expandedDetailSessions: initialExpandedDetails, prioritySessionKeys, bottomUp: true })
   const [sessions, setSessions] = createSignal(props.sessions)
   const [repositories, setRepositories] = createSignal(props.repositories)
   const [expandedLineageSessions, setExpandedLineageSessions] = createSignal<ReadonlySet<string>>(initialExpandedLineage)
   const [expandedDetailSessions, setExpandedDetailSessions] = createSignal<ReadonlySet<string>>(initialExpandedDetails)
   const [mode, setMode] = createSignal<PickerMode>(spawnMode ? "repo" : "jump")
   const [query, setQuery] = createSignal("")
-  const initialIndex = initialRows.findIndex((row) => !row.detail && row.target.type === "tmux_session" && row.target.session === props.currentSession)
+  const initialIndex = initialRows.findIndex((row) => !row.detail && row.target.type === "tmux_session" && (currentSessionIdentities.has(row.target.location?.nativeSessionId || "") || currentSessionIdentities.has(row.target.session)))
   const [index, setIndex] = createSignal(Math.max(0, initialIndex))
   const [repository, setRepository] = createSignal<SessionRow>()
   const [branches, setBranches] = createSignal<BranchRow[]>([])
@@ -878,7 +872,7 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
   const deletedSessionNames = new Set<string>()
   let appliedCacheRevision = props.initialRevision.source === "legacy" ? undefined : props.initialRevision
 
-  const treeRows = (rows = sessions(), search = query(), lineage = expandedLineageSessions(), details = expandedDetailSessions()) => buildTreeRows(rows, search, { expandedLineageSessions: lineage, expandedDetailSessions: details, bottomUp: true })
+  const treeRows = (rows = sessions(), search = query(), lineage = expandedLineageSessions(), details = expandedDetailSessions()) => buildTreeRows(rows, search, { expandedLineageSessions: lineage, expandedDetailSessions: details, prioritySessionKeys, bottomUp: true })
   const filteredTreeRows = createMemo(() => treeRows())
   const filteredRepositories = createMemo(() => filterSessions(repositories(), query()))
   const filteredBranches = createMemo(() => filterBranches(branches(), query()))
@@ -1327,6 +1321,12 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
         }
         const refreshed = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
         const actual = parseTmuxRows(refreshed.stdout.toString()).find(([id]) => id === sessionId)?.[1] || renameName().trim()
+        if (row.resourceId) {
+          const registry = openResourceRegistry()
+          try { registry.updateDisplayName(row.resourceId, renameName().trim()) }
+          finally { registry.close() }
+          Bun.spawnSync(["tmux", "set-option", "-t", sessionId, "@clankerhouse_display_name", renameName().trim()], { stdout: "ignore", stderr: "ignore" })
+        }
         const updateTarget = (target: Target): Target => target.type === "tmux_session" ? { ...target, session: actual } : target.type === "tmux_window" || target.type === "opencode" ? { ...target, session: actual } : target
         row.name = actual
         row.target = updateTarget(row.target)
@@ -1509,8 +1509,8 @@ const program = process.argv.includes("--server") ? serverProgram : process.argv
   const snapshot = yield* cachedOrCollectedSnapshot
   const sessions = snapshot.sessions
   const repositories = cachedRepositoryRows(sessions)
-  let currentSession = ""
-  if (Bun.env.TMUX) currentSession = yield* runCommand(["tmux", "display-message", "-p", "#{session_name}"], { allowFailure: true }).pipe(Effect.map((output) => output.trim()))
+  let currentSession = Bun.env.CLANKERHOUSE_CURRENT_SESSION ?? ""
+  if (!currentSession && Bun.env.TMUX) currentSession = yield* runCommand(["tmux", "display-message", "-p", tmuxFields("#{session_id}", "#{session_name}")], { allowFailure: true }).pipe(Effect.map((output) => output.trim()))
   let target: Target | undefined
   yield* Effect.tryPromise({
     try: () => render(() => <App sessions={sessions} initialRevision={snapshot.revision} repositories={repositories} refreshRepositories={(rows) => Effect.runPromise(refreshRepositoryRows(rows))} currentSession={currentSession} onOpen={(next) => { target = next }} />, { exitOnCtrlC: true }),

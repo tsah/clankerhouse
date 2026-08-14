@@ -5,6 +5,7 @@ import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from
 import { initialHarnessCommand, recoveryHarnessCommand } from "./harness"
 import { openRecoveryStore, type RecoveryStore } from "./store"
 import { recordRecoveryIncident } from "../incidents"
+import { ensureManagedTmuxSession } from "../multiplexer"
 import { parseTmuxFields, tmuxFields } from "../tmux-fields"
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
 import { recoveryUnitName } from "./process-owner"
@@ -184,6 +185,7 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_recovery_attempt", attemptId])
         if (desired.harnessSessionId) await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_harness_session_id", desired.harnessSessionId])
         if (window) await command(["tmux", "set-option", "-w", "-t", window, "@dotfiles_harness", desired.harness])
+        await ensureManagedTmuxSession(session)
         result.launched.push(desired.clankerId)
         panes = [...panes, { pane, session, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
       } catch (error) {

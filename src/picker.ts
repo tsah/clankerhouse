@@ -14,6 +14,7 @@ const clamp = (value: number, min: number, max: number) => Math.max(min, Math.mi
 
 const sameTarget = (left: Target | undefined, right: Target | undefined) => {
   if (!left || !right || left.type !== right.type) return false
+  if ("resourceId" in left && "resourceId" in right && left.resourceId && right.resourceId) return left.resourceId === right.resourceId
   switch (left.type) {
     case "directory": {
       const other = right as Extract<Target, { type: "directory" }>

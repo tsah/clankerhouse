@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import argparse
+import fcntl
 import hashlib
 import tempfile
 import time
@@ -20,6 +21,7 @@ HOME = os.path.expanduser("~")
 SESSION_HTTP_TIMEOUT = 1
 MESSAGE_HTTP_TIMEOUT = 0.5
 TSV_CACHE_TTL_SECONDS = 8
+STARTING_GRACE_SECONDS = 30
 
 
 RESET = "\033[0m"
@@ -34,6 +36,7 @@ COLORS = {
     "tool running": "\033[35m",
     "done": "\033[32m",
     "starting": "\033[34m",
+    "idle": "\033[90m",
     "unknown": "\033[90m",
 }
 
@@ -204,6 +207,31 @@ def extract_session_id(cmdline):
     return ""
 
 
+def session_directory(session):
+    location = session.get("location") or {}
+    return session.get("directory") or location.get("directory") or ""
+
+
+def is_root_session(session):
+    return not (session.get("parentID") or session.get("parentId"))
+
+
+def bind_root_sessions(instances, candidates, active_sessions):
+    roots = sorted(
+        (session for session in candidates if is_root_session(session)),
+        key=lambda session: (
+            active_sessions.get(session.get("id"), {}).get("type") == "running",
+            session.get("time", {}).get("updated", 0),
+        ),
+        reverse=True,
+    )
+    ordered_instances = sorted(instances, key=lambda instance: instance["start_ticks"], reverse=True)
+    for index, instance in enumerate(ordered_instances):
+        if roots:
+            instance["session_id"] = roots[min(index, len(roots) - 1)].get("id", "")
+    return roots
+
+
 def infer_status(last_msg, is_run_mode):
     """Derive status from the latest API message. Returns (status, detail)."""
     if not last_msg:
@@ -219,7 +247,9 @@ def infer_status(last_msg, is_run_mode):
         state = part.get("state") or {}
         if part.get("type") == "tool" and state.get("status") == "running":
             tool_name = part.get("tool", "tool")
-            if tool_name == "question":
+            if tool_name in {"question", "permission"}:
+                if tool_name == "permission":
+                    return "waiting permission", tool_name
                 return "waiting question", tool_name
             return "tool running", tool_name
 
@@ -236,6 +266,45 @@ def infer_status(last_msg, is_run_mode):
     return "unknown", ""
 
 
+def infer_v2_status(last_msg, active=False, session_exists=False, initializing=False):
+    """Derive V2 status, including tools detached from the foreground with Ctrl-B."""
+    if not last_msg:
+        if active:
+            return "generating", "session running"
+        if initializing:
+            return "starting", "initializing session"
+        if session_exists:
+            return "done", "awaiting next task"
+        return "starting", "initializing session"
+
+    content = last_msg.get("content") or []
+    for part in reversed(content):
+        state = part.get("state") or {}
+        if part.get("type") == "tool" and state.get("status") in {"pending", "running"}:
+            tool_name = part.get("name", "tool")
+            if tool_name == "question":
+                return "waiting question", tool_name
+            if tool_name == "permission":
+                return "waiting permission", tool_name
+            return "tool running", tool_name
+
+    if active:
+        return "generating", "session running"
+    if last_msg.get("type") == "user":
+        return "generating", "awaiting assistant"
+    if last_msg.get("type") == "assistant":
+        return "done", "awaiting next task"
+    return "unknown", ""
+
+
+def v2_message_time(last_msg):
+    timestamps = [last_msg.get("time", {}).get("created", 0)]
+    for part in last_msg.get("content") or []:
+        part_time = part.get("time") or {}
+        timestamps.extend([part_time.get("completed", 0), part_time.get("created", 0)])
+    return max((value for value in timestamps if isinstance(value, (int, float))), default=0)
+
+
 def status_rank(status):
     order = {
         "waiting question": 0,
@@ -244,7 +313,8 @@ def status_rank(status):
         "generating": 3,
         "starting": 4,
         "done": 5,
-        "unknown": 6,
+        "idle": 6,
+        "unknown": 7,
     }
     return order.get(status, 99)
 
@@ -415,15 +485,19 @@ def main():
     tmux_socket = os.environ.get("TMUX", "").split(",", 1)[0] or "default"
     cache_scope = hashlib.sha256(tmux_socket.encode("utf-8")).hexdigest()[:12]
     cache_path = f"/tmp/opencode-status-{os.getuid()}-v2-{cache_scope}.tsv"
+    cache_lock = None
+    stale_cache = ""
     cache_ttl_seconds = TSV_CACHE_TTL_SECONDS
 
     if args.tsv and not args.no_cache:
+        cache_lock = open(f"{cache_path}.lock", "a+", encoding="utf-8")
+        fcntl.flock(cache_lock, fcntl.LOCK_EX)
         try:
+            stale_cache = read_text(cache_path)
             st = os.stat(cache_path)
             if time.time() - st.st_mtime <= cache_ttl_seconds:
-                cached = read_text(cache_path)
-                if cached:
-                    print(cached, end="")
+                if stale_cache:
+                    print(stale_cache, end="")
                     return
         except OSError:
             pass
@@ -490,8 +564,14 @@ def main():
     port_questions = {}
     session_titles = {}
     session_updated_times = {}
+    v2_session_ids = set()
     scoped_session_cache = {}
-    v2_active = opencode2_api_get("/api/session/active") or {}
+    v2_active_response = opencode2_api_get("/api/session/active")
+    if v2_active_response is None and stale_cache:
+        print(stale_cache, end="")
+        return
+    v2_active = v2_active_response if isinstance(v2_active_response, dict) else {}
+    v2_messages = {}
 
     for inst in instances:
         if not inst["is_v2"]:
@@ -506,6 +586,7 @@ def main():
         for session in sessions:
             sid = session.get("id")
             if sid:
+                v2_session_ids.add(sid)
                 session_titles[sid] = session.get("title", "")
                 session_updated_times[sid] = session.get("time", {}).get("updated", 0) or 0
 
@@ -583,7 +664,10 @@ def main():
 
         def add_candidates(session_rows):
             for s in session_rows:
-                if s.get("directory") not in lookup_dirs:
+                if session_directory(s) not in lookup_dirs:
+                    continue
+                # Harness-native subagents are not separate interactive clankers.
+                if not is_root_session(s):
                     continue
                 if s.get("time", {}).get("archived"):
                     continue
@@ -621,23 +705,28 @@ def main():
 
                     add_candidates(scoped_session_cache[cache_key])
 
-        candidates = sorted(
-            candidate_by_id.values(),
-            key=lambda s: s.get("time", {}).get("updated", 0),
-            reverse=True,
-        )
+        # Pane metadata can outlive a session switch. Reconcile every interactive
+        # process against API-visible roots, preferring roots that are running.
+        bind_root_sessions(cwd_instances, candidate_by_id.values(), v2_active)
 
-        candidate_ids = [s["id"] for s in candidates if s.get("id")]
+    v2_requests = {}
+    for session_id in {inst["session_id"] for inst in instances if inst["is_v2"] and inst["session_id"]}:
+        encoded_session = urllib.parse.quote(session_id, safe="")
+        v2_requests[session_id] = f"/api/session/{encoded_session}/message?limit=1&order=desc"
 
-        # Pair only sessions that were not explicitly supplied to the TUI.
-        unresolved = [inst for inst in cwd_instances if not inst["session_id"]]
-        unresolved.sort(key=lambda i: i["start_ticks"], reverse=True)
-
-        for idx, inst in enumerate(unresolved):
-            if idx < len(candidate_ids):
-                inst["session_id"] = candidate_ids[idx]
-            elif candidates:
-                inst["session_id"] = candidates[0].get("id", "")
+    if v2_requests:
+        with ThreadPoolExecutor(max_workers=min(8, len(v2_requests))) as executor:
+            future_to_key = {
+                executor.submit(opencode2_api_get, path): session_id
+                for session_id, path in v2_requests.items()
+            }
+            for future in as_completed(future_to_key):
+                session_id = future_to_key[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    result = None
+                v2_messages[session_id] = result if isinstance(result, list) else []
 
     grouped = defaultdict(list)
     now_ms = int(datetime.now().timestamp() * 1000)
@@ -685,7 +774,24 @@ def main():
         state_updated_at = session_updated_times.get(session_id, 0)
         proc_age_seconds = process_age_seconds(inst.get("start_ticks", 0), clock_ticks, uptime_seconds)
 
-        if port and session_id:
+        if inst["is_v2"] and session_id:
+            messages = v2_messages.get(session_id, [])
+            active = (
+                v2_active.get(session_id, {}).get("type") == "running"
+                if isinstance(v2_active, dict)
+                else False
+            )
+            last_msg = messages[0] if messages else None
+            status, detail = infer_v2_status(
+                last_msg,
+                active,
+                session_id in v2_session_ids or proc_age_seconds is not None,
+                proc_age_seconds is not None and proc_age_seconds <= STARTING_GRACE_SECONDS,
+            )
+            msg_time = v2_message_time(last_msg) if last_msg else 0
+            state_updated_at = msg_time or state_updated_at
+            age = format_age(msg_time or session_updated_times.get(session_id, 0))
+        elif port and session_id:
             message_key = f"{port}:{session_id}"
             messages = message_cache.get(message_key)
             pending_question = next(
@@ -739,19 +845,14 @@ def main():
             if pending_question:
                 status = "waiting question"
                 detail = "question"
-        elif inst["is_v2"] and session_id:
-            active = v2_active.get(session_id, {}) if isinstance(v2_active, dict) else {}
-            if active.get("type") == "running":
-                status = "generating"
-                detail = "session running"
-            else:
-                status = "done"
-                detail = "awaiting next task"
-            age = format_age(session_updated_times.get(session_id, 0))
         else:
             if inst["is_v2"]:
-                status = "starting"
-                detail = "initializing session"
+                if proc_age_seconds is not None and proc_age_seconds > STARTING_GRACE_SECONDS:
+                    status = "idle"
+                    detail = "no bound active task"
+                else:
+                    status = "starting"
+                    detail = "initializing session"
             elif inst["is_auto_mode"]:
                 status = "generating"
                 detail = "automated task"

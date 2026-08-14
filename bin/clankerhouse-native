@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-env"
+
+binary="$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native"
+if [[ ! -x "$binary" ]]; then
+    echo "Native client is not built. Run: $CLANKERHOUSE_HOME/scripts/build-native" >&2
+    exit 1
+fi
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
+if [[ ! -s "$STATE_DIR/state.json" ]]; then
+    "$SCRIPT_DIR/clankerhouse-picker" --ensure-server
+fi
+
+if [[ ! -s "$STATE_DIR/state.json" ]]; then
+    echo "Clankerhouse could not initialize its snapshot." >&2
+    exit 1
+fi
+
+exec "$binary" "$@"

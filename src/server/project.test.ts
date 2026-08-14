@@ -8,6 +8,7 @@ const observedAt = 3_700_000
 const tmuxServerKey = "tmux:/tmp/test.sock"
 const emptyLineage = (): LineageSnapshot => ({ byPath: new Map(), byId: new Map() })
 const tmuxSession = (overrides: Partial<TmuxSession> = {}): TmuxSession => ({
+  id: "$1",
   name: "repo@work",
   recency: 3_600,
   path: "/tmp/work",
@@ -18,6 +19,7 @@ const tmuxSession = (overrides: Partial<TmuxSession> = {}): TmuxSession => ({
 })
 const tmuxWindow = (overrides: Partial<TmuxWindow> = {}): TmuxWindow => ({
   session: "repo@work",
+  sessionId: "$1",
   id: "@1",
   index: "0",
   name: "main",
@@ -41,6 +43,7 @@ const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   gitMetaByPath: new Map(),
   detectedHarnessByPane: new Map(),
   codexPanes: new Set(),
+  managedResources: new Map(),
   observedAt,
   tmuxServerKey,
   home: "/home/test",
@@ -125,6 +128,37 @@ describe("session resource projection", () => {
     expect(result.effects).toEqual([{ type: "markDirectoryActivity", path: "/tmp/work", source: "clanker", updatedAt: 3_690_000, minIntervalMs: 0 }])
   })
 
+  test("projects a bound active OpenCode root session as working", () => {
+    const result = projectResources(inputs({
+      sessions: [tmuxSession()],
+      windows: [tmuxWindow({ clankerId: "clanker-stale", harnessSessionId: "session-stale" })],
+      opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
+    }))
+
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", state: "working", title: "active task" })
+    expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
+  })
+
+  test("retains OpenCode ownership when the projected root matches pane metadata", () => {
+    const result = projectResources(inputs({
+      sessions: [tmuxSession()],
+      windows: [tmuxWindow({ clankerId: "clanker-current", harnessSessionId: "session-root" })],
+      opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
+    }))
+
+    expect(result.sessions[0]?.details[0]?.clankerId).toBe("clanker-current")
+  })
+
+  test("does not infer OpenCode ownership when both session IDs are absent", () => {
+    const result = projectResources(inputs({
+      sessions: [tmuxSession()],
+      windows: [tmuxWindow({ clankerId: "clanker-unverified" })],
+      opencodes: [{ directory: "/tmp/work", status: "done", detail: "awaiting next task", title: "task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1" }],
+    }))
+
+    expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
+  })
+
   test("uses prepared process detections for wrapped harness classification", () => {
     const result = projectResources(inputs({
       sessions: [tmuxSession()],
@@ -154,5 +188,43 @@ describe("session resource projection", () => {
     const result = projectResources(inputs({ incidents: [incident()] }))
     expect(result.sessions[0]).toMatchObject({ name: "lost", age: "1h", recency: 100 })
     expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "incident", age: "1h", state: "failed" })
+  })
+
+  test("separates owned display names from scoped tmux identity", () => {
+    const result = projectResources(inputs({
+      sessions: [tmuxSession({ resourceId: "mux-session-1", displayName: "Owned workshop" })],
+      windows: [tmuxWindow({ terminalId: "terminal-1", terminalDisplayName: "Owned terminal" })],
+      managedResources: new Map([
+        ["mux-session-1", { id: "mux-session-1", kind: "session", workshopId: "workshop-1", parentId: null, displayName: "Owned workshop", createdAt: 1, updatedAt: 1, location: { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }],
+        ["terminal-1", { id: "terminal-1", kind: "terminal", workshopId: "workshop-1", parentId: "window-1", displayName: "Owned terminal", createdAt: 1, updatedAt: 1, location: { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1", observedAt: 1 } }],
+      ]),
+    }))
+
+    expect(result.sessions[0]).toMatchObject({
+      name: "Owned workshop",
+      resourceId: "mux-session-1",
+      management: "managed",
+      target: {
+        session: "repo@work",
+        resourceId: "mux-session-1",
+        location: { instanceId: tmuxServerKey, nativeSessionId: "$1" },
+      },
+    })
+    expect(result.sessions[0]?.details[0]).toMatchObject({
+      title: "Owned terminal",
+      terminalId: "terminal-1",
+      target: { resourceId: "terminal-1", location: { nativeWindowId: "@1", nativePaneId: "%1" } },
+    })
+  })
+
+  test("treats unregistered identity claims as unmanaged and joins panes by session id", () => {
+    const result = projectResources(inputs({
+      sessions: [tmuxSession({ resourceId: "spoofed", displayName: "Ignored" })],
+      windows: [tmuxWindow({ session: "stale-name", terminalId: "spoofed-terminal" })],
+    }))
+
+    expect(result.sessions[0]).toMatchObject({ name: "repo@work", management: "unmanaged" })
+    expect(result.sessions[0]?.details).toHaveLength(1)
+    expect(result.sessions[0]?.details[0]?.target).toMatchObject({ management: "unmanaged", session: "stale-name" })
   })
 })

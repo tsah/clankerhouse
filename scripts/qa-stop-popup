@@ -80,8 +80,12 @@ try:
     time.sleep(0.3)
     drain()
     os.write(fd, b"\x1bd")
-    time.sleep(0.3)
-    drain()
+    popup_deadline = time.monotonic() + 5
+    while b"Press " not in output and time.monotonic() < popup_deadline:
+        time.sleep(0.05)
+        drain()
+    if b"Press " not in output:
+        raise SystemExit("Alt-D confirmation popup did not open")
     os.write(fd, b"y")
     deadline = time.monotonic() + 5
     while session_exists("delete-me") and time.monotonic() < deadline:

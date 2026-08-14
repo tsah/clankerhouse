@@ -1,0 +1,33 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(mktemp -d "${TMPDIR:-/tmp}/clankerhouse-nvim-qa-XXXXXX")
+trap 'rm -rf "$root"' EXIT
+mkdir -p "$root/bin" "$root/project"
+printf 'one\ntwo\nthree\n' > "$root/project/example.lua"
+git -C "$root/project" init -q
+
+cat > "$root/bin/clankers" <<'SH'
+#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"clanker-pi-qa","harness":"pi","name":"pi-qa","capabilities":{"send":"unix-socket"}}]\n'
+    ;;
+  send)
+    printf '%s\n' "$2" > "$CLANKERHOUSE_NVIM_QA_CAPTURE"
+    cat >> "$CLANKERHOUSE_NVIM_QA_CAPTURE"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$root/bin/clankers"
+
+PATH="$root/bin:$PATH" CLANKERHOUSE_NVIM_QA_REPO="$repo" CLANKERHOUSE_NVIM_QA_ROOT="$root" \
+  CLANKERHOUSE_NVIM_QA_CAPTURE="$root/capture" nvim --headless -u NONE -n "+luafile $repo/tests/nvim_qa.lua" +qa
+
+expected=$(printf 'clanker-pi-qa\n%s/project/example.lua:1-2 explain this' "$root")
+[[ "$(cat "$root/capture")" == "$expected" ]]
+printf 'Clankerhouse Neovim QA passed: plugin loading, mapping, project discovery, Pi selection, references, and native stdin delivery behave correctly.\n'

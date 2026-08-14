@@ -23,6 +23,13 @@ cleanup() {
         printf 'Retaining QA fixture at %s\n' "$root" >&2
         return
     fi
+    server_pid_file="$runtime/clankerhouse-$uid/server.pid"
+    if [[ -r "$server_pid_file" ]]; then
+        server_pid=$(<"$server_pid_file")
+        if [[ "$server_pid" =~ ^[0-9]+$ ]] && tr '\0' '\n' < "/proc/$server_pid/environ" 2>/dev/null | grep -Fx "XDG_RUNTIME_DIR=$runtime" >/dev/null; then
+            kill "$server_pid" 2>/dev/null || true
+        fi
+    fi
     tmux -S "$outer_socket" kill-server 2>/dev/null || true
     tmux -S "$inner_socket" kill-server 2>/dev/null || true
     if [[ -f "$qa_marker" ]]; then
@@ -277,7 +284,7 @@ lineage_tsv=$(LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_
 ' "$repo/src/workshop.ts" "$lineage_root" "$lineage_fix_coverage" "$lineage_fix_java" "$state_home/clankerhouse/workshops.sqlite3")
 while IFS=$'\t' read -r lineage_session lineage_path lineage_workshop lineage_parent; do
     [[ -n "$lineage_session" ]] || continue
-    tmux -S "$inner_socket" new-session -d -s "$lineage_session" -n main -x 140 -y 40 -c "$lineage_path" "sleep 300"
+    tmux -S "$inner_socket" -f /dev/null new-session -d -s "$lineage_session" -n main -x 140 -y 40 -c "$lineage_path" "sleep 300"
     tmux -S "$inner_socket" set-option -t "$lineage_session" @dotfiles_worktree_path "$lineage_path"
     tmux -S "$inner_socket" set-option -t "$lineage_session" @dotfiles_workshop_id "$lineage_workshop"
     tmux -S "$inner_socket" set-option -t "$lineage_session" @dotfiles_workshop_parent_id "$lineage_parent"
@@ -291,10 +298,10 @@ lineage_root_pi_pane=$(tmux -S "$inner_socket" display-message -p -t "$lineage_r
 lineage_fix_coverage_pi_pane=$(tmux -S "$inner_socket" display-message -p -t "$lineage_fix_coverage_session:pi" '#{pane_id}')
 lineage_fix_java_pi_pane=$(tmux -S "$inner_socket" display-message -p -t "$lineage_fix_java_session:pi" '#{pane_id}')
 
-tmux -S "$inner_socket" new-session -d -s "$session" -n main -x 140 -y 40 -c "$root" "sleep 300"
+tmux -S "$inner_socket" new-session -d -s "$session" -n qa-main -x 140 -y 40 -c "$root" "sleep 300"
 tmux -S "$inner_socket" new-window -d -t "=$session" -n pi -c "$root" "sleep 300"
 tmux -S "$inner_socket" set-option -w -t "=$session:pi" @dotfiles_harness pi
-main_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:main" '#{pane_id}')
+main_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:qa-main" '#{pane_id}')
 pi_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:pi" '#{pane_id}')
 
 recovery_json=$(env TMUX="$inner_socket,0,0" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" _ZO_DATA_DIR="$root/zoxide" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run "$repo/src/main.tsx" --dump-state)
@@ -337,7 +344,7 @@ records = [json.loads(path.read_text()) for path in Path(os.environ["ACTIVITY_DI
 assert any(record["path"] == os.environ["ACTIVITY_PATH"] and record["source"] == "clanker" for record in records), records
 PY
 
-tmux -S "$outer_socket" new-session -d -s harness -n client -x 140 -y 40 \
+tmux -S "$outer_socket" -f /dev/null new-session -d -s harness -n client -x 140 -y 40 \
     "env -u TMUX tmux -S '$inner_socket' attach-session -t '=$session'"
 outer_pane=$(tmux -S "$outer_socket" list-panes -t harness:client -F '#{pane_id}')
 # Match clankerhouse-picker. Depending on nested-tmux key handling, either
@@ -346,7 +353,7 @@ tmux -S "$outer_socket" set-option -gq @clankerhouse_open 1
 tmux -S "$inner_socket" set-option -gq @clankerhouse_open 1
 sleep 0.2
 
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run '$repo/src/main.tsx'"
+picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run '$repo/src/main.tsx'"
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
 animation_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
 wait_for_text "qa-workshop-tree"
@@ -515,12 +522,16 @@ wait_for_text "qa-workshop-tree"
 wait_for_text "pi"
 wait_for_row_glyph "qa-workshop-tree" "✓"
 
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Right
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "pi"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Down
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Down
+wait_for_selected_row "pi"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
-sleep 0.2
-active=$(tmux -S "$inner_socket" display-message -p -t "=$session:" '#{window_name}')
+active=""
+for _ in {1..100}; do
+    active=$(tmux -S "$inner_socket" display-message -p -t "=$session:" '#{window_name}')
+    [[ "$active" == "pi" ]] && break
+    sleep 0.05
+done
 [[ "$active" == "pi" ]] || { printf 'Expected pi window, got %s\n' "$active" >&2; exit 1; }
 
 seen_count=$(compgen -G "$runtime/clankerhouse-$uid/seen-state/*.json" | wc -l)
@@ -529,15 +540,15 @@ rm -f "$runtime/clankerhouse-$uid/state.json"
 
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
 wait_for_row_glyph "qa-workshop-tree" "○"
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Right
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Down
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "qa-main"
+wait_for_selected_row "qa-main"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy pane 'main'?"
+wait_for_text "Destroy pane 'qa-main'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" n
 pane_exists "$main_pane"
 
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy pane 'main'?"
+wait_for_text "Destroy pane 'qa-main'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
 for _ in {1..100}; do
     if ! pane_exists "$main_pane"; then

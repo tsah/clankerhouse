@@ -4,6 +4,8 @@ set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 root=$(realpath -m -- "${CLANKERHOUSE_INSTALL_QA_ROOT:-$HOME/.cache/qa-clankerhouse-install-$(id -u)-$$}")
+rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
 case "$root" in "$HOME/.cache/qa-clankerhouse-install-"*) ;; *) echo "Refusing unsafe install QA root: $root" >&2; exit 2;; esac
 socket="$root/tmux.sock"
 cleanup() {
@@ -18,6 +20,8 @@ mkdir -p "$root"
 "$repo/scripts/install" --prefix "$root/prefix" --no-enable >/dev/null
 "$root/prefix/bin/clankerhouse-doctor" >/dev/null
 "$root/prefix/bin/clankers" help >/dev/null
+nvim --headless -u NONE --cmd "set runtimepath^=$root/prefix/lib/clankerhouse" \
+    '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
 tmux -S "$socket" new-session -d -s qa 'sleep 30'
 server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
 TMUX="$socket,$server_pid,0" "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
@@ -28,7 +32,7 @@ tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse
 [[ ! -e "$root/prefix/lib/clankerhouse" ]]
 
 mkdir -p "$root/home"
-HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" "$repo/scripts/install" --prefix "$root/integration-prefix" --integrations --no-enable >/dev/null
+HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" "$repo/scripts/install" --prefix "$root/integration-prefix" --integrations --no-enable >/dev/null
 [[ -L "$root/home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
 [[ -L "$root/home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
 [[ -L "$root/home/.agents/skills/clanker-coordination" ]]

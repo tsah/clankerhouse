@@ -2,6 +2,7 @@ import type { ActivitySource } from "../activity"
 import type { ClankerState, DirectorySource } from "../model"
 
 export interface TmuxSession {
+  id: string
   name: string
   recency: number
   path: string
@@ -10,10 +11,13 @@ export interface TmuxSession {
   directoryPath: string
   workshopId?: string
   parentWorkshopId?: string | null
+  resourceId?: string
+  displayName?: string
 }
 
 export interface TmuxWindow {
   session: string
+  sessionId: string
   id: string
   index: string
   name: string
@@ -23,6 +27,13 @@ export interface TmuxWindow {
   title: string
   activity: number
   active: boolean
+  windowResourceId?: string
+  windowDisplayName?: string
+  terminalId?: string
+  terminalDisplayName?: string
+  clankerId?: string
+  explicitHarness?: string
+  harnessSessionId?: string
 }
 
 export interface OpencodeStatus {

@@ -1,6 +1,6 @@
 # Clankerhouse
 
-Clankerhouse is a tmux-native workshop and visible-harness application built with Bun, TypeScript, Effect, and OpenTUI. Open it with bare `clankerhouse` or `Alt-K`; use `clankers` for CLI operations.
+Clankerhouse is a tmux-native workshop and visible-harness application with a Rust/ratatui jump client and a Bun/TypeScript control plane. Open it with bare `clankerhouse` or `Alt-K`; use `clankers` for CLI operations.
 
 ## Installation
 
@@ -24,6 +24,30 @@ clankerhouse-doctor
 The installer places the application under `$prefix/lib/clankerhouse`, writes command launchers under `$prefix/bin`, and never removes runtime or recovery state during upgrades or uninstall. `scripts/uninstall --prefix "$HOME/.local"` removes only manifest-owned package files.
 
 Required runtime tools are Bun, tmux, Git, Python 3, and flock. Worktrunk (`wt`), jq, zoxide, and individual harness CLIs are capability-specific.
+
+### Neovim
+
+The repository is also a Neovim plugin. With Neovim 0.10 or newer:
+
+```lua
+vim.pack.add({ { src = "https://github.com/tsah/clankerhouse" } })
+require("clankerhouse").setup({
+  mappings = {
+    ask = "<leader>oa",
+    send_reference = "<leader>pp",
+    send_contents = "<leader>ps",
+    send_buffer = "<leader>pb",
+    focus = "<leader>pf",
+  },
+})
+```
+
+`ClankerAsk` sends the current line or visual selection plus a prompt to a
+current-workshop clanker that advertises native send. Pi currently provides
+that transport; an already-running Pi must be reloaded after integration
+updates. The plugin also defines `ClankerChoose`, `ClankerSendReference`,
+`ClankerSendContents`, `ClankerAppendContext`, `ClankerFocus`, and
+`ClankerSpawn`. No mappings are installed unless configured.
 
 A **workshop** is a durable Worktrunk worktree plus its canonical, lazily created tmux-session container. A **clanker** is one visible Pi, Claude, OpenCode, or Codex harness session inside a workshop. Those products are harnesses, not clankers, and harness-native in-process subagents are not clankers.
 

@@ -51,10 +51,11 @@ fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/clankerhouse-install-XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/app"
-tar -C "$source_root" --exclude='./node_modules' --exclude='./__pycache__' --exclude='*.pyc' -cf - . | tar -C "$stage/app" -xf -
+tar -C "$source_root" --exclude='./.git' --exclude='./node_modules' --exclude='./native-client/target' --exclude='./__pycache__' --exclude='*.pyc' -cf - . | tar -C "$stage/app" -xf -
 (
     cd "$stage/app"
     bun install --frozen-lockfile
+    scripts/build-native
 )
 mkdir -p "$prefix/lib" "$bin_dir" "$state_root"
 rm -rf "$app"

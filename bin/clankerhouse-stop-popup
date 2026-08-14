@@ -61,8 +61,9 @@ coproc STOP_COMMAND {
 }
 stop_pid=$STOP_COMMAND_PID
 stop_fd=${STOP_COMMAND[0]}
+exec {stop_read_fd}<&"$stop_fd"
 while kill -0 "$stop_pid" 2>/dev/null; do
-    if IFS= read -r -t 0.1 line <&"$stop_fd"; then
+    if IFS= read -r -t 0.1 line <&"$stop_read_fd"; then
         if [[ "$line" == "$progress_prefix"* ]]; then
             step=${line#"$progress_prefix"}
             [[ "${steps[-1]}" == "$step" ]] || steps+=("$step")
@@ -73,7 +74,7 @@ while kill -0 "$stop_pid" 2>/dev/null; do
     frame=$((frame + 1))
     render
 done
-while IFS= read -r line <&"$stop_fd"; do
+while IFS= read -r line <&"$stop_read_fd"; do
     if [[ "$line" == "$progress_prefix"* ]]; then
         step=${line#"$progress_prefix"}
         [[ "${steps[-1]}" == "$step" ]] || steps+=("$step")
@@ -81,6 +82,7 @@ while IFS= read -r line <&"$stop_fd"; do
         errors+=("$line")
     fi
 done
+exec {stop_read_fd}<&-
 wait "$stop_pid"
 status=$?
 if ((status != 0)); then

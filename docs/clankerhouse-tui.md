@@ -101,3 +101,27 @@ mutation API.
 
 See `clankerhouse/README.md` for the CLI and runtime contract and
 `docs/qa/clanker-api.md` for safety-scoped API validation.
+
+## Native client
+
+The default jump client remains the feature-complete TypeScript picker while
+the Rust/ratatui application in `native-client/` reaches action parity. Both
+read the same version-10 snapshot while the TypeScript cache server retains
+collection and projection ownership. Build and validate the native client with:
+
+```sh
+scripts/build-native
+bin/clankerhouse-native --check
+```
+
+To open it directly in a popup:
+
+```sh
+tmux display-popup -E -w 90% -h 80% \
+  "CLANKERHOUSE_CURRENT_SESSION='#{session_name}' '$PWD/bin/clankerhouse-native'"
+```
+
+The native client supports jump search, navigation, lineage/detail expansion,
+live snapshot reloads, opening exact targets, repository and branch selection,
+and worktree creation. Use `bin/clankerhouse-native` explicitly while rename,
+attachment, detachment, and deletion are completed there.

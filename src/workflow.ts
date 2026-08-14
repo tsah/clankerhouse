@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 import { markDirectoryActivity } from "./activity"
+import { ensureManagedTmuxSession } from "./multiplexer"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { initialHarnessCommand } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
@@ -74,6 +75,7 @@ export async function ensureSession(id: WorktreeIdentity, options: { parentWorks
   }
   const target = existing?.id || name
   await applyWorkshopOptions(target, id, record)
+  await ensureManagedTmuxSession(target)
   return name
 }
 
@@ -130,6 +132,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   await command(["tmux", "set-option", "-p", "-t", pane!, "@clankerhouse_clanker_id", clankerId])
   await command(["tmux", "set-option", "-p", "-t", pane!, "@dotfiles_harness", harness])
   await command(["tmux", "set-option", "-w", "-t", window!, "@dotfiles_harness", harness])
+  await ensureManagedTmuxSession(session)
   const spawned: Record<string, unknown> = { identity: id, session, window, pane, name, clankerId, ...(recoverable ? { harnessSessionId } : {}) }
   if (wait) {
     const timeout = Number(Bun.env.CLANKER_WAIT_TIMEOUT || 600) * 1000
@@ -203,6 +206,7 @@ export async function ensureDirectorySession(directory: string) {
   const existing = await sessionForPath(canonical)
   if (existing) {
     await command(["tmux", "set-option", "-t", existing.id, "@dotfiles_directory_path", canonical])
+    await ensureManagedTmuxSession(existing.id)
     return existing.name
   }
   const base = safeName(basename(canonical)) || "shell"
@@ -214,6 +218,7 @@ export async function ensureDirectorySession(directory: string) {
   }
   if ((await command(["tmux", "has-session", "-t", `=${name}`], undefined, true)).code !== 0) await command(["tmux", "new-session", "-d", "-s", name, "-n", "main", "-c", canonical])
   await command(["tmux", "set-option", "-t", name, "@dotfiles_directory_path", canonical])
+  await ensureManagedTmuxSession(name)
   return name
 }
 

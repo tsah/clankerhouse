@@ -82,9 +82,7 @@ export const detailStatusLabel = (detail: DetailRow) => {
 
 export const sessionMeta = (session: SessionRow) => session.target.type === "directory"
   ? [session.activitySource, session.age].filter(Boolean).join(" ")
-  : session.flags === "dirty"
-    ? "dirty"
-    : ""
+  : [session.management === "unmanaged" ? "unmanaged" : "", session.flags === "dirty" ? "dirty" : ""].filter(Boolean).join(" ")
 
 export const treePrefix = (row: TreeRow) => {
   const guides = row.guideColumns.map((guide) => guide ? "│ " : "  ").join("")

@@ -1,0 +1,84 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+uid=$(id -u)
+root=$(mktemp -d "/tmp/qa-clankerhouse-absorption-$uid-XXXXXX")
+inner_socket="$root/inner.sock"
+outer_socket="$root/outer.sock"
+state_home="$root/state"
+
+cleanup() {
+    tmux -S "$outer_socket" kill-server 2>/dev/null || true
+    tmux -S "$inner_socket" kill-server 2>/dev/null || true
+    rm -rf "$root"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$state_home"
+tmux -S "$inner_socket" -f /dev/null new-session -d -s qa-host -n shell -x 100 -y 30 "bash --noprofile --norc"
+tmux -S "$inner_socket" new-session -d -s qa-unmanaged -n editor -x 100 -y 30 -c "$repo" "sleep 300"
+tmux -S "$inner_socket" split-window -d -t qa-unmanaged:editor -c /tmp "sleep 300"
+tmux -S "$inner_socket" new-window -d -t qa-unmanaged -n logs -c "$repo" "sleep 300"
+tmux -S "$inner_socket" new-session -d -s qa-observed -n shell -x 100 -y 30 "sleep 300"
+tmux -S "$inner_socket" set-option -g @clankerhouse_server_epoch qa-epoch
+
+tmux -S "$outer_socket" -f /dev/null new-session -d -s harness -n client -x 100 -y 30 \
+    "env -u TMUX tmux -S '$inner_socket' attach-session -t qa-host"
+outer_pane=$(tmux -S "$outer_socket" display-message -p -t harness:client '#{pane_id}')
+
+inner_client=""
+for _ in {1..100}; do
+    inner_client=$(tmux -S "$inner_socket" list-clients -F '#{client_name}' 2>/dev/null | head -n 1)
+    [[ -n "$inner_client" ]] && break
+    sleep 0.05
+done
+[[ -n "$inner_client" ]] || { echo "Nested tmux client did not attach" >&2; exit 1; }
+
+session_id=$(tmux -S "$inner_socket" display-message -p -t qa-unmanaged '#{session_id}')
+window_id=$(tmux -S "$inner_socket" display-message -p -t qa-unmanaged:editor '#{window_id}')
+pane_id=$(tmux -S "$inner_socket" display-message -p -t qa-unmanaged:editor.0 '#{pane_id}')
+instance_id="tmux:$inner_socket:qa-epoch"
+target=$(jq -cn \
+    --arg session qa-unmanaged --arg instance "$instance_id" --arg sid "$session_id" --arg wid "$window_id" --arg pid "$pane_id" \
+    '{type:"tmux_session",session:$session,management:"unmanaged",location:{kind:"tmux",instanceId:$instance,nativeSessionId:$sid,nativeWindowId:$wid,nativePaneId:$pid}}')
+command="env XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$target'"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$command"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
+
+for _ in {1..100}; do
+    [[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-unmanaged" ]] && break
+    sleep 0.05
+done
+[[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-unmanaged" ]]
+
+resource_id=$(tmux -S "$inner_socket" show-option -qv -t "$session_id" @clankerhouse_session_id)
+[[ "$resource_id" == mux-session-* ]]
+[[ -n "$(tmux -S "$inner_socket" show-option -qv -t "$session_id" @clankerhouse_workshop_id)" ]]
+[[ "$(tmux -S "$inner_socket" show-option -qv -t "$session_id" @clankerhouse_display_name)" == "qa-unmanaged" ]]
+while read -r id; do
+    [[ "$(tmux -S "$inner_socket" show-option -wqv -t "$id" @clankerhouse_window_id)" == mux-window-* ]]
+done < <(tmux -S "$inner_socket" list-windows -t "$session_id" -F '#{window_id}')
+while read -r id; do
+    [[ "$(tmux -S "$inner_socket" show-option -pqv -t "$id" @clankerhouse_terminal_id)" == terminal-* ]]
+done < <(tmux -S "$inner_socket" list-panes -s -t "$session_id" -F '#{pane_id}')
+
+# Observation and direct tmux switching never absorb a session.
+tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-observed
+[[ -z "$(tmux -S "$inner_socket" show-option -qv -t qa-observed @clankerhouse_session_id)" ]]
+
+# Native names are compatibility hints: reopening a managed resource survives rename.
+tmux -S "$inner_socket" rename-session -t "$session_id" qa-renamed
+tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-host
+managed_target=$(jq -cn --arg id "$resource_id" '{type:"tmux_session",session:"stale-name",management:"managed",resourceId:$id}')
+managed_command="env XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$managed_target'"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$managed_command"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
+for _ in {1..100}; do
+    [[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-renamed" ]] && break
+    sleep 0.05
+done
+[[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-renamed" ]]
+
+printf 'Clankerhouse absorption QA passed: whole-session claims, explicit adoption, and ID-first rename-safe opening work.\n'

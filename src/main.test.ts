@@ -77,14 +77,16 @@ describe("clanker state", () => {
     const worktree = session("worktree", { target: { type: "directory", path: "/tmp/worktree" }, directorySource: "worktree" })
     const directory = session("directory", { target: { type: "directory", path: "/tmp/directory" }, directorySource: "zoxide" })
 
-    expect([working, ready, idle, neutral, worktree, directory].map(sessionSortRank)).toEqual([1, 2, 3, 4, 5, 6])
+    expect([working, ready, idle, neutral, worktree, directory].map(sessionSortRank)).toEqual([1, 2, 4, 5, 6, 7])
   })
 
-  test("sorts red-x incidents ahead of live work", () => {
+  test("renders live work nearer the prompt than red-x incidents", () => {
     const failed = session("failed", { details: [detail("failed", "terminated", "04", "failed", "incident")] })
     const working = session("working", { details: [detail("working", "pi", "05", "working", "pi")] })
-    expect([failed, working].map(sessionSortRank)).toEqual([0, 1])
-    expect(sessionRows(buildTreeRows([working, failed], "", { bottomUp: true })).map((row) => row.session.name)).toEqual(["failed", "working"])
+    const rows = sessionRows(buildTreeRows([working, failed], "", { bottomUp: true }))
+    expect([failed, working].map(sessionSortRank)).toEqual([3, 1])
+    expect(rows.map((row) => row.session.name)).toEqual(["working", "failed"])
+    expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["failed", "working"])
   })
 
   test("reports live replacement work instead of a prior reboot loss", () => {
@@ -181,6 +183,18 @@ describe("session tree", () => {
     const rows = sessionRows(buildTreeRows([working, ready, idle], "", { bottomUp: true }))
     expect(rows.map((row) => row.session.name)).toEqual(["working", "ready", "idle"])
     expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["idle", "ready", "working"])
+  })
+
+  test("puts the current session nearest the prompt without hiding active work", () => {
+    const current = session("current", { details: [detail("current", "pi", "97", "done", "pi")] })
+    const working = session("working", { details: [detail("working", "pi", "98", "working", "pi")] })
+    const failed = session("failed", { details: [detail("failed", "incident", "99", "failed", "incident")] })
+    const rows = sessionRows(buildTreeRows([failed, working, current], "", {
+      prioritySessionKeys: new Set(["session:current"]),
+      bottomUp: true,
+    }))
+
+    expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["failed", "working", "current"])
   })
 
   test("uses descendant state when sorting a lineage subtree", () => {

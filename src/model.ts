@@ -1,15 +1,23 @@
+import type { MultiplexerLocation } from "./resource-registry"
+
+export interface TargetIdentity {
+  management?: "managed" | "unmanaged"
+  resourceId?: string
+  location?: Omit<MultiplexerLocation, "observedAt">
+}
+
 export type Target =
-  | { type: "tmux_session"; session: string }
-  | { type: "tmux_window"; session: string; windowId: string; pane: string }
-  | { type: "opencode"; session: string; pane: string }
+  | ({ type: "tmux_session"; session: string } & TargetIdentity)
+  | ({ type: "tmux_window"; session: string; windowId: string; pane: string } & TargetIdentity)
+  | ({ type: "opencode"; session: string; pane: string } & TargetIdentity)
   | { type: "directory"; path: string }
 
 export type ClankerState = "failed" | "blocked" | "working" | "done" | "idle" | "unknown"
 export type ReportedClankerState = ClankerState
 
-export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number }
+export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
-export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; parentWorkshopId?: string | null; childWorkshopCount?: number; lineageLabel?: string; lineageSearchText?: string }
+export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; lineageLabel?: string; lineageSearchText?: string }
 export interface TreeRow {
   key: string
   depth: number
@@ -94,19 +102,19 @@ export const sessionState = (session: SessionRow): ClankerState => {
 
 const clankerStateSortRank = (state: ClankerState) => {
   switch (state) {
-    case "failed": return 0
-    case "blocked":
+    case "blocked": return 0
     case "working": return 1
     case "done": return 2
-    case "idle": return 3
-    case "unknown": return 4
+    case "failed": return 3
+    case "idle": return 4
+    case "unknown": return 5
   }
 }
 
 export const sessionSortRank = (session: SessionRow) => {
   const state = sessionState(session)
   if (state === "failed") return clankerStateSortRank(state)
-  if (session.target.type === "directory") return session.directorySource === "worktree" ? 5 : 6
+  if (session.target.type === "directory") return session.directorySource === "worktree" ? 6 : 7
   return clankerStateSortRank(state)
 }
 
@@ -160,7 +168,8 @@ export const structuredSearch = (fields: Array<string | SearchField>, query: str
   return { score }
 }
 
-const targetKey = (target: Target) => {
+export const targetKey = (target: Target) => {
+  if ("resourceId" in target && target.resourceId) return `${target.type}:${target.resourceId}`
   switch (target.type) {
     case "tmux_session": return `session:${target.session}`
     case "tmux_window": return `window:${target.session}:${target.windowId}`
@@ -193,7 +202,14 @@ const selectableDetails = (session: SessionRow) => session.details.filter((detai
 const visibleTreeSortRank = (node: VisibleTreeNode) => node.session.target.type === "directory"
   ? sessionSortRank(node.session)
   : clankerStateSortRank(node.state)
-const visibleTreeTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode) => visibleTreeSortRank(a) - visibleTreeSortRank(b) || b.session.recency - a.session.recency || (b.session.frecency ?? 0) - (a.session.frecency ?? 0) || a.session.name.localeCompare(b.session.name)
+const containsPrioritySession = (node: VisibleTreeNode, prioritySessionKeys: ReadonlySet<string> | undefined): boolean =>
+  Boolean(prioritySessionKeys?.has(node.key) || node.children.some((child) => containsPrioritySession(child, prioritySessionKeys)))
+const visibleTreeTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
+  Number(containsPrioritySession(b, prioritySessionKeys)) - Number(containsPrioritySession(a, prioritySessionKeys))
+  || visibleTreeSortRank(a) - visibleTreeSortRank(b)
+  || b.session.recency - a.session.recency
+  || (b.session.frecency ?? 0) - (a.session.frecency ?? 0)
+  || a.session.name.localeCompare(b.session.name)
 const maxScore = (...scores: number[]) => {
   const score = Math.max(...scores)
   return Number.isFinite(score) ? score : 0
@@ -248,6 +264,7 @@ const visibleNode = (
   expandedDetailSessions: ReadonlySet<string> | undefined,
   ancestors: SessionNode[] = [],
   includeLineage = false,
+  prioritySessionKeys?: ReadonlySet<string>,
 ): VisibleTreeNode | undefined => {
   const searchText = sessionSearchText(node.session)
   const sessionMatch = structuredSearch(sessionSearchFields(node.session), normalizedQuery)
@@ -258,9 +275,9 @@ const visibleNode = (
     return match ? [{ detail, match }] : []
   })
   const children = node.children.flatMap((child) => {
-    const visible = visibleNode(child, normalizedQuery, expandedDetailSessions, [...ancestors, node], exposeLineage)
+    const visible = visibleNode(child, normalizedQuery, expandedDetailSessions, [...ancestors, node], exposeLineage, prioritySessionKeys)
     return visible ? [visible] : []
-  }).sort((a, b) => b.score - a.score || visibleTreeTieBreak(a, b))
+  }).sort((a, b) => b.score - a.score || visibleTreeTieBreak(a, b, prioritySessionKeys))
   if (!exposeLineage && detailMatches.length === 0 && children.length === 0) return undefined
 
   const detailsExpanded = Boolean(expandedDetailSessions?.has(node.session.name))
@@ -290,13 +307,14 @@ const expandedNode = (
   expandedLineageSessions: ReadonlySet<string> | undefined,
   expandedDetailSessions: ReadonlySet<string> | undefined,
   parentSessionKey?: string,
+  prioritySessionKeys?: ReadonlySet<string>,
 ): VisibleTreeNode => {
   const details = selectableDetails(node.session)
   const lineageExpanded = Boolean(node.children.length > 0 && (!expandedLineageSessions || expandedLineageSessions.has(node.session.name)))
   const detailsExpanded = Boolean(details.length > 0 && expandedDetailSessions?.has(node.session.name))
   const children = node.children
-    .map((child) => expandedNode(child, expandedLineageSessions, expandedDetailSessions, node.key))
-    .sort(visibleTreeTieBreak)
+    .map((child) => expandedNode(child, expandedLineageSessions, expandedDetailSessions, node.key, prioritySessionKeys))
+    .sort((a, b) => visibleTreeTieBreak(a, b, prioritySessionKeys))
   const visibleChildren = lineageExpanded ? children : []
   const visibleDetails = detailsExpanded ? details.map((detail) => ({ detail })) : []
   return {
@@ -388,20 +406,20 @@ export const defaultExpandedLineageSessions = (sessions: SessionRow[], maxChildr
 export const buildTreeRows = (
   sessions: SessionRow[],
   query: string,
-  options: { expandedLineageSessions?: ReadonlySet<string>; expandedDetailSessions?: ReadonlySet<string>; bottomUp?: boolean } = {},
+  options: { expandedLineageSessions?: ReadonlySet<string>; expandedDetailSessions?: ReadonlySet<string>; prioritySessionKeys?: ReadonlySet<string>; bottomUp?: boolean } = {},
 ): TreeRow[] => {
   const normalized = query.trim().toLowerCase()
   const { roots } = sessionForest(sessions)
   const visibleRoots = normalized
     ? roots
         .flatMap((node) => {
-          const visible = visibleNode(node, normalized, options.expandedDetailSessions)
+          const visible = visibleNode(node, normalized, options.expandedDetailSessions, [], false, options.prioritySessionKeys)
           return visible ? [visible] : []
         })
-        .sort((a, b) => b.score - a.score || visibleTreeTieBreak(a, b))
+        .sort((a, b) => b.score - a.score || visibleTreeTieBreak(a, b, options.prioritySessionKeys))
     : roots
-        .map((node) => expandedNode(node, options.expandedLineageSessions, options.expandedDetailSessions))
-        .sort(visibleTreeTieBreak)
+        .map((node) => expandedNode(node, options.expandedLineageSessions, options.expandedDetailSessions, undefined, options.prioritySessionKeys))
+        .sort((a, b) => visibleTreeTieBreak(a, b, options.prioritySessionKeys))
 
   const groups = visibleRoots.map((node, index) => flattenTreeRows(node, 0, [], index === visibleRoots.length - 1))
   return options.bottomUp ? groups.flatMap((rows) => [...rows].reverse()) : groups.flat()

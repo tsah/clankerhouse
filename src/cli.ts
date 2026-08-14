@@ -7,6 +7,9 @@ import { recordRecoveryIncident, resolveRecoveredClankerIncidents } from "./inci
 import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { stopOwnedHarness } from "./recovery/process-owner"
+import { libexecPath } from "./installation"
+import { TmuxMultiplexer } from "./multiplexer"
+import type { Target } from "./model"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
@@ -187,6 +190,7 @@ const usage = `Usage:
   clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
+  clankers target open --json TARGET
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH]
   clankers status|capabilities CLANKER_ID
@@ -205,6 +209,30 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   const command = parsed.shift()
   if (!command || command === "help" || command === "--help" || command === "-h") return console.log(usage)
   if (["list", "status", "capabilities", "wait", "send", "result"].includes(command)) return runClankerApi(command, parsed)
+
+  if (command === "target") {
+    const subcommand = parsed.shift()
+    if (subcommand !== "open") throw new Error("Usage: clankers target open --json TARGET")
+    const encoded = parsed.take("--json")
+    if (!encoded) throw new Error("--json is required")
+    const target = JSON.parse(encoded) as Target
+    const multiplexer = new TmuxMultiplexer()
+    if (target.type === "tmux_session" || target.type === "tmux_window") {
+      await multiplexer.openTarget(target)
+      return
+    }
+    if (target.type === "opencode") {
+      const location = await multiplexer.resolve(target)
+      const pane = location?.nativePaneId || target.pane
+      const proc = Bun.spawn([libexecPath("opencode-attach-target"), target.session, pane], { stdin: "inherit", stdout: "inherit", stderr: "inherit" })
+      const code = await proc.exited
+      if (code !== 0) throw new Error(`opencode attach exited ${code}`)
+      return
+    }
+    const session = await ensureDirectorySession(target.path)
+    await multiplexer.openTarget({ type: "tmux_session", session })
+    return
+  }
 
   if (command === "recovery") {
     const subcommand = parsed.shift()

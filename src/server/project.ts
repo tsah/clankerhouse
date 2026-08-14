@@ -2,6 +2,7 @@ import type { ActivitySource } from "../activity"
 import { applyResourceIncidents, type ResourceIncident } from "../incidents"
 import { sessionSortRank, stateWithSeen } from "../model"
 import type { ClankerState, DetailRow, SessionRow } from "../model"
+import type { ResourceRecord } from "../resource-registry"
 import type { LineageSnapshot } from "../workshop"
 import type { ClankerReport, DirectoryRow, OpencodeStatus, TmuxSession, TmuxWindow } from "./resources"
 
@@ -26,6 +27,7 @@ export interface ProjectInputs {
   gitMetaByPath: ReadonlyMap<string, GitMeta>
   detectedHarnessByPane: ReadonlyMap<string, "pi" | "claude" | "codex" | "opencode">
   codexPanes: ReadonlySet<string>
+  managedResources: ReadonlyMap<string, ResourceRecord>
   observedAt: number
   tmuxServerKey: string
   home?: string
@@ -99,14 +101,26 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
   const { sessions, windows, opencodes, directories, clankerReports, lineage, incidents, gitMetaByPath, detectedHarnessByPane, codexPanes, observedAt, tmuxServerKey, home } = inputs
   const seen = new Map(inputs.seen)
   const effects: ProjectEffect[] = []
-  const windowsBySession = Map.groupBy(windows, (window) => window.session)
-  const opencodesBySession = Map.groupBy(opencodes, (row) => row.session)
+  const windowsBySession = Map.groupBy(windows, (window) => window.sessionId)
   const reportsByPane = new Map(clankerReports.map((report) => [report.pane, report]))
   const rows: SessionRow[] = []
+  const managedAt = (resourceId: string | undefined, kind: ResourceRecord["kind"], sessionId: string, windowId?: string, paneId?: string) => {
+    if (!resourceId) return undefined
+    const resource = inputs.managedResources.get(resourceId)
+    const location = resource?.location
+    return resource?.kind === kind && location?.kind === "tmux" && location.instanceId === tmuxServerKey
+      && location.nativeSessionId === sessionId && (location.nativeWindowId ?? undefined) === windowId && (location.nativePaneId ?? undefined) === paneId
+      ? resource
+      : undefined
+  }
 
   for (const session of sessions) {
-    const sessionWindows = windowsBySession.get(session.name) ?? []
-    const sessionOpencodes = opencodesBySession.get(session.name) ?? []
+    const sessionWindows = windowsBySession.get(session.id) ?? []
+    const sessionPaneIds = new Set(sessionWindows.map((window) => window.pane))
+    const sessionOpencodes = opencodes.filter((row) => row.stablePane ? sessionPaneIds.has(row.stablePane) : row.session === session.name)
+    const managedSession = managedAt(session.resourceId, "session", session.id)
+    const sessionManaged = Boolean(managedSession)
+    const sessionLocation = { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: session.id, nativeWindowId: null, nativePaneId: null }
     if (session.attached && sessionWindows.some((window) => window.active)) effects.push({ type: "markDirectoryActivity", path: session.path, source: "active", updatedAt: observedAt, minIntervalMs: 60_000 })
     const meta = gitMetaByPath.get(session.path) ?? { branch: "", flags: "" }
     const details: DetailRow[] = []
@@ -121,6 +135,9 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     for (const window of sessionWindows) {
       const focused = session.attached && window.active
       const windowOpencodes = opencodesByWindow.get(window.id) ?? []
+      const managedTerminal = managedAt(window.terminalId, "terminal", session.id, window.id, window.pane)
+      const terminalManaged = Boolean(managedTerminal)
+      const location = { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: window.pane }
       for (const opencode of windowOpencodes) {
         if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
         const completionKey = paneCompletionKey(tmuxServerKey, opencode.stablePane || window.pane || opencode.pane)
@@ -130,7 +147,8 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
           effects.push({ type: "markSeen", key: completionKey, seenAt: observedAt })
           seen.set(completionKey, observedAt)
         }
-        details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || window.name || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || window.pane || opencode.pane }, completionKey, updatedAt: opencode.updatedAt })
+        const clankerId = opencode.harnessSessionId && opencode.harnessSessionId === window.harnessSessionId ? window.clankerId : undefined
+        details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || window.name || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || window.pane || opencode.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, completionKey, updatedAt: opencode.updatedAt, terminalId: managedTerminal?.id, clankerId })
       }
       if (windowOpencodes.length > 0) continue
 
@@ -141,17 +159,19 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
           : codexPanes.has(window.pane)
             ? "codex"
             : detectedHarnessByPane.get(window.pane) ?? "window"
+      const explicitKind = ["pi", "claude", "codex", "opencode"].includes(window.explicitHarness || "") ? window.explicitHarness : undefined
+      const projectedKind = explicitKind ?? kind
       const report = reportsByPane.get(window.pane)
       if (report?.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: report.updatedAt, minIntervalMs: 0 })
-      const sourceState = report?.harness === kind ? report.state : kind === "codex" ? codexStateFromTitle(window.title || window.name) : kind === "claude" ? claudeStateFromTitle(window.title || window.name) : "unknown"
-      const updatedAt = report?.harness === kind ? report.updatedAt : window.activity * 1000
-      const completionKey = kind === "window" ? windowCompletionKey(tmuxServerKey, window.id) : paneCompletionKey(tmuxServerKey, window.pane)
+      const sourceState = report?.harness === projectedKind ? report.state : projectedKind === "codex" ? codexStateFromTitle(window.title || window.name) : projectedKind === "claude" ? claudeStateFromTitle(window.title || window.name) : "unknown"
+      const updatedAt = report?.harness === projectedKind ? report.updatedAt : window.activity * 1000
+      const completionKey = projectedKind === "window" ? windowCompletionKey(tmuxServerKey, window.id) : paneCompletionKey(tmuxServerKey, window.pane)
       const state = stateWithSeen(sourceState, updatedAt, seen.get(completionKey), focused)
       if (sourceState === "done" && focused) {
         effects.push({ type: "markSeen", key: completionKey, seenAt: observedAt })
         seen.set(completionKey, observedAt)
       }
-      details.push({ kind: kind === "window" ? "window" : "clanker", harness: kind === "window" ? undefined : kind, status: kind === "window" ? window.command : "", detail: "", title: kind === "window" ? window.name || window.title : window.title || window.name, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "tmux_window", session: window.session, windowId: window.id, pane: window.pane }, completionKey, updatedAt })
+      details.push({ kind: projectedKind === "window" ? "window" : "clanker", harness: projectedKind === "window" ? undefined : projectedKind, status: projectedKind === "window" ? window.command : "", detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "tmux_window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, completionKey, updatedAt, terminalId: managedTerminal?.id, clankerId: window.clankerId })
     }
 
     for (const opencode of opencodesByWindow.get("") ?? []) {
@@ -162,7 +182,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || opencode.pane }, completionKey, updatedAt: opencode.updatedAt })
     }
 
-    if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: session.path, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "tmux_session", session: session.name }, updatedAt: 0 })
+    if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: session.path, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: sessionManaged ? session.resourceId : undefined, location: sessionLocation }, updatedAt: 0 })
 
     const markers = [
       sessionOpencodes.length > 0 || sessionWindows.some((window) => detectedHarnessByPane.get(window.pane) === "opencode") ? "oc" : "",
@@ -173,7 +193,8 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const workshop = session.workshopId ? lineage.byId.get(session.workshopId) : lineage.byPath.get(session.path)
     const parentWorkshopId = workshop ? workshop.parentWorkshopId : session.parentWorkshopId
     const lineageFields = buildLineageFields(workshop?.workshopId || session.workshopId, parentWorkshopId, workshop?.childWorkshopCount ?? 0)
-    const row: SessionRow = { name: session.name, path: session.path, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name }, details, searchText: "", workshopId: workshop?.workshopId || session.workshopId, parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
+    const displayName = managedSession?.displayName || session.name
+    const row: SessionRow = { name: displayName, path: session.path, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", workshopId: workshop?.workshopId || managedSession?.workshopId || session.workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
     row.searchText = [row.name, row.path, row.branch, row.flags, row.markers.join(" "), row.lineageLabel, row.lineageSearchText, ...row.details.flatMap((detail) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title, detail.age])].join(" ").toLowerCase()
     rows.push(row)
   }

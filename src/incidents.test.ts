@@ -42,6 +42,17 @@ describe("resource incidents", () => {
     expect(readResourceIncidents(root)).toMatchObject([{ kind: "recovery_quarantined", evidence: { reason: "attempt limit", attemptNumber: 3 } }])
   })
 
+  test("reads workload and durable Clanker stop incidents", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-incidents-"))
+    roots.push(root)
+    writeFileSync(join(root, "workload.json"), JSON.stringify(incident({ id: "workload", kind: "resource_pressure_workload_stop" })))
+    writeFileSync(join(root, "clanker.json"), JSON.stringify(incident({ id: "clanker", kind: "resource_pressure_clanker_stop" })))
+
+    const rows = applyResourceIncidents([session()], readResourceIncidents(root), 3_000)
+    expect(readResourceIncidents(root).map((record) => record.kind).sort()).toEqual(["resource_pressure_clanker_stop", "resource_pressure_workload_stop"])
+    expect(rows[0]?.details.map((detail) => detail.status).sort()).toEqual(["clanker stopped", "workload stopped"])
+  })
+
   test("reads valid open incidents and ignores malformed records", () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-incidents-"))
     roots.push(root)

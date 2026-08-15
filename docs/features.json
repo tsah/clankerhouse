@@ -92,8 +92,8 @@
       "title": "Resource guard, Spot handling, and process ownership",
       "core": true,
       "unit": ["tests/test_resource_guard.py", "tests/test_spot_watch.py", "src/recovery/process-owner.test.ts"],
-      "standalone": ["scripts/qa-recovery", "scripts/qa-process-owner"],
-      "manual": ["Simulate pressure and Spot notices", "Confirm incidents and checkpoints", "Confirm every managed process remains killable through its owner scope"]
+      "standalone": ["scripts/qa-recovery", "scripts/qa-resource-guard", "scripts/qa-process-owner"],
+      "manual": ["Simulate five minutes of attributable child-process pressure and a two-minute cooldown", "Confirm only the validated workload subtree stops and a steering-capable Clanker receives an incident message; verify durable delivery evidence for unsupported transports", "Confirm an unattributable tracked Clanker is durably stopped with its pane preserved and an untracked harness is not signalled", "Confirm Spot incidents and checkpoints"]
     },
     {
       "id": "native-tui",

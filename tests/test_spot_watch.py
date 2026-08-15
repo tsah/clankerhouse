@@ -8,7 +8,7 @@ import threading
 import unittest
 from dataclasses import replace
 
-from clankerhouse.spot_watch import (
+from spot_watch import (
     ACTION_PATH,
     REBALANCE_PATH,
     Config,

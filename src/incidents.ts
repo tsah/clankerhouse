@@ -4,7 +4,7 @@ import { resolve } from "node:path"
 import { canonicalActivityPath } from "./activity"
 import type { DetailRow, SessionRow, Target } from "./model"
 
-export type IncidentKind = "resource_pressure_termination" | "unclean_boot_clanker_loss" | "recovery_quarantined" | "recovery_pressure_suspension" | "recovery_descendant_cleanup_failed" | "aggregate_io_saturation" | "interrupted_tool_requires_confirmation"
+export type IncidentKind = "resource_pressure_termination" | "resource_pressure_workload_stop" | "resource_pressure_clanker_stop" | "unclean_boot_clanker_loss" | "recovery_quarantined" | "recovery_pressure_suspension" | "recovery_descendant_cleanup_failed" | "aggregate_io_saturation" | "interrupted_tool_requires_confirmation"
 
 export interface ResourceIncident {
   version: 1
@@ -32,11 +32,13 @@ export interface ResourceIncident {
     ioPsiSome?: number
     ioPsiFull?: number
     rootReadBytesPerSecond?: number
+    process?: { pid: number; command: string; rssBytes?: number; ioBytesPerSecond?: number }
+    steering?: { attempted: boolean; delivered: boolean }
   }
 }
 
 export const incidentStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse/incidents`
-const incidentKinds = new Set<IncidentKind>(["resource_pressure_termination", "unclean_boot_clanker_loss", "recovery_quarantined", "recovery_pressure_suspension", "recovery_descendant_cleanup_failed", "aggregate_io_saturation", "interrupted_tool_requires_confirmation"])
+const incidentKinds = new Set<IncidentKind>(["resource_pressure_termination", "resource_pressure_workload_stop", "resource_pressure_clanker_stop", "unclean_boot_clanker_loss", "recovery_quarantined", "recovery_pressure_suspension", "recovery_descendant_cleanup_failed", "aggregate_io_saturation", "interrupted_tool_requires_confirmation"])
 const harnesses = new Set(["pi", "claude", "opencode", "codex"])
 
 export const recordRecoveryIncident = (kind: IncidentKind, clanker: ResourceIncident["clanker"], evidence: NonNullable<ResourceIncident["evidence"]> = {}, directory = incidentStateDirectory) => {
@@ -102,7 +104,13 @@ export const resolveRecoveredClankerIncidents = (clankerId: string, directory = 
 }
 
 const incidentPath = (incident: ResourceIncident) => incident.clanker.worktreePath || incident.clanker.cwd || ""
-const incidentStatus = (incident: ResourceIncident) => incident.kind === "resource_pressure_termination" || incident.kind === "recovery_pressure_suspension" ? "terminated" : incident.kind === "unclean_boot_clanker_loss" ? "lost on reboot" : "recovery blocked"
+const incidentStatus = (incident: ResourceIncident) => incident.kind === "resource_pressure_workload_stop"
+  ? "workload stopped"
+  : incident.kind === "resource_pressure_clanker_stop"
+    ? "clanker stopped"
+    : incident.kind === "resource_pressure_termination" || incident.kind === "recovery_pressure_suspension"
+      ? "terminated"
+      : incident.kind === "unclean_boot_clanker_loss" ? "lost on reboot" : "recovery blocked"
 const ageFromTimestamp = (timestamp: number, observedAt: number) => {
   const seconds = Math.max(0, Math.floor((observedAt - timestamp) / 1000))
   if (seconds < 60) return `${seconds}s`

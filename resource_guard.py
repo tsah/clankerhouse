@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Conservative Linux memory-pressure guard for tagged tmux clankers.
+"""Conservative Linux resource-pressure guard for tagged tmux Clankers.
 
-The guard deliberately has no third-party dependencies.  It only considers panes
+The guard deliberately has no third-party dependencies. It stops only attributable
+child workload trees, or durably stops an owned Recovery Clanker as a fallback.
+It only considers panes
 which explicitly advertise @dotfiles_harness=pi|claude|opencode|codex, and revalidates a
 process immediately before each signal.
 """
@@ -9,6 +11,7 @@ process immediately before each signal.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import dataclasses
 import datetime as dt
 import json
@@ -50,7 +53,7 @@ def _env_bool(env: Mapping[str, str], name: str, default: bool = False) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    samples: int = 12
+    samples: int = 61
     interval: float = 5.0
     ec2_floor_bytes: int = 512 * MIB
     ec2_percent: float = 10.0
@@ -62,6 +65,9 @@ class Config:
     cpu_psi_some: float = 25.0
     read_limit_bytes_per_second: int = 125 * MIB
     term_grace: float = 5.0
+    cooldown: float = 120.0
+    workload_min_rss_bytes: int = 128 * MIB
+    workload_min_io_bytes_per_second: int = 10 * MIB
     dry_run: bool = False
     state_home: pathlib.Path = pathlib.Path.home() / ".local/state"
     runtime_dir: pathlib.Path = pathlib.Path("/tmp")
@@ -71,7 +77,7 @@ class Config:
         env = os.environ if env is None else env
         home = pathlib.Path(env.get("HOME", str(pathlib.Path.home())))
         return cls(
-            samples=_env_int(env, "RESOURCE_GUARD_SAMPLES", 12, 1),
+            samples=_env_int(env, "RESOURCE_GUARD_SAMPLES", 61, 1),
             interval=_env_float(env, "RESOURCE_GUARD_INTERVAL", 5.0),
             ec2_floor_bytes=_env_int(env, "RESOURCE_GUARD_EC2_FLOOR_MIB", 512) * MIB,
             ec2_percent=_env_float(env, "RESOURCE_GUARD_EC2_PERCENT", 10.0),
@@ -83,6 +89,9 @@ class Config:
             cpu_psi_some=_env_float(env, "RESOURCE_GUARD_CPU_PSI_SOME", 25.0),
             read_limit_bytes_per_second=_env_int(env, "RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC", 125) * MIB,
             term_grace=_env_float(env, "RESOURCE_GUARD_TERM_GRACE", 5.0),
+            cooldown=_env_float(env, "RESOURCE_GUARD_COOLDOWN", 120.0),
+            workload_min_rss_bytes=_env_int(env, "RESOURCE_GUARD_WORKLOAD_MIN_RSS_MIB", 128) * MIB,
+            workload_min_io_bytes_per_second=_env_int(env, "RESOURCE_GUARD_WORKLOAD_MIN_IO_MIB_PER_SEC", 10) * MIB,
             dry_run=_env_bool(env, "RESOURCE_GUARD_DRY_RUN"),
             state_home=pathlib.Path(env.get("XDG_STATE_HOME", str(home / ".local/state"))),
             runtime_dir=pathlib.Path(env.get("XDG_RUNTIME_DIR", "/tmp")),
@@ -109,6 +118,15 @@ class MemorySample:
 
 
 @dataclasses.dataclass(frozen=True)
+class Workload:
+    pid: int
+    start_ticks: int
+    command: str
+    rss_bytes: int
+    io_bytes_per_second: float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
 class Candidate:
     pane: str
     harness: str
@@ -123,6 +141,7 @@ class Candidate:
     worktree_path: str = ""
     rss_bytes: int = 0
     report_updated_at: int = 0
+    workloads: tuple[Workload, ...] = ()
 
     def incident_clanker(self) -> dict[str, str]:
         return {
@@ -201,11 +220,51 @@ class LinuxSystem:
                     result.append(int(entry.name))
         return result
 
+    @staticmethod
+    def _linux_syscall(number: int, *arguments: int) -> int:
+        libc = ctypes.CDLL(None, use_errno=True)
+        result = int(libc.syscall(number, *arguments))
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return result
+
+    def open_process(self, pid: int, start_ticks: int) -> int | None:
+        try:
+            descriptor = os.pidfd_open(pid) if hasattr(os, "pidfd_open") else self._linux_syscall(434, pid, 0)
+        except OSError:
+            return None
+        stat = self.stat(pid)
+        if stat is None or stat[1] != start_ticks or self.uid(pid) != os.getuid():
+            os.close(descriptor)
+            return None
+        return descriptor
+
+    def signal_process(self, descriptor: int, sig: int) -> None:
+        if hasattr(signal, "pidfd_send_signal"):
+            signal.pidfd_send_signal(descriptor, sig)
+        else:
+            self._linux_syscall(424, descriptor, sig, 0, 0)
+
+    def close_process(self, descriptor: int) -> None:
+        os.close(descriptor)
+
     def kill(self, pid: int, sig: int) -> None:
         os.kill(pid, sig)
 
     def alive(self, pid: int) -> bool:
         return self.stat(pid) is not None
+
+    def process_io_bytes(self, pid: int) -> int:
+        try:
+            values = {}
+            for line in self.read_text(self.proc / str(pid) / "io").splitlines():
+                key, separator, value = line.partition(":")
+                if separator and key in ("read_bytes", "write_bytes"):
+                    values[key] = int(value.strip())
+            return values.get("read_bytes", 0) + values.get("write_bytes", 0)
+        except (OSError, ValueError):
+            return 0
 
     def root_read_bytes(self) -> int:
         device = os.stat("/").st_dev
@@ -316,12 +375,17 @@ class ResourceGuard:
         tmux: TmuxClient | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
+        run_command: Callable[[list[str]], int] | None = None,
     ) -> None:
         self.config = config or Config.from_env()
-        self.system = system or LinuxSystem()
+        self.system = system or LinuxSystem(
+            pathlib.Path(os.environ.get("CLANKERHOUSE_PROC_ROOT", "/proc")),
+            pathlib.Path(os.environ.get("CLANKERHOUSE_SYSFS_ROOT", "/sys")),
+        )
         self.tmux = tmux or TmuxClient()
         self.sleep = sleep
         self.now = now
+        self.run_command = run_command or (lambda argv: subprocess.run(argv, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
         self.boot_id = self.system.boot_id()
         self.snapshot_path = self.config.state_dir / "resource-guard-snapshot.json"
         self.admission_path = self.config.state_dir / "recovery-admission.json"
@@ -331,6 +395,7 @@ class ResourceGuard:
         self.consecutive = 0
         self.healthy_since: float | None = None
         self.previous_root_read: tuple[float, int] | None = None
+        self.previous_process_io: dict[int, tuple[float, int, int]] = {}
         self.stop_requested = False
         self._initialize_state()
 
@@ -387,6 +452,8 @@ class ResourceGuard:
             "acted": acted,
             "acted_clankers": acted_clankers,
             "sample_history": sample_history,
+            "last_mitigation_at": previous.get("last_mitigation_at") if previous.get("boot_id") == self.boot_id else None,
+            "last_steering_notification": previous.get("last_steering_notification") if previous.get("boot_id") == self.boot_id else None,
             "started_at": self.now(),
             "consecutive_pressure": 0,
         }
@@ -588,9 +655,26 @@ class ResourceGuard:
             for process in process_tree:
                 process_tree.extend(child for child in self.system.children(process) if child not in process_tree)
             rss_bytes = sum(self.system.rss_bytes(process) for process in process_tree)
+            workloads: list[Workload] = []
+            for root_pid in self.system.children(pid):
+                root_stat = self.system.stat(root_pid)
+                if not root_stat or self.system.uid(root_pid) != uid:
+                    continue
+                subtree = [root_pid]
+                for process in subtree:
+                    subtree.extend(child for child in self.system.children(process) if child not in subtree)
+                command = self.system.comm(root_pid) or pathlib.Path(next(iter(self.system.cmdline(root_pid)), "process")).name
+                observed_at = self.now()
+                io_bytes = sum(self.system.process_io_bytes(process) for process in subtree)
+                previous_io = self.previous_process_io.get(root_pid)
+                io_rate = 0.0
+                if previous_io and previous_io[2] == root_stat[1] and observed_at > previous_io[0] and io_bytes >= previous_io[1]:
+                    io_rate = (io_bytes - previous_io[1]) / (observed_at - previous_io[0])
+                self.previous_process_io[root_pid] = (observed_at, io_bytes, root_stat[1])
+                workloads.append(Workload(root_pid, root_stat[1], command, sum(self.system.rss_bytes(process) for process in subtree), io_rate))
             candidates.append(Candidate(
                 pane, harness, clanker_id, pid, pane_pid, stat[1],
-                state, focused, session_name, cwd, worktree_path, rss_bytes, report_updated_at,
+                state, focused, session_name, cwd, worktree_path, rss_bytes, report_updated_at, tuple(workloads),
             ))
         duplicate_ids = {candidate.clanker_id for candidate in candidates if sum(other.clanker_id == candidate.clanker_id for other in candidates) > 1}
         return [candidate for candidate in candidates if candidate.clanker_id not in duplicate_ids]
@@ -619,47 +703,152 @@ class ResourceGuard:
         eligible = [candidate for candidate in candidates if not candidate.focused]
         return min(eligible, key=lambda value: (STATE_RANK[value.state], -value.rss_bytes, value.report_updated_at, value.pane)) if eligible else None
 
-    def _suspend_recovery(self, candidate: Candidate) -> bool:
+    def _select_workload(self, sample: MemorySample, candidate: Candidate) -> Workload | None:
+        memory_pressured = sample.available_bytes <= sample.threshold_bytes and (
+            sample.psi_some >= self.config.psi_some or sample.psi_full >= self.config.psi_full
+        )
+        if memory_pressured:
+            eligible = [workload for workload in candidate.workloads if workload.rss_bytes >= self.config.workload_min_rss_bytes]
+            return max(eligible, key=lambda workload: (workload.rss_bytes, -workload.pid), default=None)
+        eligible = [workload for workload in candidate.workloads if workload.io_bytes_per_second >= self.config.workload_min_io_bytes_per_second]
+        return max(eligible, key=lambda workload: (workload.io_bytes_per_second, -workload.pid), default=None)
+
+    def _validate_workload(self, candidate: Candidate, workload: Workload) -> bool:
+        stat = self.system.stat(workload.pid)
+        return (
+            self.validate(candidate)
+            and stat is not None
+            and stat[1] == workload.start_ticks
+            and self.system.uid(workload.pid) == os.getuid()
+            and workload.pid != candidate.pid
+            and _is_descendant(self.system, workload.pid, candidate.pid)
+        )
+
+    def _stop_workload(self, sample: MemorySample, candidate: Candidate, workload: Workload) -> pathlib.Path | None:
+        if not self._validate_workload(candidate, workload):
+            return None
+        subtree = [workload.pid]
+        for process in subtree:
+            subtree.extend(child for child in self.system.children(process) if child not in subtree)
+        identities: list[tuple[int, int]] = []
+        for process in subtree:
+            stat = self.system.stat(process)
+            if not stat or self.system.uid(process) != os.getuid() or not _is_descendant(self.system, process, workload.pid):
+                return None
+            identities.append((process, stat[1]))
+        io_pressured = (
+            sample.io_psi_some >= self.config.io_psi_some
+            or sample.io_psi_full >= self.config.io_psi_full
+            or bool(self.config.read_limit_bytes_per_second and sample.root_read_bytes_per_second >= self.config.read_limit_bytes_per_second * 0.75)
+        )
+        reason = "sustained_io_pressure" if io_pressured else "sustained_memory_pressure"
+        handles: list[tuple[int, int, int]] = []
+        for process, start_ticks in identities:
+            if not _is_descendant(self.system, process, workload.pid):
+                for _pid, _start, handle in handles:
+                    self.system.close_process(handle)
+                return None
+            handle = self.system.open_process(process, start_ticks)
+            if handle is None:
+                for _pid, _start, opened in handles:
+                    self.system.close_process(opened)
+                return None
+            handles.append((process, start_ticks, handle))
+        for process, start_ticks, _handle in handles:
+            stat = self.system.stat(process)
+            if not stat or stat[1] != start_ticks or self.system.uid(process) != os.getuid() or not _is_descendant(self.system, process, workload.pid):
+                for _pid, _start, opened in handles:
+                    self.system.close_process(opened)
+                return None
+        signalled = False
+        forced = False
+        try:
+            for _process, _start_ticks, handle in reversed(handles):
+                try:
+                    self.system.signal_process(handle, signal.SIGTERM)
+                    signalled = True
+                except OSError:
+                    pass
+            if not signalled:
+                return None
+            if self.config.term_grace:
+                self.sleep(self.config.term_grace)
+            for process, start_ticks, handle in reversed(handles):
+                stat = self.system.stat(process)
+                if not stat or stat[1] != start_ticks or self.system.uid(process) != os.getuid():
+                    continue
+                try:
+                    self.system.signal_process(handle, signal.SIGKILL)
+                    forced = True
+                except OSError:
+                    pass
+        finally:
+            for _process, _start_ticks, handle in handles:
+                self.system.close_process(handle)
+        incident_id = uuid.uuid4().hex
+        reason_text = "sustained I/O pressure" if reason == "sustained_io_pressure" else "sustained memory pressure"
+        message = f"Resource Guard stopped child process {workload.command} (PID {workload.pid}) because {reason_text} exceeded the configured threshold. Incident: {incident_id}. Review the workload before restarting it."
+        cli = os.environ.get("CLANKERHOUSE_CLANKERS", "clankers")
+        try:
+            notified = self.run_command([cli, "send", candidate.clanker_id, "--delivery", "steer", "--text", message]) == 0
+        except OSError:
+            notified = False
+        incident = self._incident(
+            "resource_pressure_workload_stop",
+            candidate.incident_clanker(),
+            {
+                "reason": reason,
+                "process": {"pid": workload.pid, "command": workload.command, "rssBytes": workload.rss_bytes, "ioBytesPerSecond": workload.io_bytes_per_second},
+                "steering": {"attempted": True, "delivered": notified},
+                "preIncidentSamples": self.snapshot.get("sample_history", []),
+            },
+            incident_id=incident_id,
+        )
+        self.snapshot["last_steering_notification"] = {"clanker_id": candidate.clanker_id, "incident": incident_id, "delivered": notified}
+        print(json.dumps({"event": "resource_pressure_workload_stop", "clankerId": candidate.clanker_id, "pane": candidate.pane, "processPid": workload.pid, "forced": forced, "steeringDelivered": notified, "incident": str(incident)}), flush=True)
+        return incident
+
+    def _stop_tracked_clanker(self, candidate: Candidate) -> pathlib.Path | None:
         database = self.config.state_dir / "recovery.sqlite3"
         if not database.exists():
-            return True
+            return None
         try:
             with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
                 row = connection.execute(
-                    "SELECT desired_state FROM desired_clankers WHERE clanker_id = ?",
+                    "SELECT desired_state, owner_unit FROM desired_clankers WHERE clanker_id = ?",
                     (candidate.clanker_id,),
                 ).fetchone()
         except (OSError, sqlite3.Error):
-            return False
-        if row is None or row[0] == "suspended_resource_pressure":
-            return True
-        if row[0] != "running":
-            return True
+            return None
+        if row is None or row[0] not in ("running", "stopped") or not isinstance(row[1], str) or not re.fullmatch(r"clankerhouse-[A-Za-z0-9_.-]+\.scope", row[1]):
+            return None
         cli = os.environ.get("CLANKERHOUSE_CLANKERS", "clankers")
-        result = subprocess.run(
-            [cli, "recovery", "suspend", candidate.clanker_id, "--reason", "resource-pressure", "--no-kill"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return result.returncode == 0
-
-    def _owned_scope(self, candidate: Candidate) -> str | None:
-        database = self.config.state_dir / "recovery.sqlite3"
-        if not database.exists():
-            return None
         try:
-            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-                row = connection.execute("SELECT owner_unit FROM desired_clankers WHERE clanker_id = ?", (candidate.clanker_id,)).fetchone()
-            unit = row[0] if row else None
-            return unit if isinstance(unit, str) and re.fullmatch(r"clankerhouse-[A-Za-z0-9_.-]+\.scope", unit) else None
-        except (OSError, sqlite3.Error):
+            stopped = self.run_command([
+                cli, "recovery", "stop", candidate.clanker_id,
+                "--reason", "resource-pressure", "--no-pane-kill", "--if-present",
+            ]) == 0
+        except OSError:
+            stopped = False
+        if not stopped:
             return None
+        incident = self._incident(
+            "resource_pressure_clanker_stop",
+            candidate.incident_clanker(),
+            {"reason": "no_attributable_workload", "ownerUnit": row[1], "preIncidentSamples": self.snapshot.get("sample_history", [])},
+        )
+        print(json.dumps({"event": "resource_pressure_clanker_stop", "clankerId": candidate.clanker_id, "pane": candidate.pane, "incident": str(incident)}), flush=True)
+        return incident
 
     def mitigate(self, sample: MemorySample, candidates: list[Candidate] | None = None) -> Candidate | None:
         candidates = self.discover() if candidates is None else candidates
-        already_acted = set(self.snapshot.get("acted_clankers", []))
-        selected = self.select([candidate for candidate in candidates if candidate.clanker_id not in already_acted])
+        workload_by_clanker = {
+            candidate.clanker_id: workload
+            for candidate in candidates
+            if (workload := self._select_workload(sample, candidate)) is not None
+        }
+        workload_candidates = [candidate for candidate in candidates if candidate.clanker_id in workload_by_clanker]
+        selected = self.select(workload_candidates) or self.select(candidates)
         if selected is None:
             self.snapshot["mitigation_skipped"] = "no_non_focused_candidate"
             self._write_snapshot()
@@ -669,57 +858,41 @@ class ResourceGuard:
             self._write_snapshot()
             print(json.dumps({"event": "dry_run_selection", "clankerId": selected.clanker_id, "pane": selected.pane}), flush=True)
             return selected
-        if not self.validate(selected):
-            self.snapshot["mitigation_skipped"] = "candidate_validation_failed"
-            self._write_snapshot()
-            return None
-        if not self._suspend_recovery(selected):
-            self.snapshot["mitigation_skipped"] = "recovery_suspension_failed"
+
+        acted: Candidate | None = None
+        incident: pathlib.Path | None = None
+        if workload_candidates:
+            remaining = list(workload_candidates)
+            while remaining and acted is None:
+                selected = self.select(remaining)
+                if selected is None:
+                    break
+                remaining.remove(selected)
+                if not self.validate(selected):
+                    continue
+                incident = self._stop_workload(sample, selected, workload_by_clanker[selected.clanker_id])
+                acted = selected if incident is not None else None
+        else:
+            remaining = list(candidates)
+            while remaining and acted is None:
+                selected = self.select(remaining)
+                if selected is None:
+                    break
+                remaining.remove(selected)
+                if not self.validate(selected):
+                    continue
+                incident = self._stop_tracked_clanker(selected)
+                acted = selected if incident is not None else None
+        if acted is None:
+            self.snapshot["mitigation_skipped"] = "workload_validation_failed" if workload_candidates else "no_attributable_workload_or_stoppable_clanker"
             self._write_snapshot()
             return None
         self.snapshot["acted"] = True
-        self.snapshot.setdefault("acted_clankers", []).append(selected.clanker_id)
-        self.snapshot["selected"] = dataclasses.asdict(selected)
+        self.snapshot.setdefault("acted_clankers", []).append(acted.clanker_id)
+        self.snapshot["selected"] = dataclasses.asdict(acted)
+        self.snapshot["last_mitigation_at"] = self.now()
         self._write_snapshot()
-        owner = self._owned_scope(selected)
-        if owner:
-            stopped = subprocess.run(["systemctl", "--user", "stop", owner], check=False, capture_output=True, text=True)
-            verified = subprocess.run(["systemctl", "--user", "show", owner, "--property=ActiveState", "--value"], check=False, capture_output=True, text=True)
-            if stopped.returncode != 0 or (verified.returncode == 0 and verified.stdout.strip() not in ("inactive", "failed")):
-                self._incident("resource_pressure_termination", selected.incident_clanker(), {"reason": "cgroup_cleanup_failed", "ownerUnit": owner, "preIncidentSamples": self.snapshot.get("sample_history", [])})
-                self.snapshot["mitigation_skipped"] = "cgroup_cleanup_failed"
-                self.snapshot["acted_clankers"] = [value for value in self.snapshot.get("acted_clankers", []) if value != selected.clanker_id]
-                self._write_snapshot()
-                return None
-            action = "cgroup_stop"
-            incident = self._incident("resource_pressure_termination", selected.incident_clanker(), {"reason": "sustained_io_pressure" if sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full else "sustained_memory_pressure", "forced": False, "ownerUnit": owner, "preIncidentSamples": self.snapshot.get("sample_history", [])})
-            print(json.dumps({"event": "resource_pressure_termination", "clankerId": selected.clanker_id, "pane": selected.pane, "forced": False, "ownerUnit": owner, "incident": str(incident)}), flush=True)
-            return selected
-        try:
-            self.system.kill(selected.pid, signal.SIGTERM)
-        except OSError:
-            self.snapshot["acted"] = False
-            self.snapshot["acted_clankers"] = [value for value in self.snapshot.get("acted_clankers", []) if value != selected.clanker_id]
-            self.snapshot["mitigation_skipped"] = "candidate_disappeared_before_signal"
-            self._write_snapshot()
-            return None
-        action = "term"
-        if self.config.term_grace:
-            self.sleep(self.config.term_grace)
-        if self.system.alive(selected.pid) and self.validate(selected):
-            self.system.kill(selected.pid, signal.SIGKILL)
-            action = "term_kill"
-        incident = self._incident(
-            "resource_pressure_termination",
-            selected.incident_clanker(),
-            {
-                "reason": "sustained_io_pressure" if sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full else "sustained_memory_pressure",
-                "forced": action == "term_kill",
-                "preIncidentSamples": self.snapshot.get("sample_history", []),
-            },
-        )
-        print(json.dumps({"event": "resource_pressure_termination", "clankerId": selected.clanker_id, "pane": selected.pane, "forced": action == "term_kill", "incident": str(incident)}), flush=True)
-        return selected
+        return acted
 
     def run_once(self) -> MemorySample:
         sample = self.sample()
@@ -729,7 +902,9 @@ class ResourceGuard:
         io_pressured = sample.io_psi_some >= self.config.io_psi_some or sample.io_psi_full >= self.config.io_psi_full
         throughput_pressured = bool(self.config.read_limit_bytes_per_second and sample.root_read_bytes_per_second >= self.config.read_limit_bytes_per_second * 0.75)
         pressured = memory_pressured or io_pressured or throughput_pressured
-        self.consecutive = self.consecutive + 1 if pressured else 0
+        last_mitigation_at = float(self.snapshot.get("last_mitigation_at", 0) or 0)
+        cooling_down = bool(last_mitigation_at and self.now() - last_mitigation_at < self.config.cooldown)
+        self.consecutive = self.consecutive + 1 if pressured and not cooling_down else 0
         candidates = self.discover()
         healthy = not pressured and sample.cpu_psi_some < self.config.cpu_psi_some
         self._write_admission(sample, candidates, healthy)
@@ -752,6 +927,8 @@ class ResourceGuard:
             "sampled_at": self.now(),
             "sample": dataclasses.asdict(sample),
             "consecutive_pressure": self.consecutive,
+            "cooling_down": cooling_down,
+            "cooldown_remaining_seconds": max(0.0, self.config.cooldown - (self.now() - last_mitigation_at)) if cooling_down else 0.0,
             "pressure_kind": "io" if io_pressured or throughput_pressured else "memory" if memory_pressured else None,
             "clankers": [{
                 "pane": candidate.pane,
@@ -771,7 +948,11 @@ class ResourceGuard:
         })
         self._write_snapshot()
         if self.consecutive >= self.config.samples:
-            self.mitigate(sample, candidates)
+            mitigated = self.mitigate(sample, candidates)
+            if mitigated is not None and not self.config.dry_run:
+                self.consecutive = 0
+                self.snapshot["consecutive_pressure"] = 0
+                self._write_snapshot()
         return sample
 
     def clean_shutdown(self) -> None:

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
+import { readRegistryWorkshops, registryStatePath } from "./registry"
 
 export type LineageMode = "off" | "best-effort" | "strict"
 export interface LineageIdentity { path: string; commonDir: string; branch: string }
@@ -462,12 +463,22 @@ const addSnapshotRows = (snapshot: LineageSnapshot, dbPath: string, table: "work
   }
 }
 
-export const readLineageSnapshot = (dbPath = workshopStatePath, mode: LineageMode = lineageMode()): LineageSnapshot => {
+export const readLineageSnapshot = (dbPath = workshopStatePath, mode: LineageMode = lineageMode(), durableRegistryPath = dbPath === workshopStatePath ? registryStatePath() : undefined): LineageSnapshot => {
   const snapshot = emptySnapshot()
   try {
     // Keep already-running workshops visible; current Clankerhouse records win.
     if (dbPath === workshopStatePath) addSnapshotRows(snapshot, previousWorkshopStatePath, "workspaces")
     addSnapshotRows(snapshot, dbPath, "workshops")
+    // Expansion compatibility: the durable registry is preferred, while legacy stores remain readable fallbacks.
+    if (durableRegistryPath) {
+      const records = readRegistryWorkshops(durableRegistryPath)
+      const childCounts = Map.groupBy(records.filter((record) => record.parentWorkshopId), (record) => record.parentWorkshopId!)
+      for (const record of records) {
+        const preferred: WorkshopRecord & { childWorkshopCount: number } = { ...record, version: manifestVersion, childWorkshopCount: childCounts.get(record.workshopId)?.length ?? 0 }
+        snapshot.byPath.set(record.canonicalPath, preferred)
+        snapshot.byId.set(record.workshopId, preferred)
+      }
+    }
     return snapshot
   } catch (error) {
     if (mode === "strict") throw error

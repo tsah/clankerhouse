@@ -27,6 +27,17 @@ class OpencodeV2StatusTest(unittest.TestCase):
             opencode_status.is_root_session({"id": "child", "parentID": "root"})
         )
 
+    def test_process_fingerprint_changes_when_an_instance_starts_or_pid_is_reused(self):
+        original = opencode_status.process_start_ticks
+        opencode_status.process_start_ticks = lambda pid: {"10": 100, "11": 200}[pid]
+        try:
+            self.assertEqual(opencode_status.process_fingerprint(["10"]), "10:100")
+            self.assertEqual(opencode_status.process_fingerprint(["10", "11"]), "10:100\n11:200")
+            opencode_status.process_start_ticks = lambda pid: {"10": 300}[pid]
+            self.assertEqual(opencode_status.process_fingerprint(["10"]), "10:300")
+        finally:
+            opencode_status.process_start_ticks = original
+
     def test_active_root_replaces_stale_explicit_pane_binding(self):
         instances = [{"session_id": "stale", "start_ticks": 10}]
         candidates = [

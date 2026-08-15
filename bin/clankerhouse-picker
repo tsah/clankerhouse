@@ -82,6 +82,10 @@ chmod 700 "$STATE_DIR"
 exec 9>"$LOCK_FILE"
 flock 9
 if ! server_running; then
+    preserve_cache=false
+    if [[ -s "$CACHE_FILE" && -r "$VERSION_FILE" && "$(<"$VERSION_FILE")" == "$CACHE_VERSION" && -r "$SOCKET_FILE" && "$(<"$SOCKET_FILE")" == "$CURRENT_TMUX_SOCKET" ]]; then
+        preserve_cache=true
+    fi
     stale_pids=()
     while read -r old_pid; do
         [[ "$old_pid" =~ ^[0-9]+$ ]] || continue
@@ -103,7 +107,8 @@ if ! server_running; then
             kill -KILL "$old_pid" 2>/dev/null || true
         fi
     done
-    rm -f "$PID_FILE" "$CACHE_FILE" "$VERSION_FILE" "$STATE_DIR/daemon.sock"
+    rm -f "$PID_FILE" "$VERSION_FILE" "$STATE_DIR/daemon.sock"
+    [[ "$preserve_cache" == true ]] || rm -f "$CACHE_FILE"
     printf '%s\n' "$CURRENT_TMUX_SOCKET" > "$SOCKET_FILE"
     nohup bun src/main.tsx --server >>"$LOG_FILE" 2>&1 &
 fi

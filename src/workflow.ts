@@ -7,12 +7,19 @@ import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sen
 import { initialHarnessCommand } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
-import { openRecoveryStore } from "./recovery/store"
+import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { parseTmuxFields, tmuxFields } from "./tmux-fields"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, workshopForId, workshopForPath } from "./workshop"
 
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
+
+export class ClankerRegistrationError extends Error {
+  constructor(message: string, options: ErrorOptions) {
+    super(message, options)
+    this.name = "ClankerRegistrationError"
+  }
+}
 
 async function command(argv: string[], cwd?: string, allowFailure = false) {
   const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" })
@@ -106,8 +113,9 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   if (recoverable) {
     const recoverableHarness = harness as Exclude<Harness, "codex">
     const workshop = workshopForPath(id.path)
-    const store = openRecoveryStore()
+    let store: RecoveryStore | undefined
     try {
+      store = openRecoveryStore()
       const launchSpec: LaunchSpec = resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
       store.createDesired({
         clankerId,
@@ -125,7 +133,13 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       const attemptId = String(attempt.id)
       store.setRecoveryOwner(clankerId, recoveryUnitName(clankerId, attemptId))
       argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId })
-    } finally { store.close() }
+    } catch (error) {
+      try {
+        const registered = store?.getDesired(clankerId)
+        if (registered && registered.desiredState !== "tombstoned") store!.tombstone(clankerId, { reason: "initial registration failed" })
+      } catch {}
+      throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
+    } finally { store?.close() }
   }
   const result = await command(["tmux", "new-window", "-d", "-P", "-F", tmuxFields("#{window_id}", "#{pane_id}"), "-t", `=${session}`, "-n", name, "-c", id.path, ...argv])
   const [window, pane] = parseTmuxFields(result.stdout)
@@ -197,7 +211,32 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
 export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; resourceClass?: RecoveryResourceClass; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean } = {}) {
   const parent = await resolveWorkshopParent(options)
   const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy })
-  return spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass)
+  return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass))
+}
+
+type CreatedWorkshop = Awaited<ReturnType<typeof createWorkshop>>
+type CommandResult = Awaited<ReturnType<typeof command>>
+
+export async function rollbackCreatedWorkshop(created: CreatedWorkshop, run: (argv: string[]) => Promise<CommandResult> = (argv) => command(argv, undefined, true)) {
+  const cleanupErrors: string[] = []
+  const killed = await run(["tmux", "kill-session", "-t", `=${created.session}`])
+  if (killed.code !== 0 && !/can't find session|no server running/i.test(killed.stderr)) cleanupErrors.push(killed.stderr || "unable to remove tmux session")
+  const removed = await run(["wt", "-C", created.identity.path, "remove", "--foreground", "--force", "--force-delete", "--yes", created.identity.path])
+  if (removed.code !== 0) cleanupErrors.push(removed.stderr || "unable to remove worktree and branch")
+  if (cleanupErrors.length > 0) throw new Error(cleanupErrors.join("; "))
+}
+
+export async function completeWorkshopRegistration<T>(created: CreatedWorkshop, operation: () => Promise<T>, rollback: (created: CreatedWorkshop) => Promise<void> = rollbackCreatedWorkshop) {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!(error instanceof ClankerRegistrationError)) throw error
+    try { await rollback(created) }
+    catch (cleanupError) {
+      throw new Error(`${error.message}; workshop rollback also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, { cause: error })
+    }
+    throw error
+  }
 }
 
 export async function ensureDirectorySession(directory: string) {

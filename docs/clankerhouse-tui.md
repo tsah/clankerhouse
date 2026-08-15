@@ -104,8 +104,9 @@ See `clankerhouse/README.md` for the CLI and runtime contract and
 
 ## Native client
 
-The default jump client remains the feature-complete TypeScript picker while
-the Rust/ratatui application in `native-client/` reaches action parity. Both
+The default Alt-K jump client is the fast Rust/ratatui application in
+`native-client/`; set `@clankerhouse-jump-client full` before loading the tmux
+plugin to use the feature-complete TypeScript picker instead. Both
 read the same version-10 snapshot while the TypeScript cache server retains
 collection and projection ownership. Build and validate the native client with:
 
@@ -123,5 +124,6 @@ tmux display-popup -E -w 90% -h 80% \
 
 The native client supports jump search, navigation, lineage/detail expansion,
 live snapshot reloads, opening exact targets, repository and branch selection,
-and worktree creation. Use `bin/clankerhouse-native` explicitly while rename,
-attachment, detachment, and deletion are completed there.
+and worktree creation. Rename, attachment, detachment, and deletion remain in
+the full picker or their dedicated commands while those actions are completed
+in the native client.

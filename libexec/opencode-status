@@ -437,6 +437,10 @@ def process_start_ticks(pid):
         return 0
 
 
+def process_fingerprint(pids):
+    return "\n".join(f"{pid}:{process_start_ticks(pid)}" for pid in pids)
+
+
 def tmux_tty_lookup():
     lookup = {}
     if not shutil.which("tmux"):
@@ -485,6 +489,7 @@ def main():
     tmux_socket = os.environ.get("TMUX", "").split(",", 1)[0] or "default"
     cache_scope = hashlib.sha256(tmux_socket.encode("utf-8")).hexdigest()[:12]
     cache_path = f"/tmp/opencode-status-{os.getuid()}-v2-{cache_scope}.tsv"
+    cache_process_path = f"{cache_path}.processes"
     cache_lock = None
     stale_cache = ""
     cache_ttl_seconds = TSV_CACHE_TTL_SECONDS
@@ -492,17 +497,25 @@ def main():
     if args.tsv and not args.no_cache:
         cache_lock = open(f"{cache_path}.lock", "a+", encoding="utf-8")
         fcntl.flock(cache_lock, fcntl.LOCK_EX)
+
+    # Sample processes only after serializing collectors. Otherwise one caller
+    # can mistake another caller's short-lived `opencode2 api` children for a
+    # topology change and keep the cache permanently cold.
+    pids = get_opencode_pids()
+    current_processes = process_fingerprint(pids)
+
+    if cache_lock is not None:
         try:
-            stale_cache = read_text(cache_path)
+            cached_processes = read_text(cache_process_path)
+            if cached_processes == current_processes:
+                stale_cache = read_text(cache_path)
             st = os.stat(cache_path)
-            if time.time() - st.st_mtime <= cache_ttl_seconds:
+            if cached_processes == current_processes and time.time() - st.st_mtime <= cache_ttl_seconds:
                 if stale_cache:
                     print(stale_cache, end="")
                     return
         except OSError:
             pass
-
-    pids = get_opencode_pids()
 
     if not pids:
         print("No running opencode instances.")
@@ -933,6 +946,8 @@ def main():
             try:
                 with open(cache_path, "w", encoding="utf-8") as f:
                     f.write(output)
+                with open(cache_process_path, "w", encoding="utf-8") as f:
+                    f.write(current_processes)
             except OSError:
                 pass
         return

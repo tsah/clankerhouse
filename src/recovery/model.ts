@@ -1,4 +1,4 @@
-export const RECOVERY_SCHEMA_VERSION = 2 as const
+export const RECOVERY_SCHEMA_VERSION = 3 as const
 export const RECOVERY_POLICY = Object.freeze({
   version: 2 as const,
   automaticRecovery: true,

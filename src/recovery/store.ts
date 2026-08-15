@@ -110,7 +110,7 @@ const ensurePermissions = (dbPath: string) => {
 }
 
 const initialize = (db: Database) => {
-  const current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
+  let current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
   if (current > RECOVERY_SCHEMA_VERSION) throw new Error(`Unsupported recovery store version ${current}`)
   if (current === RECOVERY_SCHEMA_VERSION) return
   if (current === 1) {
@@ -126,6 +126,49 @@ const initialize = (db: Database) => {
       PRAGMA user_version = 2;
       COMMIT;
     `)
+    current = 2
+  }
+  if (current === 2) {
+    db.exec("PRAGMA foreign_keys = OFF")
+    try {
+      db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE desired_clankers_v3 (
+          clanker_id TEXT PRIMARY KEY,
+          harness TEXT NOT NULL CHECK (harness IN ('pi', 'claude', 'opencode')),
+          workshop_id TEXT NOT NULL,
+          workshop_path TEXT NOT NULL,
+          tmux_session_name TEXT NOT NULL,
+          tmux_window_name TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          harness_session_id TEXT,
+          launch_spec TEXT NOT NULL,
+          original_task TEXT NOT NULL,
+          policy_version INTEGER NOT NULL CHECK (policy_version IN (1, 2)),
+          desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped', 'suspended_resource_pressure', 'tombstoned')),
+          recovery_condition TEXT NOT NULL CHECK (recovery_condition IN ('healthy', 'pending', 'recovering', 'interrupted_unknown', 'quarantined', 'suspended')),
+          quarantine_reason TEXT,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+          owner_unit TEXT,
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO desired_clankers_v3 (${desiredColumns}) SELECT ${desiredColumns} FROM desired_clankers;
+        DROP TABLE desired_clankers;
+        ALTER TABLE desired_clankers_v3 RENAME TO desired_clankers;
+        CREATE INDEX desired_clankers_workshop_idx ON desired_clankers(workshop_id);
+        CREATE INDEX desired_clankers_state_idx ON desired_clankers(desired_state);
+      `)
+      const violations = db.query("PRAGMA foreign_key_check").all()
+      if (violations.length > 0) throw new Error("Recovery store migration produced foreign key violations")
+      db.exec("PRAGMA user_version = 3; COMMIT;")
+    } catch (error) {
+      try { db.exec("ROLLBACK") } catch {}
+      throw error
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON")
+    }
     return
   }
   if (current !== 0) throw new Error(`Unsupported recovery store version ${current}`)
@@ -200,7 +243,7 @@ const initialize = (db: Database) => {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    PRAGMA user_version = 2;
+    PRAGMA user_version = 3;
     COMMIT;
   `)
 }

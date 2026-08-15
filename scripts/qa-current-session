@@ -34,6 +34,7 @@ JSON
 
 tmux -S "$inner_socket" -f /dev/null new-session -d -s qa-working -n main -x 100 -y 24 "sleep 300"
 tmux -S "$inner_socket" new-session -d -s qa-extract-workers -n main -x 100 -y 24 "sleep 300"
+tmux -S "$inner_socket" set-option -g @clankerhouse-jump-client full
 inner_pid=$(tmux -S "$inner_socket" display-message -p '#{pid}')
 TMUX="$inner_socket,$inner_pid,0" CLANKERHOUSE_HOME="$repo" "$repo/clankerhouse.tmux"
 

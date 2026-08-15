@@ -15,6 +15,10 @@ fi
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
 if [[ ! -s "$STATE_DIR/state.json" ]]; then
     "$SCRIPT_DIR/clankerhouse-picker" --ensure-server
+else
+    # Keep a hot snapshot on the launch path and validate/restart its producer
+    # out of band so opening the jump client never waits on collection.
+    "$SCRIPT_DIR/clankerhouse-picker" --ensure-server >/dev/null 2>&1 &
 fi
 
 if [[ ! -s "$STATE_DIR/state.json" ]]; then

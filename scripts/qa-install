@@ -27,7 +27,7 @@ server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
 TMUX="$socket,$server_pid,0" "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
 sleep 0.2
 [[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$root/prefix/lib/clankerhouse" ]]
-tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse/bin/clankerhouse" >/dev/null
+tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse/bin/clankerhouse-native" >/dev/null
 "$repo/scripts/uninstall" --prefix "$root/prefix" >/dev/null
 [[ ! -e "$root/prefix/lib/clankerhouse" ]]
 

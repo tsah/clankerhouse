@@ -1639,8 +1639,10 @@ fn run(mut terminal: DefaultTerminal, mut app: App) -> io::Result<AppExit> {
         {
             return Ok(exit);
         }
-        if let Err(error) = app.reload(false) {
-            app.error = error;
+        match app.reload(false) {
+            Ok(()) => app.error.clear(),
+            Err(error) if app.sessions.is_empty() => app.error = error,
+            Err(_) => {}
         }
         app.animation_frame = (app.animation_frame + 1) % 40;
     }
@@ -1773,6 +1775,25 @@ mod tests {
         let rows = repository_rows(&cache_path, &sessions);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, "/repo");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transient_snapshot_removal_keeps_the_last_good_rows() {
+        let root = env::temp_dir().join(format!(
+            "clankerhouse-native-reload-test-{}",
+            std::process::id()
+        ));
+        let cache_path = root.join("state.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&cache_path, r#"{"version":10,"sessions":[{"name":"kept","path":"/repo","target":{"type":"directory","path":"/repo"}}]}"#).unwrap();
+        let mut app = App::new(cache_path.clone(), String::new()).unwrap();
+
+        fs::remove_file(&cache_path).unwrap();
+        assert!(app.reload(false).is_err());
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].name, "kept");
+
         fs::remove_dir_all(root).unwrap();
     }
 

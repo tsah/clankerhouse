@@ -52,7 +52,7 @@ describe("recovery store", () => {
     reopened.close()
 
     const raw = new Database(dbPath, { readonly: true })
-    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 3 })
     expect((raw.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal")
     expect(Number((raw.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous)).toBe(2)
     raw.close()
@@ -64,9 +64,73 @@ describe("recovery store", () => {
     const { dbPath } = fixture()
     mkdirSync(dirname(dbPath), { recursive: true })
     const raw = new Database(dbPath, { create: true })
-    raw.exec("PRAGMA user_version = 3")
+    raw.exec("PRAGMA user_version = 4")
     raw.close()
-    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 3/)
+    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 4/)
+  })
+
+  test("upgrades an actual v1 schema to accept policy version 2 without breaking foreign keys", () => {
+    const { dbPath } = fixture()
+    mkdirSync(dirname(dbPath), { recursive: true })
+    const raw = new Database(dbPath, { create: true })
+    raw.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE desired_clankers (
+        clanker_id TEXT PRIMARY KEY,
+        harness TEXT NOT NULL CHECK (harness IN ('pi', 'claude', 'opencode')),
+        workshop_id TEXT NOT NULL, workshop_path TEXT NOT NULL, tmux_session_name TEXT NOT NULL,
+        tmux_window_name TEXT NOT NULL, cwd TEXT NOT NULL, harness_session_id TEXT,
+        launch_spec TEXT NOT NULL, original_task TEXT NOT NULL,
+        policy_version INTEGER NOT NULL CHECK (policy_version = 1),
+        desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped', 'suspended_resource_pressure', 'tombstoned')),
+        revision INTEGER NOT NULL CHECK (revision > 0), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX desired_clankers_workshop_idx ON desired_clankers(workshop_id);
+      CREATE INDEX desired_clankers_state_idx ON desired_clankers(desired_state);
+      CREATE TABLE recovery_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, clanker_id TEXT REFERENCES desired_clankers(clanker_id),
+        event TEXT NOT NULL, revision INTEGER, payload TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX recovery_journal_clanker_idx ON recovery_journal(clanker_id, id);
+      CREATE TRIGGER recovery_journal_no_update BEFORE UPDATE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
+      CREATE TRIGGER recovery_journal_no_delete BEFORE DELETE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
+      CREATE TABLE recovery_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, clanker_id TEXT NOT NULL REFERENCES desired_clankers(clanker_id),
+        attempt_number INTEGER NOT NULL, trigger TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'abandoned')),
+        error TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, UNIQUE(clanker_id, attempt_number)
+      );
+      CREATE INDEX recovery_attempts_clanker_idx ON recovery_attempts(clanker_id, attempt_number);
+      CREATE TABLE recovery_leases (
+        scope_key TEXT PRIMARY KEY, clanker_id TEXT REFERENCES desired_clankers(clanker_id), owner_token TEXT NOT NULL,
+        boot_id TEXT NOT NULL, pid INTEGER NOT NULL, process_start_ticks INTEGER NOT NULL,
+        acquired_at INTEGER NOT NULL, renewed_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+        CHECK ((scope_key = 'global' AND clanker_id IS NULL) OR (scope_key = 'clanker:' || clanker_id AND clanker_id IS NOT NULL))
+      );
+      CREATE TABLE recovery_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      INSERT INTO desired_clankers VALUES ('legacy', 'pi', 'workshop-old', '/tmp/old', 'repo@old', 'pi', '/tmp/old', NULL, '{"version":1,"profile":null}', 'legacy task', 1, 'running', 1, 10, 10);
+      INSERT INTO recovery_attempts (clanker_id, attempt_number, trigger, status, error, started_at, finished_at) VALUES ('legacy', 1, 'initial', 'succeeded', NULL, 10, 11);
+      INSERT INTO recovery_leases VALUES ('clanker:legacy', 'legacy', 'owner', 'boot', 1, 1, 10, 10, 20);
+      PRAGMA user_version = 1;
+    `)
+    raw.close()
+
+    const store = openRecoveryStore({ dbPath })
+    expect(store.getDesired("legacy")).toMatchObject({ recoveryPolicyVersion: 1, recoveryCondition: "pending" })
+    expect(store.attemptsFor("legacy")).toHaveLength(1)
+    store.createDesired(desired({ clankerId: "new-policy-2" }), { now: 100 })
+    expect(store.getDesired("new-policy-2")?.recoveryPolicyVersion).toBe(2)
+    store.close()
+
+    const migrated = new Database(dbPath)
+    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 3 })
+    expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([])
+    expect((migrated.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'desired_clankers'").get() as { sql: string }).sql).toContain("policy_version IN (1, 2)")
+    expect(migrated.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'desired_clankers_%_idx' ORDER BY name").all()).toEqual([
+      { name: "desired_clankers_state_idx" },
+      { name: "desired_clankers_workshop_idx" },
+    ])
+    migrated.close()
   })
 
   test("couples desired mutations to append-only journal entries", () => {

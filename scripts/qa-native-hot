@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 binary="$root/native-client/target/release/clankerhouse-native"
-[[ -x "$binary" ]] || "$root/scripts/build-native" >/dev/null
+"$root/scripts/build-native" >/dev/null
 qa=$(mktemp -d "/tmp/qa-clankerhouse-native-hot-$(id -u)-XXXXXX")
 trap 'rm -rf "$qa"' EXIT INT TERM
 mkdir -m 700 "$qa/runtime"

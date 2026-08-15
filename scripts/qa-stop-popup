@@ -6,11 +6,18 @@ repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 root=$(realpath -m -- "${CLANKERHOUSE_STOP_POPUP_QA_ROOT:-/tmp/qa-clankerhouse-stop-popup-$(id -u)-$$}")
 [[ "$root" =~ ^/tmp/qa-clankerhouse-stop-popup-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe stop-popup QA root: $root" >&2; exit 2; }
 marker="$root.clankerhouse-qa-owned"
+socket="$root/tmux.sock"
+runtime="$root/runtime"
+state_home="$root/state"
+qa_home="$root/home"
 [[ ! -e "$root" || -f "$marker" ]] || { echo "Refusing unowned stop-popup QA root: $root" >&2; exit 2; }
 rm -rf -- "$root"
-mkdir -p "$root"
+mkdir -p "$root" "$runtime" "$state_home" "$qa_home"
+chmod 700 "$runtime" "$state_home" "$qa_home"
 touch "$marker"
-socket="$root/tmux.sock"
+export XDG_RUNTIME_DIR="$runtime"
+export XDG_STATE_HOME="$state_home"
+export HOME="$qa_home"
 
 cleanup() {
     tmux -S "$socket" kill-server 2>/dev/null || true
@@ -118,7 +125,7 @@ grep -q 'Destroying session' "$root/output"
 grep -q 'Finding tracked clankers' "$root/output"
 grep -q 'Persisting stop intent' "$root/output"
 grep -q 'Stop intents persisted' "$root/output"
-grep -F 'bin/clankerhouse-delete' "$repo/clankerhouse.tmux" >/dev/null
+grep -F "\$command_dir/clankerhouse-delete" "$repo/clankerhouse.tmux" >/dev/null
 grep -F 'clankerhouse-tui-active' "$repo/bin/clankerhouse-delete" >/dev/null
 grep -F 'clankerhouse-stop-popup' "$repo/bin/clankerhouse-delete" >/dev/null
 

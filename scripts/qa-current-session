@@ -8,6 +8,8 @@ root=$(mktemp -d "/tmp/qa-clankerhouse-current-$uid-XXXXXX")
 inner_socket="$root/inner.sock"
 outer_socket="$root/outer.sock"
 runtime="$root/runtime"
+state_home="$root/state"
+qa_home="$root/home"
 cache="$runtime/clankerhouse-$uid/state.json"
 
 cleanup() {
@@ -24,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$(dirname "$cache")"
+mkdir -p "$(dirname "$cache")" "$state_home" "$qa_home"
 cat > "$cache" <<'JSON'
 {"version":10,"sessions":[
   {"name":"qa-working","path":"/tmp/qa-working","recency":200,"target":{"type":"tmux_session","session":"qa-working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"qa-working","windowId":"@1","pane":"%1"}}]},
@@ -51,6 +53,8 @@ done
 [[ -n "$inner_client" ]] || { echo "Nested tmux client did not attach" >&2; exit 1; }
 
 tmux -S "$inner_socket" set-environment -g XDG_RUNTIME_DIR "$runtime"
+tmux -S "$inner_socket" set-environment -g XDG_STATE_HOME "$state_home"
+tmux -S "$inner_socket" set-environment -g HOME "$qa_home"
 tmux -S "$inner_socket" set-environment -g CLANKERHOUSE_HOME "$repo"
 tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-extract-workers
 [[ "$(tmux -S "$inner_socket" display-message -p -c "$inner_client" '#{client_session}')" == "qa-extract-workers" ]]

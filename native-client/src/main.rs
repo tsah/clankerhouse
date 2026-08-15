@@ -23,7 +23,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CACHE_VERSION: u64 = 10;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Target {
     TmuxSession {
@@ -43,8 +43,7 @@ enum Target {
         session: String,
         #[serde(rename = "windowId")]
         window_id: String,
-        #[serde(rename = "pane")]
-        _pane: String,
+        pane: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         management: Option<String>,
         #[serde(
@@ -75,7 +74,7 @@ enum Target {
     },
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MultiplexerLocation {
     kind: String,
@@ -96,7 +95,7 @@ enum ClankerState {
     Unknown,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct DetailRow {
     kind: String,
     #[serde(default)]
@@ -120,7 +119,7 @@ enum AvailableAction {
     Create,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct SessionRow {
     name: String,
     path: String,
@@ -194,12 +193,65 @@ struct BranchRow {
     recency: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Jump,
     Repository,
     Branch,
     NewBase,
+    Rename,
+    Attach,
+    DeleteConfirm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DeleteKind {
+    Pane,
+    Session,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MutationIntent {
+    Open {
+        target: Target,
+    },
+    Rename {
+        session: String,
+        #[serde(rename = "resourceId", skip_serializing_if = "Option::is_none")]
+        resource_id: Option<String>,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    },
+    Attach {
+        #[serde(rename = "workshopId")]
+        workshop_id: String,
+        #[serde(rename = "parentWorkshopId")]
+        parent_workshop_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
+    Detach {
+        #[serde(rename = "workshopId")]
+        workshop_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
+    Delete {
+        kind: DeleteKind,
+        session: String,
+        confirmed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pane: Option<String>,
+    },
+    Create {
+        repository: String,
+        branch: String,
+        create: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -237,17 +289,19 @@ struct App {
     repository: Option<RepositoryRow>,
     branch_name: String,
     base: String,
+    action_session: Option<SessionRow>,
+    rename_name: String,
+    attach_candidates: Vec<SessionRow>,
+    delete_intent: Option<MutationIntent>,
+    delete_label: String,
+    repository_identities: HashMap<String, String>,
 }
 
-enum AppExit {
+#[derive(Clone, Debug, PartialEq)]
+enum AppCommand {
     Close,
-    Open(Target),
-    OpenBranch {
-        repository: String,
-        branch: String,
-        create: bool,
-        base: String,
-    },
+    Submit(MutationIntent),
+    CreateAndOpen(MutationIntent),
 }
 
 fn state_rank(state: ClankerState) -> u8 {
@@ -423,29 +477,36 @@ fn search_score(session: &SessionRow, query: &str) -> Option<i64> {
     Some(total)
 }
 
-fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<RepositoryRow> {
+fn repository_identities(cache_path: &Path) -> HashMap<String, String> {
     let path = cache_path.with_file_name("repositories.json");
     let Ok(raw) = fs::read(path) else {
-        return Vec::new();
+        return HashMap::new();
     };
     let Ok(cache) = serde_json::from_slice::<RepositoryCache>(&raw) else {
-        return Vec::new();
+        return HashMap::new();
     };
     if cache.version != 1 {
-        return Vec::new();
+        return HashMap::new();
     }
+    cache
+        .entries
+        .into_iter()
+        .filter_map(|(path, entry)| {
+            (!entry.common_dir.is_empty()).then_some((path, entry.common_dir))
+        })
+        .collect()
+}
+
+fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<RepositoryRow> {
+    let identities = repository_identities(cache_path);
     let mut repositories = HashMap::<String, RepositoryRow>::new();
     for session in sessions {
-        let Some(entry) = cache.entries.get(&session.path) else {
+        let Some(common_dir) = identities.get(&session.path) else {
             continue;
         };
-        if entry.common_dir.is_empty() {
-            continue;
-        }
-        let repository_path = entry
-            .common_dir
+        let repository_path = common_dir
             .strip_suffix("/.git")
-            .unwrap_or(&entry.common_dir)
+            .unwrap_or(common_dir)
             .to_string();
         let name = Path::new(&repository_path)
             .file_name()
@@ -456,7 +517,7 @@ fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<Repository
             name,
             path: repository_path,
         };
-        let replace = repositories.get(&entry.common_dir).is_none_or(|existing| {
+        let replace = repositories.get(common_dir).is_none_or(|existing| {
             let existing_main = sessions
                 .iter()
                 .find(|row| row.path == existing.path)
@@ -465,7 +526,7 @@ fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<Repository
             candidate_main && !existing_main
         });
         if replace {
-            repositories.insert(entry.common_dir.clone(), candidate);
+            repositories.insert(common_dir.clone(), candidate);
         }
     }
     let mut rows = repositories.into_values().collect::<Vec<_>>();
@@ -610,7 +671,14 @@ impl App {
             repository: None,
             branch_name: String::new(),
             base: "^".into(),
+            action_session: None,
+            rename_name: String::new(),
+            attach_candidates: Vec::new(),
+            delete_intent: None,
+            delete_label: String::new(),
+            repository_identities: HashMap::new(),
         };
+        app.repository_identities = repository_identities(&app.cache_path);
         let snapshot: Snapshot = serde_json::from_slice(
             &fs::read(&app.cache_path).map_err(|error| format!("Snapshot unavailable: {error}"))?,
         )
@@ -632,6 +700,7 @@ impl App {
     }
 
     fn new_empty(cache_path: PathBuf, current_session: String) -> Self {
+        let repository_identities = repository_identities(&cache_path);
         Self {
             cache_path,
             sessions: Vec::new(),
@@ -649,6 +718,12 @@ impl App {
             repository: None,
             branch_name: String::new(),
             base: "^".into(),
+            action_session: None,
+            rename_name: String::new(),
+            attach_candidates: Vec::new(),
+            delete_intent: None,
+            delete_label: String::new(),
+            repository_identities,
         }
     }
 
@@ -946,6 +1021,28 @@ impl App {
         rows.into_iter().map(|(repository, _)| repository).collect()
     }
 
+    fn filtered_attach_candidates(&self) -> Vec<&SessionRow> {
+        let query = self.query.trim().to_lowercase();
+        let mut rows = self
+            .attach_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let score = if query.is_empty() {
+                    0
+                } else {
+                    search_score(candidate, &query)?
+                };
+                Some((candidate, score))
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|(left, left_score), (right, right_score)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        rows.into_iter().map(|(candidate, _)| candidate).collect()
+    }
+
     fn filtered_branches(&self) -> Vec<BranchRow> {
         let query = self.query.trim().to_lowercase();
         let mut rows = self
@@ -994,7 +1091,8 @@ impl App {
             Mode::Jump => self.rows.len(),
             Mode::Repository => self.filtered_repositories().len(),
             Mode::Branch => self.filtered_branches().len(),
-            Mode::NewBase => 0,
+            Mode::Attach => self.filtered_attach_candidates().len(),
+            Mode::NewBase | Mode::Rename | Mode::DeleteConfirm => 0,
         }
     }
 
@@ -1003,6 +1101,57 @@ impl App {
         self.query.clear();
         self.selected = 0;
         self.error.clear();
+        self.clear_action_mode();
+    }
+
+    fn clear_action_mode(&mut self) {
+        self.action_session = None;
+        self.rename_name.clear();
+        self.attach_candidates.clear();
+        self.delete_intent = None;
+        self.delete_label.clear();
+    }
+
+    fn enter_attach_mode(&mut self, source: SessionRow) {
+        let Some(source_id) = source.workshop_id.as_ref() else {
+            return;
+        };
+        let mut descendants = HashSet::from([source_id.clone()]);
+        loop {
+            let previous_len = descendants.len();
+            for candidate in &self.sessions {
+                if candidate
+                    .parent_workshop_id
+                    .as_ref()
+                    .is_some_and(|parent| descendants.contains(parent))
+                    && let Some(id) = candidate.workshop_id.as_ref()
+                {
+                    descendants.insert(id.clone());
+                }
+            }
+            if descendants.len() == previous_len {
+                break;
+            }
+        }
+        let source_repository = self.repository_identities.get(&source.path);
+        self.attach_candidates = self
+            .sessions
+            .iter()
+            .filter(|candidate| {
+                let same_repository = source_repository.is_some_and(|common_dir| {
+                    self.repository_identities.get(&candidate.path) == Some(common_dir)
+                });
+                same_repository
+                    && candidate.workshop_id.as_ref().is_some_and(|id| {
+                        !descendants.contains(id) && source.parent_workshop_id.as_ref() != Some(id)
+                    })
+            })
+            .cloned()
+            .collect();
+        self.action_session = Some(source);
+        self.mode = Mode::Attach;
+        self.query.clear();
+        self.selected = 0;
     }
 }
 
@@ -1012,6 +1161,105 @@ impl TreeRow {
             .as_ref()
             .map(|detail| detail.target.clone())
             .unwrap_or_else(|| self.session.target.clone())
+    }
+
+    fn allows(&self, action: AvailableAction) -> bool {
+        self.session.available_actions.contains(&action)
+    }
+}
+
+fn session_name(target: &Target) -> Option<&str> {
+    match target {
+        Target::TmuxSession { session, .. }
+        | Target::TmuxWindow { session, .. }
+        | Target::Opencode { session, .. } => Some(session),
+        Target::Directory { .. } => None,
+    }
+}
+
+fn rename_intent(session_row: &SessionRow, display_name: &str) -> Option<MutationIntent> {
+    let display_name = display_name.trim();
+    if !session_row
+        .available_actions
+        .contains(&AvailableAction::Rename)
+        || display_name.is_empty()
+        || display_name.chars().count() > 256
+    {
+        return None;
+    }
+    let Target::TmuxSession {
+        session,
+        resource_id,
+        ..
+    } = &session_row.target
+    else {
+        return None;
+    };
+    Some(MutationIntent::Rename {
+        session: session.clone(),
+        resource_id: resource_id.clone(),
+        display_name: display_name.into(),
+    })
+}
+
+fn detach_intent(row: &TreeRow) -> Option<MutationIntent> {
+    if row.detail.is_some() || !row.allows(AvailableAction::Detach) {
+        return None;
+    }
+    Some(MutationIntent::Detach {
+        workshop_id: row.session.workshop_id.clone()?,
+        session: session_name(&row.session.target).map(str::to_string),
+    })
+}
+
+fn delete_intent(row: &TreeRow) -> Option<MutationIntent> {
+    if !row.allows(AvailableAction::Delete) {
+        return None;
+    }
+    match row.detail.as_ref().map(|detail| &detail.target) {
+        Some(Target::TmuxWindow { session, pane, .. })
+        | Some(Target::Opencode { session, pane, .. }) => Some(MutationIntent::Delete {
+            kind: DeleteKind::Pane,
+            session: session.clone(),
+            confirmed: true,
+            pane: Some(pane.clone()),
+        }),
+        Some(_) => None,
+        None => {
+            let Target::TmuxSession { session, .. } = &row.session.target else {
+                return None;
+            };
+            Some(MutationIntent::Delete {
+                kind: DeleteKind::Session,
+                session: session.clone(),
+                confirmed: true,
+                pane: None,
+            })
+        }
+    }
+}
+
+fn delete_label(row: &TreeRow, intent: &MutationIntent) -> String {
+    match intent {
+        MutationIntent::Delete {
+            kind: DeleteKind::Pane,
+            pane,
+            ..
+        } => format!(
+            "Destroy exact pane '{}'?",
+            row.detail
+                .as_ref()
+                .map(|detail| detail.title.as_str())
+                .filter(|title| !title.is_empty())
+                .or_else(|| pane.as_deref())
+                .unwrap_or("unknown")
+        ),
+        MutationIntent::Delete {
+            kind: DeleteKind::Session,
+            session,
+            ..
+        } => format!("Destroy exact session '{session}'?"),
+        _ => String::new(),
     }
 }
 
@@ -1176,6 +1424,98 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                     .unwrap_or_default(),
             )
         }
+        Mode::Attach => {
+            let rows = app
+                .filtered_attach_candidates()
+                .into_iter()
+                .map(|candidate| {
+                    (
+                        candidate.name.clone(),
+                        [candidate.branch.as_str(), candidate.path.as_str()]
+                            .into_iter()
+                            .filter(|value| !value.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    )
+                })
+                .collect();
+            (
+                "Clankerhouse · Choose parent Workshop",
+                "Enter attach · Esc cancel",
+                rows,
+                app.filtered_attach_candidates()
+                    .get(app.selected)
+                    .map(|candidate| candidate.path.clone())
+                    .unwrap_or_else(|| "No valid parent Workshops match".into()),
+            )
+        }
+        Mode::Rename => {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(
+                        "Clankerhouse · Rename tmux session",
+                        Style::default()
+                            .fg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  Enter rename · Esc cancel",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]),
+                areas[0],
+            );
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("  Session: ", Style::default().fg(Color::LightCyan)),
+                        Span::raw(format!("{}_", app.rename_name)),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "  Canonical Workshop and Clanker identities are unchanged",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+                .block(Block::default().borders(Borders::ALL)),
+                areas[1],
+            );
+            frame.render_widget(
+                Paragraph::new(app.error.as_str()).style(Style::default().fg(Color::LightYellow)),
+                areas[2],
+            );
+            return;
+        }
+        Mode::DeleteConfirm => {
+            frame.render_widget(
+                Line::from(Span::styled(
+                    "Clankerhouse · Confirm deletion",
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                areas[0],
+            );
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("  {}", app.delete_label),
+                        Style::default().fg(Color::LightRed),
+                    )),
+                    Line::from(""),
+                    Line::from("  Press y to confirm or n/Esc to cancel."),
+                ])
+                .block(Block::default().borders(Borders::ALL)),
+                areas[1],
+            );
+            frame.render_widget(
+                Paragraph::new(app.error.as_str()).style(Style::default().fg(Color::LightYellow)),
+                areas[2],
+            );
+            return;
+        }
         Mode::NewBase => {
             frame.render_widget(
                 Line::from(vec![
@@ -1305,7 +1645,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-K branches · ←/→ expand · Enter open · Esc close",
+                "  Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -1450,12 +1790,53 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
+fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     app.error.clear();
-    if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
-        app.enter_repository_mode();
+
+    if app.mode == Mode::DeleteConfirm {
+        match key.code {
+            KeyCode::Char('y') => {
+                let intent = app.delete_intent.take()?;
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+                return Some(AppCommand::Submit(intent));
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+            }
+            _ => {}
+        }
         return None;
     }
+
+    if app.mode == Mode::Rename {
+        match key.code {
+            KeyCode::Esc => {
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+            }
+            KeyCode::Backspace => {
+                app.rename_name.pop();
+            }
+            KeyCode::Enter => {
+                let intent = rename_intent(app.action_session.as_ref()?, &app.rename_name)?;
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+                return Some(AppCommand::Submit(intent));
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                app.rename_name.push(character);
+            }
+            _ => {}
+        }
+        return None;
+    }
+
     if app.mode == Mode::NewBase {
         match key.code {
             KeyCode::Esc => {
@@ -1467,12 +1848,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
                 app.base.pop();
             }
             KeyCode::Enter if !app.branch_name.is_empty() => {
-                return Some(AppExit::OpenBranch {
+                return Some(AppCommand::CreateAndOpen(MutationIntent::Create {
                     repository: app.repository.as_ref()?.path.clone(),
                     branch: app.branch_name.clone(),
                     create: true,
-                    base: app.base.clone(),
-                });
+                    base: (!app.base.is_empty()).then(|| app.base.clone()),
+                }));
             }
             KeyCode::Char(character)
                 if !key
@@ -1485,7 +1866,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
         }
         return None;
     }
-    if app.mode == Mode::Repository || app.mode == Mode::Branch {
+
+    if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.enter_repository_mode();
+        return None;
+    }
+
+    if app.mode == Mode::Repository || app.mode == Mode::Branch || app.mode == Mode::Attach {
         match key.code {
             KeyCode::Esc => {
                 if !app.query.is_empty() {
@@ -1493,6 +1880,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
                     app.selected = 0;
                 } else if app.mode == Mode::Branch {
                     app.enter_repository_mode();
+                } else if app.mode == Mode::Attach {
+                    app.mode = Mode::Jump;
+                    app.clear_action_mode();
                 } else {
                     app.mode = Mode::Jump;
                     app.selected = 0;
@@ -1522,6 +1912,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
                     Err(error) => app.error = error,
                 }
             }
+            KeyCode::Enter if app.mode == Mode::Attach => {
+                let source = app.action_session.as_ref()?;
+                if !source.available_actions.contains(&AvailableAction::Attach) {
+                    return None;
+                }
+                let parent_id = app
+                    .filtered_attach_candidates()
+                    .get(app.selected)?
+                    .workshop_id
+                    .clone()?;
+                let intent = MutationIntent::Attach {
+                    workshop_id: source.workshop_id.clone()?,
+                    parent_workshop_id: parent_id,
+                    session: session_name(&source.target).map(str::to_string),
+                };
+                app.mode = Mode::Jump;
+                app.query.clear();
+                app.clear_action_mode();
+                return Some(AppCommand::Submit(intent));
+            }
             KeyCode::Enter => {
                 let branch = app.filtered_branches().get(app.selected).cloned()?;
                 if branch.kind == BranchKind::Create {
@@ -1529,12 +1939,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
                     app.base = "^".into();
                     app.mode = Mode::NewBase;
                 } else {
-                    return Some(AppExit::OpenBranch {
+                    return Some(AppCommand::CreateAndOpen(MutationIntent::Create {
                         repository: app.repository.as_ref()?.path.clone(),
                         branch: branch.value,
                         create: false,
-                        base: String::new(),
-                    });
+                        base: None,
+                    }));
                 }
             }
             KeyCode::Char(character)
@@ -1550,9 +1960,50 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
         }
         return None;
     }
+
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Char('r') => {
+                let row = app.selected()?.clone();
+                if !row.allows(AvailableAction::Rename)
+                    || !matches!(row.session.target, Target::TmuxSession { .. })
+                {
+                    return None;
+                }
+                app.rename_name = row.session.name.clone();
+                app.action_session = Some(row.session);
+                app.mode = Mode::Rename;
+                return None;
+            }
+            KeyCode::Char('a') => {
+                let row = app.selected()?.clone();
+                if row.detail.is_none()
+                    && row.allows(AvailableAction::Attach)
+                    && row.session.workshop_id.is_some()
+                {
+                    app.enter_attach_mode(row.session);
+                }
+                return None;
+            }
+            KeyCode::Char('l') => {
+                let intent = detach_intent(app.selected()?)?;
+                return Some(AppCommand::Submit(intent));
+            }
+            KeyCode::Char('d') => {
+                let row = app.selected()?.clone();
+                let intent = delete_intent(&row)?;
+                app.delete_label = delete_label(&row, &intent);
+                app.delete_intent = Some(intent);
+                app.mode = Mode::DeleteConfirm;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
     match key.code {
         KeyCode::Esc if !app.query.is_empty() => app.update_query(String::new()),
-        KeyCode::Esc => return Some(AppExit::Close),
+        KeyCode::Esc => return Some(AppCommand::Close),
         KeyCode::Up => app.move_selection(1),
         KeyCode::Down => app.move_selection(-1),
         KeyCode::Backspace => {
@@ -1589,13 +2040,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
         }
         KeyCode::Enter => {
             if let Some(row) = app.selected()
-                && (row.session.available_actions.is_empty()
-                    || row
-                        .session
-                        .available_actions
-                        .contains(&AvailableAction::Open))
+                && row.allows(AvailableAction::Open)
             {
-                return Some(AppExit::Open(row.target()));
+                return Some(AppCommand::Submit(MutationIntent::Open {
+                    target: row.target(),
+                }));
             }
         }
         KeyCode::Char(character)
@@ -1699,7 +2148,7 @@ fn rpc_retry(
 
 fn daemon_mutation(
     socket_path: &Path,
-    intent: serde_json::Value,
+    intent: &MutationIntent,
 ) -> Result<serde_json::Value, String> {
     let key = format!(
         "native-{}-{}",
@@ -1760,14 +2209,22 @@ fn run(
     mut terminal: DefaultTerminal,
     mut app: App,
     snapshots: Receiver<Snapshot>,
-) -> io::Result<AppExit> {
+    socket_path: &Path,
+) -> io::Result<AppCommand> {
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-            && let Some(exit) = handle_key(&mut app, key)
+            && let Some(command) = handle_key(&mut app, key)
         {
-            return Ok(exit);
+            match command {
+                AppCommand::Submit(intent) if !matches!(intent, MutationIntent::Open { .. }) => {
+                    if let Err(error) = daemon_mutation(socket_path, &intent) {
+                        app.error = error;
+                    }
+                }
+                command => return Ok(command),
+            }
         }
         while let Ok(snapshot) = snapshots.try_recv() {
             if let Err(error) = app.apply_snapshot(snapshot, false) {
@@ -1819,38 +2276,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscription_path = socket_path.clone();
     thread::spawn(move || subscribe_loop(subscription_path, snapshot_sender));
     let terminal = ratatui::init();
-    let result = run(terminal, app, snapshot_receiver);
+    let result = run(terminal, app, snapshot_receiver, &socket_path);
     ratatui::restore();
     match result? {
-        AppExit::Close => Ok(()),
-        AppExit::Open(target) => daemon_mutation(
-            &socket_path,
-            serde_json::json!({"type": "open", "target": target}),
-        )
-        .map(|_| ())
-        .map_err(|error| io::Error::other(error).into()),
-        AppExit::OpenBranch {
-            repository,
-            branch,
-            create,
-            base,
-        } => {
-            let result = daemon_mutation(&socket_path, serde_json::json!({
-                "type": "create", "repository": repository, "branch": branch, "create": create, "base": base
-            })).map_err(io::Error::other)?;
+        AppCommand::Close => Ok(()),
+        AppCommand::Submit(intent) => daemon_mutation(&socket_path, &intent)
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error).into()),
+        AppCommand::CreateAndOpen(intent @ MutationIntent::Create { .. }) => {
+            let result = daemon_mutation(&socket_path, &intent).map_err(io::Error::other)?;
             let target: Target = serde_json::from_value(
                 result
                     .get("target")
                     .cloned()
                     .ok_or_else(|| io::Error::other("daemon omitted created target"))?,
             )?;
-            daemon_mutation(
-                &socket_path,
-                serde_json::json!({"type": "open", "target": target}),
-            )
-            .map(|_| ())
-            .map_err(|error| io::Error::other(error).into())
+            daemon_mutation(&socket_path, &MutationIntent::Open { target })
+                .map(|_| ())
+                .map_err(|error| io::Error::other(error).into())
         }
+        AppCommand::CreateAndOpen(_) => unreachable!("create flow emitted a non-create intent"),
     }
 }
 
@@ -1917,8 +2362,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("repositories.json"), r#"{"version":1,"entries":{"/repo/main":{"commonDir":"/repo/.git"},"/repo/feature":{"commonDir":"/repo/.git"}}}"#).unwrap();
         let sessions: Vec<SessionRow> = serde_json::from_str(r#"[
-            {"name":"main","path":"/repo/main","branch":"main","target":{"type":"directory","path":"/repo/main"}},
-            {"name":"feature","path":"/repo/feature","branch":"feature","target":{"type":"directory","path":"/repo/feature"}}
+            {"name":"main","path":"/repo/main","branch":"main","availableActions":["open","create"],"target":{"type":"directory","path":"/repo/main"}},
+            {"name":"feature","path":"/repo/feature","branch":"feature","availableActions":["open","create"],"target":{"type":"directory","path":"/repo/feature"}}
         ]"#).unwrap();
         let rows = repository_rows(&cache_path, &sessions);
         assert_eq!(rows.len(), 1);
@@ -2061,6 +2506,210 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn app_with_sessions(json: &str) -> App {
+        App::from_snapshot(
+            PathBuf::from("/nonexistent/state.json"),
+            String::new(),
+            Snapshot {
+                version: CACHE_VERSION,
+                sessions: serde_json::from_str(json).unwrap(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn alt(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn rename_mode_constructs_a_typed_intent_with_stable_resource_id() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"display","path":"/repo","resourceId":"resource-1","availableActions":["open","rename"],"target":{"type":"tmux_session","session":"native-name","resourceId":"resource-1"}}]"#,
+        );
+
+        assert_eq!(handle_key(&mut app, alt('r')), None);
+        assert_eq!(app.mode, Mode::Rename);
+        app.rename_name = "  renamed  ".into();
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Rename {
+                session: "native-name".into(),
+                resource_id: Some("resource-1".into()),
+                display_name: "renamed".into(),
+            }))
+        );
+        assert_eq!(app.mode, Mode::Jump);
+    }
+
+    #[test]
+    fn attach_and_detach_use_projected_actions_and_stable_workshop_ids() {
+        let mut app = app_with_sessions(
+            r#"[
+                {"name":"parent","path":"/parent","workshopId":"parent-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"parent-native"}},
+                {"name":"source","path":"/source","workshopId":"source-id","parentWorkshopId":"parent-id","availableActions":["open","attach","detach"],"target":{"type":"tmux_session","session":"source-native"}},
+                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"source-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"child-native"}},
+                {"name":"candidate","path":"/candidate","workshopId":"candidate-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"candidate-native"}},
+                {"name":"outsider","path":"/outsider","workshopId":"outsider-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"outsider-native"}}
+            ]"#,
+        );
+        for path in ["/parent", "/source", "/child", "/candidate"] {
+            app.repository_identities
+                .insert(path.into(), "/repo/.git".into());
+        }
+        app.repository_identities
+            .insert("/outsider".into(), "/other/.git".into());
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.session.workshop_id.as_deref() == Some("source-id"))
+            .unwrap();
+
+        assert_eq!(handle_key(&mut app, alt('a')), None);
+        assert_eq!(app.mode, Mode::Attach);
+        assert_eq!(
+            app.attach_candidates
+                .iter()
+                .filter_map(|row| row.workshop_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["candidate-id"]
+        );
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Attach {
+                workshop_id: "source-id".into(),
+                parent_workshop_id: "candidate-id".into(),
+                session: Some("source-native".into()),
+            }))
+        );
+
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.session.workshop_id.as_deref() == Some("source-id"))
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut app, alt('l')),
+            Some(AppCommand::Submit(MutationIntent::Detach {
+                workshop_id: "source-id".into(),
+                session: Some("source-native".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn delete_requires_confirmation_and_preserves_exact_selected_scope() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"display","path":"/repo","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"},"details":[{"kind":"clanker","title":"worker","state":"idle","target":{"type":"tmux_window","session":"native-session","windowId":"@2","pane":"%7"}}]}]"#,
+        );
+        app.expanded_details.insert("display".into());
+        app.rebuild(None);
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.detail.is_some())
+            .unwrap();
+
+        assert_eq!(handle_key(&mut app, alt('d')), None);
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        assert_eq!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+            ),
+            Some(AppCommand::Submit(MutationIntent::Delete {
+                kind: DeleteKind::Pane,
+                session: "native-session".into(),
+                confirmed: true,
+                pane: Some("%7".into()),
+            }))
+        );
+
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.detail.is_none())
+            .unwrap();
+        assert_eq!(handle_key(&mut app, alt('d')), None);
+        assert_eq!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+            ),
+            Some(AppCommand::Submit(MutationIntent::Delete {
+                kind: DeleteKind::Session,
+                session: "native-session".into(),
+                confirmed: true,
+                pane: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn projected_actions_gate_exact_open_and_destructive_keys() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"blocked","path":"/repo","workshopId":"workshop-id","target":{"type":"tmux_session","session":"native-session"},"details":[{"kind":"window","title":"shell","state":"idle","target":{"type":"tmux_window","session":"native-session","windowId":"@9","pane":"%9"}}]}]"#,
+        );
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(handle_key(&mut app, alt('r')), None);
+        assert_eq!(handle_key(&mut app, alt('a')), None);
+        assert_eq!(handle_key(&mut app, alt('l')), None);
+        assert_eq!(handle_key(&mut app, alt('d')), None);
+        assert_eq!(app.mode, Mode::Jump);
+
+        app.sessions[0].available_actions = vec![AvailableAction::Open];
+        app.expanded_details.insert("blocked".into());
+        app.rebuild(None);
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.detail.is_some())
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Open {
+                target: Target::TmuxWindow {
+                    session: "native-session".into(),
+                    window_id: "@9".into(),
+                    pane: "%9".into(),
+                    management: None,
+                    resource_id: None,
+                    location: None,
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn branch_selection_constructs_daemon_create_intent() {
+        let mut app = app_with_sessions("[]");
+        app.mode = Mode::Branch;
+        app.repository = Some(RepositoryRow {
+            name: "repo".into(),
+            path: "/repo".into(),
+        });
+        app.branches = vec![BranchRow {
+            name: "feature".into(),
+            value: "feature".into(),
+            kind: BranchKind::Local,
+            path: String::new(),
+            recency: 0,
+        }];
+
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::CreateAndOpen(MutationIntent::Create {
+                repository: "/repo".into(),
+                branch: "feature".into(),
+                create: false,
+                base: None,
+            }))
+        );
     }
 
     #[test]

@@ -69,7 +69,7 @@ matches by concatenating unrelated fields.
 - `Alt-R`: rename a tmux session without changing workshop identity
 - `Alt-A`: attach a workshop to another valid parent
 - `Alt-L`: detach a workshop from its parent
-- `Alt-D`: confirm and asynchronously destroy the selected disposable target with a live step trace and progress indicator; remain in Clankerhouse afterward
+- `Alt-D`: explicitly confirm, then destroy the exact selected pane or session as safely projected; remain in Clankerhouse afterward
 - `Esc`: clear the query or close the current flow
 
 ## Implementation
@@ -123,7 +123,9 @@ tmux display-popup -E -w 90% -h 80% \
 ```
 
 The native client supports jump search, navigation, lineage/detail expansion,
-live snapshot reloads, opening exact targets, repository and branch selection,
-and worktree creation. Rename, attachment, detachment, and deletion remain in
-the full picker or their dedicated commands while those actions are completed
-in the native client.
+live snapshot reloads, exact target opening, repository/branch creation, rename,
+Workshop attachment and detachment, and explicitly confirmed deletion. It gates
+every action on the projected `availableActions`, carries stable resource and
+Workshop IDs where the daemon protocol accepts them, and sends only typed daemon
+mutation intents. The socket remains the live source through reconnects; the
+atomic JSON snapshot is read at most once as a startup fallback.

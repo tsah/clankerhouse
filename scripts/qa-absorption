@@ -8,6 +8,8 @@ root=$(mktemp -d "/tmp/qa-clankerhouse-absorption-$uid-XXXXXX")
 inner_socket="$root/inner.sock"
 outer_socket="$root/outer.sock"
 state_home="$root/state"
+runtime="$root/runtime"
+qa_home="$root/home"
 
 cleanup() {
     tmux -S "$outer_socket" kill-server 2>/dev/null || true
@@ -16,7 +18,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$state_home"
+mkdir -p "$state_home" "$runtime" "$qa_home"
+chmod 700 "$state_home" "$runtime" "$qa_home"
 tmux -S "$inner_socket" -f /dev/null new-session -d -s qa-host -n shell -x 100 -y 30 "bash --noprofile --norc"
 tmux -S "$inner_socket" new-session -d -s qa-unmanaged -n editor -x 100 -y 30 -c "$repo" "sleep 300"
 tmux -S "$inner_socket" split-window -d -t qa-unmanaged:editor -c /tmp "sleep 300"
@@ -43,7 +46,7 @@ instance_id="tmux:$inner_socket:qa-epoch"
 target=$(jq -cn \
     --arg session qa-unmanaged --arg instance "$instance_id" --arg sid "$session_id" --arg wid "$window_id" --arg pid "$pane_id" \
     '{type:"tmux_session",session:$session,management:"unmanaged",location:{kind:"tmux",instanceId:$instance,nativeSessionId:$sid,nativeWindowId:$wid,nativePaneId:$pid}}')
-command="env XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$target'"
+command="env HOME='$qa_home' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$target'"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$command"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
 
@@ -72,7 +75,7 @@ tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-observed
 tmux -S "$inner_socket" rename-session -t "$session_id" qa-renamed
 tmux -S "$inner_socket" switch-client -c "$inner_client" -t qa-host
 managed_target=$(jq -cn --arg id "$resource_id" '{type:"tmux_session",session:"stale-name",management:"managed",resourceId:$id}')
-managed_command="env XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$managed_target'"
+managed_command="env HOME='$qa_home' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' CLANKERHOUSE_HOME='$repo' '$repo/bin/clankers' target open --json '$managed_target'"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$managed_command"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
 for _ in {1..100}; do

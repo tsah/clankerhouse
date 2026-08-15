@@ -22,9 +22,9 @@ import { discoverForegroundAgent } from "./server/process-discovery"
 import type { ForegroundAgentHarness } from "./server/process-discovery"
 import { isCodexWindow, projectResources } from "./server/project"
 import type { ProjectEffect } from "./server/project"
-import type { ClankerReport, DirectoryRow, OpencodeStatus, TmuxSession, TmuxWindow } from "./server/resources"
-import { refreshProjection, startSnapshotServer, subscribeSnapshots } from "./transport"
-import type { SnapshotServer, SnapshotSubscription } from "./transport"
+import type { ClankerReport, DirectoryRow, TmuxSession, TmuxWindow } from "./server/resources"
+import { acquireProducerLease, getSnapshot, refreshProjection, startSnapshotServer, submitMutation, subscribeSnapshots, waitForOperation } from "./transport"
+import type { MutationIntent, ProducerLease, SnapshotServer, SnapshotSubscription } from "./transport"
 import { parseTmuxRows, tmuxFields } from "./tmux-fields"
 
 interface BranchRow { key: string; name: string; value: string; kind: "worktree" | "local" | "remote" | "create"; path: string; recency: number; searchText: string }
@@ -44,7 +44,8 @@ const previousClankerStateDir = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/alt-k-tui-
 const seenStateDir = `${runtimeDir}/seen-state`
 const refreshMs = Number(Bun.env.CLANKERHOUSE_REFRESH_MS ?? 1500) || 1500
 const cacheVersion = 10
-const projectionSource = randomUUID()
+let projectionSource: string = randomUUID()
+let producerLease: ProducerLease | undefined
 let latestWrittenProjection: ProjectionSnapshot<SessionRow> | undefined
 let projectionRefreshInFlight: Promise<ProjectionSnapshot<SessionRow>> | undefined
 let snapshotServer: SnapshotServer<SessionRow> | undefined
@@ -148,18 +149,6 @@ const readManagedResources = () => {
   try { return new Map(registry.list().map((resource) => [resource.id, resource])) }
   finally { registry.close() }
 }
-
-const collectOpencode = runCommand([Bun.env.CLANKERHOUSE_OPENCODE_STATUS || libexecPath("opencode-status"), "--tsv"], { allowFailure: true }).pipe(
-  Effect.map((output) => parseTsv(output).map((parts): OpencodeStatus | undefined => {
-    if (parts.length < 7) return undefined
-    const directory = parts[0] ?? ""
-    if (directory.endsWith("(deleted)")) return undefined
-    if (parts.length >= 8) {
-      return { directory, status: parts[1] ?? "", detail: parts[2] ?? "", title: parts[3] ?? "", age: parts[4] ?? "", session: parts[5] ?? "", pane: parts[6] ?? "", updatedAt: Number(parts[8] ?? 0) || 0, stablePane: parts[9] ?? "", harnessSessionId: parts[10] ?? "" }
-    }
-    return { directory, status: parts[1] ?? "", detail: "", title: parts[2] ?? "", age: parts[3] ?? "", session: parts[4] ?? "", pane: parts[5] ?? "", updatedAt: 0, stablePane: "", harnessSessionId: "" }
-  }).filter((row): row is OpencodeStatus => Boolean(row?.session))),
-)
 
 const collectZoxideDirectories = runCommand(["zoxide", "query", "-ls"], { allowFailure: true }).pipe(
   Effect.map((output) => output.split("\n").flatMap((line): DirectoryRow[] => {
@@ -316,7 +305,6 @@ const applyProjectEffect = (effect: ProjectEffect) => {
 
 const collectSessions = Effect.all([
   collectMultiplexerResources,
-  collectOpencode,
   collectDirectories,
   collectClankerReports,
   Effect.sync(readSeenState),
@@ -324,7 +312,7 @@ const collectSessions = Effect.all([
   Effect.sync(readResourceIncidents),
   Effect.sync(readManagedResources),
 ], { concurrency: "unbounded" }).pipe(
-  Effect.flatMap(([multiplexer, opencodes, directories, clankerReports, seen, lineage, incidents, managedResources]) => Effect.all([
+  Effect.flatMap(([multiplexer, directories, clankerReports, seen, lineage, incidents, managedResources]) => Effect.all([
     Effect.succeed(multiplexer),
     Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }),
     Effect.forEach(
@@ -345,7 +333,7 @@ const collectSessions = Effect.all([
     const projection = projectResources({
       sessions: resources.sessions,
       windows: resources.windows,
-      opencodes,
+      opencodes: [],
       directories,
       clankerReports,
       seen,
@@ -409,7 +397,7 @@ const serverProgram = Effect.gen(function* () {
     cleanup()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
-    void closing.finally(() => process.exit(0))
+    void closing.finally(() => producerLease?.release()).finally(() => process.exit(0))
   }
 
   yield* Effect.sync(() => {
@@ -420,6 +408,11 @@ const serverProgram = Effect.gen(function* () {
     process.once("SIGINT", shutdown)
     process.once("SIGTERM", shutdown)
   })
+  producerLease = yield* Effect.tryPromise({
+    try: () => acquireProducerLease(`${runtimeDir}/producer.lease`, `${process.env.TMUX?.split(",")[0] || "default-tmux"}`),
+    catch: (error) => error instanceof Error ? error : new Error(String(error)),
+  })
+  projectionSource = producerLease.epoch
 
   while (true) {
     const snapshot = yield* Effect.tryPromise({
@@ -435,7 +428,16 @@ const serverProgram = Effect.gen(function* () {
       if (snapshotServer) snapshotServer.publish(snapshot)
       else if (!transportUnavailable) {
         const started = yield* Effect.tryPromise({
-          try: () => startSnapshotServer({ socketPath: daemonSocketPath, initialSnapshot: snapshot, refresh: refreshProjectionSnapshot }),
+          try: () => startSnapshotServer({
+            socketPath: daemonSocketPath,
+            initialSnapshot: snapshot,
+            epoch: producerLease!.epoch,
+            owner: producerLease!.owner,
+            assertAuthoritative: () => producerLease!.assertCurrentSync(),
+            refresh: refreshProjectionSnapshot,
+            executeMutation: executeDaemonMutation,
+            operationJournalPath: `${runtimeDir}/operations.json`,
+          }),
           catch: (error) => error instanceof Error ? error : new Error(String(error)),
         }).pipe(
           Effect.map((server) => ({ server })),
@@ -444,7 +446,7 @@ const serverProgram = Effect.gen(function* () {
         if ("server" in started) snapshotServer = started.server
         else {
           transportUnavailable = true
-          console.error(`Snapshot transport disabled; JSON polling remains active: ${started.error.message}`)
+          console.error(`Daemon socket transport disabled: ${started.error.message}`)
         }
       }
     }
@@ -452,11 +454,16 @@ const serverProgram = Effect.gen(function* () {
   }
 })
 
-const cachedOrCollectedSnapshot = Effect.gen(function* () {
-  const cached = yield* Effect.sync(readCachePayload)
-  if (cached) return cached
-  const sessions = yield* collectSessions
-  return yield* writeCache(sessions)
+const authoritativeOrStartupFallbackSnapshot = Effect.tryPromise({
+  try: async () => {
+    try { return await getSnapshot<SessionRow>(daemonSocketPath) }
+    catch (socketError) {
+      const cached = readCachePayload()
+      if (cached) return cached
+      throw socketError
+    }
+  },
+  catch: (error) => error instanceof Error ? error : new Error(String(error)),
 })
 
 const repositoryIdentityPlan = (rows: SessionRow[]) => {
@@ -735,6 +742,82 @@ const deleteWorktree = async (sessionName: string, path: string, reportProgress?
   return runDeleteCommand([libexecPath("worktree-delete"), "--yes", expandHome(path)], reportProgress)
 }
 
+const tmuxWorkshopParent = (sessionName: string, parentWorkshopId: string | null) => {
+  const found = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
+  const sessionId = parseTmuxRows(found.stdout.toString()).find(([, name]) => name === sessionName)?.[0] ?? ""
+  if (found.exitCode !== 0 || !sessionId) throw new Error(found.stderr.toString().trim() || "Selected session no longer exists")
+  const args = parentWorkshopId === null
+    ? ["tmux", "set-option", "-u", "-t", sessionId, "@dotfiles_workshop_parent_id"]
+    : ["tmux", "set-option", "-t", sessionId, "@dotfiles_workshop_parent_id", parentWorkshopId]
+  const updated = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" })
+  if (updated.exitCode !== 0) throw new Error(updated.stderr.toString().trim() || "Unable to update tmux workshop parent metadata")
+}
+
+const executeDaemonMutation = async (intent: MutationIntent): Promise<unknown> => {
+  let result: unknown
+  if (intent.type === "open") {
+    const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
+    if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
+    return { opened: true }
+  }
+  if (intent.type === "rename") {
+    const found = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
+    const sessionId = parseTmuxRows(found.stdout.toString()).find(([, name]) => name === intent.session)?.[0] ?? ""
+    if (found.exitCode !== 0 || !sessionId) throw new Error(found.stderr.toString().trim() || "Selected session no longer exists")
+    const renamed = Bun.spawnSync(["tmux", "rename-session", "-t", sessionId, intent.displayName], { stdout: "pipe", stderr: "pipe" })
+    if (renamed.exitCode !== 0) throw new Error(renamed.stderr.toString().trim() || "Unable to rename session")
+    if (intent.resourceId) {
+      const registry = openResourceRegistry()
+      try { registry.updateDisplayName(intent.resourceId, intent.displayName) } finally { registry.close() }
+      Bun.spawnSync(["tmux", "set-option", "-t", sessionId, "@clankerhouse_display_name", intent.displayName], { stdout: "ignore", stderr: "ignore" })
+    }
+    result = { session: intent.displayName }
+  } else if (intent.type === "attach") {
+    attachWorkshopToParent(intent.workshopId, intent.parentWorkshopId)
+    if (intent.session) tmuxWorkshopParent(intent.session, intent.parentWorkshopId)
+    result = { attached: true }
+  } else if (intent.type === "detach") {
+    detachWorkshopFromParent(intent.workshopId)
+    if (intent.session) tmuxWorkshopParent(intent.session, null)
+    result = { detached: true }
+  } else if (intent.type === "delete") {
+    const command = intent.kind === "pane" && intent.pane
+      ? await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "pane", intent.pane])
+      : intent.kind === "worktree" && intent.path
+        ? await deleteWorktree(intent.session, intent.path)
+        : await stopSessionIntent(intent.session, true)
+    if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Deletion failed")
+    result = { deleted: true }
+  } else if (intent.type === "create") {
+    const created = switchBranchSessionSync(expandHome(intent.repository), intent.branch, intent.create, intent.base)
+    if (!created.session) throw new Error(created.error || "Unable to create workshop")
+    result = { target: { type: "tmux_session", session: created.session } }
+  } else {
+    const rows = latestWrittenProjection?.sessions ?? []
+    result = { repositories: await Effect.runPromise(refreshRepositoryRows(rows)) }
+  }
+  if (intent.type !== "repository.refresh") {
+    const refreshed = await refreshProjectionSnapshot()
+    snapshotServer?.publish(refreshed)
+  }
+  return result
+}
+
+const issueDaemonMutation = async (intent: MutationIntent) => {
+  const idempotencyKey = randomUUID()
+  let lastError: unknown
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const submitted = await submitMutation(daemonSocketPath, idempotencyKey, intent)
+      return await waitForOperation(daemonSocketPath, submitted.operation.operationId)
+    } catch (error) {
+      lastError = error
+      await sleep(Math.min(500, 25 * (attempt + 1)))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
 function HighlightText(props: { text: string; query: string; fg: string }) {
   const positions = createMemo(() => fuzzyResult(props.text, props.query)?.positions ?? [])
   return <>{Array.from(props.text).map((char, index) => positions().includes(index) ? <b>{char}</b> : char)}</>
@@ -966,21 +1049,23 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
   }
   const closeWith = (target?: Target, completionKey?: string, activityPath?: string) => {
     props.onOpen(target)
-    const opened = target ? openTargetSync(target) : true
-    if (opened && completionKey) markSeen(completionKey)
-    if (opened && activityPath) markDirectoryActivity(activityPath, "opened")
-    renderer.destroy()
+    if (!target) { renderer.destroy(); return }
+    setError("")
+    void issueDaemonMutation({ type: "open", target }).then(() => {
+      if (completionKey) markSeen(completionKey)
+      if (activityPath) markDirectoryActivity(activityPath, "opened")
+      renderer.destroy()
+    }).catch((openError) => setError(openError instanceof Error ? openError.message : String(openError)))
   }
   const finishBranch = (branch: string, create: boolean) => {
     const repo = repository()
     if (!repo) return
     setError("")
-    const result = switchBranchSessionSync(expandHome(repo.path), branch, create, base())
-    if (!result.session) {
-      setError(result.error ?? "Unable to open worktree")
-      return
-    }
-    closeWith({ type: "tmux_session", session: result.session })
+    void issueDaemonMutation({ type: "create", repository: expandHome(repo.path), branch, create, base: base() }).then((operation) => {
+      const target = (operation.result as { target?: Target } | undefined)?.target
+      if (!target) throw new Error("Daemon did not return the created target")
+      closeWith(target)
+    }).catch((createError) => setError(createError instanceof Error ? createError.message : String(createError)))
   }
   const appendInput = (raw: string) => {
     const text = raw.replace(/[\x00-\x1f\x7f]/g, "")
@@ -1131,35 +1216,19 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
       setDeletePending(true)
       setDeleteError("")
       setDeleteSteps(["Preparing deletion"])
-      void (async () => {
-        try {
-          let result: DeleteCommandResult | undefined
-          if (action.kind === "pane" && action.pane) {
-            reportDeleteStep("Stopping tracked clanker and pane")
-            result = await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "pane", action.pane], reportDeleteStep)
-          } else if (action.kind === "worktree" && action.row.session.path) {
-            result = await deleteWorktree(action.row.session.name, action.row.session.path, reportDeleteStep)
-          } else if (action.kind === "session") {
-            result = await stopSessionIntent(action.row.session.name, true, reportDeleteStep)
-          }
-          if (!result || result.exitCode !== 0) {
-            const detail = result ? result.stderr.trim() || result.stdout.trim() : "Deletion command was unavailable."
-            setDeleteError(detail || `Deletion failed with exit code ${result?.exitCode ?? "unknown"}.`)
-            setDeletePending(false)
-            return
-          }
+      reportDeleteStep("Submitting daemon deletion intent")
+      void issueDaemonMutation({ kind: action.kind, type: "delete", session: action.row.session.name, confirmed: true, pane: action.pane, path: action.row.session.path || undefined })
+        .then(() => {
           removeDeletedAction(action)
           setDeleteAction(undefined)
           setDeleteError("")
           setDeletePending(false)
           setDeleteSteps([])
-          invalidateCacheSync()
-          if (snapshotTransportEnabled) void refreshProjection(daemonSocketPath).catch(() => {})
-        } catch (error) {
-          setDeleteError(error instanceof Error ? error.message : String(error))
+        })
+        .catch((deleteFailure) => {
+          setDeleteError(deleteFailure instanceof Error ? deleteFailure.message : String(deleteFailure))
           setDeletePending(false)
-        }
-      })()
+        })
       return
     }
     if (key.meta && key.name === "k") return resetList("repo")
@@ -1195,17 +1264,8 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
       const workshopId = selected && !selected.detail ? selected.session.workshopId : undefined
       if (!workshopId || !selected?.session.parentWorkshopId) return
       setError("")
-      try {
-        detachWorkshopFromParent(workshopId)
-      } catch (detachError) {
-        setError(detachError instanceof Error ? detachError.message : String(detachError))
-        return
-      }
-      if (selected.target.type === "tmux_session") {
-        const tmuxError = setTmuxWorkshopParent(selected.target.session, null)
-        if (tmuxError) setError(`Workshop detached, but ${tmuxError}`)
-      }
-      refreshLineageRows(workshopId, query())
+      void issueDaemonMutation({ type: "detach", workshopId, session: selected.target.type === "tmux_session" ? selected.target.session : undefined })
+        .catch((detachError) => setError(detachError instanceof Error ? detachError.message : String(detachError)))
       return
     }
     if (key.ctrl && key.name === "r" && mode() === "branch" && repository()) {
@@ -1214,13 +1274,11 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
     }
     if (key.name === "escape") {
       if (mode() === "rename" || mode() === "attach") {
-        const sourceWorkshopId = attachSession()?.workshopId
         setMode("jump")
         setQuery("")
         setError("")
         setAttachSession(undefined)
         setAttachCandidateIds(new Set<string>())
-        if (sourceWorkshopId) refreshLineageRows(sourceWorkshopId, "")
         return
       }
       if (mode() === "new") {
@@ -1289,59 +1347,26 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
         const parent = selectedAttachCandidate()
         if (!source?.workshopId || !parent?.workshopId) return
         setError("")
-        try {
-          attachWorkshopToParent(source.workshopId, parent.workshopId)
-        } catch (attachError) {
-          setError(attachError instanceof Error ? attachError.message : String(attachError))
-          return
-        }
-        let tmuxError = ""
-        if (source.target.type === "tmux_session") tmuxError = setTmuxWorkshopParent(source.target.session, parent.workshopId)
-        setMode("jump")
-        setQuery("")
-        setAttachSession(undefined)
-        setAttachCandidateIds(new Set<string>())
-        if (tmuxError) setError(`Workshop attached, but ${tmuxError}`)
-        refreshLineageRows(source.workshopId, "")
+        void issueDaemonMutation({ type: "attach", workshopId: source.workshopId, parentWorkshopId: parent.workshopId, session: source.target.type === "tmux_session" ? source.target.session : undefined })
+          .then(() => {
+            setMode("jump")
+            setQuery("")
+            setAttachSession(undefined)
+            setAttachCandidateIds(new Set<string>())
+          })
+          .catch((attachError) => setError(attachError instanceof Error ? attachError.message : String(attachError)))
         return
       }
       if (mode() === "rename" && renameSession()?.target.type === "tmux_session" && renameName().trim()) {
         const row = renameSession()!
         const oldName = row.target.type === "tmux_session" ? row.target.session : ""
-        const found = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
-        const sessionId = parseTmuxRows(found.stdout.toString()).find(([, name]) => name === oldName)?.[0] ?? ""
-        if (found.exitCode !== 0 || !sessionId) {
-          setError(found.stderr.toString().trim() || "Selected session no longer exists")
-          return
-        }
-        const renamed = Bun.spawnSync(["tmux", "rename-session", "-t", sessionId, renameName().trim()], { stdout: "pipe", stderr: "pipe" })
-        if (renamed.exitCode !== 0) {
-          setError(renamed.stderr.toString().trim() || "Unable to rename session")
-          return
-        }
-        const refreshed = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
-        const actual = parseTmuxRows(refreshed.stdout.toString()).find(([id]) => id === sessionId)?.[1] || renameName().trim()
-        if (row.resourceId) {
-          const registry = openResourceRegistry()
-          try { registry.updateDisplayName(row.resourceId, renameName().trim()) }
-          finally { registry.close() }
-          Bun.spawnSync(["tmux", "set-option", "-t", sessionId, "@clankerhouse_display_name", renameName().trim()], { stdout: "ignore", stderr: "ignore" })
-        }
-        const updateTarget = (target: Target): Target => target.type === "tmux_session" ? { ...target, session: actual } : target.type === "tmux_window" || target.type === "opencode" ? { ...target, session: actual } : target
-        row.name = actual
-        row.target = updateTarget(row.target)
-        row.details = row.details.map((detail) => ({ ...detail, target: updateTarget(detail.target) }))
-        row.searchText = `${actual} ${row.searchText}`.toLowerCase()
-        const nextLineage = new Set(expandedLineageSessions())
-        if (nextLineage.delete(oldName)) nextLineage.add(actual)
-        const nextDetails = new Set(expandedDetailSessions())
-        if (nextDetails.delete(oldName)) nextDetails.add(actual)
-        setExpandedLineageSessions(nextLineage)
-        setExpandedDetailSessions(nextDetails)
-        setRenameSession(undefined)
-        resetList("jump")
-        if (snapshotTransportEnabled) void refreshProjection(daemonSocketPath).catch(() => {})
-        setIndex(Math.max(0, treeRows(sessions(), "", nextLineage, nextDetails).findIndex((treeRow) => !treeRow.detail && treeRow.session === row)))
+        setError("")
+        void issueDaemonMutation({ type: "rename", session: oldName, resourceId: row.resourceId, displayName: renameName().trim() })
+          .then(() => {
+            setRenameSession(undefined)
+            resetList("jump")
+          })
+          .catch((renameError) => setError(renameError instanceof Error ? renameError.message : String(renameError)))
         return
       }
       if (mode() === "jump") {
@@ -1431,17 +1456,12 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
         setAnimationFrame((frame) => (frame + 1) % animationFrameCount)
       }
     }, 100)
-    const cacheInterval = setInterval(() => {
-      const refreshed = readCachePayload()
-      if (refreshed) applySnapshot(refreshed)
-    }, 500)
     connectSnapshotTransport()
     onCleanup(() => {
       disposed = true
       clearTimeout(initialRepositoryRefresh)
       if (reconnectTimer) clearTimeout(reconnectTimer)
       clearInterval(animationInterval)
-      clearInterval(cacheInterval)
       subscription?.close()
     })
   })
@@ -1506,14 +1526,17 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
 }
 
 const program = process.argv.includes("--server") ? serverProgram : process.argv.includes("--dump-cache") ? dumpCachedState : process.argv.includes("--dump-state") ? dumpState : Effect.gen(function* () {
-  const snapshot = yield* cachedOrCollectedSnapshot
+  const snapshot = yield* authoritativeOrStartupFallbackSnapshot
   const sessions = snapshot.sessions
   const repositories = cachedRepositoryRows(sessions)
   let currentSession = Bun.env.CLANKERHOUSE_CURRENT_SESSION ?? ""
   if (!currentSession && Bun.env.TMUX) currentSession = yield* runCommand(["tmux", "display-message", "-p", tmuxFields("#{session_id}", "#{session_name}")], { allowFailure: true }).pipe(Effect.map((output) => output.trim()))
   let target: Target | undefined
   yield* Effect.tryPromise({
-    try: () => render(() => <App sessions={sessions} initialRevision={snapshot.revision} repositories={repositories} refreshRepositories={(rows) => Effect.runPromise(refreshRepositoryRows(rows))} currentSession={currentSession} onOpen={(next) => { target = next }} />, { exitOnCtrlC: true }),
+    try: () => render(() => <App sessions={sessions} initialRevision={snapshot.revision} repositories={repositories} refreshRepositories={async () => {
+      const operation = await issueDaemonMutation({ type: "repository.refresh" })
+      return (operation.result as { repositories?: SessionRow[] } | undefined)?.repositories ?? repositories
+    }} currentSession={currentSession} onOpen={(next) => { target = next }} />, { exitOnCtrlC: true }),
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
 })

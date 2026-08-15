@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self},
-    os::unix::process::CommandExt,
+    io::{self, BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, SystemTime},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::Duration,
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -107,6 +109,17 @@ struct DetailRow {
     target: Target,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AvailableAction {
+    Open,
+    Rename,
+    Attach,
+    Detach,
+    Delete,
+    Create,
+}
+
 #[derive(Clone, Deserialize)]
 struct SessionRow {
     name: String,
@@ -134,6 +147,8 @@ struct SessionRow {
     workshop_id: Option<String>,
     #[serde(default)]
     management: String,
+    #[serde(default, rename = "availableActions")]
+    available_actions: Vec<AvailableAction>,
     #[serde(default, rename = "parentWorkshopId")]
     parent_workshop_id: Option<String>,
 }
@@ -207,7 +222,6 @@ struct TreeBuildContext<'a> {
 
 struct App {
     cache_path: PathBuf,
-    cache_modified: Option<SystemTime>,
     sessions: Vec<SessionRow>,
     rows: Vec<TreeRow>,
     expanded_lineage: HashSet<String>,
@@ -581,7 +595,6 @@ impl App {
     fn new(cache_path: PathBuf, current_session: String) -> Result<Self, String> {
         let mut app = Self {
             cache_path,
-            cache_modified: None,
             sessions: Vec::new(),
             rows: Vec::new(),
             expanded_lineage: HashSet::new(),
@@ -598,21 +611,48 @@ impl App {
             branch_name: String::new(),
             base: "^".into(),
         };
-        app.reload(true)?;
+        let snapshot: Snapshot = serde_json::from_slice(
+            &fs::read(&app.cache_path).map_err(|error| format!("Snapshot unavailable: {error}"))?,
+        )
+        .map_err(|error| format!("Invalid snapshot: {error}"))?;
+        app.apply_snapshot(snapshot, true)?;
         app.repositories = repository_rows(&app.cache_path, &app.sessions);
         Ok(app)
     }
 
-    fn reload(&mut self, initial: bool) -> Result<(), String> {
-        let metadata = fs::metadata(&self.cache_path)
-            .map_err(|error| format!("Snapshot unavailable: {error}"))?;
-        let modified = metadata.modified().ok();
-        if !initial && modified == self.cache_modified {
-            return Ok(());
+    fn from_snapshot(
+        cache_path: PathBuf,
+        current_session: String,
+        snapshot: Snapshot,
+    ) -> Result<Self, String> {
+        let mut app = Self::new_empty(cache_path, current_session);
+        app.apply_snapshot(snapshot, true)?;
+        app.repositories = repository_rows(&app.cache_path, &app.sessions);
+        Ok(app)
+    }
+
+    fn new_empty(cache_path: PathBuf, current_session: String) -> Self {
+        Self {
+            cache_path,
+            sessions: Vec::new(),
+            rows: Vec::new(),
+            expanded_lineage: HashSet::new(),
+            expanded_details: HashSet::new(),
+            selected: 0,
+            query: String::new(),
+            current_session,
+            error: String::new(),
+            animation_frame: 0,
+            mode: Mode::Jump,
+            repositories: Vec::new(),
+            branches: Vec::new(),
+            repository: None,
+            branch_name: String::new(),
+            base: "^".into(),
         }
-        let snapshot: Snapshot =
-            serde_json::from_slice(&fs::read(&self.cache_path).map_err(|error| error.to_string())?)
-                .map_err(|error| format!("Invalid snapshot: {error}"))?;
+    }
+
+    fn apply_snapshot(&mut self, snapshot: Snapshot, initial: bool) -> Result<(), String> {
         if snapshot.version != CACHE_VERSION {
             return Err(format!(
                 "Snapshot version {} is unsupported",
@@ -621,7 +661,6 @@ impl App {
         }
         let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
         self.sessions = snapshot.sessions;
-        self.cache_modified = modified;
         if initial {
             self.initialize_expansion();
         }
@@ -1411,58 +1450,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn open_target(target: Target, root: &Path) -> io::Error {
-    let encoded = serde_json::to_string(&target).expect("target serialization must succeed");
-    let mut command = Command::new(root.join("bin/clankers"));
-    command.args(["target", "open", "--json", &encoded]);
-    command.exec()
-}
-
-fn open_branch(
-    repository: &str,
-    branch: &str,
-    create: bool,
-    base: &str,
-    root: &Path,
-) -> Result<Target, String> {
-    let mut command = Command::new("wt");
-    command.args(["-C", repository, "switch"]);
-    if create {
-        command.arg("--create");
-    }
-    command.args([branch, "--no-cd", "--format", "json"]);
-    if create && !base.is_empty() {
-        command.args(["--base", base]);
-    }
-    let switched = command.output().map_err(|error| error.to_string())?;
-    if !switched.status.success() {
-        return Err(String::from_utf8_lossy(&switched.stderr).trim().into());
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&switched.stdout).map_err(|error| error.to_string())?;
-    let path = value
-        .get("path")
-        .and_then(|path| path.as_str())
-        .ok_or_else(|| "Worktrunk did not return a worktree path".to_string())?;
-    let created = Command::new(root.join("bin/clankers"))
-        .args(["workshop", "ensure", "--cwd", path])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !created.status.success() {
-        return Err(String::from_utf8_lossy(&created.stderr).trim().into());
-    }
-    let session = String::from_utf8_lossy(&created.stdout).trim().to_string();
-    if session.is_empty() {
-        return Err("Session creation did not return a session name".into());
-    }
-    Ok(Target::TmuxSession {
-        session,
-        management: None,
-        resource_id: None,
-        location: None,
-    })
-}
-
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
     app.error.clear();
     if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
@@ -1601,7 +1588,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
             }
         }
         KeyCode::Enter => {
-            if let Some(row) = app.selected() {
+            if let Some(row) = app.selected()
+                && (row.session.available_actions.is_empty()
+                    || row
+                        .session
+                        .available_actions
+                        .contains(&AvailableAction::Open))
+            {
                 return Some(AppExit::Open(row.target()));
             }
         }
@@ -1619,6 +1612,139 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppExit> {
     None
 }
 
+fn rpc(
+    socket_path: &Path,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    let id = format!("native-{}-{}", std::process::id(), method);
+    let mut request = serde_json::json!({"version": 1, "id": id, "method": method});
+    if let Some(params) = params {
+        request["params"] = params;
+    }
+    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    let response: serde_json::Value =
+        serde_json::from_str(&line).map_err(|error| error.to_string())?;
+    if response.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(response
+            .pointer("/error/message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("daemon request failed")
+            .into());
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "daemon response omitted result".into())
+}
+
+fn socket_snapshot(socket_path: &Path) -> Result<Snapshot, String> {
+    serde_json::from_value(rpc(socket_path, "snapshot.get", None)?)
+        .map_err(|error| error.to_string())
+}
+
+fn subscribe_loop(socket_path: PathBuf, sender: Sender<Snapshot>) {
+    let mut delay = Duration::from_millis(50);
+    loop {
+        match UnixStream::connect(&socket_path) {
+            Ok(mut stream) => {
+                let request = serde_json::json!({"version": 1, "id": "native-subscribe", "method": "snapshots.subscribe"});
+                if writeln!(stream, "{request}").is_ok() {
+                    delay = Duration::from_millis(50);
+                    for line in BufReader::new(stream).lines() {
+                        let Ok(line) = line else { break };
+                        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+                            break;
+                        };
+                        if message.get("event").and_then(|value| value.as_str()) == Some("snapshot")
+                            && let Ok(snapshot) =
+                                serde_json::from_value::<Snapshot>(message["snapshot"].clone())
+                            && sender.send(snapshot).is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
+fn rpc_retry(
+    socket_path: &Path,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut last_error = String::new();
+    for attempt in 0..40 {
+        match rpc(socket_path, method, params.clone()) {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = error,
+        }
+        thread::sleep(Duration::from_millis((25 * (attempt + 1)).min(500)));
+    }
+    Err(last_error)
+}
+
+fn daemon_mutation(
+    socket_path: &Path,
+    intent: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let key = format!(
+        "native-{}-{}",
+        std::process::id(),
+        std::time::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let submitted = rpc_retry(
+        socket_path,
+        "mutation.submit",
+        Some(serde_json::json!({"idempotencyKey": key, "intent": intent})),
+    )?;
+    let operation_id = submitted
+        .pointer("/operation/operationId")
+        .and_then(|value| value.as_str())
+        .ok_or("daemon omitted operation id")?
+        .to_string();
+    for _ in 0..1200 {
+        let operation = rpc_retry(
+            socket_path,
+            "operation.status",
+            Some(serde_json::json!({"operationId": operation_id})),
+        )?;
+        match operation.get("state").and_then(|value| value.as_str()) {
+            Some("succeeded") => {
+                return Ok(operation
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            Some("failed") => {
+                return Err(operation
+                    .get("error")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("daemon operation failed")
+                    .into());
+            }
+            _ => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    Err("daemon operation timed out".into())
+}
+
 fn runtime_root() -> PathBuf {
     let base = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
     let uid = unsafe { libc_getuid() };
@@ -1630,7 +1756,11 @@ unsafe extern "C" {
     fn libc_getuid() -> u32;
 }
 
-fn run(mut terminal: DefaultTerminal, mut app: App) -> io::Result<AppExit> {
+fn run(
+    mut terminal: DefaultTerminal,
+    mut app: App,
+    snapshots: Receiver<Snapshot>,
+) -> io::Result<AppExit> {
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
         if event::poll(Duration::from_millis(100))?
@@ -1639,24 +1769,16 @@ fn run(mut terminal: DefaultTerminal, mut app: App) -> io::Result<AppExit> {
         {
             return Ok(exit);
         }
-        match app.reload(false) {
-            Ok(()) => app.error.clear(),
-            Err(error) if app.sessions.is_empty() => app.error = error,
-            Err(_) => {}
+        while let Ok(snapshot) = snapshots.try_recv() {
+            if let Err(error) = app.apply_snapshot(snapshot, false) {
+                app.error = error;
+            }
         }
         app.animation_frame = (app.animation_frame + 1) % 40;
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = env::var("CLANKERHOUSE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_path_buf()
-        });
     let current_session = env::var("CLANKERHOUSE_CURRENT_SESSION")
         .ok()
         .filter(|session| !session.is_empty())
@@ -1674,8 +1796,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .unwrap_or_default();
-    let mut app =
-        App::new(runtime_root().join("state.json"), current_session).map_err(io::Error::other)?;
+    let runtime = runtime_root();
+    let socket_path = runtime.join("daemon.sock");
+    let cache_path = runtime.join("state.json");
+    let mut app = match socket_snapshot(&socket_path) {
+        Ok(snapshot) => App::from_snapshot(cache_path, current_session, snapshot),
+        Err(_) => App::new(cache_path, current_session),
+    }
+    .map_err(io::Error::other)?;
     if env::args().any(|argument| argument == "--check") {
         println!(
             "Native snapshot ready: {} sessions, {} targets",
@@ -1687,21 +1815,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("spawn") {
         app.enter_repository_mode();
     }
+    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    let subscription_path = socket_path.clone();
+    thread::spawn(move || subscribe_loop(subscription_path, snapshot_sender));
     let terminal = ratatui::init();
-    let result = run(terminal, app);
+    let result = run(terminal, app, snapshot_receiver);
     ratatui::restore();
     match result? {
         AppExit::Close => Ok(()),
-        AppExit::Open(target) => Err(open_target(target, &root).into()),
+        AppExit::Open(target) => daemon_mutation(
+            &socket_path,
+            serde_json::json!({"type": "open", "target": target}),
+        )
+        .map(|_| ())
+        .map_err(|error| io::Error::other(error).into()),
         AppExit::OpenBranch {
             repository,
             branch,
             create,
             base,
         } => {
-            let target = open_branch(&repository, &branch, create, &base, &root)
-                .map_err(io::Error::other)?;
-            Err(open_target(target, &root).into())
+            let result = daemon_mutation(&socket_path, serde_json::json!({
+                "type": "create", "repository": repository, "branch": branch, "create": create, "base": base
+            })).map_err(io::Error::other)?;
+            let target: Target = serde_json::from_value(
+                result
+                    .get("target")
+                    .cloned()
+                    .ok_or_else(|| io::Error::other("daemon omitted created target"))?,
+            )?;
+            daemon_mutation(
+                &socket_path,
+                serde_json::json!({"type": "open", "target": target}),
+            )
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error).into())
         }
     }
 }
@@ -1779,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_snapshot_removal_keeps_the_last_good_rows() {
+    fn transient_socket_failure_keeps_the_last_good_rows() {
         let root = env::temp_dir().join(format!(
             "clankerhouse-native-reload-test-{}",
             std::process::id()
@@ -1790,7 +1938,16 @@ mod tests {
         let mut app = App::new(cache_path.clone(), String::new()).unwrap();
 
         fs::remove_file(&cache_path).unwrap();
-        assert!(app.reload(false).is_err());
+        assert!(
+            app.apply_snapshot(
+                Snapshot {
+                    version: 99,
+                    sessions: Vec::new()
+                },
+                false
+            )
+            .is_err()
+        );
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.sessions[0].name, "kept");
 

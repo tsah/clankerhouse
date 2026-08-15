@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createConnection, createServer } from "node:net"
 import { advanceProjection, type ProjectionSnapshot } from "../projection"
-import { getServerStatus, getSnapshot, refreshProjection, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, subscribeSnapshots, type SnapshotServer } from "./index"
+import { acquireProducerLease, getOperationStatus, getServerStatus, getSnapshot, refreshProjection, replaceProducerLeaseRecord, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, submitMutation, subscribeSnapshots, type SnapshotServer } from "./index"
 
 interface Row { name: string }
 
@@ -64,6 +64,7 @@ describe("Unix snapshot transport", () => {
     expect(await getSnapshot<Row>(socketPath)).toEqual(initial)
     const status = await getServerStatus(socketPath)
     expect(status.protocolVersion).toBe(SNAPSHOT_PROTOCOL_VERSION)
+    expect(status).toMatchObject({ healthy: true, epoch: initial.revision.source, revision: initial.revision })
     expect(status.subscribers).toBe(0)
 
     const next = snapshot("second", initial)
@@ -131,6 +132,53 @@ describe("Unix snapshot transport", () => {
     })
     await server.close()
     expect(await disconnected.promise).toBeUndefined()
+  })
+
+  test("executes typed mutations idempotently and resumes a failed retry", async () => {
+    const { directory, socketPath } = await fixture()
+    let attempts = 0
+    const server = await startSnapshotServer({
+      socketPath,
+      initialSnapshot: snapshot("initial"),
+      operationJournalPath: join(directory, "operations.json"),
+      executeMutation: async (intent) => {
+        attempts += 1
+        if (attempts === 1) throw new Error("injected fault")
+        return { accepted: intent.type }
+      },
+    })
+    servers.push(server)
+    const intent = { type: "open" as const, target: { type: "directory" as const, path: "/tmp/work" } }
+    const first = await submitMutation(socketPath, "same-key", intent)
+    let operation = await getOperationStatus(socketPath, first.operation.operationId)
+    while (operation.state === "queued" || operation.state === "running") {
+      await Bun.sleep(5)
+      operation = await getOperationStatus(socketPath, operation.operationId)
+    }
+    expect(operation.state).toBe("failed")
+
+    const retry = await submitMutation(socketPath, "same-key", intent)
+    expect(retry.replayed).toBe(true)
+    expect(retry.operation.operationId).toBe(first.operation.operationId)
+    do {
+      await Bun.sleep(5)
+      operation = await getOperationStatus(socketPath, operation.operationId)
+    } while (operation.state === "queued" || operation.state === "running")
+    expect(operation).toMatchObject({ state: "succeeded", attempts: 2, result: { accepted: "open" } })
+    expect(attempts).toBe(2)
+  })
+
+  test("rejects a stale producer after its epoch lease is replaced", async () => {
+    const { directory, socketPath } = await fixture()
+    const leasePath = join(directory, "producer.lease")
+    const lease = await acquireProducerLease(leasePath, "tmux:test")
+    const initial = advanceProjection(undefined, [{ name: "initial" }], 3, lease.epoch)
+    const server = await startSnapshotServer({ socketPath, initialSnapshot: initial, epoch: lease.epoch, owner: lease.owner, assertAuthoritative: lease.assertCurrentSync })
+    servers.push(server)
+    await replaceProducerLeaseRecord(leasePath, lease.owner, "replacement-epoch")
+    const next = advanceProjection(initial, [{ name: "rejected" }], 3, lease.epoch)
+    expect(() => server.publish(next)).toThrow("stale producer")
+    await lease.release()
   })
 
   test("rejects malformed, unsupported, unknown, and oversized requests", async () => {

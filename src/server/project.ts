@@ -152,16 +152,13 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       }
       if (windowOpencodes.length > 0) continue
 
-      const kind = isPiWindow(window)
-        ? "pi"
-        : isClaudeWindow(window)
-          ? "claude"
-          : codexPanes.has(window.pane)
-            ? "codex"
-            : detectedHarnessByPane.get(window.pane) ?? "window"
-      const explicitKind = ["pi", "claude", "codex", "opencode"].includes(window.explicitHarness || "") ? window.explicitHarness : undefined
-      const projectedKind = explicitKind ?? kind
       const report = reportsByPane.get(window.pane)
+      const registeredHarness = window.clankerId && ["pi", "claude", "codex", "opencode"].includes(window.explicitHarness || "")
+        ? window.explicitHarness
+        : report?.harness
+      // Titles, command names, and process resemblance can enrich a registered Clanker,
+      // but never create Clanker identity.
+      const projectedKind = registeredHarness ?? "window"
       if (report?.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: report.updatedAt, minIntervalMs: 0 })
       const sourceState = report?.harness === projectedKind ? report.state : projectedKind === "codex" ? codexStateFromTitle(window.title || window.name) : projectedKind === "claude" ? claudeStateFromTitle(window.title || window.name) : "unknown"
       const updatedAt = report?.harness === projectedKind ? report.updatedAt : window.activity * 1000
@@ -194,7 +191,9 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const parentWorkshopId = workshop ? workshop.parentWorkshopId : session.parentWorkshopId
     const lineageFields = buildLineageFields(workshop?.workshopId || session.workshopId, parentWorkshopId, workshop?.childWorkshopCount ?? 0)
     const displayName = managedSession?.displayName || session.name
-    const row: SessionRow = { name: displayName, path: session.path, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", workshopId: workshop?.workshopId || managedSession?.workshopId || session.workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
+    const workshopId = workshop?.workshopId || managedSession?.workshopId || session.workshopId
+    const availableActions = ["open", "rename", ...(workshopId ? ["attach"] : []), ...(parentWorkshopId ? ["detach"] : []), "delete"] as SessionRow["availableActions"]
+    const row: SessionRow = { name: displayName, path: session.path, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", availableActions, workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
     row.searchText = [row.name, row.path, row.branch, row.flags, row.markers.join(" "), row.lineageLabel, row.lineageSearchText, ...row.details.flatMap((detail) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title, detail.age])].join(" ").toLowerCase()
     rows.push(row)
   }
@@ -211,7 +210,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const age = directory.activityAt ? ageFromTimestamp(directory.activityAt, observedAt) : ""
     const workshop = lineage.byPath.get(path)
     const lineageFields = buildLineageFields(workshop?.workshopId, workshop?.parentWorkshopId, workshop?.childWorkshopCount ?? 0)
-    const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId: workshop?.parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
+    const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", availableActions: ["open", "create"], directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId: workshop?.parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
     row.searchText = [row.name, row.path, row.branch, `${directory.source} directory`, row.activitySource, row.age, row.lineageLabel, row.lineageSearchText].join(" ").toLowerCase()
     rows.push(row)
   }

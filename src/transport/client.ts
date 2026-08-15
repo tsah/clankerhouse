@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
 import { parseProjectionSnapshot, type ProjectionSnapshot } from "../projection"
-import { encodeMessage, SNAPSHOT_PROTOCOL_VERSION, type ProjectionRefreshResult, type ServerStatus } from "./protocol"
+import { encodeMessage, SNAPSHOT_PROTOCOL_VERSION, type MutationIntent, type MutationSubmitResult, type OperationRecord, type ProjectionRefreshResult, type ServerStatus } from "./protocol"
 
 export interface SnapshotSubscription {
   close(): void
@@ -35,7 +35,7 @@ const parseSnapshot = <T>(value: unknown): ProjectionSnapshot<T> | undefined => 
   return parseProjectionSnapshot<T>(value, version)
 }
 
-const request = async <T>(socketPath: string, method: "server.status" | "snapshot.get" | "projection.refresh", options: SnapshotClientOptions = {}): Promise<T> => {
+const request = async <T>(socketPath: string, method: "server.status" | "server.health" | "snapshot.get" | "projection.refresh" | "mutation.submit" | "operation.status", options: SnapshotClientOptions = {}, params?: object): Promise<T> => {
   const socket = await connect(socketPath)
   const id = randomUUID()
   const maxMessageBytes = options.maxMessageBytes ?? 4 * 1024 * 1024
@@ -67,13 +67,29 @@ const request = async <T>(socketPath: string, method: "server.status" | "snapsho
       socket.end()
       resolve(message.result as T)
     })
-    socket.write(encodeMessage({ version: SNAPSHOT_PROTOCOL_VERSION, id, method }))
+    socket.write(encodeMessage({ version: SNAPSHOT_PROTOCOL_VERSION, id, method, ...(params ? { params } : {}) }))
   })
 }
 
 export const getServerStatus = (socketPath: string, options?: SnapshotClientOptions) => request<ServerStatus>(socketPath, "server.status", options)
-
+export const getServerHealth = (socketPath: string, options?: SnapshotClientOptions) => request<ServerStatus>(socketPath, "server.health", options)
 export const refreshProjection = (socketPath: string, options?: SnapshotClientOptions) => request<ProjectionRefreshResult>(socketPath, "projection.refresh", options)
+export const submitMutation = (socketPath: string, idempotencyKey: string, intent: MutationIntent, options?: SnapshotClientOptions) => request<MutationSubmitResult>(socketPath, "mutation.submit", options, { idempotencyKey, intent })
+export const getOperationStatus = (socketPath: string, operationId: string, options?: SnapshotClientOptions) => request<OperationRecord>(socketPath, "operation.status", options, { operationId })
+
+export const waitForOperation = async (socketPath: string, operationId: string, options: SnapshotClientOptions & { timeoutMs?: number; retryMs?: number } = {}) => {
+  const deadline = Date.now() + (options.timeoutMs ?? 30_000)
+  let lastError: Error | undefined
+  while (true) {
+    let operation: OperationRecord | undefined
+    try { operation = await getOperationStatus(socketPath, operationId, options); lastError = undefined }
+    catch (error) { lastError = asError(error) }
+    if (operation?.state === "succeeded") return operation
+    if (operation?.state === "failed") throw new Error(operation.error || "daemon operation failed")
+    if (Date.now() >= deadline) throw lastError ?? new Error(`operation ${operationId} did not complete before timeout`)
+    await new Promise((resolve) => setTimeout(resolve, options.retryMs ?? 25))
+  }
+}
 
 export const getSnapshot = async <T>(socketPath: string, options?: SnapshotClientOptions): Promise<ProjectionSnapshot<T>> => {
   const value = await request<unknown>(socketPath, "snapshot.get", options)

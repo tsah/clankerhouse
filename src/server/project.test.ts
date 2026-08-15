@@ -159,14 +159,15 @@ describe("session resource projection", () => {
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 
-  test("uses prepared process detections for wrapped harness classification", () => {
+  test("does not create Clanker identity from process resemblance", () => {
     const result = projectResources(inputs({
       sessions: [tmuxSession()],
       windows: [tmuxWindow({ title: "✓ complete" })],
       detectedHarnessByPane: new Map([["%1", "codex"]]),
     }))
     expect(result.sessions[0]?.markers).toEqual(["codex"])
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "codex", state: "done" })
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "window", state: "unknown" })
+    expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 
   test("projects lineage and sessionless directories while removing occupied paths", () => {

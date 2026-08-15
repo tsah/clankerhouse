@@ -45,7 +45,9 @@ server_pid=$!
 
 daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
 cache="$runtime/clankerhouse-$uid/state.json"
-for _ in {1..100}; do
+# Cold Bun startup can exceed five seconds on contended builders. Keep the
+# wait bounded, but continue to fail immediately if the child exits.
+for _ in {1..600}; do
     [[ -S "$daemon_socket" && -s "$cache" && "$(stat -c '%a' "$daemon_socket")" == "600" ]] && break
     kill -0 "$server_pid" 2>/dev/null || {
         printf 'Clankerhouse daemon exited during startup:\n' >&2

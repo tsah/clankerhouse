@@ -1,24 +1,29 @@
 import { chmod, lstat, unlink } from "node:fs/promises"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import type { ProjectionSnapshot } from "../projection"
+import { OperationJournal, type MutationExecutor } from "./operations"
 import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION } from "./protocol"
 
 export interface SnapshotServerOptions<T> {
   socketPath: string
   initialSnapshot: ProjectionSnapshot<T>
+  epoch?: string
+  owner?: string
+  assertAuthoritative?: () => void
   maxRequestBytes?: number
   maxOutboundBytes?: number
   maxClients?: number
   refresh?: () => Promise<ProjectionSnapshot<T>>
+  executeMutation?: MutationExecutor
+  operationJournalPath?: string
 }
-
 export interface SnapshotServer<T> {
   readonly socketPath: string
+  readonly epoch: string
   publish(snapshot: ProjectionSnapshot<T>): void
   close(): Promise<void>
   subscriberCount(): number
 }
-
 interface PathIdentity { dev: number; ino: number; uid: number }
 
 const pathIdentity = async (path: string): Promise<PathIdentity | undefined> => {
@@ -33,25 +38,12 @@ const pathIdentity = async (path: string): Promise<PathIdentity | undefined> => 
     throw error
   }
 }
-
 const socketIsListening = (path: string) => new Promise<boolean>((resolve, reject) => {
   const probe = createConnection(path)
-  const timer = setTimeout(() => {
-    probe.destroy()
-    reject(new Error(`Timed out probing Unix socket: ${path}`))
-  }, 500)
-  probe.once("connect", () => {
-    clearTimeout(timer)
-    probe.destroy()
-    resolve(true)
-  })
-  probe.once("error", (error: NodeJS.ErrnoException) => {
-    clearTimeout(timer)
-    if (error.code === "ECONNREFUSED" || error.code === "ENOENT") resolve(false)
-    else reject(error)
-  })
+  const timer = setTimeout(() => { probe.destroy(); reject(new Error(`Timed out probing Unix socket: ${path}`)) }, 500)
+  probe.once("connect", () => { clearTimeout(timer); probe.destroy(); resolve(true) })
+  probe.once("error", (error: NodeJS.ErrnoException) => { clearTimeout(timer); if (error.code === "ECONNREFUSED" || error.code === "ENOENT") resolve(false); else reject(error) })
 })
-
 const prepareSocketPath = async (path: string) => {
   const identity = await pathIdentity(path)
   if (!identity) return
@@ -61,14 +53,10 @@ const prepareSocketPath = async (path: string) => {
   if (current.dev !== identity.dev || current.ino !== identity.ino || current.uid !== identity.uid) throw new Error(`Unix socket changed while checking staleness: ${path}`)
   await unlink(path)
 }
-
 const listen = (server: Server, path: string) => new Promise<void>((resolve, reject) => {
   const onError = (error: Error) => reject(error)
   server.once("error", onError)
-  server.listen(path, () => {
-    server.off("error", onError)
-    resolve()
-  })
+  server.listen(path, () => { server.off("error", onError); resolve() })
 })
 
 export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>): Promise<SnapshotServer<T>> => {
@@ -76,44 +64,38 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
   const maxOutboundBytes = options.maxOutboundBytes ?? 4 * 1024 * 1024
   const maxClients = options.maxClients ?? 32
   if (maxRequestBytes < 128 || maxOutboundBytes < 128 || maxClients < 1) throw new Error("Invalid snapshot server limits")
-
+  options.assertAuthoritative?.()
   await prepareSocketPath(options.socketPath)
 
   let latest = options.initialSnapshot
   let closed = false
   const startedAt = Date.now()
+  const epoch = options.epoch ?? latest.revision.source
+  const owner = options.owner ?? "snapshot-server"
   const clients = new Set<Socket>()
   const subscribers = new Set<Socket>()
+  const operations = options.executeMutation ? await OperationJournal.open(options.executeMutation, options.operationJournalPath) : undefined
 
   const send = (socket: Socket, message: object): boolean => {
     const encoded = encodeMessage(message)
     const bytes = Buffer.byteLength(encoded)
-    if (bytes > maxOutboundBytes || socket.writableLength + bytes > maxOutboundBytes) {
-      socket.destroy(new Error("snapshot transport outbound limit exceeded"))
-      return false
-    }
+    if (bytes > maxOutboundBytes || socket.writableLength + bytes > maxOutboundBytes) { socket.destroy(new Error("snapshot transport outbound limit exceeded")); return false }
     socket.write(encoded)
     return true
   }
-
   const publish = (snapshot: ProjectionSnapshot<T>) => {
-    if (latest.revision.source === snapshot.revision.source && latest.revision.sequence === snapshot.revision.sequence) return
+    options.assertAuthoritative?.()
+    if (snapshot.revision.source !== epoch) throw new Error(`stale producer revision source ${snapshot.revision.source}; authoritative epoch is ${epoch}`)
+    if (latest.revision.source === snapshot.revision.source && latest.revision.sequence >= snapshot.revision.sequence) return
     latest = snapshot
-    for (const subscriber of subscribers) send(subscriber, { version: SNAPSHOT_PROTOCOL_VERSION, event: "snapshot", snapshot })
+    for (const subscriber of subscribers) send(subscriber, { version: SNAPSHOT_PROTOCOL_VERSION, event: "snapshot", epoch, snapshot })
   }
 
   const server = createServer((socket) => {
-    if (clients.size >= maxClients) {
-      send(socket, protocolError(null, "server_busy", "too many clients"))
-      socket.end()
-      return
-    }
+    if (clients.size >= maxClients) { send(socket, protocolError(null, "server_busy", "too many clients")); socket.end(); return }
     clients.add(socket)
     let input = Buffer.alloc(0)
-    const remove = () => {
-      clients.delete(socket)
-      subscribers.delete(socket)
-    }
+    const remove = () => { clients.delete(socket); subscribers.delete(socket) }
     socket.on("close", remove)
     socket.on("error", () => {})
     socket.on("data", (chunk: Buffer) => {
@@ -123,66 +105,40 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
         if (newline < 0) break
         const line = input.subarray(0, newline)
         input = input.subarray(newline + 1)
-        if (line.byteLength > maxRequestBytes) {
-          send(socket, protocolError(null, "request_too_large", "request exceeds byte limit"))
-          socket.end()
-          return
-        }
+        if (line.byteLength > maxRequestBytes) { send(socket, protocolError(null, "request_too_large", "request exceeds byte limit")); socket.end(); return }
         let raw: unknown
-        try {
-          raw = JSON.parse(line.toString("utf8"))
-        } catch {
-          send(socket, protocolError(null, "bad_request", "request is not valid JSON"))
-          continue
-        }
+        try { raw = JSON.parse(line.toString("utf8")) } catch { send(socket, protocolError(null, "bad_request", "request is not valid JSON")); continue }
         const request = parseRequest(raw)
-        if (isErrorResponse(request)) {
-          send(socket, request)
-          continue
-        }
-        if (request.method === "server.status") {
-          send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, id: request.id, ok: true, result: { protocolVersion: SNAPSHOT_PROTOCOL_VERSION, startedAt, subscribers: subscribers.size } })
-        } else if (request.method === "snapshot.get") {
-          send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, id: request.id, ok: true, result: latest })
-        } else if (request.method === "projection.refresh") {
-          if (!options.refresh) {
-            send(socket, protocolError(request.id, "method_not_found", "projection refresh is unavailable"))
-            continue
-          }
-          void options.refresh().then((snapshot) => {
-            publish(snapshot)
-            send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, id: request.id, ok: true, result: { revision: snapshot.revision } })
-          }).catch(() => {
-            send(socket, protocolError(request.id, "server_busy", "projection refresh failed"))
-          })
+        if (isErrorResponse(request)) { send(socket, request); continue }
+        try { options.assertAuthoritative?.() } catch { send(socket, protocolError(request.id, "stale_producer", "daemon no longer owns the producer lease")); continue }
+        const succeed = (result: unknown) => send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, id: request.id, ok: true, result })
+        if (request.method === "server.status" || request.method === "server.health") {
+          succeed({ protocolVersion: SNAPSHOT_PROTOCOL_VERSION, startedAt, subscribers: subscribers.size, healthy: true, epoch, owner, revision: latest.revision })
+        } else if (request.method === "snapshot.get") succeed(latest)
+        else if (request.method === "projection.refresh") {
+          if (!options.refresh) { send(socket, protocolError(request.id, "method_not_found", "projection refresh is unavailable")); continue }
+          void options.refresh().then((snapshot) => { publish(snapshot); succeed({ revision: snapshot.revision }) }).catch(() => send(socket, protocolError(request.id, "server_busy", "projection refresh failed")))
+        } else if (request.method === "mutation.submit") {
+          if (!operations) { send(socket, protocolError(request.id, "method_not_found", "mutations are unavailable")); continue }
+          void operations.submit(request.params.idempotencyKey, request.params.intent).then(succeed).catch((error) => send(socket, protocolError(request.id, "bad_request", error instanceof Error ? error.message : String(error))))
+        } else if (request.method === "operation.status") {
+          const operation = operations?.get(request.params.operationId)
+          if (!operation) send(socket, protocolError(request.id, "not_found", "operation was not found"))
+          else succeed(operation)
         } else {
           subscribers.add(socket)
-          if (send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, id: request.id, ok: true, result: { subscribed: true } })) {
-            send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, event: "snapshot", snapshot: latest })
-          }
+          if (succeed({ subscribed: true, epoch })) send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, event: "snapshot", epoch, snapshot: latest })
         }
       }
-      if (input.byteLength > maxRequestBytes) {
-        send(socket, protocolError(null, "request_too_large", "request exceeds byte limit"))
-        socket.end()
-      }
+      if (input.byteLength > maxRequestBytes) { send(socket, protocolError(null, "request_too_large", "request exceeds byte limit")); socket.end() }
     })
   })
-
-  try {
-    await listen(server, options.socketPath)
-    await chmod(options.socketPath, 0o600)
-  } catch (error) {
-    server.close()
-    throw error
-  }
+  try { await listen(server, options.socketPath); await chmod(options.socketPath, 0o600) } catch (error) { server.close(); throw error }
   const ownedIdentity = await pathIdentity(options.socketPath)
-
   return {
     socketPath: options.socketPath,
-    publish(snapshot) {
-      if (!closed) publish(snapshot)
-    },
+    epoch,
+    publish(snapshot) { if (!closed) publish(snapshot) },
     subscriberCount: () => subscribers.size,
     async close() {
       if (closed) return

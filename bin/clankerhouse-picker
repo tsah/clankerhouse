@@ -26,6 +26,7 @@ CACHE_FILE="$STATE_DIR/state.json"
 LOG_FILE="$STATE_DIR/server.log"
 SOCKET_FILE="$STATE_DIR/server.tmux-socket"
 VERSION_FILE="$STATE_DIR/server.version"
+DAEMON_SOCKET="$STATE_DIR/daemon.sock"
 LOCK_FILE="$STATE_DIR/server.lock"
 CACHE_VERSION=10
 CURRENT_TMUX_SOCKET=${TMUX:-}
@@ -57,20 +58,23 @@ cache_server_uses_current_tmux() {
 }
 
 server_running() {
-    local pid=""
-    [[ -r "$PID_FILE" ]] || return 1
-    pid=$(<"$PID_FILE")
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    current_cache_server_process "$pid" || return 1
-    # A cache process inherited from another tmux socket cannot observe this
-    # client's sessions or clankers (common after isolated QA runs).
-    [[ -r "$SOCKET_FILE" ]] || return 1
-    [[ "$(<"$SOCKET_FILE")" == "$CURRENT_TMUX_SOCKET" ]] || return 1
-    [[ -r "$VERSION_FILE" ]] || return 1
-    [[ "$(<"$VERSION_FILE")" == "$CACHE_VERSION" ]] || return 1
-    # Restart after local source edits even when the cache schema is unchanged.
-    [[ -z "$(find src -type f -newer "$PID_FILE" -print -quit 2>/dev/null)" ]]
+    [[ -S "$DAEMON_SOCKET" ]] || return 1
+    CLANKERHOUSE_PROBE_SOCKET="$DAEMON_SOCKET" CLANKERHOUSE_EXPECTED_OWNER="$CURRENT_TMUX_SOCKET" bun --eval '
+      import { createConnection } from "node:net"
+      const socket = createConnection(process.env.CLANKERHOUSE_PROBE_SOCKET)
+      const timer = setTimeout(() => { socket.destroy(); process.exit(1) }, 750)
+      socket.on("error", () => process.exit(1))
+      socket.on("connect", () => socket.write(JSON.stringify({version:1,id:"launcher-health",method:"server.health"}) + "\n"))
+      let input = ""
+      socket.on("data", chunk => {
+        input += chunk
+        const newline = input.indexOf("\n")
+        if (newline < 0) return
+        clearTimeout(timer)
+        const message = JSON.parse(input.slice(0, newline))
+        process.exit(message.ok === true && message.result?.healthy === true && message.result?.owner === (process.env.CLANKERHOUSE_EXPECTED_OWNER || "default-tmux") ? 0 : 1)
+      })
+    ' >/dev/null 2>&1
 }
 
 mkdir -p -m 700 "$STATE_DIR"
@@ -111,25 +115,27 @@ if ! server_running; then
     [[ "$preserve_cache" == true ]] || rm -f "$CACHE_FILE"
     printf '%s\n' "$CURRENT_TMUX_SOCKET" > "$SOCKET_FILE"
     nohup bun src/main.tsx --server >>"$LOG_FILE" 2>&1 &
+    launched_pid=$!
 fi
 
-for _ in {1..20}; do
-    [[ -s "$CACHE_FILE" ]] && break
+# Wait for the authoritative Interface, not state.json. The JSON file is only a
+# one-time client fallback. Cold Bun startup gets a bounded minute; a child that
+# exits still fails immediately.
+for _ in {1..1200}; do
+    server_running && break
+    if [[ -n ${launched_pid:-} ]] && ! kill -0 "$launched_pid" 2>/dev/null; then
+        printf 'Clankerhouse daemon exited during startup; see %s\n' "$LOG_FILE" >&2
+        exit 1
+    fi
     sleep 0.05
 done
-
-if [[ ${1:-} == "--ensure-server" && ! -s "$CACHE_FILE" ]]; then
-    for _ in {1..600}; do
-        [[ -s "$CACHE_FILE" ]] && break
-        sleep 0.05
-    done
-fi
+server_running || { printf 'Clankerhouse daemon did not become healthy; see %s\n' "$LOG_FILE" >&2; exit 1; }
 
 flock -u 9
 exec 9>&-
 
 if [[ ${1:-} == "--ensure-server" ]]; then
-    [[ -s "$CACHE_FILE" ]]
+    server_running
     exit
 fi
 

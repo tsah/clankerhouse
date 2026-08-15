@@ -1,4 +1,5 @@
 import type { MultiplexerLocation } from "./resource-registry"
+import type { AvailableAction } from "./transport/protocol"
 
 export interface TargetIdentity {
   management?: "managed" | "unmanaged"
@@ -17,7 +18,7 @@ export type ReportedClankerState = ClankerState
 
 export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
-export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; lineageLabel?: string; lineageSearchText?: string }
+export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; lineageLabel?: string; lineageSearchText?: string }
 export interface TreeRow {
   key: string
   depth: number

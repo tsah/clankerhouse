@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createConnection, createServer } from "node:net"
 import { advanceProjection, type ProjectionSnapshot } from "../projection"
+import { openDurableRegistry } from "../registry"
 import { acquireProducerLease, getOperationStatus, getServerStatus, getSnapshot, refreshProjection, replaceProducerLeaseRecord, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, submitMutation, subscribeSnapshots, type SnapshotServer } from "./index"
 
 interface Row { name: string }
@@ -137,10 +138,11 @@ describe("Unix snapshot transport", () => {
   test("executes typed mutations idempotently and resumes a failed retry", async () => {
     const { directory, socketPath } = await fixture()
     let attempts = 0
+    const operationRegistry = openDurableRegistry({ dbPath: join(directory, "registry.sqlite3") })
     const server = await startSnapshotServer({
       socketPath,
       initialSnapshot: snapshot("initial"),
-      operationJournalPath: join(directory, "operations.json"),
+      operationRegistry,
       executeMutation: async (intent) => {
         attempts += 1
         if (attempts === 1) throw new Error("injected fault")
@@ -165,7 +167,26 @@ describe("Unix snapshot transport", () => {
       operation = await getOperationStatus(socketPath, operation.operationId)
     } while (operation.state === "queued" || operation.state === "running")
     expect(operation).toMatchObject({ state: "succeeded", attempts: 2, result: { accepted: "open" } })
+    expect(operationRegistry.operation(operation.operationId)).toMatchObject({ status: "succeeded", attempts: 2 })
     expect(attempts).toBe(2)
+    operationRegistry.close()
+  })
+
+  test("preserves explicitly injected in-memory mutation mode without a registry", async () => {
+    const { socketPath } = await fixture()
+    const server = await startSnapshotServer({
+      socketPath,
+      initialSnapshot: snapshot("initial"),
+      executeMutation: async (intent) => ({ accepted: intent.type }),
+    })
+    servers.push(server)
+    const submitted = await submitMutation(socketPath, "memory-key", { type: "repository.refresh" })
+    let operation = await getOperationStatus(socketPath, submitted.operation.operationId)
+    while (operation.state === "queued" || operation.state === "running") {
+      await Bun.sleep(2)
+      operation = await getOperationStatus(socketPath, operation.operationId)
+    }
+    expect(operation).toMatchObject({ state: "succeeded", attempts: 1, result: { accepted: "repository.refresh" } })
   })
 
   test("rejects a stale producer after its epoch lease is replaced", async () => {

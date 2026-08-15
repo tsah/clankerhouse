@@ -3,15 +3,19 @@ import type { ProjectionSnapshot } from "../projection"
 
 export const SNAPSHOT_PROTOCOL_VERSION = 1 as const
 
-export type AvailableAction = "open" | "rename" | "attach" | "detach" | "delete" | "create"
+export type AvailableAction = "open" | "absorb" | "rename" | "attach" | "reparent" | "detach" | "delete" | "create" | "start" | "stop" | "recovery"
 
 export type MutationIntent =
   | { type: "open"; target: Target }
+  | { type: "absorb"; target: Target }
   | { type: "rename"; session: string; resourceId?: string; displayName: string }
-  | { type: "attach"; workshopId: string; parentWorkshopId: string; session?: string }
+  | { type: "attach" | "reparent"; workshopId: string; parentWorkshopId: string; session?: string }
   | { type: "detach"; workshopId: string; session?: string }
   | { type: "delete"; kind: "pane" | "session" | "worktree"; session: string; confirmed: true; pane?: string; path?: string }
   | { type: "create"; repository: string; branch: string; create: boolean; base?: string }
+  | { type: "start"; clankerId: string; force?: boolean }
+  | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
+  | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
   | { type: "repository.refresh" }
 
 export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "mutation.submit" | "operation.status"
@@ -78,11 +82,16 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
   const intent = value as Record<string, unknown>
   switch (intent.type) {
     case "open": return validTarget(intent.target) ? { type: "open", target: intent.target } : undefined
+    case "absorb": return validTarget(intent.target) ? { type: "absorb", target: intent.target } : undefined
     case "rename": return validText(intent.session) && validText(intent.displayName, 256) ? { type: "rename", session: intent.session, resourceId: validText(intent.resourceId) ? intent.resourceId : undefined, displayName: intent.displayName } : undefined
-    case "attach": return validText(intent.workshopId) && validText(intent.parentWorkshopId) ? { type: "attach", workshopId: intent.workshopId, parentWorkshopId: intent.parentWorkshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
+    case "attach":
+    case "reparent": return validText(intent.workshopId) && validText(intent.parentWorkshopId) ? { type: intent.type, workshopId: intent.workshopId, parentWorkshopId: intent.parentWorkshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "detach": return validText(intent.workshopId) ? { type: "detach", workshopId: intent.workshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "delete": return ["pane", "session", "worktree"].includes(String(intent.kind)) && validText(intent.session) && intent.confirmed === true ? { type: "delete", kind: intent.kind as "pane" | "session" | "worktree", session: intent.session, confirmed: true, pane: validText(intent.pane) ? intent.pane : undefined, path: validText(intent.path) ? intent.path : undefined } : undefined
     case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined } : undefined
+    case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
+    case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
+    case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "repository.refresh": return { type: "repository.refresh" }
     default: return undefined
   }

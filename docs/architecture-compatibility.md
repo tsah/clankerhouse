@@ -28,3 +28,9 @@ A later release may remove compatibility paths only after all of the following a
 5. The removal and rollback cutoff are called out in release notes.
 
 Until then, tests must exercise both legacy ingress and the authoritative socket/registry path.
+
+## Current compatibility gate
+
+The daemon initializes, imports, and validates the unified registry at startup. Socket mutation operations and their retry stages are authoritative in the registry `operations` table. Domain rows imported from Workshop, resource, and recovery stores are marked `legacy-mutable` and are not preferred by live projection while any supported ingress can still write those stores directly. Repeated startup import is skipped per source provenance during this gate, preventing a changed mutable source from being mistaken for an immutable historical import.
+
+Target `open`, Workshop `ensure`, Recovery `start`, `stop`, `suspend`, `tombstone`, and per-Clanker `resume` command shapes route through the daemon when its socket is available. Daemon-owned compatibility subprocesses set `CLANKERHOUSE_DAEMON_INTERNAL=1` to prevent recursive socket submission. `CLANKERHOUSE_LEGACY_MUTATIONS=1` is the explicit rollback escape hatch. Other legacy mutation ingress remains compatibility-gated until it can be converted without recursive daemon-to-client calls; the gate must not be removed before that conversion is complete.

@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync 
 import { dirname, join, resolve } from "node:path"
 
 /** The expanded, single durable registry described by ADR-0002. Legacy stores are import inputs only. */
-export const REGISTRY_SCHEMA_VERSION = 1 as const
+export const REGISTRY_SCHEMA_VERSION = 2 as const
 
 export const registryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state")) =>
   join(stateHome, "clankerhouse", "registry.sqlite3")
@@ -53,6 +53,7 @@ export interface DurableOperationRecord {
   createdAt: number
   updatedAt: number
   completedAt: number | null
+  attempts: number
 }
 
 export interface RegistryLeaseInput {
@@ -107,6 +108,15 @@ const initialize = (db: Database) => {
   const current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
   if (current > REGISTRY_SCHEMA_VERSION) throw new Error(`Unsupported durable registry version ${current}`)
   if (current === REGISTRY_SCHEMA_VERSION) return
+  if (current === 1) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE operations ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0);
+      PRAGMA user_version = 2;
+      COMMIT;
+    `)
+    return
+  }
   if (current !== 0) throw new Error(`Unsupported durable registry version ${current}`)
   db.exec(`
     BEGIN IMMEDIATE;
@@ -297,7 +307,8 @@ const initialize = (db: Database) => {
       error TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      completed_at INTEGER
+      completed_at INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0)
     );
     CREATE TABLE import_provenance (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -313,7 +324,7 @@ const initialize = (db: Database) => {
       UNIQUE (source_kind, source_path, source_table, source_key)
     );
     CREATE INDEX import_provenance_target_idx ON import_provenance(target_table, target_key);
-    PRAGMA user_version = 1;
+    PRAGMA user_version = 2;
     COMMIT;
   `)
 }
@@ -590,12 +601,13 @@ export class DurableRegistry {
   }
 
   operation(id: string): DurableOperationRecord | undefined {
-    const row = this.db.query("SELECT id, idempotency_key, kind, stage, status, input, result, error, created_at, updated_at, completed_at FROM operations WHERE id = ?1").get(id) as Record<string, unknown> | null
+    const row = this.db.query("SELECT id, idempotency_key, kind, stage, status, input, result, error, created_at, updated_at, completed_at, attempts FROM operations WHERE id = ?1").get(id) as Record<string, unknown> | null
     if (!row) return undefined
     return {
       id: String(row.id), idempotencyKey: String(row.idempotency_key), kind: String(row.kind), stage: String(row.stage),
       status: row.status as DurableOperationRecord["status"], input: JSON.parse(String(row.input)), result: row.result === null ? null : JSON.parse(String(row.result)),
       error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), completedAt: row.completed_at === null ? null : Number(row.completed_at),
+      attempts: Number(row.attempts),
     }
   }
 
@@ -617,22 +629,37 @@ export class DurableRegistry {
     return this.operation(id)!
   }
 
+  startOperation(id: string, options: { now?: number } = {}) {
+    const now = integer(options.now ?? this.clock())
+    return this.db.transaction(() => {
+      const current = this.operation(id)
+      if (!current) throw new Error(`Unknown operation ${id}`)
+      if (current.status === "succeeded") return current
+      this.db.query("UPDATE operations SET status = 'running', error = NULL, completed_at = NULL, attempts = attempts + 1, updated_at = ?2 WHERE id = ?1").run(id, now)
+      return this.operation(id)!
+    }).immediate()
+  }
+
+  resumableOperations(kindPrefix = "mutation.") {
+    return (this.db.query("SELECT id FROM operations WHERE kind LIKE ?1 AND status IN ('pending', 'running') ORDER BY created_at, id").all(`${kindPrefix}%`) as Array<{ id: string }>).map((row) => this.operation(row.id)!)
+  }
+
   advanceOperation(id: string, stageValue: string, status: DurableOperationRecord["status"], options: { expectedStage?: string; result?: unknown; error?: string | null; now?: number } = {}) {
     const stage = requiredText(stageValue, "operation stage")
     if (!["pending", "running", "succeeded", "failed"].includes(status)) throw new Error("Invalid operation status")
-    const result = options.result === undefined ? null : JSON.stringify(options.result)
-    if (result !== null) JSON.parse(result)
+    const result = options.result === undefined ? undefined : JSON.stringify(options.result)
+    if (result !== undefined) JSON.parse(result)
     const now = integer(options.now ?? this.clock())
     return this.db.transaction(() => {
       const current = this.operation(id)
       if (!current) throw new Error(`Unknown operation ${id}`)
       if (options.expectedStage !== undefined && current.stage !== options.expectedStage) throw new Error(`Operation ${id} stage mismatch`)
       if (current.status === "succeeded") {
-        if (current.stage === stage && status === "succeeded" && JSON.stringify(current.result) === (result ?? "null")) return current
+        if (current.stage === stage && status === "succeeded" && (result === undefined || JSON.stringify(current.result) === result)) return current
         throw new Error(`Operation ${id} is already succeeded`)
       }
-      this.db.query("UPDATE operations SET stage = ?2, status = ?3, result = ?4, error = ?5, updated_at = ?6, completed_at = ?7 WHERE id = ?1")
-        .run(id, stage, status, result, options.error ?? null, now, status === "succeeded" || status === "failed" ? now : null)
+      this.db.query("UPDATE operations SET stage = ?2, status = ?3, result = COALESCE(?4, result), error = ?5, updated_at = ?6, completed_at = ?7 WHERE id = ?1")
+        .run(id, stage, status, result ?? null, options.error ?? null, now, status === "succeeded" ? now : null)
       return this.operation(id)!
     }).immediate()
   }
@@ -678,14 +705,35 @@ export class DurableRegistry {
     return this.db.query("DELETE FROM leases WHERE scope_key = ?1 AND owner_token = ?2").run(scopeKey, ownerToken).changes === 1
   }
 
-  importLegacy(sources: LegacyRegistrySources) {
+  private sourceWasImported(kind: ImportSummary["source"], sourcePath: string) {
+    if (!existsSync(sourcePath)) return false
+    const path = realpathSync(sourcePath)
+    return Boolean(this.db.query("SELECT 1 FROM import_provenance WHERE source_kind = ?1 AND source_path = ?2 LIMIT 1").get(kind, path))
+  }
+
+  importLegacy(sources: LegacyRegistrySources, options: { oncePerSource?: boolean } = {}) {
     const summaries: ImportSummary[] = []
+    const shouldImport = (kind: ImportSummary["source"], path: string | undefined) => Boolean(path && existsSync(path) && (!options.oncePerSource || !this.sourceWasImported(kind, path)))
     // Current Clankerhouse lineage is authoritative; alt-k fills only paths that it does not contain.
-    if (sources.workshops && existsSync(sources.workshops)) summaries.push(this.importWorkshops(sources.workshops))
-    if (sources.altKLineage && existsSync(sources.altKLineage)) summaries.push(this.importWorkshops(sources.altKLineage, { altK: true }))
-    if (sources.resources && existsSync(sources.resources)) summaries.push(this.importResources(sources.resources))
-    if (sources.recovery && existsSync(sources.recovery)) summaries.push(this.importRecovery(sources.recovery))
+    if (shouldImport("workshops", sources.workshops)) summaries.push(this.importWorkshops(sources.workshops!))
+    if (shouldImport("alt-k-lineage", sources.altKLineage)) summaries.push(this.importWorkshops(sources.altKLineage!, { altK: true }))
+    if (shouldImport("resources", sources.resources)) summaries.push(this.importResources(sources.resources!))
+    if (shouldImport("recovery", sources.recovery)) summaries.push(this.importRecovery(sources.recovery!))
     return summaries
+  }
+
+  setMetadata(keyValue: string, value: unknown, options: { now?: number } = {}) {
+    const key = requiredText(keyValue, "registry metadata key")
+    const serialized = JSON.stringify(value)
+    if (serialized === undefined) throw new Error("Registry metadata must be JSON serializable")
+    JSON.parse(serialized)
+    this.db.query(`INSERT INTO registry_metadata (key, value, updated_at) VALUES (?1, ?2, ?3)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(key, serialized, integer(options.now ?? this.clock()))
+  }
+
+  metadata(keyValue: string): unknown | undefined {
+    const row = this.db.query("SELECT value FROM registry_metadata WHERE key = ?1").get(requiredText(keyValue, "registry metadata key")) as { value: string } | null
+    return row ? JSON.parse(row.value) : undefined
   }
 
   validate(): RegistryValidation {
@@ -724,6 +772,8 @@ export const readRegistryWorkshops = (dbPath = registryStatePath()): RegistryWor
   try {
     const version = Number((db.query("PRAGMA user_version").get() as { user_version: number }).user_version)
     if (version !== REGISTRY_SCHEMA_VERSION) throw new Error(`Unsupported durable registry version ${version}`)
+    const compatibility = db.query("SELECT value FROM registry_metadata WHERE key = 'compatibility.authority'").get() as { value: string } | null
+    if (compatibility && (JSON.parse(compatibility.value) as { domain?: string }).domain === "legacy-mutable") return []
     return (db.query(`SELECT w.id, w.repo_id, w.canonical_path, r.common_dir, w.branch, w.parent_id, w.revision, w.created_at, w.updated_at
       FROM workshops w JOIN repositories r ON r.id = w.repo_id WHERE w.placeholder = 0 ORDER BY w.canonical_path`).all() as Array<Record<string, string | number | null>>).map((row) => ({
         workshopId: String(row.id), repoId: String(row.repo_id), canonicalPath: String(row.canonical_path), commonDir: String(row.common_dir), branch: String(row.branch),

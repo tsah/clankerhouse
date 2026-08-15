@@ -2,13 +2,14 @@ import { render, useKeyboard, usePaste, useRenderer, useTerminalDimensions } fro
 import { createMemo, createSignal, For, onCleanup, onMount } from "solid-js"
 import { Effect, Exit } from "effect"
 import { randomUUID } from "node:crypto"
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestActivity, readDirectoryActivities } from "./activity"
+import { listClankers } from "./clanker-api"
 import type { ActivityRecord } from "./activity"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, detachWorkshopFromParent, readLineageSnapshot } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, detachWorkshopFromParent, readLineageSnapshot, workshopForId, workshopStatePath } from "./workshop"
 import { buildTreeRows, defaultExpandedLineageSessions, fuzzyResult, normalizeReportedState, sessionSortRank, sessionState, structuredSearch, targetKey } from "./model"
 import type { ClankerState, DetailRow, ReportedClankerState, SessionRow, Target, TreeRow } from "./model"
 import { pickSelection, refreshSessionsAuthoritatively, selectedItem, treeRowAnchor, visibleSlice } from "./picker"
@@ -17,7 +18,13 @@ import type { ProjectionRevision, ProjectionSnapshot } from "./projection"
 import { detailStatusLabel, ellipsize, inlineSummaryWidth, jumpFooterAction, prefixedLabelWidth, sessionMeta, treePrefix, usesNeutralStateGlyph, visibleInlineSummary } from "./presentation"
 import { planRepositoryIdentities, readRepositoryIdentityCache, writeRepositoryIdentityCache } from "./repository-cache"
 import { TmuxMultiplexer } from "./multiplexer"
-import { openResourceRegistry } from "./resource-registry"
+import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
+import { openDurableRegistry, type DurableRegistry } from "./registry"
+import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
+import { reconcileRecovery } from "./recovery/controller"
+import { stopOwnedHarness } from "./recovery/process-owner"
+import { createStagedMutationExecutor } from "./daemon-mutations"
+import type { MutationExecution } from "./transport/operations"
 import { discoverForegroundAgent } from "./server/process-discovery"
 import type { ForegroundAgentHarness } from "./server/process-discovery"
 import { isCodexWindow, projectResources } from "./server/project"
@@ -49,6 +56,7 @@ let producerLease: ProducerLease | undefined
 let latestWrittenProjection: ProjectionSnapshot<SessionRow> | undefined
 let projectionRefreshInFlight: Promise<ProjectionSnapshot<SessionRow>> | undefined
 let snapshotServer: SnapshotServer<SessionRow> | undefined
+let durableRegistry: DurableRegistry | undefined
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
 const ensurePrivateRuntimeDirectory = () => {
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
@@ -397,7 +405,7 @@ const serverProgram = Effect.gen(function* () {
     cleanup()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
-    void closing.finally(() => producerLease?.release()).finally(() => process.exit(0))
+    void closing.finally(() => producerLease?.release()).finally(() => durableRegistry?.close()).finally(() => process.exit(0))
   }
 
   yield* Effect.sync(() => {
@@ -407,6 +415,30 @@ const serverProgram = Effect.gen(function* () {
     process.once("exit", cleanup)
     process.once("SIGINT", shutdown)
     process.once("SIGTERM", shutdown)
+  })
+  durableRegistry = yield* Effect.try({
+    try: () => {
+      const registry = openDurableRegistry()
+      try {
+        const stateHome = Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`
+        registry.importLegacy({
+          workshops: workshopStatePath,
+          altKLineage: `${stateHome}/alt-k-tui/workspaces.sqlite3`,
+          resources: resourceRegistryStatePath(stateHome),
+          recovery: recoveryStatePath(stateHome),
+        }, { oncePerSource: true })
+        const validation = registry.validate()
+        if (validation.foreignKeyViolations.length || validation.semanticViolations.length) throw new Error(`Unified registry validation failed: ${[...validation.semanticViolations, ...validation.foreignKeyViolations.map(String)].join(", ")}`)
+        // Compatibility gate: legacy stores remain mutable until every ingress is a socket client,
+        // so imported domain rows are not preferred while operations already use this registry.
+        registry.setMetadata("compatibility.authority", { domain: "legacy-mutable", operations: "registry" })
+        return registry
+      } catch (error) {
+        registry.close()
+        throw error
+      }
+    },
+    catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   producerLease = yield* Effect.tryPromise({
     try: () => acquireProducerLease(`${runtimeDir}/producer.lease`, `${process.env.TMUX?.split(",")[0] || "default-tmux"}`),
@@ -436,7 +468,7 @@ const serverProgram = Effect.gen(function* () {
             assertAuthoritative: () => producerLease!.assertCurrentSync(),
             refresh: refreshProjectionSnapshot,
             executeMutation: executeDaemonMutation,
-            operationJournalPath: `${runtimeDir}/operations.json`,
+            operationRegistry: durableRegistry!,
           }),
           catch: (error) => error instanceof Error ? error : new Error(String(error)),
         }).pipe(
@@ -556,23 +588,6 @@ const collectBranchesSync = (repoPath: string): BranchRow[] => {
   }
   const rank = { worktree: 0, local: 1, remote: 2, create: 3 }
   return rows.sort((a, b) => rank[a.kind] - rank[b.kind] || (a.kind === "remote" ? b.recency - a.recency : a.name.localeCompare(b.name)))
-}
-
-const switchBranchSessionSync = (repoPath: string, branch: string, create: boolean, base = "^") => {
-  const wtArgs = ["wt", "-C", repoPath, "switch", ...(create ? ["--create"] : []), branch, "--no-cd", "--format", "json", ...(create && base ? ["--base", base] : [])]
-  const switched = Bun.spawnSync(wtArgs, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" })
-  if (switched.exitCode !== 0) return { error: switched.stderr.toString().trim() || `wt exited ${switched.exitCode}` }
-  try {
-    const worktree = JSON.parse(switched.stdout.toString()) as { path?: string }
-    if (!worktree.path) return { error: "Worktrunk did not return a worktree path" }
-    const created = Bun.spawnSync([binPath("clankers"), "workshop", "ensure", "--cwd", worktree.path], { cwd: repoRoot, stdout: "pipe", stderr: "pipe" })
-    if (created.exitCode !== 0) return { error: created.stderr.toString().trim() || `session creation exited ${created.exitCode}` }
-    const session = created.stdout.toString().trim()
-    if (!session) return { error: "Session creation did not return a session name" }
-    return { session }
-  } catch {
-    return { error: "Worktrunk returned invalid JSON" }
-  }
 }
 
 const dumpState = collectSessions.pipe(
@@ -719,7 +734,7 @@ const consumeDeleteOutput = async (stream: ReadableStream<Uint8Array>, reportPro
 }
 
 const runDeleteCommand = async (argv: string[], reportProgress?: DeleteProgressReporter): Promise<DeleteCommandResult> => {
-  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_PROGRESS: "1" } })
+  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_PROGRESS: "1", CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
   const [exitCode, stdout, stderr] = await Promise.all([
     proc.exited,
     consumeDeleteOutput(proc.stdout, reportProgress),
@@ -728,80 +743,362 @@ const runDeleteCommand = async (argv: string[], reportProgress?: DeleteProgressR
   return { exitCode, stdout, stderr }
 }
 
-const stopSessionIntent = async (sessionName: string, kill: boolean, reportProgress?: DeleteProgressReporter) => {
-  const sessions = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
-  if (sessions.exitCode !== 0) return { exitCode: sessions.exitCode, stdout: sessions.stdout.toString(), stderr: sessions.stderr.toString() }
-  const sessionId = parseTmuxRows(sessions.stdout.toString()).find(([, name]) => name === sessionName)?.[0]
-  reportProgress?.("Stopping tracked clankers")
-  return runDeleteCommand([binPath("clankerhouse-tmux-stop"), kill ? "session" : "mark-session", sessionId || `=${sessionName}`], reportProgress)
+type MutationCheckpoint = Record<string, unknown>
+const mutationCheckpoint = (execution: MutationExecution): MutationCheckpoint => execution.operation.result && typeof execution.operation.result === "object"
+  ? execution.operation.result as MutationCheckpoint
+  : {}
+
+const tmuxSessionsSync = () => {
+  const listed = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}", "#{@dotfiles_workshop_id}", "#{@dotfiles_worktree_path}", "#{@dotfiles_directory_path}", "#{session_path}", "#{@dotfiles_workshop_parent_id}", "#{@clankerhouse_display_name}", "#{@clankerhouse_session_id}")], { stdout: "pipe", stderr: "pipe" })
+  if (listed.exitCode !== 0) return { rows: [] as string[][], error: listed.stderr.toString().trim() }
+  return { rows: parseTmuxRows(listed.stdout.toString()), error: "" }
 }
 
-const deleteWorktree = async (sessionName: string, path: string, reportProgress?: DeleteProgressReporter) => {
-  const marked = await stopSessionIntent(sessionName, false, reportProgress)
-  if (marked.exitCode !== 0) return marked
-  return runDeleteCommand([libexecPath("worktree-delete"), "--yes", expandHome(path)], reportProgress)
+const exactSession = (identity: { session?: string; nativeSessionId?: string }) => {
+  const listed = tmuxSessionsSync()
+  const matches = listed.rows.filter(([id, name]) => identity.nativeSessionId ? id === identity.nativeSessionId : name === identity.session)
+  if (matches.length > 1) throw new Error("Selected tmux session identity is ambiguous")
+  return matches[0]
 }
 
-const tmuxWorkshopParent = (sessionName: string, parentWorkshopId: string | null) => {
-  const found = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
-  const sessionId = parseTmuxRows(found.stdout.toString()).find(([, name]) => name === sessionName)?.[0] ?? ""
-  if (found.exitCode !== 0 || !sessionId) throw new Error(found.stderr.toString().trim() || "Selected session no longer exists")
+const exactPaneExists = (nativeSessionId: string, paneId: string) => {
+  const found = Bun.spawnSync(["tmux", "display-message", "-p", "-t", paneId, tmuxFields("#{session_id}", "#{pane_id}")], { stdout: "pipe", stderr: "ignore" })
+  return found.exitCode === 0 && parseTmuxRows(found.stdout.toString()).some(([session, pane]) => session === nativeSessionId && pane === paneId)
+}
+
+const sessionClankerIds = (nativeSessionId: string) => {
+  const listed = Bun.spawnSync(["tmux", "list-panes", "-s", "-t", nativeSessionId, "-F", "#{@clankerhouse_clanker_id}"], { stdout: "pipe", stderr: "ignore" })
+  return listed.exitCode === 0 ? [...new Set(listed.stdout.toString().split("\n").filter(Boolean))] : []
+}
+
+const applyExactTmuxParent = (nativeSessionId: string, workshopId: string, parentWorkshopId: string | null) => {
+  const row = exactSession({ nativeSessionId })
+  if (!row) throw new Error("Selected session no longer exists")
+  if (row[2] && row[2] !== workshopId) throw new Error(`Tmux session ${nativeSessionId} belongs to a different Workshop`)
+  if ((row[6] || null) === parentWorkshopId) return
   const args = parentWorkshopId === null
-    ? ["tmux", "set-option", "-u", "-t", sessionId, "@dotfiles_workshop_parent_id"]
-    : ["tmux", "set-option", "-t", sessionId, "@dotfiles_workshop_parent_id", parentWorkshopId]
+    ? ["tmux", "set-option", "-u", "-t", nativeSessionId, "@dotfiles_workshop_parent_id"]
+    : ["tmux", "set-option", "-t", nativeSessionId, "@dotfiles_workshop_parent_id", parentWorkshopId]
   const updated = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" })
-  if (updated.exitCode !== 0) throw new Error(updated.stderr.toString().trim() || "Unable to update tmux workshop parent metadata")
+  if (updated.exitCode !== 0) throw new Error(updated.stderr.toString().trim() || "Unable to update tmux Workshop parent claim")
 }
 
-const executeDaemonMutation = async (intent: MutationIntent): Promise<unknown> => {
-  let result: unknown
-  if (intent.type === "open") {
-    const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
-    if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
-    return { opened: true }
+const worktreeForBranch = (repository: string, branch: string) => {
+  const listed = Bun.spawnSync(["git", "-C", repository, "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "pipe" })
+  if (listed.exitCode !== 0) throw new Error(listed.stderr.toString().trim() || `Unable to inspect worktrees for ${repository}`)
+  let path = ""
+  for (const line of listed.stdout.toString().split("\n")) {
+    if (line.startsWith("worktree ")) path = line.slice("worktree ".length)
+    if (line === `branch refs/heads/${branch}`) return realpathSync(path)
   }
-  if (intent.type === "rename") {
-    const found = Bun.spawnSync(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}")], { stdout: "pipe", stderr: "pipe" })
-    const sessionId = parseTmuxRows(found.stdout.toString()).find(([, name]) => name === intent.session)?.[0] ?? ""
-    if (found.exitCode !== 0 || !sessionId) throw new Error(found.stderr.toString().trim() || "Selected session no longer exists")
-    const renamed = Bun.spawnSync(["tmux", "rename-session", "-t", sessionId, intent.displayName], { stdout: "pipe", stderr: "pipe" })
-    if (renamed.exitCode !== 0) throw new Error(renamed.stderr.toString().trim() || "Unable to rename session")
-    if (intent.resourceId) {
-      const registry = openResourceRegistry()
-      try { registry.updateDisplayName(intent.resourceId, intent.displayName) } finally { registry.close() }
-      Bun.spawnSync(["tmux", "set-option", "-t", sessionId, "@clankerhouse_display_name", intent.displayName], { stdout: "ignore", stderr: "ignore" })
-    }
-    result = { session: intent.displayName }
-  } else if (intent.type === "attach") {
-    attachWorkshopToParent(intent.workshopId, intent.parentWorkshopId)
-    if (intent.session) tmuxWorkshopParent(intent.session, intent.parentWorkshopId)
-    result = { attached: true }
-  } else if (intent.type === "detach") {
-    detachWorkshopFromParent(intent.workshopId)
-    if (intent.session) tmuxWorkshopParent(intent.session, null)
-    result = { detached: true }
-  } else if (intent.type === "delete") {
-    const command = intent.kind === "pane" && intent.pane
-      ? await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "pane", intent.pane])
-      : intent.kind === "worktree" && intent.path
-        ? await deleteWorktree(intent.session, intent.path)
-        : await stopSessionIntent(intent.session, true)
-    if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Deletion failed")
-    result = { deleted: true }
-  } else if (intent.type === "create") {
-    const created = switchBranchSessionSync(expandHome(intent.repository), intent.branch, intent.create, intent.base)
-    if (!created.session) throw new Error(created.error || "Unable to create workshop")
-    result = { target: { type: "tmux_session", session: created.session } }
-  } else {
-    const rows = latestWrittenProjection?.sessions ?? []
-    result = { repositories: await Effect.runPromise(refreshRepositoryRows(rows)) }
-  }
-  if (intent.type !== "repository.refresh") {
+  return undefined
+}
+
+const createWorktreeSync = (repository: string, branch: string, create: boolean, base?: string) => {
+  const existing = worktreeForBranch(repository, branch)
+  if (existing) return existing
+  const args = ["wt", "-C", repository, "switch", ...(create ? ["--create"] : []), branch, "--no-cd", "--format", "json", ...(create && base ? ["--base", base] : [])]
+  const switched = Bun.spawnSync(args, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" })
+  if (switched.exitCode !== 0) throw new Error(switched.stderr.toString().trim() || `wt exited ${switched.exitCode}`)
+  const parsed = JSON.parse(switched.stdout.toString()) as { path?: string }
+  if (!parsed.path) throw new Error("Worktrunk did not return a worktree path")
+  return realpathSync(parsed.path)
+}
+
+const ensureWorktreeSessionSync = (path: string) => {
+  const existing = tmuxSessionsSync().rows.find((row) => {
+    const candidate = row[3] || row[4] || row[5]
+    try { return candidate && realpathSync(candidate) === path } catch { return false }
+  })
+  if (existing) return existing[1]!
+  const created = Bun.spawnSync([binPath("clankers"), "workshop", "ensure", "--cwd", path], { cwd: repoRoot, stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
+  if (created.exitCode !== 0) throw new Error(created.stderr.toString().trim() || `session creation exited ${created.exitCode}`)
+  const session = created.stdout.toString().trim()
+  if (!session) throw new Error("Session creation did not return a session name")
+  return session
+}
+
+const reconcileMutationStage = async (intent: MutationIntent, stage: string, execution: MutationExecution) => {
+  const checkpoint = mutationCheckpoint(execution)
+  if (stage === "projection.refreshed") {
     const refreshed = await refreshProjectionSnapshot()
     snapshotServer?.publish(refreshed)
+    return { checkpoint, result: checkpoint.outcome ?? checkpoint }
   }
-  return result
+  if (intent.type === "repository.refresh") {
+    const rows = latestWrittenProjection?.sessions ?? []
+    if (stage === "repository-cache.checked") {
+      const current = existsSync(repositoryCachePath) && statSync(repositoryCachePath).mtimeMs >= execution.operation.createdAt
+      return { checkpoint: { ...checkpoint, cacheCurrent: current } }
+    }
+    const repositories = checkpoint.cacheCurrent ? cachedRepositoryRows(rows) : await Effect.runPromise(refreshRepositoryRows(rows))
+    return { checkpoint: { ...checkpoint, cacheCurrent: true }, result: { repositories } }
+  }
+
+  if (intent.type === "open" || intent.type === "absorb") {
+    const multiplexer = new TmuxMultiplexer()
+    if (stage === "identity.validated") {
+      if (intent.target.type === "directory") {
+        const path = realpathSync(expandHome(intent.target.path))
+        return { checkpoint: { ...checkpoint, path } }
+      }
+      if (intent.type === "absorb" && !intent.target.location) throw new Error("Absorption requires an exact Multiplexer Location")
+      const target = intent.target
+      const snapshot = await multiplexer.observe()
+      const session = target.location
+        ? snapshot.sessions.find((candidate) => candidate.id === target.location!.nativeSessionId && snapshot.instanceId === target.location!.instanceId)
+        : snapshot.sessions.find((candidate) => candidate.nativeName === target.session)
+      if (!session) throw new Error("Selected Multiplexer target no longer exists")
+      const location = target.location ?? { kind: "tmux", instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: target.type === "tmux_window" ? target.windowId : null, nativePaneId: target.type === "tmux_window" || target.type === "opencode" ? target.pane : null }
+      return { checkpoint: { ...checkpoint, location } }
+    }
+    if (stage === "topology.absorbed") {
+      const location = checkpoint.location as NonNullable<Exclude<typeof intent.target, { type: "directory" }>["location"]>
+      const registry = openResourceRegistry()
+      try {
+        const existing = registry.findByNativeLocation({ kind: location.kind, instanceId: location.instanceId, nativeSessionId: location.nativeSessionId })
+        const snapshot = await multiplexer.observe()
+        const session = snapshot.sessions.find((candidate) => candidate.id === location.nativeSessionId)
+        const claimsComplete = existing && session?.resourceId === existing.id && session.windows.every((window) => {
+          if (!window.resourceId) return false
+          const windowRecord = registry.get(window.resourceId)
+          if (windowRecord?.kind !== "window" || windowRecord.parentId !== existing.id || windowRecord.location?.nativeWindowId !== window.id) return false
+          return window.panes.every((pane) => {
+            if (!pane.terminalId) return false
+            const terminal = registry.get(pane.terminalId)
+            return terminal?.kind === "terminal" && terminal.parentId === windowRecord.id && terminal.location?.nativePaneId === pane.id
+          })
+        })
+        if (!claimsComplete) await multiplexer.absorb(location)
+      } finally { registry.close() }
+      return { checkpoint: { ...checkpoint, outcome: { absorbed: true } } }
+    }
+    if (stage === "target.opened") {
+      const location = checkpoint.location as { nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
+      const current = await multiplexer.currentLocation()
+      const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
+        && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
+        && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)
+      if (!alreadyOpen) {
+        const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
+        if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
+      }
+      return { checkpoint: { ...checkpoint, outcome: { opened: true } }, result: { opened: true } }
+    }
+  }
+
+  if (intent.type === "rename") {
+    if (stage === "identity.validated") {
+      let row = exactSession({ session: intent.session }) ?? exactSession({ session: intent.displayName })
+      if (!row) throw new Error("Selected session no longer exists")
+      if (intent.resourceId) {
+        const registry = openResourceRegistry()
+        try {
+          const resource = registry.get(intent.resourceId)
+          if (!resource || resource.kind !== "session" || resource.location?.nativeSessionId !== row[0]) throw new Error("Managed session identity no longer matches its exact Multiplexer Location")
+        } finally { registry.close() }
+      }
+      return { checkpoint: { ...checkpoint, nativeSessionId: row[0] } }
+    }
+    const nativeSessionId = String(checkpoint.nativeSessionId)
+    if (stage === "tmux.renamed") {
+      const row = exactSession({ nativeSessionId })
+      if (!row) throw new Error("Selected session disappeared before rename reconciliation")
+      if (row[1] !== intent.displayName) {
+        if (row[1] !== intent.session) throw new Error("Selected session name changed outside this operation")
+        const renamed = Bun.spawnSync(["tmux", "rename-session", "-t", nativeSessionId, intent.displayName], { stdout: "pipe", stderr: "pipe" })
+        if (renamed.exitCode !== 0) throw new Error(renamed.stderr.toString().trim() || "Unable to rename session")
+      }
+      return { checkpoint }
+    }
+    if (stage === "display-name.persisted") {
+      if (intent.resourceId) {
+        const registry = openResourceRegistry()
+        try {
+          const resource = registry.get(intent.resourceId)
+          if (!resource || resource.location?.nativeSessionId !== nativeSessionId) throw new Error("Managed session identity changed before Display Name persistence")
+          if (resource.displayName !== intent.displayName) registry.updateDisplayName(intent.resourceId, intent.displayName)
+        } finally { registry.close() }
+        const current = exactSession({ nativeSessionId })
+        if (!current) throw new Error("Managed session disappeared before Display Name claim persistence")
+        if (current[7] !== intent.displayName) {
+          const option = Bun.spawnSync(["tmux", "set-option", "-t", nativeSessionId, "@clankerhouse_display_name", intent.displayName], { stdout: "pipe", stderr: "pipe" })
+          if (option.exitCode !== 0) throw new Error(option.stderr.toString().trim() || "Unable to persist tmux Display Name claim")
+        }
+      }
+      return { checkpoint: { ...checkpoint, outcome: { session: intent.displayName } } }
+    }
+  }
+
+  if (intent.type === "attach" || intent.type === "reparent" || intent.type === "detach") {
+    const parentWorkshopId = intent.type === "detach" ? null : intent.parentWorkshopId
+    if (stage === "identity.validated") {
+      const workshop = workshopForId(intent.workshopId)
+      if (!workshop) throw new Error(`Workshop ${intent.workshopId} does not exist`)
+      if (parentWorkshopId) {
+        const parent = workshopForId(parentWorkshopId)
+        if (!parent || parent.repoId !== workshop.repoId) throw new Error("Workshop parent must exist in the same repository")
+        if (!attachmentCandidatesForWorkshop(intent.workshopId).some((candidate) => candidate.workshopId === parentWorkshopId) && workshop.parentWorkshopId !== parentWorkshopId) throw new Error("Workshop reparent would create an unsafe lineage")
+      }
+      const row = intent.session ? exactSession({ session: intent.session }) : undefined
+      if (intent.session && !row) throw new Error("Selected Workshop session no longer exists")
+      if (row?.[2] && row[2] !== intent.workshopId) throw new Error("Selected tmux session belongs to a different Workshop")
+      return { checkpoint: { ...checkpoint, nativeSessionId: row?.[0] } }
+    }
+    if (stage === "lineage.updated") {
+      const current = workshopForId(intent.workshopId)
+      if (!current) throw new Error(`Workshop ${intent.workshopId} disappeared`)
+      if (current.parentWorkshopId !== parentWorkshopId) {
+        if (parentWorkshopId) attachWorkshopToParent(intent.workshopId, parentWorkshopId)
+        else detachWorkshopFromParent(intent.workshopId)
+      }
+      return { checkpoint }
+    }
+    if (stage === "tmux-parent.updated") {
+      if (checkpoint.nativeSessionId) applyExactTmuxParent(String(checkpoint.nativeSessionId), intent.workshopId, parentWorkshopId)
+      const outcome = parentWorkshopId ? { attached: true } : { detached: true }
+      return { checkpoint: { ...checkpoint, outcome } }
+    }
+  }
+
+  if (intent.type === "delete") {
+    if (stage === "identity.validated") {
+      const session = exactSession({ session: intent.session })
+      if (!session) throw new Error("Selected session no longer exists")
+      if (intent.kind === "pane") {
+        if (!intent.pane || !sessionPaneIdsSync(intent.session).includes(intent.pane)) throw new Error("Selected pane is not in the exact session")
+        return { checkpoint: { ...checkpoint, nativeSessionId: session[0], pane: intent.pane } }
+      }
+      if (intent.kind === "worktree") {
+        if (!intent.path || !isLinkedWorktreeSync(intent.path)) throw new Error("Selected path is not a linked worktree")
+        const path = realpathSync(expandHome(intent.path))
+        const sessionPath = session[3] || session[4] || session[5]
+        if (!sessionPath || realpathSync(sessionPath) !== path) throw new Error("Selected session does not own the exact worktree path")
+        const identity = Bun.spawnSync(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD"], { stdout: "pipe", stderr: "pipe" })
+        if (identity.exitCode !== 0) throw new Error(identity.stderr.toString().trim() || "Unable to capture exact worktree identity")
+        const [commonDir, branch] = identity.stdout.toString().trim().split("\n")
+        if (!commonDir || !branch || branch === "HEAD") throw new Error("Refusing worktree deletion without an exact branch identity")
+        return { checkpoint: { ...checkpoint, nativeSessionId: session[0], path, commonDir: realpathSync(commonDir), branch } }
+      }
+      return { checkpoint: { ...checkpoint, nativeSessionId: session[0] } }
+    }
+    if (stage === "tmux.marked") {
+      const nativeSessionId = String(checkpoint.nativeSessionId)
+      if (exactSession({ nativeSessionId })) {
+        const ids = sessionClankerIds(nativeSessionId)
+        const recovery = openRecoveryStore()
+        let allStopped = false
+        try { allStopped = ids.every((id) => recovery.getDesired(id)?.desiredState === "stopped") } finally { recovery.close() }
+        if (!allStopped) {
+          const marked = await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "mark-session", nativeSessionId])
+          if (marked.exitCode !== 0) throw new Error(marked.stderr.trim() || "Unable to mark worktree session for deletion")
+        }
+      }
+      return { checkpoint }
+    }
+    if (stage === "worktree.deleted") {
+      const path = String(checkpoint.path)
+      if (existsSync(path)) {
+        const identity = Bun.spawnSync(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD"], { stdout: "pipe", stderr: "pipe" })
+        const [commonDir, branch] = identity.stdout.toString().trim().split("\n")
+        if (identity.exitCode !== 0 || !commonDir || realpathSync(commonDir) !== checkpoint.commonDir || branch !== checkpoint.branch) throw new Error("Worktree identity changed before deletion")
+        const removed = await runDeleteCommand([libexecPath("worktree-delete"), "--yes", path])
+        if (removed.exitCode !== 0 && existsSync(path)) throw new Error(removed.stderr.trim() || removed.stdout.trim() || "Worktree deletion failed")
+      }
+      return { checkpoint }
+    }
+    if (stage === "tmux.deleted") {
+      const nativeSessionId = String(checkpoint.nativeSessionId)
+      if (exactSession({ nativeSessionId })) {
+        const killed = Bun.spawnSync(["tmux", "kill-session", "-t", nativeSessionId], { stdout: "pipe", stderr: "pipe" })
+        if (killed.exitCode !== 0) throw new Error(killed.stderr.toString().trim() || "Unable to close deleted worktree session")
+      }
+      return { checkpoint: { ...checkpoint, outcome: { deleted: true } } }
+    }
+    if (stage === "target.deleted") {
+      const nativeSessionId = String(checkpoint.nativeSessionId)
+      const exists = intent.kind === "pane" ? exactPaneExists(nativeSessionId, String(checkpoint.pane)) : Boolean(exactSession({ nativeSessionId }))
+      if (exists) {
+        const command = intent.kind === "pane"
+          ? await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "pane", String(checkpoint.pane)])
+          : await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "session", nativeSessionId])
+        if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Deletion failed")
+      }
+      return { checkpoint: { ...checkpoint, outcome: { deleted: true } } }
+    }
+  }
+
+  if (intent.type === "create") {
+    if (stage === "identity.validated") {
+      const repository = realpathSync(expandHome(intent.repository))
+      const verified = Bun.spawnSync(["git", "-C", repository, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" })
+      if (verified.exitCode !== 0) throw new Error(verified.stderr.toString().trim() || "Selected repository is invalid")
+      return { checkpoint: { ...checkpoint, repository } }
+    }
+    if (stage === "worktree.ready") {
+      const path = createWorktreeSync(String(checkpoint.repository), intent.branch, intent.create, intent.base)
+      return { checkpoint: { ...checkpoint, path } }
+    }
+    if (stage === "tmux.ready") {
+      const path = realpathSync(String(checkpoint.path))
+      const session = ensureWorktreeSessionSync(path)
+      return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "tmux_session", session } } } }
+    }
+  }
+
+  if (intent.type === "start" || intent.type === "stop" || intent.type === "recovery") {
+    const store = openRecoveryStore()
+    try {
+      if (stage === "identity.validated") {
+        if (!store.getDesired(intent.clankerId)) throw new Error(`Unknown Clanker ${intent.clankerId}`)
+        return { checkpoint }
+      }
+      const action = intent.type === "start" ? "resume" : intent.type === "stop" ? "stop" : intent.action
+      if (stage === "desired-state.updated") {
+        const state = action === "resume" || action === "reconcile" ? "running" : action === "suspend" ? "suspended_resource_pressure" : action === "tombstone" ? "tombstoned" : "stopped"
+        const desired = store.getDesired(intent.clankerId)!
+        if (desired.desiredState !== state) store.setDesiredState(intent.clankerId, state, { reason: intent.type === "stop" ? intent.reason || "daemon-stop" : intent.type === "recovery" ? intent.reason || intent.action : "daemon-start" })
+        return { checkpoint }
+      }
+      if (stage === "harness.stopped") {
+        const desired = store.getDesired(intent.clankerId)!
+        const matches = (await listClankers()).filter((row) => row.id === intent.clankerId)
+        if (matches.length > 1) throw new Error(`Ambiguous live panes for ${intent.clankerId}`)
+        if (desired.ownerUnit) {
+          const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", desired.ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+          if (active) stopOwnedHarness(desired.ownerUnit)
+        }
+        if (matches.length) {
+          const killed = Bun.spawnSync(["tmux", "kill-pane", "-t", matches[0]!.pane], { stdout: "pipe", stderr: "pipe" })
+          if (killed.exitCode !== 0) throw new Error(killed.stderr.toString().trim() || "Unable to stop Clanker pane")
+        }
+        return { checkpoint: { ...checkpoint, outcome: { stopped: true } } }
+      }
+      if (stage === "recovery.reconciled") {
+        const shouldLaunch = action === "resume" || action === "reconcile"
+        if (!shouldLaunch) {
+          const desired = store.getDesired(intent.clankerId)!
+          if (desired.ownerUnit) {
+            const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", desired.ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+            if (active) stopOwnedHarness(desired.ownerUnit)
+          }
+          const matches = (await listClankers()).filter((row) => row.id === intent.clankerId)
+          if (matches.length > 1) throw new Error(`Ambiguous live panes for ${intent.clankerId}`)
+          if (matches.length === 1) {
+            const killed = Bun.spawnSync(["tmux", "kill-pane", "-t", matches[0]!.pane], { stdout: "pipe", stderr: "pipe" })
+            if (killed.exitCode !== 0) throw new Error(killed.stderr.toString().trim() || "Unable to stop recovered Clanker pane")
+          }
+        }
+        const result = shouldLaunch ? await reconcileRecovery(store, { trigger: "daemon", clankerId: intent.clankerId, allowLaunch: true, automatic: false, bypassAdmission: intent.type !== "stop" && intent.force === true }) : { clankerId: intent.clankerId, state: store.getDesired(intent.clankerId)?.desiredState }
+        return { checkpoint: { ...checkpoint, outcome: result } }
+      }
+    } finally { store.close() }
+  }
+
+  throw new Error(`Unsupported mutation stage ${intent.type}/${stage}`)
 }
+
+const executeDaemonMutation = createStagedMutationExecutor(reconcileMutationStage)
 
 const issueDaemonMutation = async (intent: MutationIntent) => {
   const idempotencyKey = randomUUID()

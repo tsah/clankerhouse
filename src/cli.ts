@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
@@ -13,6 +13,16 @@ import type { Target } from "./model"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
+import { submitMutation, waitForOperation } from "./transport"
+import type { MutationIntent } from "./transport"
+
+const daemonSocketPath = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/clankerhouse-${process.getuid?.() ?? Bun.env.USER ?? "user"}/daemon.sock`
+const routeCompatibilityMutation = async (intent: MutationIntent) => {
+  if (Bun.env.CLANKERHOUSE_DAEMON_INTERNAL === "1" || Bun.env.CLANKERHOUSE_LEGACY_MUTATIONS === "1" || !existsSync(daemonSocketPath)) return undefined
+  const submitted = await submitMutation(daemonSocketPath, randomUUID(), intent)
+  const operation = await waitForOperation(daemonSocketPath, submitted.operation.operationId)
+  return { routed: true as const, result: operation.result }
+}
 
 export interface ParsedArgs {
   args: string[]
@@ -216,6 +226,8 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const encoded = parsed.take("--json")
     if (!encoded) throw new Error("--json is required")
     const target = JSON.parse(encoded) as Target
+    const routed = await routeCompatibilityMutation({ type: "open", target })
+    if (routed) return
     const multiplexer = new TmuxMultiplexer()
     if (target.type === "tmux_session" || target.type === "tmux_window") {
       await multiplexer.openTarget(target)
@@ -256,7 +268,9 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       }
       if (subcommand === "resume") {
         const id = requiredClankerId(parsed)
-        return console.log(JSON.stringify(await reconcileRecovery(store, { trigger: "manual", clankerId: id, allowLaunch: true, automatic: false, bypassAdmission: parsed.has("--force") })))
+        const force = parsed.has("--force")
+        const routed = await routeCompatibilityMutation({ type: "recovery", clankerId: id, action: "resume", force })
+        return console.log(JSON.stringify(routed ? routed.result : await reconcileRecovery(store, { trigger: "manual", clankerId: id, allowLaunch: true, automatic: false, bypassAdmission: force })))
       }
       if (subcommand === "unquarantine") {
         const id = requiredClankerId(parsed)
@@ -307,8 +321,18 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         const state = subcommand === "start" ? "running" : subcommand === "suspend" ? "suspended_resource_pressure" : subcommand === "tombstone" ? "tombstoned" : "stopped"
         const noKill = parsed.has("--no-kill")
         const noPaneKill = parsed.has("--no-pane-kill")
+        const reason = parsed.take("--reason") || subcommand!
         if (parsed.has("--if-present") && !store.getDesired(id)) return console.log(JSON.stringify({ clankerId: id, tracked: false }))
-        const desired = store.setDesiredState(id, state, { reason: parsed.take("--reason") || subcommand })
+        if (!noKill && !noPaneKill) {
+          const intent: MutationIntent = subcommand === "start"
+            ? { type: "start", clankerId: id }
+            : subcommand === "stop"
+              ? { type: "stop", clankerId: id, confirmed: true, reason }
+              : { type: "recovery", clankerId: id, action: subcommand as "suspend" | "tombstone", reason }
+          const routed = await routeCompatibilityMutation(intent)
+          if (routed) return console.log(JSON.stringify(routed.result))
+        }
+        const desired = store.setDesiredState(id, state, { reason })
         if (!noKill && (subcommand === "stop" || subcommand === "suspend" || subcommand === "tombstone")) {
           if (desired.ownerUnit) {
             try { stopOwnedHarness(desired.ownerUnit) }
@@ -356,6 +380,12 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       let worktree
       try { worktree = await identity(cwd) }
       catch { return console.log(await ensureDirectorySession(cwd)) }
+      const routed = await routeCompatibilityMutation({ type: "create", repository: worktree.path, branch: worktree.branch, create: false })
+      if (routed) {
+        const target = (routed.result as { target?: { session?: string } } | undefined)?.target
+        if (!target?.session) throw new Error("Daemon did not return the ensured Workshop session")
+        return console.log(target.session)
+      }
       return console.log(await ensureSession(worktree))
     }
     if (subcommand === "identity") return console.log(JSON.stringify(await identity(cwd)))

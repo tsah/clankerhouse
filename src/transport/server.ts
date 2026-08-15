@@ -1,6 +1,7 @@
 import { chmod, lstat, unlink } from "node:fs/promises"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import type { ProjectionSnapshot } from "../projection"
+import type { DurableRegistry } from "../registry"
 import { OperationJournal, type MutationExecutor } from "./operations"
 import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION } from "./protocol"
 
@@ -15,7 +16,8 @@ export interface SnapshotServerOptions<T> {
   maxClients?: number
   refresh?: () => Promise<ProjectionSnapshot<T>>
   executeMutation?: MutationExecutor
-  operationJournalPath?: string
+  /** Omit only for explicitly test-injected in-memory operation mode. */
+  operationRegistry?: DurableRegistry
 }
 export interface SnapshotServer<T> {
   readonly socketPath: string
@@ -74,7 +76,7 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
   const owner = options.owner ?? "snapshot-server"
   const clients = new Set<Socket>()
   const subscribers = new Set<Socket>()
-  const operations = options.executeMutation ? await OperationJournal.open(options.executeMutation, options.operationJournalPath) : undefined
+  const operations = options.executeMutation ? await OperationJournal.open(options.executeMutation, options.operationRegistry) : undefined
 
   const send = (socket: Socket, message: object): boolean => {
     const encoded = encodeMessage(message)

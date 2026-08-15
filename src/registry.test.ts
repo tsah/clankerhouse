@@ -219,6 +219,23 @@ describe("single durable registry", () => {
     raw.close()
   })
 
+  test("gates imported domain rows while compatibility stores remain mutable", () => {
+    const { state, registry } = fixture()
+    const lineage = join(state, "workshops.sqlite3")
+    lineageFixture(lineage)
+    const module = openDurableRegistry({ dbPath: registry })
+    module.importLegacy({ workshops: lineage }, { oncePerSource: true })
+    module.setMetadata("compatibility.authority", { domain: "legacy-mutable", operations: "registry" })
+    expect(readRegistryWorkshops(registry)).toEqual([])
+
+    const legacy = new Database(lineage)
+    legacy.query("UPDATE workshops SET branch = 'fresh-legacy', revision = revision + 1 WHERE id = 'workshop-child'").run()
+    legacy.close()
+    expect(module.importLegacy({ workshops: lineage }, { oncePerSource: true })).toEqual([])
+    expect(readLineageSnapshot(lineage, "strict", registry).byId.get("workshop-child")?.branch).toBe("fresh-legacy")
+    module.close()
+  })
+
   test("detects source-row mutation instead of silently changing imported identity", () => {
     const { state, registry } = fixture()
     const lineage = join(state, "workshops.sqlite3")

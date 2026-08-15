@@ -549,8 +549,9 @@ done
 [[ "$active" == "pi" ]] || { printf 'Expected pi window, got %s\n' "$active" >&2; exit 1; }
 
 seen_count=0
+mkdir -p "$runtime/clankerhouse-$uid/seen-state"
 for _ in {1..100}; do
-    seen_count=$(compgen -G "$runtime/clankerhouse-$uid/seen-state/*.json" | wc -l)
+    seen_count=$(find "$runtime/clankerhouse-$uid/seen-state" -maxdepth 1 -type f -name '*.json' | wc -l)
     [[ "$seen_count" -ge 1 ]] && break
     sleep 0.05
 done

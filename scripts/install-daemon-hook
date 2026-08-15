@@ -1,0 +1,100 @@
+#!/bin/bash
+
+set -euo pipefail
+
+action=${1:-}
+shift || true
+runtime_dir=
+tmux_socket=
+application=
+while (($#)); do
+    case "$1" in
+        --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
+        --tmux-socket) tmux_socket=${2:?}; shift 2 ;;
+        --application) application=${2:?}; shift 2 ;;
+        *) echo "Unknown daemon hook argument: $1" >&2; exit 2 ;;
+    esac
+done
+case "$action" in quiesce|activate|restart) ;; *) echo "Usage: scripts/install-daemon-hook quiesce|activate|restart --runtime-dir PATH --tmux-socket PATH --application PATH" >&2; exit 2;; esac
+[[ -n "$runtime_dir" && -n "$tmux_socket" && -n "$application" ]] || { echo "Daemon hooks require an explicit runtime, tmux socket, and application target" >&2; exit 2; }
+runtime_dir=$(realpath -m -- "$runtime_dir")
+tmux_socket=$(realpath -m -- "$tmux_socket")
+application=$(realpath -e -- "$application")
+[[ -d "$runtime_dir" && ! -L "$runtime_dir" && -O "$runtime_dir" ]] || { echo "Refusing unsafe selected runtime: $runtime_dir" >&2; exit 1; }
+[[ -S "$tmux_socket" ]] || { echo "Selected tmux socket is unavailable: $tmux_socket" >&2; exit 1; }
+state_dir="$runtime_dir/clankerhouse-$(id -u)"
+if [[ -e "$state_dir" || -L "$state_dir" ]]; then
+    [[ -d "$state_dir" && ! -L "$state_dir" && -O "$state_dir" ]] || { echo "Refusing unsafe daemon state directory: $state_dir" >&2; exit 1; }
+else
+    mkdir -m 700 "$state_dir"
+fi
+chmod 700 "$state_dir"
+pid_file="$state_dir/server.pid"
+
+process_matches_selection() {
+    local pid=$1 cwd= process_tmux= process_runtime=
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" | grep -F 'bun src/main.tsx --server' >/dev/null || return 1
+    cwd=$(readlink -e "/proc/$pid/cwd" 2>/dev/null || true)
+    [[ "$cwd" == "$application" ]] || return 1
+    process_tmux=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^TMUX=//p' | head -n 1)
+    process_tmux=${process_tmux%%,*}
+    process_runtime=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -n 1)
+    [[ "$process_tmux" == "$tmux_socket" && "$process_runtime" == "$runtime_dir" ]]
+}
+
+quiesce() {
+    local pid=
+    [[ -r "$pid_file" ]] || return 0
+    pid=$(<"$pid_file")
+    if ! kill -0 "$pid" 2>/dev/null; then rm -f "$pid_file"; return 0; fi
+    process_matches_selection "$pid" || { echo "Refusing to stop daemon outside the selected runtime/application" >&2; exit 1; }
+    kill "$pid"
+    for _ in {1..100}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Selected daemon did not quiesce" >&2
+        exit 1
+    fi
+    rm -f "$pid_file"
+}
+
+probe() {
+    local pid= socket="$state_dir/daemon.sock"
+    [[ -r "$pid_file" ]] || return 1
+    pid=$(<"$pid_file")
+    kill -0 "$pid" 2>/dev/null && process_matches_selection "$pid" || return 1
+    python3 - "$socket" <<'PY'
+import json
+import socket
+import sys
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(2)
+client.connect(sys.argv[1])
+client.sendall(b'{"version":1,"id":"install-health","method":"server.status"}\n')
+data = b""
+while b"\n" not in data:
+    chunk = client.recv(65536)
+    if not chunk:
+        raise SystemExit(1)
+    data += chunk
+response = json.loads(data.split(b"\n", 1)[0])
+if response.get("version") != 1 or response.get("id") != "install-health" or response.get("ok") is not True:
+    raise SystemExit(1)
+PY
+}
+
+case "$action" in
+    quiesce)
+        quiesce
+        ;;
+    activate|restart)
+        tmux_pid=$(tmux -S "$tmux_socket" display-message -p '#{pid}')
+        env TMUX="$tmux_socket,$tmux_pid,0" XDG_RUNTIME_DIR="$runtime_dir" \
+            CLANKERHOUSE_HOME="$application" CLANKERHOUSE_BIN_DIR="$application/bin" CLANKERHOUSE_LIBEXEC="$application/libexec" \
+            "$application/bin/clankerhouse-picker" --ensure-server
+        for _ in {1..50}; do probe && exit 0; sleep 0.05; done
+        echo "Daemon health probe failed for $application" >&2
+        exit 1
+        ;;
+esac

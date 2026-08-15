@@ -21,7 +21,19 @@ scripts/install --prefix "$HOME/.local" --integrations --systemd
 clankerhouse-doctor
 ```
 
-The installer places the application under `$prefix/lib/clankerhouse`, writes command launchers under `$prefix/bin`, and never removes runtime or recovery state during upgrades or uninstall. `scripts/uninstall --prefix "$HOME/.local"` removes only manifest-owned package files.
+The first install stages and validates a version under `$prefix/lib/clankerhouse-versions` and atomically creates `$prefix/lib/clankerhouse` as the active symlink. Stable launchers under `$prefix/bin`, tmux bindings, harness integrations, and user units resolve that active target on each invocation instead of pinning a version.
+
+For an upgrade with a running projection daemon, explicitly select its runtime and tmux server so the installer cannot signal an unrelated process:
+
+```bash
+scripts/install --prefix "$HOME/.local" --integrations --systemd \
+  --runtime-dir "${XDG_RUNTIME_DIR:?}" \
+  --tmux-socket "$(tmux display-message -p '#{socket_path}')"
+```
+
+The installer quiesces only a daemon whose process identity, application target, runtime directory, and tmux socket all match that selection. It activates the new version, probes `server.status`, and atomically restores and restarts the prior target if activation fails. Use `--no-daemon-handoff` only after manually proving no daemon is using the installation. The first upgrade from the legacy fixed `$prefix/lib/clankerhouse` directory moves that owned tree into the versions directory after quiescence, preserving it as the rollback target.
+
+Old versions are retained for rollback until uninstall or explicit cleanup. `scripts/uninstall --prefix "$HOME/.local"` removes only manifest-owned package files and versions; runtime and recovery state are never removed.
 
 Required runtime tools are Bun, tmux, Git, Python 3, and flock. Worktrunk (`wt`), jq, zoxide, and individual harness CLIs are capability-specific.
 

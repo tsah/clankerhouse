@@ -3,42 +3,136 @@
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-root=$(realpath -m -- "${CLANKERHOUSE_INSTALL_QA_ROOT:-$HOME/.cache/qa-clankerhouse-install-$(id -u)-$$}")
-rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
-cargo_home=${CARGO_HOME:-$HOME/.cargo}
-case "$root" in "$HOME/.cache/qa-clankerhouse-install-"*) ;; *) echo "Refusing unsafe install QA root: $root" >&2; exit 2;; esac
+real_home=$HOME
+root=$(realpath -m -- "${CLANKERHOUSE_INSTALL_QA_ROOT:-$real_home/.cache/qa-clankerhouse-install-$(id -u)-$$}")
+rustup_home=${RUSTUP_HOME:-$real_home/.rustup}
+cargo_home=${CARGO_HOME:-$real_home/.cargo}
+case "$root" in "$real_home/.cache/qa-clankerhouse-install-"*) ;; *) echo "Refusing unsafe install QA root: $root" >&2; exit 2;; esac
+home="$root/home"
+runtime="$root/runtime"
+state="$root/state"
+prefix="$root/prefix"
 socket="$root/tmux.sock"
+fake_bin="$root/fake-bin"
 cleanup() {
-    HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" "$repo/scripts/uninstall" --prefix "$root/integration-prefix" --force >/dev/null 2>&1 || true
-    "$repo/scripts/uninstall" --prefix "$root/prefix" --force >/dev/null 2>&1 || true
+    if [[ -L "$prefix/lib/clankerhouse" && -S "$socket" ]]; then
+        target=$(readlink -f "$prefix/lib/clankerhouse" 2>/dev/null || true)
+        if [[ -n "$target" && -d "$runtime" ]]; then
+            "$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --tmux-socket "$socket" --application "$target" >/dev/null 2>&1 || true
+        fi
+    fi
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state" PATH="$fake_bin:$PATH" \
+        "$repo/scripts/uninstall" --prefix "$prefix" --force >/dev/null 2>&1 || true
     tmux -S "$socket" kill-server 2>/dev/null || true
     rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$root"
+mkdir -p "$home" "$runtime" "$state" "$fake_bin"
+chmod 700 "$runtime"
 
-"$repo/scripts/install" --prefix "$root/prefix" --no-enable >/dev/null
-"$root/prefix/bin/clankerhouse-doctor" >/dev/null
-"$root/prefix/bin/clankers" help >/dev/null
-nvim --headless -u NONE --cmd "set runtimepath^=$root/prefix/lib/clankerhouse" \
+cat > "$fake_bin/systemctl" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
+exit 0
+SH
+chmod 755 "$fake_bin/systemctl"
+cat > "$root/fail-preflight" <<'SH'
+#!/bin/sh
+printf 'injected preflight failure for %s\n' "$1" >&2
+exit 71
+SH
+cat > "$root/fail-activation" <<'SH'
+#!/bin/sh
+printf 'injected activation failure for %s\n' "$1" >&2
+exit 72
+SH
+chmod 755 "$root/fail-preflight" "$root/fail-activation"
+
+export HOME="$home"
+export XDG_CONFIG_HOME="$home/.config"
+export XDG_RUNTIME_DIR="$runtime"
+export XDG_STATE_HOME="$state"
+export RUSTUP_HOME="$rustup_home"
+export CARGO_HOME="$cargo_home"
+export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log"
+export PATH="$fake_bin:$PATH"
+
+tmux -S "$socket" -f /dev/null new-session -d -s qa-install 'sleep 300'
+
+# Unmanaged fixed installs remain protected before staging or daemon activity.
+mkdir -p "$root/unmanaged-prefix/lib/clankerhouse"
+printf 'unmanaged\n' > "$root/unmanaged-prefix/lib/clankerhouse/keep"
+if "$repo/scripts/install" --prefix "$root/unmanaged-prefix" --no-daemon-handoff >/dev/null 2>&1; then
+    echo "Installer replaced an unmanaged fixed installation" >&2
+    exit 1
+fi
+[[ -f "$root/unmanaged-prefix/lib/clankerhouse/keep" ]]
+
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" >/dev/null
+active="$prefix/lib/clankerhouse"
+versions="$prefix/lib/clankerhouse-versions"
+[[ -L "$active" ]]
+old_target=$(readlink -f "$active")
+[[ "$old_target/" == "$versions/"* && -f "$old_target/.clankerhouse-install" ]]
+[[ -s "$runtime/clankerhouse-$(id -u)/daemon.sock" ]]
+"$prefix/bin/clankerhouse-doctor" >/dev/null
+"$prefix/bin/clankers" help >/dev/null
+nvim --headless -u NONE --cmd "set runtimepath^=$active" \
     '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
-tmux -S "$socket" new-session -d -s qa 'sleep 30'
-server_pid=$(tmux -S "$socket" display-message -p '#{pid}')
-TMUX="$socket,$server_pid,0" "$root/prefix/lib/clankerhouse/clankerhouse.tmux"
-sleep 0.2
-[[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$root/prefix/lib/clankerhouse" ]]
-tmux -S "$socket" list-keys -T root M-k | grep -F "$root/prefix/lib/clankerhouse/bin/clankerhouse-native" >/dev/null
-"$repo/scripts/uninstall" --prefix "$root/prefix" >/dev/null
-[[ ! -e "$root/prefix/lib/clankerhouse" ]]
+TMUX="$socket,$(tmux -S "$socket" display-message -p '#{pid}'),0" "$active/clankerhouse.tmux"
+[[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$active" ]]
+tmux -S "$socket" list-keys -T root M-k | grep -F "$prefix/bin/clankerhouse-native" >/dev/null
 
-mkdir -p "$root/home"
-HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" "$repo/scripts/install" --prefix "$root/integration-prefix" --integrations --no-enable >/dev/null
-[[ -L "$root/home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
-[[ -L "$root/home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
-[[ -L "$root/home/.agents/skills/clanker-coordination" ]]
-[[ -L "$root/home/.claude/skills/clanker-coordination" ]]
-[[ -L "$root/home/.codex/skills/clanker-coordination" ]]
-grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"
-HOME="$root/home" XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/state" "$repo/scripts/uninstall" --prefix "$root/integration-prefix" >/dev/null
-! grep -q clankerhouse-clanker-state-report "$root/home/.claude/settings.json"
-printf 'Clankerhouse install QA passed: relocatable prefix install, commands, doctor, TPM bindings, integrations, uninstall, and state preservation behave correctly.\n'
+# A failed preflight never quiesces or switches the selected isolated daemon.
+old_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
+if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --preflight-hook "$root/fail-preflight" >/dev/null 2>&1; then
+    echo "Injected preflight failure unexpectedly succeeded" >&2
+    exit 1
+fi
+[[ "$(readlink -f "$active")" == "$old_target" ]]
+[[ "$(<"$runtime/clankerhouse-$(id -u)/server.pid")" == "$old_pid" ]]
+"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --tmux-socket "$socket" --application "$old_target"
+
+# A failed new-daemon health/activation hook atomically restores and probes old.
+before_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
+if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --activation-hook "$root/fail-activation" >/dev/null 2>&1; then
+    echo "Injected activation failure unexpectedly succeeded" >&2
+    exit 1
+fi
+[[ "$(readlink -f "$active")" == "$old_target" ]]
+[[ -x "$old_target/bin/clankers" ]]
+"$prefix/bin/clankers" help >/dev/null
+"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --tmux-socket "$socket" --application "$old_target"
+after_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
+[[ "$after_versions" == "$before_versions" ]]
+rollback_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
+[[ "$(readlink -e "/proc/$rollback_pid/cwd")" == "$old_target" ]]
+
+# A successful upgrade retains the old version, moves optional links through the
+# stable active path, and renders user units through stable validated wrappers.
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --integrations --systemd --no-enable >/dev/null
+new_target=$(readlink -f "$active")
+[[ "$new_target" != "$old_target" && -d "$old_target" ]]
+new_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
+[[ "$(readlink -e "/proc/$new_pid/cwd")" == "$new_target" ]]
+[[ -L "$home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
+[[ "$(readlink "$home/.pi/agent/extensions/tmux-clanker-lifecycle.ts")" == "$active/integrations/pi/tmux-clanker-lifecycle.ts" ]]
+[[ -L "$home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
+[[ -L "$home/.agents/skills/clanker-coordination" ]]
+[[ -L "$home/.claude/skills/clanker-coordination" ]]
+[[ -L "$home/.codex/skills/clanker-coordination" ]]
+grep -F "$prefix/bin/clankerhouse-clanker-state-report" "$home/.claude/settings.json" >/dev/null
+grep -F "ExecStart=\"$prefix/bin/clankerhouse-recovery\"" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
+grep -F "Documentation=file:$active/README.md" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
+grep -Fx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
+! grep -F -- '--user enable' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
+
+# Uninstall only after an explicit isolated quiesce; package ownership removes
+# every retained version while preserving runtime and durable state roots.
+"$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --tmux-socket "$socket" --application "$new_target"
+printf 'preserve\n' > "$state/preserved-state"
+"$repo/scripts/uninstall" --prefix "$prefix" >/dev/null
+[[ ! -e "$active" && ! -L "$active" && ! -e "$versions" ]]
+[[ -f "$state/preserved-state" && -d "$runtime" ]]
+! grep -q clankerhouse-clanker-state-report "$home/.claude/settings.json"
+printf 'Clankerhouse install QA passed: same-filesystem staging, atomic active resolution, isolated daemon handoff, preflight/activation rollback, optional integrations/systemd, ownership, and state preservation behave correctly.\n'

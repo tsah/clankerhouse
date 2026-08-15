@@ -3,7 +3,7 @@
 set -euo pipefail
 
 settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-reporter="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankerhouse-clanker-state-report"
+reporter="${CLANKERHOUSE_BIN_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}/clankerhouse-clanker-state-report"
 
 mkdir -p "$(dirname "$settings_file")"
 

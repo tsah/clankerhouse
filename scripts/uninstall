@@ -24,13 +24,25 @@ for unit in clankerhouse-recovery.service clankerhouse-resource-guard.service cl
     if grep -F "/$unit" "$manifest" >/dev/null; then systemctl --user disable --now "$unit" 2>/dev/null || true; fi
 done
 mapfile -t paths < "$manifest"
+versions="$prefix/lib/clankerhouse-versions"
 for ((index=${#paths[@]} - 1; index >= 0; index--)); do
     path=${paths[$index]}
-    if [[ -L "$path" || -f "$path" ]]; then rm -f -- "$path"
-    elif [[ -d "$path" ]]; then rm -rf -- "$path"
-    elif [[ "$force" == false ]]; then continue
+    if [[ -L "$path" || -f "$path" ]]; then
+        rm -f -- "$path"
+    elif [[ -d "$path" ]]; then
+        if [[ "$path" == "$app" ]]; then
+            # Compatibility with manifests from the legacy fixed-directory installer.
+            rm -rf -- "$path"
+        elif [[ "$path/" == "$versions/"* && -f "$path/.clankerhouse-install" && -O "$path" ]]; then
+            rm -rf -- "$path"
+        elif [[ "$force" == true ]]; then
+            rm -rf -- "$path"
+        else
+            echo "Preserving replaced or unvalidated managed directory: $path" >&2
+        fi
     fi
 done
+rmdir -- "$versions" 2>/dev/null || true
 rm -f "$manifest"
 command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload || true
 printf 'Uninstalled Clankerhouse from %s; runtime and recovery state were preserved.\n' "$prefix"

@@ -197,6 +197,19 @@ describe("session tree", () => {
     expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["failed", "working", "current"])
   })
 
+  test("puts a nested current session nearest the prompt within its Workshop", () => {
+    const root = session("root", { workshopId: "root", details: [detail("root", "shell", "root-pane")] })
+    const working = session("working", { workshopId: "working-id", parentWorkshopId: "root", details: [detail("working", "pi", "working-pane", "working", "pi")] })
+    const current = session("current", { workshopId: "current-id", parentWorkshopId: "root", details: [detail("current", "pi", "current-pane", "idle", "pi")] })
+    const rows = buildTreeRows([root, current, working], "", {
+      expandedLineageSessions: new Set(["root"]),
+      prioritySessionKeys: new Set(["session:current"]),
+      bottomUp: true,
+    })
+
+    expect(visibleSlice(rows, 0, rows.length).filter((row) => !row.detail).map((row) => row.session.name)).toEqual(["root", "working", "current"])
+  })
+
   test("uses descendant state when sorting a lineage subtree", () => {
     const root = session("root", { workshopId: "root", details: [detail("root", "shell", "94")] })
     const child = session("child", { workshopId: "child", parentWorkshopId: "root", details: [detail("child", "pi", "95", "working", "pi")] })

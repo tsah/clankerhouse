@@ -211,6 +211,15 @@ const visibleTreeTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySes
   || b.session.recency - a.session.recency
   || (b.session.frecency ?? 0) - (a.session.frecency ?? 0)
   || a.session.name.localeCompare(b.session.name)
+// Root groups are reversed as units by the bottom-up picker. Descendants are not
+// independent groups, so place a priority child last within its parent to keep
+// the current session nearest the prompt after rendering.
+const visibleChildTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
+  Number(containsPrioritySession(a, prioritySessionKeys)) - Number(containsPrioritySession(b, prioritySessionKeys))
+  || visibleTreeSortRank(a) - visibleTreeSortRank(b)
+  || b.session.recency - a.session.recency
+  || (b.session.frecency ?? 0) - (a.session.frecency ?? 0)
+  || a.session.name.localeCompare(b.session.name)
 const maxScore = (...scores: number[]) => {
   const score = Math.max(...scores)
   return Number.isFinite(score) ? score : 0
@@ -278,7 +287,7 @@ const visibleNode = (
   const children = node.children.flatMap((child) => {
     const visible = visibleNode(child, normalizedQuery, expandedDetailSessions, [...ancestors, node], exposeLineage, prioritySessionKeys)
     return visible ? [visible] : []
-  }).sort((a, b) => b.score - a.score || visibleTreeTieBreak(a, b, prioritySessionKeys))
+  }).sort((a, b) => b.score - a.score || visibleChildTieBreak(a, b, prioritySessionKeys))
   if (!exposeLineage && detailMatches.length === 0 && children.length === 0) return undefined
 
   const detailsExpanded = Boolean(expandedDetailSessions?.has(node.session.name))
@@ -315,7 +324,7 @@ const expandedNode = (
   const detailsExpanded = Boolean(details.length > 0 && expandedDetailSessions?.has(node.session.name))
   const children = node.children
     .map((child) => expandedNode(child, expandedLineageSessions, expandedDetailSessions, node.key, prioritySessionKeys))
-    .sort((a, b) => visibleTreeTieBreak(a, b, prioritySessionKeys))
+    .sort((a, b) => visibleChildTieBreak(a, b, prioritySessionKeys))
   const visibleChildren = lineageExpanded ? children : []
   const visibleDetails = detailsExpanded ? details.map((detail) => ({ detail })) : []
   return {

@@ -13,7 +13,9 @@ if [[ ! -x "$binary" ]]; then
 fi
 
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
-if [[ ! -s "$STATE_DIR/state.json" ]]; then
+CURRENT_TMUX_SOCKET=${TMUX:-}
+CURRENT_TMUX_SOCKET=${CURRENT_TMUX_SOCKET%%,*}
+if [[ ! -s "$STATE_DIR/state.json" || ! -r "$STATE_DIR/server.version" || "$(<"$STATE_DIR/server.version")" != 10 || ! -r "$STATE_DIR/server.tmux-socket" || "$(<"$STATE_DIR/server.tmux-socket")" != "$CURRENT_TMUX_SOCKET" ]]; then
     "$SCRIPT_DIR/clankerhouse-picker" --ensure-server
 else
     # Keep a hot snapshot on the launch path and validate/restart its producer

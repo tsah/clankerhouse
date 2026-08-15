@@ -12,7 +12,7 @@ set -g @plugin 'tsah/clankerhouse'
 # run-shell '/path/to/clankerhouse/clankerhouse.tmux'
 ```
 
-TPM loads `clankerhouse.tmux`, which prefers the stable installation at `~/.local/lib/clankerhouse` and owns `M-k` (native jump), `M-b` (spawn), `M-d` (safe deletion), and `M-x` (stop current session). Set `@clankerhouse-jump-client full` before loading the plugin to use the slower feature-complete TypeScript picker for `M-k`. Set `@clankerhouse-home` to another installed application root, `@clankerhouse-bindings off` to disable all defaults, or override `@clankerhouse-key`, `@clankerhouse-spawn-key`, `@clankerhouse-delete-key`, and `@clankerhouse-stop-key` before loading it.
+TPM loads `clankerhouse.tmux`, which prefers the stable installation at `~/.local/lib/clankerhouse` and owns `M-k` (native jump when built, otherwise the full picker), `M-b` (spawn), `M-d` (safe deletion), and `M-x` (stop current session). Set `@clankerhouse-jump-client full` before loading the plugin to always use the slower feature-complete TypeScript picker for `M-k`. Set `@clankerhouse-home` to another installed application root, `@clankerhouse-bindings off` to disable all defaults, or override `@clankerhouse-key`, `@clankerhouse-spawn-key`, `@clankerhouse-delete-key`, and `@clankerhouse-stop-key` before loading it.
 
 For stable commands, integrations, and optional user services:
 

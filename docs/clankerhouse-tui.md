@@ -105,10 +105,12 @@ See `clankerhouse/README.md` for the CLI and runtime contract and
 ## Native client
 
 The default Alt-K jump client is the fast Rust/ratatui application in
-`native-client/`; set `@clankerhouse-jump-client full` before loading the tmux
-plugin to use the compatibility TypeScript picker instead. Both receive the same
-version-10 observation from the authoritative TypeScript daemon; JSON is only a
-one-time startup/crash fallback. Build and validate the native client with:
+`native-client/` when its release binary is built, with the feature-complete
+TypeScript picker as a fallback. Set `@clankerhouse-jump-client full` before
+loading the tmux plugin to always use the compatibility picker instead. Both
+receive the same version-10 observation from the authoritative TypeScript daemon;
+JSON is only a one-time startup/crash fallback. Build and validate the native
+client with:
 
 ```sh
 scripts/build-native

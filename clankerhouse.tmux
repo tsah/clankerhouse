@@ -42,7 +42,8 @@ if [ "$(option @clankerhouse-bindings on)" != off ]; then
     delete_key=$(option @clankerhouse-delete-key M-d)
     stop_key=$(option @clankerhouse-stop-key M-x)
     jump_client=$(option @clankerhouse-jump-client native)
-    if [ "$jump_client" = full ]; then jump_command=$command_dir/clankerhouse; else jump_command=$command_dir/clankerhouse-native; fi
+    native_binary=$runtime_root/native-client/target/release/clankerhouse-native
+    if [ "$jump_client" = full ] || [ ! -x "$native_binary" ]; then jump_command=$command_dir/clankerhouse; else jump_command=$command_dir/clankerhouse-native; fi
 
     tmux bind-key -n "$open_key" run-shell \
         "tmux display-popup -E -c '#{client_name}' -w 90% -h 80% -e 'CLANKERHOUSE_CURRENT_SESSION=#{session_name}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \"'$jump_command'\""

@@ -21,7 +21,7 @@ import { TmuxMultiplexer } from "./multiplexer"
 import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
 import { openDurableRegistry, type DurableRegistry } from "./registry"
 import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
-import { reconcileRecovery } from "./recovery/controller"
+import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import type { MutationExecution } from "./transport/operations"
@@ -57,6 +57,7 @@ let latestWrittenProjection: ProjectionSnapshot<SessionRow> | undefined
 let projectionRefreshInFlight: Promise<ProjectionSnapshot<SessionRow>> | undefined
 let snapshotServer: SnapshotServer<SessionRow> | undefined
 let durableRegistry: DurableRegistry | undefined
+let recoveryController: RecoveryController | undefined
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
 const ensurePrivateRuntimeDirectory = () => {
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
@@ -403,6 +404,7 @@ const serverProgram = Effect.gen(function* () {
   }
   const shutdown = () => {
     cleanup()
+    recoveryController?.stop()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
     void closing.finally(() => producerLease?.release()).finally(() => durableRegistry?.close()).finally(() => process.exit(0))
@@ -445,6 +447,13 @@ const serverProgram = Effect.gen(function* () {
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   projectionSource = producerLease.epoch
+  // The authoritative daemon also owns Recovery reconciliation. A legacy
+  // recovery process may remain during the compatibility window; the durable
+  // global Recovery lease guarantees that only one controller can act.
+  recoveryController = new RecoveryController()
+  void recoveryController.run().catch((error) => {
+    console.error(`Recovery controller stopped: ${error instanceof Error ? error.message : String(error)}`)
+  }).finally(() => recoveryController?.close())
 
   while (true) {
     const snapshot = yield* Effect.tryPromise({

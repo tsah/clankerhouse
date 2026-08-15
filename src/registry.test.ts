@@ -156,6 +156,24 @@ describe("single durable registry", () => {
     raw.close()
   })
 
+  test("joins recovery with a superseded Workshop ID to the canonical lineage path", () => {
+    const { state, registry } = fixture()
+    const lineage = join(state, "workshops.sqlite3")
+    const recovery = join(state, "recovery-superseded-workshop.sqlite3")
+    lineageFixture(lineage)
+    recoveryFixture(recovery, 3, "superseded", "workshop-old-id")
+    const module = openDurableRegistry({ dbPath: registry })
+    module.importWorkshops(lineage)
+    expect(() => module.importRecovery(recovery)).not.toThrow()
+    expect(module.validate()).toEqual({ foreignKeyViolations: [], semanticViolations: [] })
+    module.close()
+
+    const raw = new Database(registry, { readonly: true })
+    expect(raw.query("SELECT workshop_id FROM clankers WHERE id = 'clanker-superseded'").get()).toEqual({ workshop_id: "workshop-root" })
+    expect(raw.query("SELECT COUNT(*) AS count FROM workshops WHERE canonical_path = '/work/root'").get()).toEqual({ count: 1 })
+    raw.close()
+  })
+
   test("rolls an interrupted source transaction back and resumes through the same durable operation", () => {
     const { state, registry } = fixture()
     const lineage = join(state, "workshops.sqlite3")

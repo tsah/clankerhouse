@@ -428,10 +428,16 @@ export class DurableRegistry {
     const workshopId = requiredText(workshopIdValue, "Workshop id")
     const existing = this.db.query("SELECT id FROM workshops WHERE id = ?1").get(workshopId)
     if (existing) return workshopId
+    const canonicalPath = typeof pathValue === "string" && pathValue.length > 0 ? pathValue : `legacy-placeholder:${workshopId}`
+    // Recovery v1/v2/v3 may retain a superseded Workshop ID after lineage was
+    // re-registered for the same canonical worktree. Canonical path is already
+    // unique durable identity, so join the Clanker to that Workshop rather than
+    // inventing a competing placeholder or discarding recovery data.
+    const existingPath = this.db.query("SELECT id FROM workshops WHERE canonical_path = ?1").get(canonicalPath) as { id: string } | null
+    if (existingPath) return existingPath.id
     const commonDir = `legacy-placeholder:${workshopId}`
     const repoId = `legacy-repository:${workshopId}`
     this.db.query("INSERT OR IGNORE INTO repositories (id, common_dir, placeholder, created_at, updated_at) VALUES (?1, ?2, 1, ?3, ?3)").run(repoId, commonDir, now)
-    const canonicalPath = typeof pathValue === "string" && pathValue.length > 0 ? pathValue : `legacy-placeholder:${workshopId}`
     this.db.query("INSERT INTO workshops (id, repo_id, canonical_path, branch, parent_id, revision, placeholder, created_at, updated_at) VALUES (?1, ?2, ?3, 'legacy', NULL, 1, 1, ?4, ?4)")
       .run(workshopId, repoId, canonicalPath, now)
     return workshopId

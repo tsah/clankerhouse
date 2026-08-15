@@ -95,6 +95,23 @@ describe("tmux multiplexer adapter", () => {
     expect(resolved?.nativeSessionId).toBe("$9")
   })
 
+  test("opens and observes against the explicit requesting client", async () => {
+    const calls: string[][] = []
+    const command: MultiplexerCommand = async (argv) => {
+      calls.push(argv)
+      if (argv[0] === "list-clients") return { stdout: tmuxFields("/dev/pts/9", "$2", "@2", "%2"), stderr: "", code: 0 }
+      if (argv[0] === "display-message") return { stdout: "/tmp/tmux.sock", stderr: "", code: 0 }
+      return { stdout: "", stderr: "", code: 0 }
+    }
+    const adapter = new TmuxMultiplexer({ command })
+
+    expect(await adapter.currentLocation("/dev/pts/9")).toMatchObject({ nativeSessionId: "$2" })
+    await adapter.open({ nativeSessionId: "$3", nativeWindowId: null, nativePaneId: null }, "/dev/pts/9")
+
+    expect(calls[0]).toEqual(["list-clients", "-F", expect.any(String)])
+    expect(calls).toContainEqual(["switch-client", "-c", "/dev/pts/9", "-t", "$3"])
+  })
+
   test("does not let unknown tmux claims mint Clankerhouse identity", async () => {
     const registryPath = fixture()
     const adapter = new TmuxMultiplexer({ command: topologyCommand([], { sessionResourceId: "mux-session-spoofed" }), registryPath })

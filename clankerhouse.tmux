@@ -45,8 +45,8 @@ if [ "$(option @clankerhouse-bindings on)" != off ]; then
     if [ "$jump_client" = full ]; then jump_command=$command_dir/clankerhouse; else jump_command=$command_dir/clankerhouse-native; fi
 
     tmux bind-key -n "$open_key" run-shell \
-        "tmux display-popup -E -c '#{client_name}' -w 90% -h 80% -e 'CLANKERHOUSE_CURRENT_SESSION=#{session_name}' \"'$jump_command'\""
-    tmux bind-key -n "$spawn_key" display-popup -E -w 90% -h 80% -d '#{pane_current_path}' \
+        "tmux display-popup -E -c '#{client_name}' -w 90% -h 80% -e 'CLANKERHOUSE_CURRENT_SESSION=#{session_name}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \"'$jump_command'\""
+    tmux bind-key -n "$spawn_key" display-popup -E -w 90% -h 80% -d '#{pane_current_path}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \
         "CLANKERHOUSE_MODE=spawn '$command_dir/clankerhouse'"
     tmux bind-key -n "$delete_key" run-shell \
         "'$command_dir/clankerhouse-delete' '#{pane_id}' '#{session_id}'"

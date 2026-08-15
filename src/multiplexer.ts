@@ -200,10 +200,15 @@ export class TmuxMultiplexer {
     return { kind: "tmux", instanceId, sessions: [...bySession.values()] }
   }
 
-  async currentLocation(): Promise<Omit<MultiplexerLocation, "observedAt"> | undefined> {
-    const result = await this.command(["display-message", "-p", tmuxFields("#{session_id}", "#{window_id}", "#{pane_id}")], { allowFailure: true })
+  async currentLocation(client?: string): Promise<Omit<MultiplexerLocation, "observedAt"> | undefined> {
+    const result = client
+      ? await this.command(["list-clients", "-F", tmuxFields("#{client_name}", "#{session_id}", "#{window_id}", "#{pane_id}")], { allowFailure: true })
+      : await this.command(["display-message", "-p", tmuxFields("#{session_id}", "#{window_id}", "#{pane_id}")], { allowFailure: true })
     if (result.code !== 0) return undefined
-    const [nativeSessionId = "", nativeWindowId = "", nativePaneId = ""] = parseTmuxFields(result.stdout)
+    const fields = client
+      ? result.stdout.split("\n").map(parseTmuxFields).find((parts) => parts[0] === client)?.slice(1)
+      : parseTmuxFields(result.stdout)
+    const [nativeSessionId = "", nativeWindowId = "", nativePaneId = ""] = fields ?? []
     if (!nativeSessionId) return undefined
     return { kind: "tmux", instanceId: await this.instanceId(), nativeSessionId, nativeWindowId: nativeWindowId || null, nativePaneId: nativePaneId || null }
   }
@@ -312,31 +317,32 @@ export class TmuxMultiplexer {
     return { ...target.location, observedAt: Date.now() }
   }
 
-  async open(location: Pick<MultiplexerLocation, "nativeSessionId" | "nativeWindowId" | "nativePaneId">) {
-    if (!Bun.env.TMUX) {
+  async open(location: Pick<MultiplexerLocation, "nativeSessionId" | "nativeWindowId" | "nativePaneId">, client?: string) {
+    if (!Bun.env.TMUX && !client) {
       const argv = ["attach-session", "-t", location.nativeSessionId]
       if (location.nativeWindowId) argv.push(";", "select-window", "-t", location.nativeWindowId)
       if (location.nativePaneId) argv.push(";", "select-pane", "-t", location.nativePaneId)
       await this.command(argv, { interactive: true })
       return
     }
-    await this.command(["switch-client", "-t", location.nativeSessionId])
+    await this.command(["switch-client", ...(client ? ["-c", client] : []), "-t", location.nativeSessionId])
     if (location.nativeWindowId) await this.command(["select-window", "-t", location.nativeWindowId])
     if (location.nativePaneId) await this.command(["select-pane", "-t", location.nativePaneId])
   }
 
-  async openTarget(target: OpenMultiplexerTarget) {
+  async openTarget(target: OpenMultiplexerTarget, client?: string) {
     const resolved = await this.resolve(target)
     if (resolved) {
-      await this.open(resolved)
+      await this.open(resolved, client)
       return
     }
     if (target.type === "tmux_session") {
-      await this.command([Bun.env.TMUX ? "switch-client" : "attach-session", "-t", `=${target.session}`], { interactive: !Bun.env.TMUX })
+      const switching = Boolean(Bun.env.TMUX || client)
+      await this.command([switching ? "switch-client" : "attach-session", ...(client ? ["-c", client] : []), "-t", `=${target.session}`], { interactive: !switching })
       return
     }
-    if (Bun.env.TMUX) {
-      await this.command(["switch-client", "-t", `=${target.session}`])
+    if (Bun.env.TMUX || client) {
+      await this.command(["switch-client", ...(client ? ["-c", client] : []), "-t", `=${target.session}`])
       await this.command(["select-window", "-t", target.windowId])
       return
     }

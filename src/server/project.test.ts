@@ -185,6 +185,23 @@ describe("session resource projection", () => {
     expect(result.sessions[0]).toMatchObject({ name: "/tmp/child", age: "1m", workshopId: "workshop-child", parentWorkshopId: "workshop-parent", childWorkshopCount: 2, lineageLabel: "↖ ⇣2" })
   })
 
+  test("uses a managed Workshop's canonical path and does not duplicate it as a directory", () => {
+    const record = workshop({ workshopId: "workshop-1", canonicalPath: "/tmp/canonical", parentWorkshopId: null })
+    const lineage: LineageSnapshot = { byPath: new Map([[record.canonicalPath, record]]), byId: new Map([[record.workshopId, record]]) }
+    const managed = { id: "mux-session-1", kind: "session" as const, workshopId: record.workshopId, parentId: null, displayName: "managed", createdAt: 1, updatedAt: 1, location: { kind: "tmux" as const, instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }
+    const result = projectResources(inputs({
+      sessions: [tmuxSession({ path: "/tmp/stale-legacy-path", workshopId: record.workshopId, resourceId: managed.id })],
+      windows: [tmuxWindow()],
+      directories: [{ path: record.canonicalPath, source: "worktree", branch: "canonical" }],
+      lineage,
+      managedResources: new Map([[managed.id, managed]]),
+      gitMetaByPath: new Map([[record.canonicalPath, { branch: "canonical", flags: "" }]]),
+    }))
+
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({ name: "managed", path: record.canonicalPath, branch: "canonical", workshopId: record.workshopId, target: { type: "tmux_session" } })
+  })
+
   test("applies and sorts incidents using the prepared observation time", () => {
     const result = projectResources(inputs({ incidents: [incident()] }))
     expect(result.sessions[0]).toMatchObject({ name: "lost", age: "1h", recency: 100 })

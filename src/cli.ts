@@ -226,11 +226,12 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const encoded = parsed.take("--json")
     if (!encoded) throw new Error("--json is required")
     const target = JSON.parse(encoded) as Target
-    const routed = await routeCompatibilityMutation({ type: "open", target })
+    const client = parsed.take("--client")
+    const routed = await routeCompatibilityMutation({ type: "open", target, ...(client ? { client } : {}) })
     if (routed) return
     const multiplexer = new TmuxMultiplexer()
     if (target.type === "tmux_session" || target.type === "tmux_window") {
-      await multiplexer.openTarget(target)
+      await multiplexer.openTarget(target, client)
       return
     }
     if (target.type === "opencode") {
@@ -242,7 +243,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       return
     }
     const session = await ensureDirectorySession(target.path)
-    await multiplexer.openTarget({ type: "tmux_session", session })
+    await multiplexer.openTarget({ type: "tmux_session", session }, client)
     return
   }
 

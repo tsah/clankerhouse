@@ -6,7 +6,7 @@ export const SNAPSHOT_PROTOCOL_VERSION = 1 as const
 export type AvailableAction = "open" | "absorb" | "rename" | "attach" | "reparent" | "detach" | "delete" | "create" | "start" | "stop" | "recovery"
 
 export type MutationIntent =
-  | { type: "open"; target: Target }
+  | { type: "open"; target: Target; client?: string }
   | { type: "absorb"; target: Target }
   | { type: "rename"; session: string; resourceId?: string; displayName: string }
   | { type: "attach" | "reparent"; workshopId: string; parentWorkshopId: string; session?: string }
@@ -81,7 +81,10 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
   if (!value || typeof value !== "object") return undefined
   const intent = value as Record<string, unknown>
   switch (intent.type) {
-    case "open": return validTarget(intent.target) ? { type: "open", target: intent.target } : undefined
+    case "open": {
+      if (!validTarget(intent.target) || (intent.client !== undefined && !validText(intent.client, 512))) return undefined
+      return { type: "open", target: intent.target, ...(typeof intent.client === "string" ? { client: intent.client } : {}) }
+    }
     case "absorb": return validTarget(intent.target) ? { type: "absorb", target: intent.target } : undefined
     case "rename": return validText(intent.session) && validText(intent.displayName, 256) ? { type: "rename", session: intent.session, resourceId: validText(intent.resourceId) ? intent.resourceId : undefined, displayName: intent.displayName } : undefined
     case "attach":

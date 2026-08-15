@@ -704,6 +704,13 @@ const openTargetSync = (target: Target | undefined) => {
   return Bun.spawnSync([binPath("clankers"), "target", "open", "--json", JSON.stringify(target)], { cwd: repoRoot, stdout: "ignore", stderr: "ignore" }).exitCode === 0
 }
 
+const requestingTmuxClient = (() => {
+  if (Bun.env.CLANKERHOUSE_TMUX_CLIENT) return Bun.env.CLANKERHOUSE_TMUX_CLIENT
+  if (!Bun.env.TMUX) return ""
+  const result = Bun.spawnSync(["tmux", "display-message", "-p", "#{client_name}"], { stdout: "pipe", stderr: "ignore" })
+  return result.exitCode === 0 ? result.stdout.toString().trim() : ""
+})()
+
 const paneForTargetSync = (target: Target) => {
   if (target.type !== "tmux_window" && target.type !== "opencode") return ""
   const resolved = Bun.spawnSync(["tmux", "display-message", "-p", "-t", target.pane, "#{pane_id}"], { stdout: "pipe", stderr: "ignore" })
@@ -853,6 +860,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
 
   if (intent.type === "open" || intent.type === "absorb") {
     const multiplexer = new TmuxMultiplexer()
+    const requestingClient = intent.type === "open" ? intent.client : undefined
     if (stage === "identity.validated") {
       if (intent.target.type === "directory") {
         const path = realpathSync(expandHome(intent.target.path))
@@ -860,6 +868,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       if (intent.type === "absorb" && !intent.target.location) throw new Error("Absorption requires an exact Multiplexer Location")
       const target = intent.target
+      if (requestingClient && !await multiplexer.currentLocation(requestingClient)) throw new Error("Requesting tmux client no longer exists")
       const snapshot = await multiplexer.observe()
       const session = target.location
         ? snapshot.sessions.find((candidate) => candidate.id === target.location!.nativeSessionId && snapshot.instanceId === target.location!.instanceId)
@@ -891,12 +900,12 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "target.opened") {
       const location = checkpoint.location as { nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
-      const current = await multiplexer.currentLocation()
+      const current = await multiplexer.currentLocation(requestingClient)
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
         && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)
       if (!alreadyOpen) {
-        const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
+        const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target), ...(requestingClient ? ["--client", requestingClient] : [])])
         if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
       }
       return { checkpoint: { ...checkpoint, outcome: { opened: true } }, result: { opened: true } }
@@ -1364,7 +1373,7 @@ function App(props: { sessions: SessionRow[]; initialRevision: ProjectionRevisio
     props.onOpen(target)
     if (!target) { renderer.destroy(); return }
     setError("")
-    void issueDaemonMutation({ type: "open", target }).then(() => {
+    void issueDaemonMutation({ type: "open", target, ...(requestingTmuxClient ? { client: requestingTmuxClient } : {}) }).then(() => {
       if (completionKey) markSeen(completionKey)
       if (activityPath) markDirectoryActivity(activityPath, "opened")
       renderer.destroy()

@@ -15,6 +15,12 @@ describe("mutation protocol target set", () => {
     for (const intent of intents) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
   })
 
+  test("preserves an explicit requesting client on open intents", () => {
+    const intent = { type: "open", target: { type: "tmux_session", session: "child" }, client: "/dev/pts/9" }
+    expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
+    expect(mutation({ ...intent, client: "" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
+  })
+
   test("requires destructive stop confirmation and a known recovery action", () => {
     expect(mutation({ type: "stop", clankerId: "clanker-1" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
     expect(mutation({ type: "recovery", clankerId: "clanker-1", action: "guess" })).toMatchObject({ ok: false, error: { code: "bad_request" } })

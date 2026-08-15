@@ -216,6 +216,8 @@ enum DeleteKind {
 enum MutationIntent {
     Open {
         target: Target,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
     },
     Rename {
         session: String,
@@ -281,6 +283,7 @@ struct App {
     selected: usize,
     query: String,
     current_session: String,
+    tmux_client: Option<String>,
     error: String,
     animation_frame: usize,
     mode: Mode,
@@ -663,6 +666,7 @@ impl App {
             selected: 0,
             query: String::new(),
             current_session,
+            tmux_client: None,
             error: String::new(),
             animation_frame: 0,
             mode: Mode::Jump,
@@ -710,6 +714,7 @@ impl App {
             selected: 0,
             query: String::new(),
             current_session,
+            tmux_client: None,
             error: String::new(),
             animation_frame: 0,
             mode: Mode::Jump,
@@ -799,10 +804,20 @@ impl App {
             }
         }
         let mut by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
-        let known_ids = self
+        let id_counts = self
             .sessions
             .iter()
             .filter_map(|session| session.workshop_id.clone())
+            .fold(HashMap::<String, usize>::new(), |mut counts, id| {
+                *counts.entry(id).or_default() += 1;
+                counts
+            });
+        // Compatibility sources can temporarily project more than one exact target
+        // for one Workshop ID. Such an ID is not an unambiguous tree parent: keeping
+        // each target as a root is preferable to rendering every child multiple times.
+        let known_ids = id_counts
+            .into_iter()
+            .filter_map(|(id, count)| (count == 1).then_some(id))
             .collect::<HashSet<_>>();
         for (index, session) in self.sessions.iter().enumerate() {
             let parent = session
@@ -2044,6 +2059,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             {
                 return Some(AppCommand::Submit(MutationIntent::Open {
                     target: row.target(),
+                    client: app.tmux_client.clone(),
                 }));
             }
         }
@@ -2253,6 +2269,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .unwrap_or_default();
+    let tmux_client = env::var("CLANKERHOUSE_TMUX_CLIENT")
+        .ok()
+        .filter(|client| !client.is_empty())
+        .or_else(|| {
+            env::var_os("TMUX").and_then(|_| {
+                let output = Command::new("tmux")
+                    .args(["display-message", "-p", "#{client_name}"])
+                    .output()
+                    .ok()?;
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .filter(|client| !client.is_empty())
+            })
+        });
     let runtime = runtime_root();
     let socket_path = runtime.join("daemon.sock");
     let cache_path = runtime.join("state.json");
@@ -2261,10 +2293,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => App::new(cache_path, current_session),
     }
     .map_err(io::Error::other)?;
+    app.tmux_client = tmux_client;
     if env::args().any(|argument| argument == "--check") {
+        let tmux_sessions = app
+            .sessions
+            .iter()
+            .filter(|row| matches!(row.target, Target::TmuxSession { .. }))
+            .count();
+        let directory_resources = app
+            .sessions
+            .iter()
+            .filter(|row| matches!(row.target, Target::Directory { .. }))
+            .count();
         println!(
-            "Native snapshot ready: {} sessions, {} targets",
-            app.sessions.len(),
+            "Native snapshot ready: {tmux_sessions} tmux sessions, {directory_resources} directory resources, {} visible targets",
             app.rows.len()
         );
         return Ok(());
@@ -2276,6 +2318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscription_path = socket_path.clone();
     thread::spawn(move || subscribe_loop(subscription_path, snapshot_sender));
     let terminal = ratatui::init();
+    let open_client = app.tmux_client.clone();
     let result = run(terminal, app, snapshot_receiver, &socket_path);
     ratatui::restore();
     match result? {
@@ -2291,9 +2334,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .cloned()
                     .ok_or_else(|| io::Error::other("daemon omitted created target"))?,
             )?;
-            daemon_mutation(&socket_path, &MutationIntent::Open { target })
-                .map(|_| ())
-                .map_err(|error| io::Error::other(error).into())
+            daemon_mutation(
+                &socket_path,
+                &MutationIntent::Open {
+                    target,
+                    client: open_client,
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error).into())
         }
         AppCommand::CreateAndOpen(_) => unreachable!("create flow emitted a non-create intent"),
     }
@@ -2681,6 +2730,7 @@ mod tests {
                     resource_id: None,
                     location: None,
                 },
+                client: None,
             }))
         );
     }
@@ -2708,6 +2758,50 @@ mod tests {
                 branch: "feature".into(),
                 create: false,
                 base: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn ambiguous_workshop_ids_do_not_duplicate_child_targets() {
+        let mut app = app_with_sessions(
+            r#"[
+                {"name":"legacy-parent","path":"/legacy","workshopId":"parent-id","target":{"type":"directory","path":"/legacy"}},
+                {"name":"live-parent","path":"/live","workshopId":"parent-id","target":{"type":"tmux_session","session":"live-parent"}},
+                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"parent-id","availableActions":["open"],"target":{"type":"tmux_session","session":"child-native"}}
+            ]"#,
+        );
+
+        let keys = app
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(
+            keys.iter()
+                .filter(|key| **key == "session:child-native")
+                .count(),
+            1
+        );
+        assert!(app.rows.iter().all(|row| row.depth == 0));
+
+        app.tmux_client = Some("/dev/pts/9".into());
+        app.selected = app
+            .rows
+            .iter()
+            .position(|row| row.key == "session:child-native")
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Open {
+                target: Target::TmuxSession {
+                    session: "child-native".into(),
+                    management: None,
+                    resource_id: None,
+                    location: None,
+                },
+                client: Some("/dev/pts/9".into()),
             }))
         );
     }

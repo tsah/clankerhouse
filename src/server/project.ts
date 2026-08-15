@@ -120,9 +120,13 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const sessionOpencodes = opencodes.filter((row) => row.stablePane ? sessionPaneIds.has(row.stablePane) : row.session === session.name)
     const managedSession = managedAt(session.resourceId, "session", session.id)
     const sessionManaged = Boolean(managedSession)
+    const workshop = managedSession?.workshopId
+      ? lineage.byId.get(managedSession.workshopId)
+      : session.workshopId ? lineage.byId.get(session.workshopId) : lineage.byPath.get(session.path)
+    const sessionPath = workshop?.canonicalPath ?? session.path
     const sessionLocation = { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: session.id, nativeWindowId: null, nativePaneId: null }
-    if (session.attached && sessionWindows.some((window) => window.active)) effects.push({ type: "markDirectoryActivity", path: session.path, source: "active", updatedAt: observedAt, minIntervalMs: 60_000 })
-    const meta = gitMetaByPath.get(session.path) ?? { branch: "", flags: "" }
+    if (session.attached && sessionWindows.some((window) => window.active)) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "active", updatedAt: observedAt, minIntervalMs: 60_000 })
+    const meta = gitMetaByPath.get(sessionPath) ?? { branch: "", flags: "" }
     const details: DetailRow[] = []
 
     const opencodesByWindow = Map.groupBy(sessionOpencodes, (opencode) => {
@@ -139,7 +143,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const terminalManaged = Boolean(managedTerminal)
       const location = { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: window.pane }
       for (const opencode of windowOpencodes) {
-        if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
+        if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
         const completionKey = paneCompletionKey(tmuxServerKey, opencode.stablePane || window.pane || opencode.pane)
         const sourceState = opencodeState(opencode)
         const state = stateWithSeen(sourceState, opencode.updatedAt, seen.get(completionKey), focused)
@@ -159,7 +163,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       // Titles, command names, and process resemblance can enrich a registered Clanker,
       // but never create Clanker identity.
       const projectedKind = registeredHarness ?? "window"
-      if (report?.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: report.updatedAt, minIntervalMs: 0 })
+      if (report?.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: report.updatedAt, minIntervalMs: 0 })
       const sourceState = report?.harness === projectedKind ? report.state : projectedKind === "codex" ? codexStateFromTitle(window.title || window.name) : projectedKind === "claude" ? claudeStateFromTitle(window.title || window.name) : "unknown"
       const updatedAt = report?.harness === projectedKind ? report.updatedAt : window.activity * 1000
       const completionKey = projectedKind === "window" ? windowCompletionKey(tmuxServerKey, window.id) : paneCompletionKey(tmuxServerKey, window.pane)
@@ -172,14 +176,14 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     }
 
     for (const opencode of opencodesByWindow.get("") ?? []) {
-      if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: session.path, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
+      if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
       const completionKey = paneCompletionKey(tmuxServerKey, opencode.stablePane || opencode.pane)
       const sourceState = opencodeState(opencode)
       const state = stateWithSeen(sourceState, opencode.updatedAt, seen.get(completionKey))
       details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || opencode.pane }, completionKey, updatedAt: opencode.updatedAt })
     }
 
-    if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: session.path, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: sessionManaged ? session.resourceId : undefined, location: sessionLocation }, updatedAt: 0 })
+    if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: sessionPath, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: sessionManaged ? session.resourceId : undefined, location: sessionLocation }, updatedAt: 0 })
 
     const markers = [
       sessionOpencodes.length > 0 || sessionWindows.some((window) => detectedHarnessByPane.get(window.pane) === "opencode") ? "oc" : "",
@@ -187,28 +191,28 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       sessionWindows.some((window) => isClaudeWindow(window) || detectedHarnessByPane.get(window.pane) === "claude") ? "C" : "",
       sessionWindows.some((window) => codexPanes.has(window.pane) || detectedHarnessByPane.get(window.pane) === "codex") ? "codex" : "",
     ].filter(Boolean)
-    const workshop = session.workshopId ? lineage.byId.get(session.workshopId) : lineage.byPath.get(session.path)
     const parentWorkshopId = workshop ? workshop.parentWorkshopId : session.parentWorkshopId
     const lineageFields = buildLineageFields(workshop?.workshopId || session.workshopId, parentWorkshopId, workshop?.childWorkshopCount ?? 0)
     const displayName = managedSession?.displayName || session.name
     const workshopId = workshop?.workshopId || managedSession?.workshopId || session.workshopId
     const availableActions = ["open", "rename", ...(workshopId ? ["attach"] : []), ...(parentWorkshopId ? ["detach"] : []), "delete"] as SessionRow["availableActions"]
-    const row: SessionRow = { name: displayName, path: session.path, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", availableActions, workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
+    const row: SessionRow = { name: displayName, path: sessionPath, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", availableActions, workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
     row.searchText = [row.name, row.path, row.branch, row.flags, row.markers.join(" "), row.lineageLabel, row.lineageSearchText, ...row.details.flatMap((detail) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title, detail.age])].join(" ").toLowerCase()
     rows.push(row)
   }
 
   const occupiedDirs = new Set([
-    ...sessions.map((session) => expandHome(session.path, home)),
+    ...rows.map((row) => expandHome(row.path, home)),
     ...opencodes.map((row) => expandHome(row.directory.replace(/ \([0-9]+\)$/, ""), home)),
   ])
+  const occupiedWorkshopIds = new Set(rows.flatMap((row) => row.workshopId ? [row.workshopId] : []))
   for (const directory of directories) {
     const path = expandHome(directory.path, home)
-    if (occupiedDirs.has(path)) continue
+    const workshop = lineage.byPath.get(path)
+    if (occupiedDirs.has(path) || (workshop && occupiedWorkshopIds.has(workshop.workshopId))) continue
     occupiedDirs.add(path)
     const details: DetailRow[] = [{ kind: "directory", status: "", detail: directory.source, title: path, age: "", state: "unknown", target: { type: "directory", path }, updatedAt: 0 }]
     const age = directory.activityAt ? ageFromTimestamp(directory.activityAt, observedAt) : ""
-    const workshop = lineage.byPath.get(path)
     const lineageFields = buildLineageFields(workshop?.workshopId, workshop?.parentWorkshopId, workshop?.childWorkshopCount ?? 0)
     const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", availableActions: ["open", "create"], directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId: workshop?.parentWorkshopId, childWorkshopCount: workshop?.childWorkshopCount ?? 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
     row.searchText = [row.name, row.path, row.branch, `${directory.source} directory`, row.activitySource, row.age, row.lineageLabel, row.lineageSearchText].join(" ").toLowerCase()

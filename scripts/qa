@@ -18,6 +18,9 @@ cache_file="$runtime/clankerhouse-$uid/state.json"
 lineage_capture_path="$root/lineage-render.txt"
 session="qa-workshop-tree"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+export HOME="$root/home"
+export XDG_DATA_HOME="$root/data"
+export XDG_CONFIG_HOME="$root/config"
 
 cleanup() {
     if [[ "${CLANKERHOUSE_QA_KEEP:-0}" == "1" ]]; then
@@ -226,7 +229,7 @@ if [[ -e "$root" && ! -f "$qa_marker" ]]; then
     exit 1
 fi
 rm -rf "$root"
-mkdir -p "$runtime" "$state_home/clankerhouse/activity" "$root/zoxide" "$root/dev" "$root/bin"
+mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$runtime" "$state_home/clankerhouse/activity" "$root/zoxide" "$root/dev" "$root/bin"
 touch "$qa_marker"
 
 # Match the standalone launcher's non-login PATH.

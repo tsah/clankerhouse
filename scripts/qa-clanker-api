@@ -18,7 +18,10 @@ state_home="$root/state"
 fixture="$root/repo"
 other_fixture="$root/other-repo"
 report_dir="$runtime/clankerhouse-$(id -u)/clanker-state"
-mkdir -p "$runtime" "$state_home" "$report_dir"
+qa_home="$root/home"
+data_home="$root/data"
+config_home="$root/config"
+mkdir -p "$runtime" "$state_home" "$report_dir" "$qa_home" "$data_home" "$config_home"
 chmod 700 "$report_dir"
 server_pid=""
 
@@ -141,7 +144,7 @@ for _ in {1..50}; do [[ -S "$native_socket" ]] && break; sleep 0.02; done
 [[ -S "$native_socket" ]] || fail "native socket did not start"
 tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_clanker_socket "$native_socket"
 
-qa_env=(env "TMUX=$socket,1,0" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "DOTFILES_DIR=$repo")
+qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "XDG_CONFIG_HOME=$config_home" "TMUX=$socket,1,0" "DOTFILES_DIR=$repo")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 # Discovery, canonical filtering, ID assignment, and rename stability.
 all=$(api list)

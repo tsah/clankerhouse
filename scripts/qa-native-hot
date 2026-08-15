@@ -5,8 +5,8 @@ binary="$root/native-client/target/release/clankerhouse-native"
 "$root/scripts/build-native" >/dev/null
 qa=$(mktemp -d "/tmp/qa-clankerhouse-native-hot-$(id -u)-XXXXXX")
 trap 'rm -rf "$qa"' EXIT INT TERM
-mkdir -m 700 "$qa/runtime"
-XDG_RUNTIME_DIR="$qa/runtime" BINARY="$binary" python3 - <<'PY'
+mkdir -m 700 "$qa/runtime" "$qa/home" "$qa/state" "$qa/data" "$qa/config"
+HOME="$qa/home" XDG_RUNTIME_DIR="$qa/runtime" XDG_STATE_HOME="$qa/state" XDG_DATA_HOME="$qa/data" XDG_CONFIG_HOME="$qa/config" BINARY="$binary" python3 - <<'PY'
 import json, os, socket, subprocess, threading, time
 from pathlib import Path
 runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / f"clankerhouse-{os.getuid()}"

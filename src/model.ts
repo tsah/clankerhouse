@@ -119,6 +119,13 @@ export const sessionSortRank = (session: SessionRow) => {
   return clankerStateSortRank(state)
 }
 
+/** Authoritative ordering for an ungrouped projection before lineage rendering. */
+export const compareProjectedSessions = (a: SessionRow, b: SessionRow) =>
+  sessionSortRank(a) - sessionSortRank(b)
+  || b.recency - a.recency
+  || (b.frecency ?? 0) - (a.frecency ?? 0)
+  || a.name.localeCompare(b.name)
+
 export const fuzzyResult = (text: string, query: string): FuzzyResult | undefined => {
   const chars = Array.from(text.toLowerCase())
   const normalizedQuery = query.toLowerCase().trim()

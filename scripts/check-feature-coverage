@@ -1,0 +1,73 @@
+#!/usr/bin/env bun
+
+import { existsSync, statSync } from "node:fs"
+import { resolve } from "node:path"
+
+interface Feature {
+  id: string
+  title: string
+  core: boolean
+  unit: string[]
+  standalone: string[]
+  manual: string[]
+}
+
+interface Catalogue {
+  version: number
+  features: Feature[]
+}
+
+const root = resolve(import.meta.dir, "..")
+const catalogue = await Bun.file(resolve(root, "docs/features.json")).json() as Catalogue
+const failures: string[] = []
+const runner = await Bun.file(resolve(root, "test")).text()
+if (catalogue.version !== 1) failures.push("docs/features.json must use catalogue version 1")
+const ids = new Set<string>()
+const coveredTests = new Set<string>()
+
+for (const feature of catalogue.features) {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(feature.id)) failures.push(`Invalid feature id: ${feature.id}`)
+  if (ids.has(feature.id)) failures.push(`Duplicate feature id: ${feature.id}`)
+  ids.add(feature.id)
+  if (!feature.title.trim()) failures.push(`${feature.id}: title is required`)
+  if (feature.core && feature.unit.length === 0) failures.push(`${feature.id}: functional-core feature has no unit tests`)
+  if (feature.standalone.length === 0) failures.push(`${feature.id}: no standalone end-to-end scenario`)
+  if (feature.manual.length === 0) failures.push(`${feature.id}: no manual-agent judgement steps`)
+  for (const path of feature.unit) {
+    coveredTests.add(path)
+    if (!existsSync(resolve(root, path))) failures.push(`${feature.id}: missing unit test ${path}`)
+    if (!path.endsWith(".test.ts") && !/^tests\/test_.+\.py$/.test(path) && path !== "native-client/src/main.rs") failures.push(`${feature.id}: unit evidence is not a recognized test surface: ${path}`)
+    if (path === "native-client/src/main.rs" && !(await Bun.file(resolve(root, path)).text()).includes("#[cfg(test)]")) failures.push(`${feature.id}: native test module is missing`)
+  }
+  for (const path of feature.standalone) {
+    const absolute = resolve(root, path)
+    if (!existsSync(absolute)) failures.push(`${feature.id}: missing standalone scenario ${path}`)
+    else if (!(statSync(absolute).mode & 0o111)) failures.push(`${feature.id}: standalone scenario is not executable: ${path}`)
+    if (!runner.includes(path)) failures.push(`${feature.id}: standalone scenario is absent from the top-level test runner: ${path}`)
+  }
+}
+
+const discovered = [
+  ...new Bun.Glob("src/**/*.test.ts").scanSync({ cwd: root }),
+  ...new Bun.Glob("tests/test_*.py").scanSync({ cwd: root }),
+]
+for (const path of discovered) if (!coveredTests.has(path)) failures.push(`Uncatalogued unit test: ${path}`)
+if (!coveredTests.has("native-client/src/main.rs")) failures.push("Native Rust test module is uncatalogued")
+for (const path of new Bun.Glob("scripts/qa*").scanSync({ cwd: root })) {
+  if (!statSync(resolve(root, path)).isFile()) continue
+  if (!runner.includes(path)) failures.push(`Standalone QA script is absent from the top-level test runner: ${path}`)
+  if (!catalogue.features.some((feature) => feature.standalone.includes(path))) failures.push(`Standalone QA script is uncatalogued: ${path}`)
+}
+
+for (const path of [
+  ".agents/skills/manual-qa/SKILL.md",
+  ".agents/skills/troubleshoot/SKILL.md",
+  ".pi/prompts/qa.md",
+  ".pi/prompts/troubleshoot.md",
+]) if (!existsSync(resolve(root, path))) failures.push(`Missing agent workflow: ${path}`)
+
+if (failures.length) {
+  console.error(["Feature coverage check failed:", ...failures.map((failure) => `- ${failure}`)].join("\n"))
+  process.exit(1)
+}
+console.log(`Feature catalogue validated: ${catalogue.features.length} features, ${discovered.length} discovered unit-test files, all standalone scripts routed, and manual judgement declared.`)

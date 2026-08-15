@@ -9,6 +9,7 @@ import { ensureManagedTmuxSession } from "../multiplexer"
 import { parseTmuxFields, tmuxFields } from "../tmux-fields"
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
 import { recoveryUnitName } from "./process-owner"
+import { decideRecovery } from "./planner"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
@@ -99,43 +100,39 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
     let panes = await observePanes()
     for (const original of store.listDesired()) {
       if (options.clankerId && original.clankerId !== options.clankerId) continue
-      if (original.desiredState !== "running") continue
       let desired = original
       const matching = panes.filter((pane) => pane.clankerId === desired.clankerId)
-      if (matching.length > 1) {
-        result.skipped.push({ clankerId: desired.clankerId, reason: "ambiguous duplicate live panes" })
-        continue
-      }
-      if (matching.length === 1) {
-        const pane = matching[0]!
-        if (pane.harness && pane.harness !== desired.harness) result.skipped.push({ clankerId: desired.clankerId, reason: "live harness mismatch" })
-        else if (pane.harnessSessionId && desired.harnessSessionId && pane.harnessSessionId !== desired.harnessSessionId) result.skipped.push({ clankerId: desired.clankerId, reason: "live harness session mismatch" })
-        else {
-          const latest = store.attemptsFor(desired.clankerId).at(-1)
-          if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
-          result.adopted.push(desired.clankerId)
-        }
-        continue
-      }
-      if (desired.recoveryCondition === "healthy" || desired.recoveryCondition === "recovering") {
-        desired = store.markRecoveryPending(desired.clankerId, "no owned live pane", { now })
+      const automaticCandidate = !options.automatic || !options.automaticCandidates || options.automaticCandidates.includes(desired.clankerId)
+      const decide = () => decideRecovery({
+        desired,
+        matchingPanes: matching,
+        allowLaunch: Boolean(options.allowLaunch),
+        automaticCandidate,
+        backoffRemainingMs: backoffRemaining(desired, store, now),
+        activeRecoveries: store.listDesired().filter((row) => row.desiredState === "running" && row.recoveryCondition === "recovering").length,
+      })
+      let decision = decide()
+      if (decision.type === "mark-pending") {
+        desired = store.markRecoveryPending(desired.clankerId, decision.reason, { now })
         if (desired.recoveryCondition === "interrupted_unknown") {
           recordRecoveryIncident("interrupted_tool_requires_confirmation", { clankerId: desired.clankerId, harness: desired.harness, worktreePath: desired.workshopPath, cwd: desired.cwd }, { reason: "owned recovery process disappeared before a settled checkpoint" })
         }
+        decision = decide()
       }
-      const automaticCandidate = !options.automaticCandidates || options.automaticCandidates.includes(desired.clankerId)
-      if (!options.allowLaunch || (options.automatic && !automaticCandidate)) {
+      if (decision.type === "ignore") continue
+      if (decision.type === "adopt") {
+        const latest = store.attemptsFor(desired.clankerId).at(-1)
+        if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
+        result.adopted.push(desired.clankerId)
+        continue
+      }
+      if (decision.type === "block" || decision.type === "defer") {
+        result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
+        continue
+      }
+      if (decision.type === "pending") {
         result.pending.push(desired.clankerId)
-        result.skipped.push({ clankerId: desired.clankerId, reason: desired.recoveryCondition === "interrupted_unknown" ? "interrupted work requires operator review" : "manual resume required" })
-        continue
-      }
-      if (desired.recoveryCondition === "interrupted_unknown" || desired.recoveryCondition === "quarantined") {
-        result.skipped.push({ clankerId: desired.clankerId, reason: desired.recoveryCondition === "quarantined" ? desired.quarantineReason || "quarantined" : "interrupted work requires reset after operator review" })
-        continue
-      }
-      const remaining = backoffRemaining(desired, store, now)
-      if (remaining > 0) {
-        result.skipped.push({ clankerId: desired.clankerId, reason: `backoff ${remaining}ms` })
+        result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
         continue
       }
       const activeRecoveries = store.listDesired().filter((row) => row.desiredState === "running" && row.recoveryCondition === "recovering").length
@@ -150,9 +147,6 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
           result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
           continue
         }
-      } else if (activeRecoveries >= RECOVERY_POLICY.maxActiveRecoveries) {
-        result.skipped.push({ clankerId: desired.clankerId, reason: "global recovery admission limit reached" })
-        continue
       }
       for (const previous of store.attemptsFor(desired.clankerId).filter((attempt) => attempt.status === "running")) {
         store.finishAttempt(previous.id, "abandoned", { error: "operator admitted recovery after interrupted attempt", now })

@@ -186,18 +186,17 @@ Controls:
 
 On startup, the tmux session containing the popup is selected when it appears in the jump list. Renaming stays inside Clankerhouse and preserves the session's canonical path metadata and included clankers.
 
-Run checks, model/API/recovery tests, and the isolated real-terminal smoke test with:
+Run every static check, unit/component suite, and isolated standalone end-to-end scenario through the authoritative top-level entrypoint:
 
 ```bash
-bun run check
-bun test
-PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch
-scripts/qa-clanker-api
-scripts/qa-daemon
-scripts/qa-recovery
-scripts/qa-stop-popup
-scripts/qa
+./test                 # everything
+./test --unit          # feature coverage plus TypeScript, Python, and Rust
+./test --standalone    # every real daemon/tmux/TUI/integration simulation
 ```
+
+`docs/features.json` is the feature-to-unit/standalone/manual acceptance catalogue. `scripts/check-feature-coverage` fails when a functional-core feature lacks unit tests, any feature lacks standalone/manual coverage, or a discovered unit-test file is uncatalogued.
+
+Project-local Agent Skills are shared by Pi and OpenCode through `.agents/skills/`: Pi exposes `/skill:manual-qa` and `/skill:troubleshoot`; OpenCode exposes `/manual-qa` and `/troubleshoot`. Pi also provides the convenience prompt templates `/qa` and `/troubleshoot`. Manual QA treats the agent as the semantic judge and retains evidence under `.qa-artifacts/`; troubleshooting is read-only until live mutations are explicitly confirmed.
 
 Capture a deterministic lineage render from a disposable real OpenTUI fixture with:
 

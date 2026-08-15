@@ -9,11 +9,12 @@ import type { RecoveryResourceClass } from "./recovery/model"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { libexecPath } from "./installation"
 import { TmuxMultiplexer } from "./multiplexer"
-import type { Target } from "./model"
+import { diagnoseProjection } from "./diagnostics"
+import type { SessionRow, Target } from "./model"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
-import { submitMutation, waitForOperation } from "./transport"
+import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 
 const daemonSocketPath = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/clankerhouse-${process.getuid?.() ?? Bun.env.USER ?? "user"}/daemon.sock`
@@ -201,6 +202,7 @@ const usage = `Usage:
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers target open --json TARGET
+  clankers diagnose [--json] [--strict]
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH]
   clankers status|capabilities CLANKER_ID
@@ -219,6 +221,21 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   const command = parsed.shift()
   if (!command || command === "help" || command === "--help" || command === "-h") return console.log(usage)
   if (["list", "status", "capabilities", "wait", "send", "result"].includes(command)) return runClankerApi(command, parsed)
+
+  if (command === "diagnose") {
+    const json = parsed.has("--json")
+    const strict = parsed.has("--strict")
+    const snapshot = await getSnapshot<SessionRow>(daemonSocketPath)
+    const report = diagnoseProjection(snapshot.sessions)
+    if (json) console.log(JSON.stringify(report, null, 2))
+    else {
+      console.log(`Clankerhouse projection: ${report.counts.tmuxSessions} tmux sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
+      if (!report.issues.length) console.log("No projection anomalies detected.")
+      for (const entry of report.issues) console.log(`${entry.severity.toUpperCase()} ${entry.code}: ${entry.summary}`)
+    }
+    if (strict && !report.healthy) throw new Error("Projection diagnostics found invariant violations")
+    return
+  }
 
   if (command === "target") {
     const subcommand = parsed.shift()

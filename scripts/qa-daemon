@@ -13,6 +13,9 @@ socket="$root/tmux.sock"
 runtime="$root/runtime"
 state_home="$root/state"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cargo_bin=$(command -v cargo)
+cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
+rustup_home=${RUSTUP_HOME:-"$HOME/.rustup"}
 server_pid=""
 
 cleanup() {
@@ -30,14 +33,16 @@ if [[ -e "$root" && ! -f "$marker" ]]; then
     exit 1
 fi
 rm -rf "$root"
-mkdir -p "$runtime" "$state_home" "$root/work"
+mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/work"
 touch "$marker"
 tmux -S "$socket" new-session -d -s qa-daemon -n main -x 100 -y 30 -c "$root/work" "sleep 300"
 
 env \
+    HOME="$root/home" \
     TMUX="$socket,0,0" \
     XDG_RUNTIME_DIR="$runtime" \
     XDG_STATE_HOME="$state_home" \
+    XDG_DATA_HOME="$root/data" \
     CLANKERHOUSE_DEV_ROOT="$root/missing" \
     CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
     bun run "$repo/src/main.tsx" --server >"$root/server.log" 2>&1 &
@@ -74,6 +79,12 @@ transport_result=$(bun --eval '
 ' "$repo/src/transport/index.ts" "$daemon_socket")
 [[ "$transport_result" == *'"protocol":1'* ]] || { printf 'Unexpected daemon response: %s\n' "$transport_result" >&2; exit 1; }
 
+diagnostics=$(env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CLANKERHOUSE_HOME="$repo" "$repo/bin/clankers" diagnose --json)
+jq -e '.healthy == true and .counts.tmuxSessions == 1 and .counts.renderedSessionRows == 1' <<<"$diagnostics" >/dev/null
+native_tree=$(env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
+    "$cargo_bin" run --quiet --manifest-path "$repo/native-client/Cargo.toml" -- --dump-tree)
+jq -e '.version == 1 and (.rows | length) == 1 and .rows[0].target.type == "tmux_session"' <<<"$native_tree" >/dev/null
+
 SOCKET_PATH="$daemon_socket" python3 - <<'PY'
 import json
 import os
@@ -97,4 +108,4 @@ server_pid=""
 [[ -s "$cache" ]] || { printf 'Expected JSON fallback cache to remain after shutdown\n' >&2; exit 1; }
 [[ ! -e "$daemon_socket" ]] || { printf 'Expected daemon socket cleanup after shutdown\n' >&2; exit 1; }
 
-printf 'Clankerhouse daemon QA passed: private socket mode, typed status/snapshot/subscription transport, coalesced refresh revisions, destructive-action rejection, JSON fallback, and clean shutdown behave correctly.\n'
+printf 'Clankerhouse daemon QA passed: private socket mode, typed status/snapshot/subscription transport, read-only diagnostics and native tree dumps, coalesced refresh revisions, destructive-action rejection, JSON fallback, and clean shutdown behave correctly.\n'

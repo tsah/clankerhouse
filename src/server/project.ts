@@ -1,6 +1,6 @@
 import type { ActivitySource } from "../activity"
 import { applyResourceIncidents, type ResourceIncident } from "../incidents"
-import { sessionSortRank, stateWithSeen } from "../model"
+import { compareProjectedSessions, stateWithSeen } from "../model"
 import type { ClankerState, DetailRow, SessionRow } from "../model"
 import type { ResourceRecord } from "../resource-registry"
 import type { LineageSnapshot } from "../workshop"
@@ -220,6 +220,6 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
   }
 
   const projectedSessions = applyResourceIncidents(rows, [...incidents], observedAt)
-  projectedSessions.sort((a, b) => sessionSortRank(a) - sessionSortRank(b) || b.recency - a.recency || (b.frecency ?? 0) - (a.frecency ?? 0) || a.name.localeCompare(b.name))
+  projectedSessions.sort(compareProjectedSessions)
   return { sessions: projectedSessions, effects }
 }

@@ -2294,6 +2294,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .map_err(io::Error::other)?;
     app.tmux_client = tmux_client;
+    if env::args().any(|argument| argument == "--dump-tree") {
+        let rows = app
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                serde_json::json!({
+                    "index": index,
+                    "selected": index == app.selected,
+                    "key": row.key,
+                    "depth": row.depth,
+                    "name": row.session.name,
+                    "path": row.session.path,
+                    "workshopId": row.session.workshop_id,
+                    "parentWorkshopId": row.session.parent_workshop_id,
+                    "detailKind": row.detail.as_ref().map(|detail| detail.kind.as_str()),
+                    "state": format!("{:?}", row.state).to_lowercase(),
+                    "target": row.target(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "rows": rows }))?
+        );
+        return Ok(());
+    }
     if env::args().any(|argument| argument == "--check") {
         let tmux_sessions = app
             .sessions

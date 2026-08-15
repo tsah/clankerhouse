@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Authoritative top-level Clankerhouse test entrypoint.
+# Default: static checks, every unit/component test, and every isolated standalone scenario.
+set -euo pipefail
+
+root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+cd "$root"
+
+mode=all
+case "${1:-}" in
+    ""|--all) mode=all ;;
+    --unit) mode=unit ;;
+    --standalone) mode=standalone ;;
+    --list)
+        cat <<'EOF'
+unit/static:
+  feature-catalogue, TypeScript, Python, Rust
+standalone/end-to-end:
+  native-hot, Neovim, Clanker API, daemon, Recovery, process owner,
+  stop popup, current session, absorption, client routing, installer, full TUI
+EOF
+        exit 0
+        ;;
+    *) printf 'Usage: ./test [--all|--unit|--standalone|--list]\n' >&2; exit 2 ;;
+esac
+
+started=$SECONDS
+passed=0
+run() {
+    local name=$1
+    shift
+    printf '\n\033[1;36m==> %s\033[0m\n' "$name"
+    "$@"
+    passed=$((passed + 1))
+}
+
+if [[ "$mode" == all || "$mode" == unit ]]; then
+    run "feature coverage" scripts/check-feature-coverage
+    run "TypeScript static check" bun run check
+    run "TypeScript unit and component tests" bun test
+    run "Python unit and component tests" env PYTHONPATH=.. python3 -m unittest \
+        tests.test_resource_guard tests.test_spot_watch tests.test_opencode_status
+    run "Rust native-client unit tests" cargo test --manifest-path native-client/Cargo.toml
+fi
+
+if [[ "$mode" == all || "$mode" == standalone ]]; then
+    run "native hot-start scenario" scripts/qa-native-hot
+    run "Neovim integration scenario" scripts/qa-nvim
+    run "Clanker API scenario" scripts/qa-clanker-api
+    run "authoritative daemon scenario" scripts/qa-daemon
+    run "Recovery campaign scenario" scripts/qa-recovery
+    run "process ownership scenario" scripts/qa-process-owner
+    run "standalone stop popup scenario" scripts/qa-stop-popup
+    run "current-session and lineage scenario" scripts/qa-current-session
+    run "whole-session absorption scenario" scripts/qa-absorption
+    run "requesting-client child navigation scenario" scripts/qa-client-routing
+    run "atomic installer and rollback scenario" scripts/qa-install
+    run "complete native TUI interaction scenario" scripts/qa
+fi
+
+printf '\n\033[1;32mAll %d Clankerhouse test groups passed in %ds (%s mode).\033[0m\n' "$passed" "$((SECONDS - started))" "$mode"

@@ -15,10 +15,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y tmux python3 jq zoxide util-linux
       - run: bun install --frozen-lockfile
-      - run: bun run check
-      - run: bun test
-      - run: bun run test:python
-      - run: bun run test:native
+      - run: ./test --unit
       - run: bun run qa:native-hot
       - run: scripts/qa-clanker-api
       - run: scripts/qa-daemon

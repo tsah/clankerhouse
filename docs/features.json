@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "policy": {
+    "coreRequiresUnitTests": true,
+    "everyFeatureRequiresStandaloneScenarios": true,
+    "everyFeatureRequiresManualJudgement": true
+  },
+  "features": [
+    {
+      "id": "projection-tree",
+      "title": "Projection, identity deduplication, lineage, and sorting",
+      "core": true,
+      "unit": ["src/server/project.test.ts", "src/main.test.ts", "src/diagnostics.test.ts", "src/activity.test.ts", "src/incidents.test.ts", "src/repository-cache.test.ts", "src/server/process-discovery.test.ts", "src/tmux-fields.test.ts", "tests/test_opencode_status.py"],
+      "standalone": ["scripts/qa"],
+      "manual": ["Inspect the full unfiltered tree", "Confirm each exact target and Workshop appears once", "Confirm lineage and actionable-state ordering"]
+    },
+    {
+      "id": "search-navigation",
+      "title": "Search, selection, expansion, scrolling, and current-session priority",
+      "core": true,
+      "unit": ["src/main.test.ts", "src/picker.test.ts", "native-client/src/main.rs"],
+      "standalone": ["scripts/qa", "scripts/qa-current-session"],
+      "manual": ["Search exact, fuzzy, hyphenated, and absent terms", "Navigate parent, child, and detail rows", "Confirm selected row and footer refer to the same target"]
+    },
+    {
+      "id": "client-routed-opening",
+      "title": "Opening exact sessions, children, windows, and directories for the requesting client",
+      "core": true,
+      "unit": ["src/multiplexer.test.ts", "src/transport/protocol.test.ts", "native-client/src/main.rs"],
+      "standalone": ["scripts/qa-client-routing", "scripts/qa-absorption"],
+      "manual": ["Open a child session from the native TUI", "Confirm only the requesting tmux client moves", "Return to the original session and open a detail target"]
+    },
+    {
+      "id": "typed-actions",
+      "title": "Rename, attach, detach, delete, create, start, and stop actions",
+      "core": true,
+      "unit": ["src/daemon-mutations.test.ts", "src/transport/protocol.test.ts", "src/cli.test.ts", "native-client/src/main.rs"],
+      "standalone": ["scripts/qa", "scripts/qa-stop-popup", "scripts/qa-recovery"],
+      "automatedScope": "Delete, stop, Recovery desired-state transitions, protocol validation, and durable action stages are automated; rename, attach, detach, create, and start require the manual standalone walkthrough until dedicated interaction scenarios are added.",
+      "manual": ["Exercise every advertised action in the laboratory", "Cancel each destructive confirmation once", "Confirm action results survive a projection refresh"]
+    },
+    {
+      "id": "workshop-lifecycle",
+      "title": "Workshop identity, creation, lineage, manifests, and rollback",
+      "core": true,
+      "unit": ["src/workshop.test.ts", "src/workflow.test.ts"],
+      "standalone": ["scripts/qa", "scripts/qa-current-session"],
+      "manual": ["Create a Workshop and child", "Reparent and detach the child", "Confirm stable IDs and manifests remain consistent"]
+    },
+    {
+      "id": "absorption",
+      "title": "Explicit whole-session absorption and validated Multiplexer Locations",
+      "core": true,
+      "unit": ["src/multiplexer.test.ts", "src/resource-registry.test.ts"],
+      "standalone": ["scripts/qa-absorption"],
+      "manual": ["Enter an unmanaged session through Clankerhouse", "Confirm the complete terminal topology is registered", "Confirm ordinary tmux switching does not absorb"]
+    },
+    {
+      "id": "clanker-api",
+      "title": "Stable Clanker discovery, status, capabilities, sends, waits, and results",
+      "core": true,
+      "unit": ["src/clanker-api.test.ts"],
+      "standalone": ["scripts/qa-clanker-api"],
+      "manual": ["Inspect capabilities before communication", "Send through every supported delivery mode", "Confirm generations, waits, and results correlate"]
+    },
+    {
+      "id": "daemon-transport",
+      "title": "Authoritative socket snapshots, subscriptions, refresh, leases, and operations",
+      "core": true,
+      "unit": ["src/transport/transport.test.ts", "src/transport/producer-lease.test.ts", "src/projection.test.ts"],
+      "standalone": ["scripts/qa-daemon"],
+      "manual": ["Start an isolated daemon", "Observe a subscription update", "Restart it and confirm stale producer rejection and client reconnection"]
+    },
+    {
+      "id": "durable-registry",
+      "title": "Durable registry, resource identity, imports, and compatibility authority",
+      "core": true,
+      "unit": ["src/registry.test.ts", "src/resource-registry.test.ts"],
+      "standalone": ["scripts/qa-daemon", "scripts/qa-absorption", "scripts/qa-install"],
+      "manual": ["Validate integrity and foreign keys", "Inspect provenance and immutable journal entries", "Confirm legacy stores remain readable during compatibility"]
+    },
+    {
+      "id": "recovery",
+      "title": "Desired state, admission, campaigns, leases, interruption safety, and reconciliation",
+      "core": true,
+      "unit": ["src/recovery/admission.test.ts", "src/recovery/controller.test.ts", "src/recovery/planner.test.ts", "src/recovery/store.test.ts", "src/recovery/interruption.test.ts", "src/recovery/harness.test.ts", "src/recovery/model.test.ts"],
+      "standalone": ["scripts/qa-recovery"],
+      "manual": ["Simulate clean loss, hard reboot, ambiguous interruption, and resource pressure", "Confirm only admitted candidates launch", "Confirm stopped and suspended Clankers remain stopped"]
+    },
+    {
+      "id": "resource-safety",
+      "title": "Resource guard, Spot handling, and process ownership",
+      "core": true,
+      "unit": ["tests/test_resource_guard.py", "tests/test_spot_watch.py", "src/recovery/process-owner.test.ts"],
+      "standalone": ["scripts/qa-recovery", "scripts/qa-process-owner"],
+      "manual": ["Simulate pressure and Spot notices", "Confirm incidents and checkpoints", "Confirm every managed process remains killable through its owner scope"]
+    },
+    {
+      "id": "native-tui",
+      "title": "Native rendering, input parity, reconnect, and hot startup",
+      "core": true,
+      "unit": ["native-client/src/main.rs", "src/main.test.ts"],
+      "standalone": ["scripts/qa", "scripts/qa-native-hot", "scripts/qa-client-routing"],
+      "automatedScope": "Native startup, typed intent construction, child routing, and the shared TUI contract are automated; full native action parity and reconnect remain mandatory manual standalone judgements.",
+      "manual": ["Capture and inspect the real native screen", "Exercise keyboard actions and reconnect", "Judge glyphs, connectors, naming, question marks, and selection alignment"]
+    },
+    {
+      "id": "diagnostics",
+      "title": "Read-only projection and TUI troubleshooting diagnostics",
+      "core": true,
+      "unit": ["src/diagnostics.test.ts"],
+      "standalone": ["scripts/qa-daemon", "scripts/qa"],
+      "manual": ["Run clankers diagnose --json", "Run clankerhouse-native --dump-tree", "Explain every warning and distinguish expected unknown resources from defects"]
+    },
+    {
+      "id": "installation",
+      "title": "Atomic installation, daemon handoff, integrations, and rollback",
+      "core": false,
+      "unit": [],
+      "standalone": ["scripts/qa-install"],
+      "manual": ["Install into an isolated prefix", "Verify active target and service templates", "Inject preflight and activation failures and confirm rollback"]
+    },
+    {
+      "id": "neovim-integration",
+      "title": "Neovim loading, mappings, discovery, selection, and native delivery",
+      "core": false,
+      "unit": [],
+      "standalone": ["scripts/qa-nvim"],
+      "manual": ["Load the plugin in an isolated Neovim", "Select a Clanker", "Send a native message and inspect the exact delivery"]
+    },
+    {
+      "id": "popup-lifecycle",
+      "title": "Standalone stop popup and surviving-session preservation",
+      "core": false,
+      "unit": [],
+      "standalone": ["scripts/qa-stop-popup"],
+      "manual": ["Cancel then confirm a stop", "Inspect progress and durable intent", "Confirm unrelated sessions survive"]
+    }
+  ]
+}

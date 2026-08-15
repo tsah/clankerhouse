@@ -1,0 +1,60 @@
+#!/bin/bash
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+binary="$root/native-client/target/release/clankerhouse-native"
+[[ -x "$binary" ]] || "$root/scripts/build-native" >/dev/null
+qa=$(mktemp -d "/tmp/qa-clankerhouse-native-hot-$(id -u)-XXXXXX")
+trap 'rm -rf "$qa"' EXIT INT TERM
+mkdir -m 700 "$qa/runtime"
+XDG_RUNTIME_DIR="$qa/runtime" BINARY="$binary" python3 - <<'PY'
+import json, os, socket, subprocess, threading, time
+from pathlib import Path
+runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / f"clankerhouse-{os.getuid()}"
+runtime.mkdir(mode=0o700)
+socket_path = runtime / "daemon.sock"
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(str(socket_path))
+os.chmod(socket_path, 0o600)
+server.listen(8)
+stopped = False
+
+def serve():
+    while not stopped:
+        try:
+            client, _ = server.accept()
+        except OSError:
+            return
+        with client:
+            line = b""
+            while b"\n" not in line:
+                chunk = client.recv(4096)
+                if not chunk: break
+                line += chunk
+            try:
+                request = json.loads(line.split(b"\n", 1)[0])
+                response = {"version": 1, "id": request["id"], "ok": True, "result": {
+                    "version": 10, "revision": {"source": "hot-daemon", "sequence": 1},
+                    "generatedAt": int(time.time() * 1000), "sessions": []}}
+                client.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+            except Exception:
+                pass
+thread = threading.Thread(target=serve, daemon=True)
+thread.start()
+env = dict(os.environ)
+env.pop("TMUX", None)
+command = [os.environ["BINARY"], "--check"]
+# Warm executable pages and allocator before measuring the hot Alt-K path.
+subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
+samples = []
+for _ in range(9):
+    start = time.perf_counter_ns()
+    subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
+    samples.append((time.perf_counter_ns() - start) / 1_000_000)
+stopped = True
+server.close()
+samples.sort()
+p95 = samples[-2]
+if p95 >= 100:
+    raise SystemExit(f"hot native first-frame p95 was {p95:.1f} ms (samples={samples})")
+print(f"Clankerhouse native hot-start QA passed: first-frame p95 {p95:.1f} ms (n={len(samples)}).")
+PY

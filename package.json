@@ -37,6 +37,7 @@
     "test": "bun test",
     "test:python": "PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch tests.test_opencode_status",
     "test:native": "cargo test --manifest-path native-client/Cargo.toml",
+    "qa:native-hot": "scripts/qa-native-hot",
     "test:nvim": "scripts/qa-nvim",
     "qa:api": "scripts/qa-clanker-api",
     "qa:daemon": "scripts/qa-daemon",
@@ -47,7 +48,7 @@
     "qa:absorption": "scripts/qa-absorption",
     "qa:install": "scripts/qa-install",
     "qa:tui": "scripts/qa",
-    "qa": "bun run check && bun test && bun run test:python && bun run test:native && scripts/qa-nvim && scripts/qa-clanker-api && scripts/qa-daemon && scripts/qa-recovery && scripts/qa-process-owner && scripts/qa-stop-popup && scripts/qa-current-session && scripts/qa-absorption && scripts/qa-install && scripts/qa",
+    "qa": "bun run check && bun test && bun run test:python && bun run test:native && bun run qa:native-hot && scripts/qa-nvim && scripts/qa-clanker-api && scripts/qa-daemon && scripts/qa-recovery && scripts/qa-process-owner && scripts/qa-stop-popup && scripts/qa-current-session && scripts/qa-absorption && scripts/qa-install && scripts/qa",
     "doctor": "bin/clankerhouse-doctor"
   },
   "files": [

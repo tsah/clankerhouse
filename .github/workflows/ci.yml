@@ -19,6 +19,7 @@ jobs:
       - run: bun test
       - run: bun run test:python
       - run: bun run test:native
+      - run: bun run qa:native-hot
       - run: scripts/qa-clanker-api
       - run: scripts/qa-daemon
       - run: scripts/qa-recovery

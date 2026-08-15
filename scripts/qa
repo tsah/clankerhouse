@@ -12,6 +12,7 @@ qa_marker="$root.clankerhouse-qa-owned"
 inner_socket="$root/inner.sock"
 outer_socket="$root/outer.sock"
 runtime="$root/runtime"
+fixture_runtime="$root/fixture-runtime"
 state_home="$root/state"
 cache_file="$runtime/clankerhouse-$uid/state.json"
 lineage_capture_path="$root/lineage-render.txt"
@@ -353,7 +354,7 @@ tmux -S "$outer_socket" set-option -gq @clankerhouse_open 1
 tmux -S "$inner_socket" set-option -gq @clankerhouse_open 1
 sleep 0.2
 
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run '$repo/src/main.tsx'"
+picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
 animation_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
 wait_for_text "qa-workshop-tree"
@@ -417,12 +418,20 @@ PY
 tmux -S "$inner_socket" kill-pane -t "$lineage_picker_pane"
 sleep 0.2
 
+# Synthetic contract fixtures use a separate runtime so the authoritative
+# daemon cannot overwrite their one-time crash fallback.
+cache_file="$fixture_runtime/clankerhouse-$uid/state.json"
+mkdir -p "$(dirname "$cache_file")"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
+# They never poll JSON and never compete with the authoritative test daemon.
+picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_SUBSCRIBE=0 CLANKERHOUSE_STARTUP_FALLBACK_ONLY=1 bun run '$repo/src/main.tsx'"
 lineage_visual_pane=$(open_picker_window lineage-visual)
 wait_for_text "$lineage_root_session"
-# The picker starts on the root; move across both lineage children to the
-# final child before exercising exact-detail expansion.
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Down Down
+# Select the exact lineage child independently of current-session priority,
+# then clear the query while preserving its stable row anchor.
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$lineage_fix_java_session"
+wait_for_selected_row "$lineage_fix_java_session"
+for ((i = 0; i < ${#lineage_fix_java_session}; i++)); do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
 wait_for_selected_row "$lineage_fix_java_session"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Right
 wait_for_text "· ○ main"
@@ -507,12 +516,17 @@ wait_for_text "refresh-keep"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Up
 wait_for_selected_row "refresh-keep"
 write_fixture_cache refresh-updated
-wait_for_text "refresh-new-top"
-wait_for_absent_text "refresh-remove"
+sleep 0.3
+# A live client must not poll the fallback file. Socket update/reconnect behavior
+# is covered by qa-daemon and native transport tests.
+wait_for_absent_text "refresh-new-top"
+wait_for_text "refresh-remove"
 wait_for_selected_row "refresh-keep"
 tmux -S "$inner_socket" kill-pane -t "$refresh_picker_pane"
 sleep 0.2
 rm -f "$cache_file"
+cache_file="$runtime/clankerhouse-$uid/state.json"
+picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 
 now=$(date +%s%3N)
 printf '{"harness":"pi","state":"done","pane":"%s","updatedAt":%s,"hookEvent":"agent_settled"}\n' "$pi_pane" "$now" > "$state_file"
@@ -534,7 +548,12 @@ for _ in {1..100}; do
 done
 [[ "$active" == "pi" ]] || { printf 'Expected pi window, got %s\n' "$active" >&2; exit 1; }
 
-seen_count=$(compgen -G "$runtime/clankerhouse-$uid/seen-state/*.json" | wc -l)
+seen_count=0
+for _ in {1..100}; do
+    seen_count=$(compgen -G "$runtime/clankerhouse-$uid/seen-state/*.json" | wc -l)
+    [[ "$seen_count" -ge 1 ]] && break
+    sleep 0.05
+done
 [[ "$seen_count" -ge 1 ]] || { printf 'Expected a persisted seen record\n' >&2; exit 1; }
 rm -f "$runtime/clankerhouse-$uid/state.json"
 
@@ -588,8 +607,8 @@ tmux -S "$inner_socket" has-session -t "=$delete_session"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
 wait_for_text "Destroy final pane, session, and worktree"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
-wait_for_text "Destroying workshop"
-wait_for_text "Removing worktree with Worktrunk"
+# Durable stage transitions are asserted in daemon-mutations.test.ts; the
+# client waits for the final observation rather than sequencing progress text.
 for _ in {1..100}; do
     if ! tmux -S "$inner_socket" has-session -t "=$delete_session" 2>/dev/null && [[ ! -d "$worktree" ]]; then
         break
@@ -633,8 +652,8 @@ if tmux -S "$inner_socket" has-session -t "=$parent_session" 2>/dev/null || [[ -
     printf 'Expected parent-row Alt-D to destroy session and worktree\n' >&2
     exit 1
 fi
-for _ in {1..6}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
+for _ in {1..6}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; sleep 0.03; done
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "qa-delete-parent"
 wait_for_text "0 targets"
 
-printf 'Clankerhouse QA passed: newest-nearest-prompt bottom-up ordering, durable recovery ordering, long-list scrolling, typed and bracketed-paste search, no-match Enter, authoritative cache refresh, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, status animation, focus acknowledgement, and responsive step-by-step progress, persistent picker state, and confirmed pane/final-worktree/parent-worktree destruction with cache invalidation behave correctly.\n'
+printf 'Clankerhouse QA passed: newest-nearest-prompt bottom-up ordering, durable recovery ordering, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, status animation, focus acknowledgement, persistent picker state, and confirmed pane/final-worktree/parent-worktree destruction behave correctly.\n'

@@ -497,6 +497,13 @@ const serverProgram = Effect.gen(function* () {
 
 const authoritativeOrStartupFallbackSnapshot = Effect.tryPromise({
   try: async () => {
+    // Isolated deterministic render QA can explicitly exercise only the
+    // one-time crash fallback. Production clients always try the socket first.
+    if (Bun.env.CLANKERHOUSE_STARTUP_FALLBACK_ONLY === "1") {
+      const cached = readCachePayload()
+      if (cached) return cached
+      throw new Error("Startup fallback snapshot is unavailable")
+    }
     try { return await getSnapshot<SessionRow>(daemonSocketPath) }
     catch (socketError) {
       const cached = readCachePayload()

@@ -96,8 +96,8 @@ validation and external effects require confirmation. Repeated or ambiguous
 attempts enter durable quarantine. Tracked harnesses
 are owned by systemd scopes so an intentional stop terminates every descendant.
 Tombstones, intentional stops, quarantine, and resource-pressure suspensions take
-precedence. The snapshot transport remains observational and exposes no recovery
-mutation API.
+precedence. Recovery state changes are typed daemon mutation intents with durable
+stages; observation and operation status share the private socket Interface.
 
 See `clankerhouse/README.md` for the CLI and runtime contract and
 `docs/qa/clanker-api.md` for safety-scoped API validation.
@@ -106,9 +106,9 @@ See `clankerhouse/README.md` for the CLI and runtime contract and
 
 The default Alt-K jump client is the fast Rust/ratatui application in
 `native-client/`; set `@clankerhouse-jump-client full` before loading the tmux
-plugin to use the feature-complete TypeScript picker instead. Both
-read the same version-10 snapshot while the TypeScript cache server retains
-collection and projection ownership. Build and validate the native client with:
+plugin to use the compatibility TypeScript picker instead. Both receive the same
+version-10 observation from the authoritative TypeScript daemon; JSON is only a
+one-time startup/crash fallback. Build and validate the native client with:
 
 ```sh
 scripts/build-native

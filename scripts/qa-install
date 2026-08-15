@@ -74,7 +74,7 @@ versions="$prefix/lib/clankerhouse-versions"
 [[ -L "$active" ]]
 old_target=$(readlink -f "$active")
 [[ "$old_target/" == "$versions/"* && -f "$old_target/.clankerhouse-install" ]]
-[[ -s "$runtime/clankerhouse-$(id -u)/daemon.sock" ]]
+[[ -S "$runtime/clankerhouse-$(id -u)/daemon.sock" ]]
 "$prefix/bin/clankerhouse-doctor" >/dev/null
 "$prefix/bin/clankers" help >/dev/null
 nvim --headless -u NONE --cmd "set runtimepath^=$active" \

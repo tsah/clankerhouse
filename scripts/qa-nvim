@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=herdr HERDR_ENV=1 HERDR_PANE_ID=w1:p9 TMUX= TMUX_PANE=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 root=$(mktemp -d "${TMPDIR:-/tmp}/clankerhouse-nvim-qa-XXXXXX")
@@ -14,11 +15,36 @@ cat > "$root/bin/clankers" <<'SH'
 set -eu
 case "$1" in
   list)
-    printf '[{"id":"clanker-pi-qa","harness":"pi","name":"pi-qa","capabilities":{"send":"unix-socket"}}]\n'
+    if [ "${CLANKERHOUSE_NVIM_QA_ONLY_SELF:-}" = 1 ]; then
+      printf '%s\n' '[{"id":"clanker-pi-self","harness":"pi","name":"pi-self","sessionId":"w1","window":"w1:t1","pane":"w1:p9","capabilities":{"send":"unix-socket"}}]'
+      exit 0
+    fi
+    printf '%s\n' '[{"id":"clanker-pi-far","harness":"pi","name":"pi-far","sessionId":"w2","window":"w2:t1","pane":"w2:p1","capabilities":{"send":"unix-socket"}},{"id":"clanker-pi-session","harness":"pi","name":"pi-session","sessionId":"w1","window":"w1:t2","pane":"w1:p3","capabilities":{"send":"unix-socket"}},{"id":"clanker-pi-window-far","harness":"pi","name":"pi-window-far","sessionId":"w1","window":"w1:t1","pane":"w1:p2","capabilities":{"send":"unix-socket"}},{"id":"clanker-pi-nearest","harness":"pi","name":"pi-nearest","sessionId":"stale","window":"stale:t9","pane":"w1:p7","capabilities":{"send":"unix-socket"}},{"id":"clanker-claude-closer","harness":"claude","name":"claude-closer","sessionId":"stale","window":"stale:t9","pane":"w1:p8","capabilities":{"send":"multiplexer-prompt","deliveryModes":[]}},{"id":"clanker-pi-self","harness":"pi","name":"pi-self","sessionId":"w1","window":"w1:t1","pane":"w1:p9","capabilities":{"send":"unix-socket"}}]'
     ;;
   send)
     printf '%s\n' "$2" > "$CLANKERHOUSE_NVIM_QA_CAPTURE"
     cat >> "$CLANKERHOUSE_NVIM_QA_CAPTURE"
+    ;;
+  mux)
+    case "$2" in
+      pane-address-env)
+        printf '%s\n' 'HERDR_PANE_ID'
+        ;;
+      observe)
+        if [ "${CLANKERHOUSE_NVIM_QA_BROKEN_OBSERVE:-}" = 1 ]; then
+          printf '%s\n' '{"kind":"herdr","instanceId":"herdr:qa","sessions":[]}'
+          exit 0
+        fi
+        printf '%s\n' '{"kind":"herdr","instanceId":"herdr:qa","sessions":[{"id":"w2","windows":[{"id":"w2:t1","index":"1","panes":[{"id":"w2:p1","index":"0"}]}]},{"id":"w1","windows":[{"id":"w1:t1","index":"1","panes":[{"id":"w1:p2","index":"0"},{"id":"w1:p7","index":"1"},{"id":"w1:p8","index":"2"},{"id":"w1:p9","index":"3"}]},{"id":"w1:t2","index":"2","panes":[{"id":"w1:p3","index":"0"}]}]}]}'
+        ;;
+      current-location)
+        printf '%s\n' '{"kind":"herdr","instanceId":"herdr:qa","nativeSessionId":"wrong","nativeWindowId":"wrong:t1","nativePaneId":"wrong:p1"}'
+        ;;
+      focus)
+        printf '%s\n' "$*" > "$CLANKERHOUSE_NVIM_QA_FOCUS"
+        ;;
+      *) exit 2 ;;
+    esac
     ;;
   *) exit 2 ;;
 esac
@@ -26,8 +52,10 @@ SH
 chmod +x "$root/bin/clankers"
 
 PATH="$root/bin:$PATH" CLANKERHOUSE_NVIM_QA_REPO="$repo" CLANKERHOUSE_NVIM_QA_ROOT="$root" \
-  CLANKERHOUSE_NVIM_QA_CAPTURE="$root/capture" nvim --headless -u NONE -n "+luafile $repo/tests/nvim_qa.lua" +qa
+  CLANKERHOUSE_NVIM_QA_CAPTURE="$root/capture" CLANKERHOUSE_NVIM_QA_FOCUS="$root/focus" \
+  nvim --headless -u NONE -n "+luafile $repo/tests/nvim_qa.lua" +qa
 
-expected=$(printf 'clanker-pi-qa\n%s/project/example.lua:1-2 explain this' "$root")
+expected=$(printf 'clanker-claude-closer\n%s/project/example.lua:1-2 explain this' "$root")
 [[ "$(cat "$root/capture")" == "$expected" ]]
-printf 'Clankerhouse Neovim QA passed: plugin loading, mapping, project discovery, Pi selection, references, and native stdin delivery behave correctly.\n'
+[[ "$(cat "$root/focus")" == 'mux focus --session w1 --window w1:t1 --pane w1:p8' ]]
+printf 'Clankerhouse Neovim QA passed: plugin loading, mapping, caller-pane discovery, exact nearest-clanker ranking across Pi and Claude transports, native stdin delivery, and Adapter-neutral focus behave correctly.\n'

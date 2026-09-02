@@ -8,7 +8,9 @@ import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { libexecPath } from "./installation"
-import { TmuxMultiplexer } from "./multiplexer"
+import { openManagedMultiplexer } from "./multiplexer"
+import { paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
+import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
@@ -16,12 +18,40 @@ import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryW
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
+import { mutationStages } from "./daemon-mutations"
 
-const daemonSocketPath = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/clankerhouse-${process.getuid?.() ?? Bun.env.USER ?? "user"}/daemon.sock`
+const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
+const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
+
+export const mutationProgressSteps = (intent: MutationIntent): readonly string[] => {
+  if (intent.type !== "delete") return []
+  if (intent.kind === "worktree") return [
+    "Validating worktree identity",
+    "Stopping tracked Clankers",
+    "Deleting worktree",
+    "Deleting tmux session",
+    "Refreshing Clankerhouse",
+  ]
+  return ["Validating tmux identity", `Deleting tmux ${intent.kind}`, "Refreshing Clankerhouse"]
+}
+
 const routeCompatibilityMutation = async (intent: MutationIntent) => {
   if (Bun.env.CLANKERHOUSE_DAEMON_INTERNAL === "1" || Bun.env.CLANKERHOUSE_LEGACY_MUTATIONS === "1" || !existsSync(daemonSocketPath)) return undefined
+  const progressSteps = Bun.env.CLANKERHOUSE_PROGRESS === "1" ? mutationProgressSteps(intent) : []
+  let reported = -1
+  const reportThrough = (index: number) => {
+    while (reported < Math.min(index, progressSteps.length - 1)) console.error(`${progressPrefix}${progressSteps[++reported]}`)
+  }
+  reportThrough(0)
   const submitted = await submitMutation(daemonSocketPath, randomUUID(), intent)
-  const operation = await waitForOperation(daemonSocketPath, submitted.operation.operationId)
+  const stages = mutationStages(intent)
+  const operation = await waitForOperation(daemonSocketPath, submitted.operation.operationId, {
+    onStatus: (current) => {
+      const completed = current.stage === "completed" ? stages.length : stages.indexOf(current.stage)
+      reportThrough(completed + 1)
+    },
+  })
+  reportThrough(progressSteps.length - 1)
   return { routed: true as const, result: operation.result }
 }
 
@@ -144,7 +174,7 @@ const adoptDesired = async (store: RecoveryStore, id: string, sessionId: string)
 }
 
 const adoptLivePiSessions = async (store: RecoveryStore) => {
-  const runtime = `${Bun.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}/clanker-state`
+  const runtime = `${runtimeDirFor()}/clanker-state`
   const sessionRoot = Bun.env.PI_CODING_AGENT_SESSION_DIR || join(Bun.env.HOME || "", ".pi", "agent", "sessions")
   const replies = new Map<string, Array<{ id: string; cwd: string }>>()
   const sessionsByCwd = new Map<string, Array<{ id: string; cwd: string; updatedAt: number }>>()
@@ -209,18 +239,112 @@ const usage = `Usage:
   clankers wait CLANKER_ID [--after GENERATION] [--timeout SECONDS]
   clankers send CLANKER_ID [--delivery steer|follow-up] [--wait] [--text TEXT]
   clankers result CLANKER_ID [--generation GENERATION]
+  clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers recovery status|journal|reconcile|checkpoint
   clankers recovery attest-exit CLANKER_ID --attempt ID [--session-id ID]
   clankers recovery pending|pause-all
   clankers recovery resume CLANKER_ID [--force]
   clankers recovery unquarantine CLANKER_ID --reason TEXT
-  clankers recovery stop|start|suspend|tombstone CLANKER_ID`
+  clankers recovery stop|start|suspend|tombstone CLANKER_ID
+  clankers mux kind|capabilities|pane-address-env|observe|current-location [--client CLIENT]
+  clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
+  clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION) [--client CLIENT]
+  clankers mux clanker-ids|pane-path (--pane PANE|--session SESSION)
+  clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]`
+
+const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities"])
+
+const muxLocation = (parsed: ParsedArgs): NativeLocation => {
+  const pane = parsed.take("--pane")
+  const window = parsed.take("--window")
+  const session = parsed.take("--session")
+  if (!pane && !window && !session) throw new Error("--pane, --window, or --session is required")
+  return { nativeSessionId: session ?? "", nativeWindowId: window ?? null, nativePaneId: pane ?? null }
+}
+
+/**
+ * Runtime-neutral multiplexer operations for shell callers (lifecycle reporters, stop
+ * scripts, resource guard). Every operation goes through the selected Adapter.
+ */
+const runMultiplexerCli = async (parsed: ParsedArgs) => {
+  const subcommand = parsed.shift()
+  const multiplexer = openManagedMultiplexer()
+  if (subcommand === "kind") return console.log(multiplexer.kind)
+  if (subcommand === "capabilities") return console.log(JSON.stringify({ kind: multiplexer.kind, ...multiplexer.capabilities() }))
+  if (subcommand === "pane-address-env") return console.log(multiplexer.paneAddressEnv())
+  if (subcommand === "observe") return console.log(JSON.stringify(await multiplexer.observe()))
+  if (subcommand === "current-location") return console.log(JSON.stringify(await multiplexer.currentLocation(parsed.take("--client")) ?? null))
+  if (subcommand === "claim" || subcommand === "read-claim") {
+    const unset = parsed.has("--unset")
+    const location = muxLocation(parsed)
+    const key = parsed.shift()
+    if (!key || !claimKeys.has(key as ClaimKey)) throw new Error(`Unknown claim key: ${key ?? ""}`)
+    if (subcommand === "read-claim") return console.log(await multiplexer.readClaim(location, key as ClaimKey) ?? "")
+    const value = unset ? null : parsed.shift()
+    if (value === undefined) throw new Error("claim requires VALUE or --unset")
+    await multiplexer.claim(location, key as ClaimKey, value)
+    return
+  }
+  if (subcommand === "clanker-ids" || subcommand === "pane-path") {
+    const location = muxLocation(parsed)
+    const snapshot = await multiplexer.observe()
+    const panes = snapshot.sessions.flatMap((session) => {
+      if (location.nativeSessionId && session.id !== location.nativeSessionId && session.nativeName !== location.nativeSessionId) return []
+      return session.windows.flatMap((window) => window.panes.filter((pane) => !location.nativePaneId || pane.id === location.nativePaneId))
+    })
+    if (subcommand === "pane-path") return console.log(panes[0]?.currentPath ?? "")
+    return console.log([...new Set(panes.flatMap((pane) => pane.clankerId ? [pane.clankerId] : []))].join("\n"))
+  }
+  if (subcommand === "kill") return multiplexer.kill(muxLocation(parsed))
+  if (subcommand === "focus") {
+    const client = parsed.take("--client")
+    return multiplexer.focus(muxLocation(parsed), client)
+  }
+  if (subcommand === "spawn") {
+    const newSession = parsed.take("--new-session")
+    const session = parsed.take("--session")
+    const name = parsed.take("--name")
+    const cwd = parsed.take("--cwd")
+    const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
+    const env: Record<string, string> = { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
+    let pair = parsed.take("--env")
+    while (pair) {
+      const separator = pair.indexOf("=")
+      if (separator <= 0) throw new Error("--env requires KEY=VALUE")
+      env[pair.slice(0, separator)] = pair.slice(separator + 1)
+      pair = parsed.take("--env")
+    }
+    const dash = parsed.args.indexOf("--")
+    const argv = dash >= 0 ? parsed.args.slice(dash + 1) : []
+    if (!cwd || (!newSession && !session) || (session && !name)) throw new Error("spawn requires --cwd and either --new-session NAME or --session SESSION --name NAME")
+    const launch = argv.length ? { kind: "argv" as const, argv } : undefined
+    const result = newSession
+      ? await multiplexer.spawn({ scope: "session", name: newSession, cwd, windowName: name, env, launch })
+      : await multiplexer.spawn({ scope: "window", nativeSessionId: session!, name: name!, cwd, env, launch })
+    return console.log(JSON.stringify(result))
+  }
+  throw new Error("Usage: clankers mux kind|capabilities|pane-address-env|observe|current-location|claim|read-claim|kill|focus|spawn ...")
+}
 
 export async function runClankersCli(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
   const command = parsed.shift()
   if (!command || command === "help" || command === "--help" || command === "-h") return console.log(usage)
   if (["list", "status", "capabilities", "wait", "send", "result"].includes(command)) return runClankerApi(command, parsed)
+
+  if (command === "mux") return runMultiplexerCli(parsed)
+
+  if (command === "delete") {
+    const kind = parsed.shift()
+    if (kind !== "session" && kind !== "worktree") throw new Error("Usage: clankers delete session|worktree --session SESSION [--path PATH] --yes")
+    const session = parsed.take("--session")
+    const path = parsed.take("--path")
+    if (!session || !parsed.has("--yes") || (kind === "worktree" && !path)) throw new Error("Usage: clankers delete session|worktree --session SESSION [--path PATH] --yes")
+    const routed = await routeCompatibilityMutation({ type: "delete", kind, session, confirmed: true, ...(path ? { path } : {}) })
+    if (!routed) throw new Error("Clankerhouse daemon is required for durable deletion")
+    if (Bun.env.CLANKERHOUSE_PROGRESS !== "1") console.log(JSON.stringify(routed.result ?? { deleted: true }))
+    return
+  }
 
   if (command === "diagnose") {
     const json = parsed.has("--json")
@@ -246,13 +370,18 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const client = parsed.take("--client")
     const routed = await routeCompatibilityMutation({ type: "open", target, ...(client ? { client } : {}) })
     if (routed) return
-    const multiplexer = new TmuxMultiplexer()
+    const multiplexer = openManagedMultiplexer()
     if (target.type === "tmux_session" || target.type === "tmux_window") {
       await multiplexer.openTarget(target, client)
       return
     }
     if (target.type === "opencode") {
       const location = await multiplexer.resolve(target)
+      if (multiplexer.kind !== "tmux") {
+        if (!location) throw new Error(`OpenCode target has no current ${multiplexer.kind} location`)
+        await multiplexer.open(location, client)
+        return
+      }
       const pane = location?.nativePaneId || target.pane
       const proc = Bun.spawn([libexecPath("opencode-attach-target"), target.session, pane], { stdin: "inherit", stdout: "inherit", stderr: "inherit" })
       const code = await proc.exited
@@ -279,7 +408,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         for (const row of store.listDesired().filter((candidate) => candidate.desiredState === "running")) {
           const desired = store.setDesiredState(row.clankerId, "suspended_resource_pressure", { reason })
           if (desired.ownerUnit) stopOwnedHarness(desired.ownerUnit)
-          for (const match of live.filter((candidate) => candidate.id === row.clankerId)) Bun.spawnSync(["tmux", "kill-pane", "-t", match.pane], { stdout: "ignore", stderr: "ignore" })
+          for (const match of live.filter((candidate) => candidate.id === row.clankerId)) await openManagedMultiplexer().kill(paneLocation(match.sessionId, match.window, match.pane)).catch(() => {})
           paused.push(row.clankerId)
         }
         return console.log(JSON.stringify({ paused }))
@@ -362,7 +491,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
           if (!noPaneKill) {
             const matches = (await listClankers()).filter((row) => row.id === id)
             if (matches.length > 1) throw new Error(`Ambiguous live panes for ${id}`)
-            if (matches.length === 1) Bun.spawnSync(["tmux", "kill-pane", "-t", matches[0]!.pane], { stdout: "ignore", stderr: "ignore" })
+            if (matches.length === 1) await openManagedMultiplexer().kill(paneLocation(matches[0]!.sessionId, matches[0]!.window, matches[0]!.pane)).catch(() => {})
           }
         }
         return console.log(JSON.stringify(desired))

@@ -1,6 +1,11 @@
 #!/bin/bash
 
 set -uo pipefail
+libexec_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../libexec" && pwd)
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-mux"
 
 if [[ "${1:-}" != "--" || $# -lt 2 ]]; then
     echo "Usage: clankerhouse-harness-lifecycle -- COMMAND [ARG ...]" >&2
@@ -30,12 +35,12 @@ if [[ "${CLANKER_RECOVERY_TRACKED:-}" == "1" && -n "${CLANKER_ID:-}" && -n "${CL
     if [[ -n "$reason" ]]; then
         clankers_command=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
         session_id=${CLANKER_SESSION_ID:-}
-        if [[ -z "$session_id" && -n "${TMUX_PANE:-}" ]]; then
-            session_id=$(tmux show-option -pqv -t "$TMUX_PANE" @clankerhouse_harness_session_id 2>/dev/null || true)
+        if [[ -z "$session_id" && -n "$(ch_mux_pane)" ]]; then
+            session_id=$(ch_mux_pane_read harnessSessionId)
         fi
         args=(recovery attest-exit "$CLANKER_ID" --attempt "$CLANKER_RECOVERY_ATTEMPT" --reason "$reason")
         [[ -z "$session_id" ]] || args+=(--session-id "$session_id")
-        "$clankers_command" "${args[@]}" >/dev/null || true
+        CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_command" "${args[@]}" >/dev/null || true
     fi
 fi
 

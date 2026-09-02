@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { buildTreeRows, defaultExpandedLineageSessions, normalizeReportedState, sessionSortRank, sessionState, stateWithSeen, structuredSearch } from "./model"
+import { buildTreeRows, compareProjectedSessions, defaultExpandedLineageSessions, normalizeReportedState, sessionState, stateWithSeen, structuredSearch } from "./model"
 import type { DetailRow, SessionRow, Target, TreeRow } from "./model"
-import { visibleSlice } from "./picker"
-import { detailStatusLabel, inlineSummary, inlineSummaryWidth, jumpFooterAction, prefixedLabelWidth, treePrefix, usesNeutralStateGlyph, visibleInlineSummary } from "./presentation"
 
 const sessionTarget = (session: string): Target => ({ type: "tmux_session", session })
 const windowTarget = (session: string, suffix: string): Target => ({ type: "tmux_window", session, windowId: `@${suffix}`, pane: `%${suffix}` })
@@ -69,24 +67,16 @@ describe("clanker state", () => {
     expect(sessionState(aggregate)).toBe("done")
   })
 
-  test("sorts working, ready, idle, and neutral sessions before directory targets", () => {
-    const working = session("working", { details: [detail("working", "pi", "01", "working", "pi")] })
-    const ready = session("ready", { details: [detail("ready", "pi", "02", "done", "pi")] })
-    const idle = session("idle", { details: [detail("idle", "pi", "03", "idle", "pi")] })
-    const neutral = session("neutral")
-    const worktree = session("worktree", { target: { type: "directory", path: "/tmp/worktree" }, directorySource: "worktree" })
-    const directory = session("directory", { target: { type: "directory", path: "/tmp/directory" }, directorySource: "zoxide" })
+  test("sorts projection rows only by last seen, regardless of status", () => {
+    const rows = [
+      session("working", { recency: 10, details: [detail("working", "pi", "01", "working", "pi")] }),
+      session("failed", { recency: 20, details: [detail("failed", "terminated", "02", "failed", "incident")] }),
+      session("ready", { recency: 30, details: [detail("ready", "pi", "03", "done", "pi")] }),
+      session("idle", { recency: 40, details: [detail("idle", "pi", "04", "idle", "pi")] }),
+      session("neutral", { recency: 50 }),
+    ]
 
-    expect([working, ready, idle, neutral, worktree, directory].map(sessionSortRank)).toEqual([1, 2, 4, 5, 6, 7])
-  })
-
-  test("renders live work nearer the prompt than red-x incidents", () => {
-    const failed = session("failed", { details: [detail("failed", "terminated", "04", "failed", "incident")] })
-    const working = session("working", { details: [detail("working", "pi", "05", "working", "pi")] })
-    const rows = sessionRows(buildTreeRows([working, failed], "", { bottomUp: true }))
-    expect([failed, working].map(sessionSortRank)).toEqual([3, 1])
-    expect(rows.map((row) => row.session.name)).toEqual(["working", "failed"])
-    expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["failed", "working"])
+    expect([...rows].sort(compareProjectedSessions).map((row) => row.name)).toEqual(["neutral", "idle", "ready", "failed", "working"])
   })
 
   test("reports live replacement work instead of a prior reboot loss", () => {
@@ -131,6 +121,8 @@ describe("session tree", () => {
       expandedDetailSessions: new Set(groupedSessions.map((row) => row.name)),
     })
     expect(labeledRows(rows)).toEqual([
+      "0:y-root",
+      "1:y-root-window",
       "0:a-root",
       "1:a-root-window",
       "1:c-child",
@@ -139,17 +131,15 @@ describe("session tree", () => {
       "3:deep-window",
       "1:b-child",
       "2:b-child-window",
-      "0:y-root",
-      "1:y-root-window",
       "0:z-root",
       "1:z-root-window",
     ])
     expect(sessionRows(rows).map((row) => [row.session.name, row.depth, row.detail])).toEqual([
+      ["y-root", 0, undefined],
       ["a-root", 0, undefined],
       ["c-child", 1, undefined],
       ["d-grandchild", 2, undefined],
       ["b-child", 1, undefined],
-      ["y-root", 0, undefined],
       ["z-root", 0, undefined],
     ])
     expect(rows.find((row) => !row.detail && row.session.name === "d-grandchild")?.target).toEqual(sessionTarget("d-grandchild"))
@@ -160,6 +150,8 @@ describe("session tree", () => {
     const expanded = new Set(groupedSessions.map((row) => row.name))
     const rows = buildTreeRows(groupedSessions, "", { expandedLineageSessions: expanded, expandedDetailSessions: expanded, bottomUp: true })
     expect(labeledRows(rows)).toEqual([
+      "1:y-root-window",
+      "0:y-root",
       "2:b-child-window",
       "1:b-child",
       "3:deep-window",
@@ -168,21 +160,19 @@ describe("session tree", () => {
       "1:c-child",
       "1:a-root-window",
       "0:a-root",
-      "1:y-root-window",
-      "0:y-root",
       "1:z-root-window",
       "0:z-root",
     ])
   })
 
-  test("puts working subtrees nearest the bottom prompt, followed by ready subtrees", () => {
+  test("puts the most recently seen subtree nearest the bottom prompt", () => {
     const working = session("working", { recency: 100, details: [detail("working", "pi", "91", "working", "pi")] })
     const ready = session("ready", { recency: 200, details: [detail("ready", "pi", "92", "done", "pi")] })
     const idle = session("idle", { recency: 300, details: [detail("idle", "pi", "93", "idle", "pi")] })
 
     const rows = sessionRows(buildTreeRows([working, ready, idle], "", { bottomUp: true }))
-    expect(rows.map((row) => row.session.name)).toEqual(["working", "ready", "idle"])
-    expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["idle", "ready", "working"])
+    expect(rows.map((row) => row.session.name)).toEqual(["idle", "ready", "working"])
+    expect([...rows].reverse().map((row) => row.session.name)).toEqual(["working", "ready", "idle"])
   })
 
   test("puts the current session nearest the prompt without hiding active work", () => {
@@ -194,7 +184,7 @@ describe("session tree", () => {
       bottomUp: true,
     }))
 
-    expect(visibleSlice(rows, 0, rows.length).map((row) => row.session.name)).toEqual(["failed", "working", "current"])
+    expect([...rows].reverse().map((row) => row.session.name)).toEqual(["working", "failed", "current"])
   })
 
   test("puts a nested current session nearest the prompt within its Workshop", () => {
@@ -207,18 +197,31 @@ describe("session tree", () => {
       bottomUp: true,
     })
 
-    expect(visibleSlice(rows, 0, rows.length).filter((row) => !row.detail).map((row) => row.session.name)).toEqual(["root", "working", "current"])
+    expect([...rows].reverse().filter((row) => !row.detail).map((row) => row.session.name)).toEqual(["root", "working", "current"])
   })
 
-  test("uses descendant state when sorting a lineage subtree", () => {
-    const root = session("root", { workshopId: "root", details: [detail("root", "shell", "94")] })
-    const child = session("child", { workshopId: "child", parentWorkshopId: "root", details: [detail("child", "pi", "95", "working", "pi")] })
-    const ready = session("ready", { details: [detail("ready", "pi", "96", "done", "pi")] })
+  test("sorts a lineage subtree by its most recently seen descendant", () => {
+    const root = session("root", { workshopId: "root", recency: 10 })
+    const child = session("child", { workshopId: "child", parentWorkshopId: "root", recency: 90 })
+    const other = session("other", { recency: 50 })
 
-    expect(sessionRows(buildTreeRows([ready, root, child], "", {
+    const rows = sessionRows(buildTreeRows([root, child, other], "", {
       expandedLineageSessions: new Set(["root"]),
       bottomUp: true,
-    })).map((row) => row.session.name)).toEqual(["child", "root", "ready"])
+    }))
+    expect([...rows].reverse().map((row) => row.session.name)).toEqual(["other", "root", "child"])
+  })
+
+  test("does not let unknown Clanker status override last-seen lineage ordering", () => {
+    const root = session("root", { workshopId: "root", recency: 100, details: [detail("root", "shell", "root-pane")] })
+    const unknown = session("unknown", { workshopId: "unknown", parentWorkshopId: "root", recency: 200, details: [detail("unknown", "opencode", "unknown-pane", "unknown", "clanker")] })
+    const neutral = session("neutral", { recency: 150, details: [detail("neutral", "shell", "neutral-pane")] })
+
+    const rows = sessionRows(buildTreeRows([neutral, root, unknown], "", {
+      expandedLineageSessions: new Set(["root"]),
+      bottomUp: true,
+    }))
+    expect([...rows].reverse().map((row) => row.session.name)).toEqual(["neutral", "root", "unknown"])
   })
 
   test("collapsing lineage hides descendants while leaving compact session rows", () => {
@@ -227,8 +230,8 @@ describe("session tree", () => {
       expandedDetailSessions: new Set(),
     })
     expect(labeledRows(rows)).toEqual([
-      "0:a-root",
       "0:y-root",
+      "0:a-root",
       "0:z-root",
     ])
     expect(rowFor(rows, "a-root")?.expandable).toBe(true)
@@ -237,7 +240,7 @@ describe("session tree", () => {
     expect(rowFor(rows, "a-root")?.detailsExpanded).toBe(false)
   })
 
-  test("defaults expand only small lineage subtrees, not leaf details", () => {
+  test("defaults expand lineages with fewer than ten fully expanded rows, including failures", () => {
     expect(defaultExpandedLineageSessions(groupedSessions)).toEqual(new Set(["a-root", "c-child"]))
 
     const crowded = [
@@ -261,7 +264,42 @@ describe("session tree", () => {
       ? session("active-four", { workshopId: "active-4", parentWorkshopId: "active-root", details: [detail("active-four", "pi", "53", "done", "pi")] })
       : row)
     expect(defaultExpandedLineageSessions(readyCrowded)).toEqual(new Set(["active-root"]))
+
+    const failed = [
+      session("failed-root", { workshopId: "failed-root", details: [detail("failed-root", "incident", "54", "failed", "incident")] }),
+      session("neutral-child", { workshopId: "neutral-child", parentWorkshopId: "failed-root" }),
+    ]
+    expect(defaultExpandedLineageSessions(failed)).toEqual(new Set(["failed-root"]))
+
+    const lineage = (rowCount: number) => [
+      session(`root-${rowCount}`, { workshopId: `root-${rowCount}` }),
+      ...Array.from({ length: rowCount - 1 }, (_, index) => session(`child-${rowCount}-${index}`, {
+        workshopId: `child-${rowCount}-${index}`,
+        parentWorkshopId: `root-${rowCount}`,
+      })),
+    ]
+    expect(defaultExpandedLineageSessions(lineage(9))).toEqual(new Set(["root-9"]))
+    expect(defaultExpandedLineageSessions(lineage(10))).toEqual(new Set())
     expect(defaultExpandedLineageSessions([session("leaf")])).toEqual(new Set())
+  })
+
+  test("gives process and lifecycle observations on one pane distinct rendered keys", () => {
+    const process = {
+      ...detail("observed", "pi", "55", "unknown", "observation"),
+      observation: { source: "process", confidence: "observed", state: "present", observedAt: 10 } as const,
+    }
+    const rejected = {
+      ...process,
+      title: "pi report",
+      observation: { source: "lifecycle", confidence: "rejected", state: "working", observedAt: 11, reason: "no-owned-identity" } as const,
+    }
+    const rows = buildTreeRows([session("observed", { details: [process, rejected] })], "", {
+      expandedDetailSessions: new Set(["observed"]),
+    })
+    const keys = rows.filter((row) => row.detail).map((row) => row.key)
+    expect(new Set(keys).size).toBe(2)
+    expect(keys).toContain("window:observed:@55:observation:process:observed:")
+    expect(keys).toContain("window:observed:@55:observation:lifecycle:rejected:no-owned-identity")
   })
 
   test("explicit detail expansion is independent from lineage expansion", () => {
@@ -270,12 +308,12 @@ describe("session tree", () => {
       expandedDetailSessions: new Set(["d-grandchild"]),
     })
     expect(labeledRows(rows)).toEqual([
+      "0:y-root",
       "0:a-root",
       "1:c-child",
       "2:d-grandchild",
       "3:deep-window",
       "1:b-child",
-      "0:y-root",
       "0:z-root",
     ])
     expect(rowFor(rows, "b-child")?.expandable).toBe(false)
@@ -367,82 +405,5 @@ describe("session tree", () => {
       "0:flat-two",
       "1:flat-two-window",
     ])
-  })
-})
-
-describe("presentation helpers", () => {
-  test("labels persisted incidents without treating them as neutral", () => {
-    const failed = session("failed", { details: [detail("failed", "terminated", "00", "failed", "incident")] })
-    const row = rowFor(buildTreeRows([failed], ""), "failed")!
-    expect(row.state).toBe("failed")
-    expect(usesNeutralStateGlyph(row)).toBe(false)
-    expect(detailStatusLabel(failed.details[0]!)).toBe("failed")
-  })
-
-  test("uses neutral state glyphs when no clanker state applies", () => {
-    const plainSession = rowFor(buildTreeRows([session("plain")], ""), "plain")!
-    const directorySession = session("directory", {
-      target: { type: "directory", path: "/tmp/directory" },
-      details: [{ ...detail("directory", "/tmp/directory", "00", "unknown", "directory"), target: { type: "directory", path: "/tmp/directory" } }],
-    })
-    const directoryRow = rowFor(buildTreeRows([directorySession], ""), "directory")!
-    const unknownClanker = rowFor(buildTreeRows([session("clanker", { details: [detail("clanker", "pi", "01", "unknown", "pi")] })], ""), "clanker")!
-
-    expect(usesNeutralStateGlyph(plainSession)).toBe(true)
-    expect(usesNeutralStateGlyph(directoryRow)).toBe(true)
-    expect(usesNeutralStateGlyph(unknownClanker)).toBe(false)
-  })
-
-  test("uses session-only connectors and subdued detail bullets", () => {
-    const rows = buildTreeRows([
-      session("root", { workshopId: "root", details: [detail("root", "main", "01") ] }),
-      session("child", { workshopId: "child", parentWorkshopId: "root", details: [detail("child", "main", "02"), detail("child", "pi", "03", "done", "pi")] }),
-    ], "", { expandedLineageSessions: new Set(["root"]), expandedDetailSessions: new Set(["child"]) })
-    expect(treePrefix(rowFor(rows, "root")!)).toBe("▾ ")
-    expect(treePrefix(rowFor(rows, "child")!)).toBe("└─▾ ")
-    const detailRow = rows.find((row) => row.detail?.title === "main" && row.session.name === "child")!
-    expect(treePrefix(detailRow)).toContain("· ")
-    expect(treePrefix(detailRow)).not.toContain("├")
-    expect(treePrefix(detailRow)).not.toContain("└")
-  })
-
-  test("fits inline summaries compactly and reports hidden entries", () => {
-    const crowded = session("crowded", {
-      details: [
-        detail("crowded", "main", "11"),
-        detail("crowded", "pi", "12", "done", "pi"),
-        detail("crowded", "claude", "13", "working", "claude"),
-        detail("crowded", "codex", "14", "blocked", "codex"),
-      ],
-    })
-    expect(inlineSummary(crowded, 40)).toEqual({
-      entries: [
-        { detail: crowded.details[0]!, label: "main" },
-        { detail: crowded.details[1]!, label: "pi" },
-        { detail: crowded.details[2]!, label: "claude" },
-      ],
-      hiddenCount: 1,
-    })
-    expect(inlineSummary(crowded, 12)).toEqual({
-      entries: [
-        { detail: crowded.details[0]!, label: "main" },
-        { detail: crowded.details[1]!, label: "pi" },
-      ],
-      hiddenCount: 2,
-    })
-    expect(visibleInlineSummary(crowded, 40, "exact-hit")).toEqual({ entries: [], hiddenCount: 0 })
-    expect(inlineSummaryWidth({ entries: [], hiddenCount: 4 })).toBe(4)
-    expect(inlineSummaryWidth({ entries: [{ detail: crowded.details[0]!, label: "main" }], hiddenCount: 3 })).toBe(10)
-    expect(prefixedLabelWidth("⇣2")).toBe(4)
-  })
-
-  test("describes separate lineage and detail navigation affordances", () => {
-    const rows = buildTreeRows([
-      session("root", { workshopId: "root" }),
-      session("child", { workshopId: "child", parentWorkshopId: "root" }),
-    ], "", { expandedLineageSessions: new Set(["root"]), expandedDetailSessions: new Set(["child"]) })
-    expect(jumpFooterAction(rowFor(rows, "root"))).toBe("← lineage  → details  Enter open")
-    expect(jumpFooterAction(rowFor(rows, "child"))).toBe("← details/parent  Enter open")
-    expect(jumpFooterAction(rows.find((row) => row.detail?.title === "child-window"))).toBe("← session  Enter focus")
   })
 })

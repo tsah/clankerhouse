@@ -34,7 +34,7 @@ pid_file="$state_dir/server.pid"
 process_matches_selection() {
     local pid=$1 cwd= process_tmux= process_runtime=
     [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
-    tr '\0' ' ' < "/proc/$pid/cmdline" | grep -F 'bun src/main.tsx --server' >/dev/null || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" | grep -F 'bun src/daemon.ts --server' >/dev/null || return 1
     cwd=$(readlink -e "/proc/$pid/cwd" 2>/dev/null || true)
     [[ "$cwd" == "$application" ]] || return 1
     process_tmux=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^TMUX=//p' | head -n 1)
@@ -91,6 +91,7 @@ case "$action" in
     activate|restart)
         tmux_pid=$(tmux -S "$tmux_socket" display-message -p '#{pid}')
         env TMUX="$tmux_socket,$tmux_pid,0" XDG_RUNTIME_DIR="$runtime_dir" \
+            CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID= \
             CLANKERHOUSE_HOME="$application" CLANKERHOUSE_BIN_DIR="$application/bin" CLANKERHOUSE_LIBEXEC="$application/libexec" \
             "$application/bin/clankerhouse-picker" --ensure-server
         for _ in {1..50}; do probe && exit 0; sleep 0.05; done

@@ -12,17 +12,36 @@ export type MutationIntent =
   | { type: "attach" | "reparent"; workshopId: string; parentWorkshopId: string; session?: string }
   | { type: "detach"; workshopId: string; session?: string }
   | { type: "delete"; kind: "pane" | "session" | "worktree"; session: string; confirmed: true; pane?: string; path?: string }
-  | { type: "create"; repository: string; branch: string; create: boolean; base?: string }
+  | { type: "create"; repository: string; branch: string; create: boolean; base?: string; remoteRef?: string }
   | { type: "start"; clankerId: string; force?: boolean }
   | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
   | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
   | { type: "repository.refresh" }
 
-export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "mutation.submit" | "operation.status"
+export type ObservationState = "failed" | "blocked" | "working" | "done" | "idle" | "unknown"
+export interface ObservationReport {
+  source: string
+  seq: number
+  pane: string
+  harness: string
+  state: ObservationState
+  updatedAt: number
+  hookEvent?: string
+  clankerId?: string
+  harnessSessionId?: string
+  recoveryAttemptId?: string
+  generation?: number
+  settledGeneration?: number
+  result?: unknown
+  results?: unknown[]
+}
+
+export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status"
 
 interface RequestBase { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string }
 export type SnapshotRequest =
   | (RequestBase & { method: "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" })
+  | (RequestBase & { method: "observation.report"; params: ObservationReport })
   | (RequestBase & { method: "mutation.submit"; params: { idempotencyKey: string; intent: MutationIntent } })
   | (RequestBase & { method: "operation.status"; params: { operationId: string } })
 
@@ -38,6 +57,7 @@ export interface ServerStatus {
 
 export interface SubscriptionResult { subscribed: true; epoch: string }
 export interface ProjectionRefreshResult { revision: ProjectionSnapshot<unknown>["revision"] }
+export interface ObservationReportResult { accepted: boolean }
 
 export type OperationState = "queued" | "running" | "succeeded" | "failed"
 export interface OperationRecord {
@@ -54,7 +74,7 @@ export interface OperationRecord {
 }
 
 export interface MutationSubmitResult { operation: OperationRecord; replayed: boolean }
-export type SnapshotResult<T> = ServerStatus | ProjectionSnapshot<T> | SubscriptionResult | ProjectionRefreshResult | MutationSubmitResult | OperationRecord
+export type SnapshotResult<T> = ServerStatus | ProjectionSnapshot<T> | SubscriptionResult | ProjectionRefreshResult | ObservationReportResult | MutationSubmitResult | OperationRecord
 
 export interface SuccessResponse<T = unknown> { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string; ok: true; result: T }
 export interface ErrorResponse {
@@ -68,6 +88,27 @@ export type ServerMessage<T> = SuccessResponse<SnapshotResult<T>> | ErrorRespons
 export const encodeMessage = (message: object): string => `${JSON.stringify(message)}\n`
 
 const validText = (value: unknown, max = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= max
+const validNonNegativeInteger = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0
+const observationStates = new Set<ObservationState>(["failed", "blocked", "working", "done", "idle", "unknown"])
+const parseObservationReport = (value: unknown): ObservationReport | undefined => {
+  if (!value || typeof value !== "object") return undefined
+  const report = value as Record<string, unknown>
+  if (!validText(report.source, 128)
+    || !validNonNegativeInteger(report.seq)
+    || !validText(report.pane, 128)
+    || !validText(report.harness, 64)
+    || !observationStates.has(report.state as ObservationState)
+    || !validNonNegativeInteger(report.updatedAt)) return undefined
+  if (report.hookEvent !== undefined && !validText(report.hookEvent, 128)) return undefined
+  for (const field of ["clankerId", "harnessSessionId", "recoveryAttemptId"] as const) {
+    if (report[field] !== undefined && !validText(report[field], 256)) return undefined
+  }
+  for (const field of ["generation", "settledGeneration"] as const) {
+    if (report[field] !== undefined && !validNonNegativeInteger(report[field])) return undefined
+  }
+  if (report.results !== undefined && (!Array.isArray(report.results) || report.results.length > 20)) return undefined
+  return report as unknown as ObservationReport
+}
 const validTarget = (value: unknown): value is Target => {
   if (!value || typeof value !== "object") return false
   const target = value as Record<string, unknown>
@@ -91,7 +132,7 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "reparent": return validText(intent.workshopId) && validText(intent.parentWorkshopId) ? { type: intent.type, workshopId: intent.workshopId, parentWorkshopId: intent.parentWorkshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "detach": return validText(intent.workshopId) ? { type: "detach", workshopId: intent.workshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "delete": return ["pane", "session", "worktree"].includes(String(intent.kind)) && validText(intent.session) && intent.confirmed === true ? { type: "delete", kind: intent.kind as "pane" | "session" | "worktree", session: intent.session, confirmed: true, pane: validText(intent.pane) ? intent.pane : undefined, path: validText(intent.path) ? intent.path : undefined } : undefined
-    case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined } : undefined
+    case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined, remoteRef: validText(intent.remoteRef) ? intent.remoteRef : undefined } : undefined
     case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
     case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
@@ -108,6 +149,11 @@ export const parseRequest = (value: unknown): SnapshotRequest | ErrorResponse =>
   if (request.version !== SNAPSHOT_PROTOCOL_VERSION) return protocolError(id, "unsupported_version", `protocol version ${SNAPSHOT_PROTOCOL_VERSION} is required`)
   const simple = ["server.status", "server.health", "snapshot.get", "snapshots.subscribe", "projection.refresh"] as const
   if (simple.includes(request.method as typeof simple[number])) return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: request.method as typeof simple[number] }
+  if (request.method === "observation.report") {
+    const params = parseObservationReport(request.params)
+    if (!params) return protocolError(id, "bad_request", "observation.report requires a valid pane lifecycle observation")
+    return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: "observation.report", params }
+  }
   if (request.method === "mutation.submit") {
     const params = request.params as Record<string, unknown> | undefined
     const intent = parseIntent(params?.intent)

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { instanceSlug } from "./paths"
 
 export type ResourceKind = "session" | "window" | "terminal"
 
@@ -85,8 +86,8 @@ const resourceColumns = `
   l.kind AS location_kind, l.instance_id, l.native_session_id, l.native_window_id,
   l.native_pane_id, l.observed_at`
 
-export const resourceRegistryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state")) =>
-  join(stateHome, "clankerhouse", "resources.sqlite3")
+export const resourceRegistryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state"), env: Record<string, string | undefined> = Bun.env) =>
+  join(stateHome, `clankerhouse${instanceSlug(env)}`, "resources.sqlite3")
 
 const initialize = (db: Database) => {
   const current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)

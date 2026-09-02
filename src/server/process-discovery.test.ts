@@ -153,4 +153,72 @@ describe("Linux foreground process discovery", () => {
     const access = fixture({ "/proc/5/stat": stat(5, "zsh", 1, 5, -1) })
     expect(createProcessDiscoveryProvider(access).discover(5)).toBeUndefined()
   })
+
+  test("shares one proc snapshot across pane discoveries", () => {
+    let directoryReads = 0
+    const base = fixture({
+      "/proc/5/stat": stat(5, "zsh", 1, 5, 30),
+      "/proc/30/stat": stat(30, "codex", 5, 30),
+      "/proc/30/cmdline": "codex\x00",
+      "/proc/6/stat": stat(6, "zsh", 1, 6, 40),
+      "/proc/40/stat": stat(40, "claude", 6, 40),
+      "/proc/40/cmdline": "claude\x00",
+    })
+    const access: ProcessDiscoveryAccess = {
+      ...base,
+      readDirectory(path) {
+        directoryReads += 1
+        return base.readDirectory(path)
+      },
+    }
+    const provider = createProcessDiscoveryProvider(access)
+    expect(provider.discover(5)?.harness).toBe("codex")
+    expect(provider.discover(6)?.harness).toBe("claude")
+    expect(directoryReads).toBe(1)
+  })
+
+  test("uses targeted descendant traversal when procfs exposes child lists", () => {
+    let directoryReads = 0
+    const files: Record<string, string> = {
+      "/proc/10/stat": stat(10, "zsh", 1, 10, 42),
+      "/proc/10/task/10/children": "42",
+      "/proc/42/stat": stat(42, "node", 10, 42),
+      "/proc/42/task/42/children": "43",
+      "/proc/42/cmdline": "node\x00/home/me/.npm/node_modules/@mariozechner/pi-coding-agent/dist/cli.js\x00",
+      "/proc/43/stat": stat(43, "helper", 42, 42),
+      "/proc/43/task/43/children": "",
+      "/proc/43/cmdline": "helper\x00--serve\x00",
+    }
+    const access: ProcessDiscoveryAccess = {
+      platform: "linux",
+      readDirectory() { directoryReads += 1; return [] },
+      readFile(path) {
+        const value = files[path]
+        if (value === undefined) throw new Error(`unexpected read ${path}`)
+        return value
+      },
+    }
+    const discovery = createProcessDiscoveryProvider(access).discover(10)
+    expect(discovery?.harness).toBe("pi")
+    expect(discovery?.processes.map((process) => process.pid)).toEqual([42, 43])
+    expect(directoryReads).toBe(0)
+  })
+
+  test("does not abandon targeted traversal when a descendant exits", () => {
+    let directoryReads = 0
+    const access: ProcessDiscoveryAccess = {
+      platform: "linux",
+      readDirectory() { directoryReads += 1; return [] },
+      readFile(path) {
+        if (path === "/proc/10/stat") return stat(10, "zsh", 1, 10, 42)
+        if (path === "/proc/10/task/10/children") return "42 99"
+        if (path === "/proc/42/stat") return stat(42, "codex", 10, 42)
+        if (path === "/proc/42/task/42/children") return ""
+        if (path === "/proc/42/cmdline") return "codex\x00"
+        throw new Error("process exited")
+      },
+    }
+    expect(createProcessDiscoveryProvider(access).discover(10)?.harness).toBe("codex")
+    expect(directoryReads).toBe(0)
+  })
 })

@@ -1,0 +1,144 @@
+#!/bin/bash
+
+set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
+
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-lineage-actions-$uid-$$"}")
+if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
+    printf 'Refusing unsafe Clankerhouse lineage-actions QA root: %s\n' "$root" >&2
+    exit 1
+fi
+marker="$root.clankerhouse-qa-owned"
+tmux_socket="$root/tmux.sock"
+runtime="$root/runtime"
+state_home="$root/state"
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+server_pid=""
+
+cleanup() {
+    if [[ -n "$server_pid" ]]; then
+        kill -TERM "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
+    tmux -S "$tmux_socket" kill-server 2>/dev/null || true
+    if [[ -f "$marker" ]]; then rm -rf "$root"; rm -f "$marker"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -e "$root" && ! -f "$marker" ]]; then
+    printf 'Refusing to replace unowned Clankerhouse lineage-actions QA root: %s\n' "$root" >&2
+    exit 1
+fi
+rm -rf "$root"
+mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/dev"
+touch "$marker"
+
+origin="$root/dev/repository"
+parent_path="$origin"
+middle_path="$root/dev/middle"
+child_path="$root/dev/child"
+git init -q -b main "$origin"
+git -C "$origin" config user.name "Clankerhouse QA"
+git -C "$origin" config user.email "clankerhouse-qa@example.invalid"
+printf 'fixture\n' > "$origin/fixture"
+git -C "$origin" add fixture
+git -C "$origin" commit -qm "Initial fixture"
+git -C "$origin" worktree add -q -b middle "$middle_path"
+git -C "$origin" worktree add -q -b child "$child_path"
+
+lineage=$(env HOME="$root/home" XDG_STATE_HOME="$state_home" bun --eval '
+  const [modulePath, parentPath, middlePath, childPath] = process.argv.slice(1)
+  const { identifyWorkshopSync, registerWorkshop } = await import(modulePath)
+  const parent = registerWorkshop(identifyWorkshopSync(parentPath))
+  const middle = registerWorkshop(identifyWorkshopSync(middlePath), { parentWorkshopId: parent.workshopId })
+  const child = registerWorkshop(identifyWorkshopSync(childPath), { parentWorkshopId: middle.workshopId })
+  console.log(JSON.stringify({ parent, middle, child }))
+' "$repo/src/workshop.ts" "$parent_path" "$middle_path" "$child_path")
+parent_id=$(jq -r '.parent.workshopId' <<<"$lineage")
+middle_id=$(jq -r '.middle.workshopId' <<<"$lineage")
+child_id=$(jq -r '.child.workshopId' <<<"$lineage")
+
+create_session() {
+    local name=$1 path=$2 workshop_id=$3 parent_workshop_id=$4
+    tmux -S "$tmux_socket" -f /dev/null new-session -d -s "$name" -n main -x 100 -y 30 -c "$path" "sleep 300"
+    tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_worktree_path "$path"
+    tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_workshop_id "$workshop_id"
+    if [[ -n "$parent_workshop_id" ]]; then
+        tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_workshop_parent_id "$parent_workshop_id"
+    fi
+}
+create_session qa-parent "$parent_path" "$parent_id" ""
+create_session qa-middle "$middle_path" "$middle_id" "$parent_id"
+create_session qa-child "$child_path" "$child_id" "$middle_id"
+
+# No repository picker cache is created. Attachment eligibility must arrive in
+# the daemon projection consumed by the native TUI client.
+env \
+    HOME="$root/home" \
+    TMUX="$tmux_socket,0,0" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_STATE_HOME="$state_home" \
+    XDG_DATA_HOME="$root/data" \
+    CLANKERHOUSE_HOME="$repo" \
+    CLANKERHOUSE_DEV_ROOT="$root/dev" \
+    CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
+    bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
+server_pid=$!
+daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
+for _ in {1..600}; do
+    [[ -S "$daemon_socket" ]] && break
+    kill -0 "$server_pid" 2>/dev/null || {
+        printf 'Clankerhouse lineage-actions daemon exited during startup:\n' >&2
+        cat "$root/server.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
+[[ ! -e "$runtime/clankerhouse-$uid/repositories.json" ]] || { printf 'Unexpected repository picker cache in isolated attachment scenario\n' >&2; exit 1; }
+
+SOCKET_PATH="$daemon_socket" PARENT_ID="$parent_id" CHILD_ID="$child_id" MIDDLE_PATH="$middle_path" bun --eval '
+  const [transportPath] = process.argv.slice(1)
+  const { getSnapshot, submitMutation, waitForOperation } = await import(transportPath)
+  const socket = process.env.SOCKET_PATH
+  const parentId = process.env.PARENT_ID
+  const childId = process.env.CHILD_ID
+  const snapshot = await getSnapshot(socket)
+  const child = snapshot.sessions.find((row) => row.workshopId === childId)
+  if (!child) throw new Error("child Workshop was not projected")
+  if (JSON.stringify(child.attachmentCandidateWorkshopIds) !== JSON.stringify([parentId])) {
+    throw new Error(`expected cache-independent parent candidate ${parentId}, got ${JSON.stringify(child.attachmentCandidateWorkshopIds)}`)
+  }
+  const mutate = async (key, intent) => {
+    const submitted = await submitMutation(socket, key, intent)
+    return waitForOperation(socket, submitted.operation.operationId, { timeoutMs: 120_000 })
+  }
+  await mutate("delete-middle", { type: "delete", kind: "worktree", session: "qa-middle", path: process.env.MIDDLE_PATH, confirmed: true })
+' "$repo/src/transport/index.ts"
+
+[[ ! -d "$middle_path" ]] || { printf 'Expected deleted middle worktree to be absent\n' >&2; exit 1; }
+! tmux -S "$tmux_socket" has-session -t '=qa-middle' 2>/dev/null || { printf 'Expected deleted middle tmux session to be absent\n' >&2; exit 1; }
+tmux -S "$tmux_socket" has-session -t '=qa-child'
+
+db="$state_home/clankerhouse/workshops.sqlite3"
+actual_parent=$(sqlite3 "$db" "select coalesce(parent_id, '') from workshops where id = '$child_id';")
+removed=$(sqlite3 "$db" "select count(*) from workshops where id = '$middle_id';")
+tmux_parent=$(tmux -S "$tmux_socket" show-option -qv -t qa-child @dotfiles_workshop_parent_id)
+manifest_parent=$(jq -r '.parentWorkshopId // ""' "$child_path/.clankerhouse/workshop.json")
+[[ "$actual_parent" == "$parent_id" ]] || { printf 'Expected child DB parent %s, got %s\n' "$parent_id" "$actual_parent" >&2; exit 1; }
+[[ "$removed" == 0 ]] || { printf 'Expected deleted middle Workshop declaration to be removed\n' >&2; exit 1; }
+[[ "$tmux_parent" == "$parent_id" ]] || { printf 'Expected child tmux parent %s, got %s\n' "$parent_id" "$tmux_parent" >&2; exit 1; }
+[[ "$manifest_parent" == "$parent_id" ]] || { printf 'Expected child manifest parent %s, got %s\n' "$parent_id" "$manifest_parent" >&2; exit 1; }
+
+snapshot_parent=$(SOCKET_PATH="$daemon_socket" CHILD_ID="$child_id" bun --eval '
+  const [transportPath] = process.argv.slice(1)
+  const { getSnapshot } = await import(transportPath)
+  const snapshot = await getSnapshot(process.env.SOCKET_PATH)
+  const child = snapshot.sessions.find((row) => row.workshopId === process.env.CHILD_ID)
+  if (!child) throw new Error("spliced child disappeared from projection")
+  console.log(child.parentWorkshopId || "")
+' "$repo/src/transport/index.ts")
+[[ "$snapshot_parent" == "$parent_id" ]] || { printf 'Expected projected child parent %s, got %s\n' "$parent_id" "$snapshot_parent" >&2; exit 1; }
+
+printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, tmux claim, and projection to the available parent.\n'

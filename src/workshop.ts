@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { instanceSlug } from "./paths"
 import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
@@ -44,7 +45,7 @@ const manifestVersion = 1
 const manifestRelativePath = ".clankerhouse/workshop.json"
 const manifestIgnoreRule = "/.clankerhouse/workshop.json"
 const defaultStateHome = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}`
-export const workshopStatePath = `${defaultStateHome}/clankerhouse/workshops.sqlite3`
+export const workshopStatePath = `${defaultStateHome}/clankerhouse${instanceSlug()}/workshops.sqlite3`
 const previousWorkshopStatePath = `${defaultStateHome}/alt-k-tui/workspaces.sqlite3`
 
 interface RepoRow { id: string; common_dir: string; created_at: number; updated_at: number }
@@ -388,11 +389,10 @@ export const detachWorkshopFromParent = (workshopId: string, dbPath = workshopSt
   })
 }
 
-export const attachmentCandidatesForWorkshop = (workshopId: string, dbPath = workshopStatePath) => {
-  const workshop = workshopForId(workshopId, dbPath)
+export const attachmentCandidatesFromWorkshops = (workshopId: string, workshops: readonly WorkshopRecord[]) => {
+  const workshop = workshops.find((candidate) => candidate.workshopId === workshopId)
   if (!workshop) throw new Error(`Workshop ${workshopId} does not exist`)
-  const project = projectSnapshot(workshop.canonicalPath, dbPath)
-  const childrenByParent = Map.groupBy(project.workshops, (candidate) => candidate.parentWorkshopId || "")
+  const childrenByParent = Map.groupBy(workshops, (candidate) => candidate.parentWorkshopId || "")
   const blocked = new Set([workshopId])
   const visitChildren = (parentId: string) => {
     for (const child of childrenByParent.get(parentId) ?? []) {
@@ -402,7 +402,61 @@ export const attachmentCandidatesForWorkshop = (workshopId: string, dbPath = wor
     }
   }
   visitChildren(workshopId)
-  return project.workshops.filter((candidate) => !blocked.has(candidate.workshopId) && candidate.workshopId !== workshop.parentWorkshopId)
+  return workshops
+    .filter((candidate) => candidate.repoId === workshop.repoId && !blocked.has(candidate.workshopId) && candidate.workshopId !== workshop.parentWorkshopId)
+    .toSorted((left, right) => left.canonicalPath.localeCompare(right.canonicalPath) || left.workshopId.localeCompare(right.workshopId))
+}
+
+export const attachmentCandidatesForWorkshop = (workshopId: string, dbPath = workshopStatePath) => {
+  const workshop = workshopForId(workshopId, dbPath)
+  if (!workshop) throw new Error(`Workshop ${workshopId} does not exist`)
+  return attachmentCandidatesFromWorkshops(workshopId, projectSnapshot(workshop.canonicalPath, dbPath).workshops)
+}
+
+export const spliceDeletedWorkshopFromLineage = (workshopId: string, dbPath = workshopStatePath, expected: {
+  parentWorkshopId?: string | null
+  revision?: number
+  children?: ReadonlyArray<{ workshopId: string; revision: number }>
+} = {}) => {
+  if (!existsSync(dbPath)) return undefined
+  const db = openStore(dbPath)
+  try {
+    return db.transaction(() => {
+      const workshop = db.query(`
+        SELECT w.id, w.repo_id, w.canonical_path, w.branch, w.parent_id, w.revision, w.created_at, w.updated_at, r.common_dir
+        FROM workshops w
+        JOIN repositories r ON r.id = w.repo_id
+        WHERE w.id = ?1
+      `).get(workshopId) as (WorkshopRow & { common_dir: string }) | null
+      if (!workshop) return undefined
+      if (existsSync(workshop.canonical_path)) throw new Error(`Workshop ${workshopId} still has a current directory and cannot be removed from lineage`)
+      const children = db.query(`
+        SELECT w.id, w.repo_id, w.canonical_path, w.branch, w.parent_id, w.revision, w.created_at, w.updated_at, r.common_dir
+        FROM workshops w
+        JOIN repositories r ON r.id = w.repo_id
+        WHERE w.parent_id = ?1
+        ORDER BY w.canonical_path, w.id
+      `).all(workshopId) as Array<WorkshopRow & { common_dir: string }>
+      if ("parentWorkshopId" in expected && workshop.parent_id !== expected.parentWorkshopId) throw new Error(`Workshop ${workshopId} parent changed after deletion was validated`)
+      if (expected.revision !== undefined && workshop.revision !== expected.revision) throw new Error(`Workshop ${workshopId} revision changed after deletion was validated`)
+      if (expected.children) {
+        const expectedChildren = [...expected.children].toSorted((left, right) => left.workshopId.localeCompare(right.workshopId))
+        const currentChildren = children.map((child) => ({ workshopId: child.id, revision: child.revision })).toSorted((left, right) => left.workshopId.localeCompare(right.workshopId))
+        if (JSON.stringify(currentChildren) !== JSON.stringify(expectedChildren)) throw new Error(`Workshop ${workshopId} children changed after deletion was validated`)
+      }
+      const now = Date.now()
+      for (const child of children) {
+        assertParentAllowed(db, child.id, child.repo_id, workshop.parent_id)
+        const updated = rowToRecord({ ...child, parent_id: workshop.parent_id, revision: child.revision + 1, updated_at: now })
+        db.query("UPDATE workshops SET parent_id = ?2, revision = ?3, updated_at = ?4 WHERE id = ?1").run(child.id, workshop.parent_id, updated.revision, now)
+        if (existsSync(child.canonical_path)) writeManifest({ path: child.canonical_path, commonDir: child.common_dir, branch: child.branch }, updated)
+      }
+      db.query("DELETE FROM workshops WHERE id = ?1").run(workshopId)
+      return { workshopId, parentWorkshopId: workshop.parent_id, childWorkshopIds: children.map((child) => child.id) }
+    }).immediate()
+  } finally {
+    db.close()
+  }
 }
 
 export const projectSnapshot = (cwd = process.cwd(), dbPath = workshopStatePath): ProjectSnapshot => {
@@ -428,7 +482,16 @@ export const workshopDetails = (cwd = process.cwd(), options: { id?: string; pat
   const dbPath = options.dbPath || workshopStatePath
   const record = options.id ? workshopForId(options.id, dbPath) : workshopForPath(options.path || cwd, dbPath)
   if (!record) return undefined
-  return detailsForRecord(record, projectSnapshot(record.canonicalPath, dbPath))
+  const db = openStore(dbPath)
+  try {
+    const repo = repoByCommonDir(db, record.commonDir)
+    const project: ProjectSnapshot = repo
+      ? { repoId: repo.id, commonDir: repo.common_dir, workshops: workshopRowsForRepo(db, repo.id, true).map(rowToRecord) }
+      : { repoId: record.repoId, commonDir: record.commonDir, workshops: [record] }
+    return detailsForRecord(record, project)
+  } finally {
+    db.close()
+  }
 }
 
 export const workshopTree = (cwd = process.cwd(), dbPath = workshopStatePath): WorkshopTreeNode[] => {

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
 root=$(mktemp -d /tmp/clankerhouse-process-owner-XXXXXX)
 socket="$root/tmux.sock"

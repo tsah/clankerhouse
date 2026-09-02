@@ -2,15 +2,18 @@
 
 set -euo pipefail
 
-# Give the legacy popup a useful first frame while Bun loads OpenTUI.
-if [[ ${1:-} != "--ensure-server" && -t 1 ]]; then
-    printf '\033[2J\033[H\033[38;2;56;189;248mClankerhouse - Loading\033[0m\n'
-fi
-
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/../libexec/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-mux"
 
+if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == herdr ]]; then
+    exec "$SCRIPT_DIR/clankerhouse-herdr" "$@"
+fi
+
+# Compatibility entry point: supervise the Bun daemon, then hand interactive
+# invocations to the sole Rust/ratatui renderer.
 if ! command -v bun >/dev/null 2>&1; then
     echo "Clankerhouse requires bun" >&2; exit 1
 fi
@@ -20,7 +23,7 @@ cd "$CLANKERHOUSE_HOME" || exit 1
 tmux set-option -gq @clankerhouse_open 1
 trap 'tmux set-option -gu @clankerhouse_open 2>/dev/null || true' EXIT
 
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
+STATE_DIR="$(ch_runtime_dir)"
 PID_FILE="$STATE_DIR/server.pid"
 CACHE_FILE="$STATE_DIR/state.json"
 LOG_FILE="$STATE_DIR/server.log"
@@ -37,7 +40,7 @@ cache_server_process() {
     local cmdline=""
     [[ -r "/proc/$pid/cmdline" ]] || return 1
     cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline")
-    [[ "$cmdline" == *"bun src/main.tsx --server"* ]]
+    [[ "$cmdline" == *"bun src/daemon.ts --server"* ]]
 }
 
 current_cache_server_process() {
@@ -55,6 +58,19 @@ cache_server_uses_current_tmux() {
     process_tmux=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^TMUX=//p' | head -n 1)
     process_tmux=${process_tmux%%,*}
     [[ "$process_tmux" == "$CURRENT_TMUX_SOCKET" ]]
+}
+
+cache_server_uses_current_instance() {
+    local pid=$1 process_runtime process_instance process_mux current_instance
+    [[ -r "/proc/$pid/environ" ]] || return 1
+    process_runtime=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -n 1)
+    process_runtime=${process_runtime:-/tmp}
+    process_instance=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^CLANKERHOUSE_INSTANCE=//p' | head -n 1)
+    process_mux=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^CLANKERHOUSE_MULTIPLEXER=//p' | head -n 1)
+    current_instance=${CLANKERHOUSE_INSTANCE:-}
+    [[ "$process_instance" == default || "$process_instance" == tmux ]] && process_instance=""
+    [[ "$current_instance" == default || "$current_instance" == tmux ]] && current_instance=""
+    [[ "$process_runtime" == "${XDG_RUNTIME_DIR:-/tmp}" && "$process_instance" == "$current_instance" && ( -z "$process_mux" || "$process_mux" == tmux ) ]]
 }
 
 server_running() {
@@ -93,11 +109,11 @@ if ! server_running; then
     stale_pids=()
     while read -r old_pid; do
         [[ "$old_pid" =~ ^[0-9]+$ ]] || continue
-        if cache_server_process "$old_pid" && cache_server_uses_current_tmux "$old_pid"; then
+        if cache_server_process "$old_pid" && cache_server_uses_current_tmux "$old_pid" && cache_server_uses_current_instance "$old_pid"; then
             stale_pids+=("$old_pid")
             kill "$old_pid" 2>/dev/null || true
         fi
-    done < <(pgrep -f '^bun src/main\.tsx --server$' || true)
+    done < <(pgrep -f '^bun src/daemon\.ts --server$' || true)
     for _ in {1..100}; do
         alive=false
         for old_pid in "${stale_pids[@]}"; do
@@ -114,7 +130,7 @@ if ! server_running; then
     rm -f "$PID_FILE" "$VERSION_FILE" "$STATE_DIR/daemon.sock"
     [[ "$preserve_cache" == true ]] || rm -f "$CACHE_FILE"
     printf '%s\n' "$CURRENT_TMUX_SOCKET" > "$SOCKET_FILE"
-    nohup bun src/main.tsx --server >>"$LOG_FILE" 2>&1 &
+    nohup bun src/daemon.ts --server >>"$LOG_FILE" 2>&1 9>&- &
     launched_pid=$!
 fi
 
@@ -139,4 +155,6 @@ if [[ ${1:-} == "--ensure-server" ]]; then
     exit
 fi
 
-bun src/main.tsx
+NATIVE_BINARY="$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native"
+[[ -x "$NATIVE_BINARY" ]] || { echo "Native client is not built. Run: $CLANKERHOUSE_HOME/scripts/build-native" >&2; exit 1; }
+exec "$NATIVE_BINARY" "$@"

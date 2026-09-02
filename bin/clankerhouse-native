@@ -5,6 +5,12 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/../libexec/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-mux"
+
+if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == herdr ]]; then
+    exec "$SCRIPT_DIR/clankerhouse-herdr" "$@"
+fi
 
 binary="$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native"
 if [[ ! -x "$binary" ]]; then
@@ -12,7 +18,7 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)"
+STATE_DIR="$(ch_runtime_dir)"
 CURRENT_TMUX_SOCKET=${TMUX:-}
 CURRENT_TMUX_SOCKET=${CURRENT_TMUX_SOCKET%%,*}
 if [[ ! -s "$STATE_DIR/state.json" || ! -r "$STATE_DIR/server.version" || "$(<"$STATE_DIR/server.version")" != 10 || ! -r "$STATE_DIR/server.tmux-socket" || "$(<"$STATE_DIR/server.tmux-socket")" != "$CURRENT_TMUX_SOCKET" ]]; then

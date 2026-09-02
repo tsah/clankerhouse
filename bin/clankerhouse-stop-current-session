@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$script_dir/../libexec/clankerhouse-env"
+clankerhouse_require_tmux clankerhouse-stop-current-session || exit $?
+
 if [[ -n "${1:-}" ]]; then
     target=$1
 elif [[ -n "${TMUX_PANE:-}" ]]; then
@@ -15,4 +20,4 @@ if [[ ! "$target" =~ ^\$[0-9]+$ ]]; then
 fi
 
 tmux switch-client -n 2>/dev/null || true
-exec "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankerhouse-tmux-stop" session "$target"
+exec "$script_dir/clankerhouse-tmux-stop" session "$target"

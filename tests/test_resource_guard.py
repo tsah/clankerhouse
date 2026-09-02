@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 
-from resource_guard import Config, ResourceGuard, parse_meminfo, parse_psi
+from resource_guard import Config, MultiplexerClient, ResourceGuard, parse_meminfo, parse_psi
 
 
 class FakeSystem:
@@ -165,6 +165,66 @@ class ResourceGuardTests(unittest.TestCase):
         config = Config.from_env({"HOME": str(pathlib.Path(self.temporary.name) / "home")})
         self.assertEqual((config.samples - 1) * config.interval, 300)
         self.assertEqual(config.cooldown, 120)
+
+    def test_managed_herdr_uses_an_instance_scoped_state_directory(self):
+        config = Config.from_env({
+            "HOME": str(pathlib.Path(self.temporary.name) / "home"),
+            "XDG_STATE_HOME": str(self.config.state_home),
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse-herdr")
+
+    def test_explicit_tmux_beats_managed_herdr_markers(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.config.state_home),
+            "CLANKERHOUSE_MULTIPLEXER": " tmux ",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.multiplexer, "tmux")
+        self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse")
+
+    def test_explicit_instance_changes_only_the_path_suffix(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.config.state_home),
+            "CLANKERHOUSE_INSTANCE": " staging ",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.multiplexer, "herdr")
+        self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse-staging")
+        with self.assertRaisesRegex(ValueError, "invalid CLANKERHOUSE_INSTANCE"):
+            Config.from_env({"CLANKERHOUSE_INSTANCE": "../other"})
+
+    def test_managed_herdr_selects_the_multiplexer_client(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.config.state_home),
+            "XDG_RUNTIME_DIR": str(self.config.runtime_dir),
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        guard = ResourceGuard(config, system=self.system, now=lambda: self.clock)
+        self.assertIsInstance(guard.tmux, MultiplexerClient)
+
+    def test_managed_herdr_reads_reports_from_its_runtime_root(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.config.state_home),
+            "XDG_RUNTIME_DIR": str(self.config.runtime_dir),
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.add_process(101, 11, "pi")
+        self.tmux.listing = "w2:p1\tpi\tid-1\t101\t11\t0\t1\t1\ts1\t/cwd1\t/wt1"
+        report_dir = self.config.runtime_dir / f"clankerhouse-{os.getuid()}-herdr" / "clanker-state"
+        report_dir.mkdir(parents=True)
+        (report_dir / "w2_p1.json").write_text(json.dumps({
+            "pane": "w2:p1", "harness": "pi", "clankerId": "id-1", "state": "working",
+        }), encoding="utf-8")
+
+        candidates = ResourceGuard(config, system=self.system, tmux=self.tmux, now=lambda: self.clock).discover()
+
+        self.assertEqual(candidates[0].state, "working")
 
     def test_proc_parsers_require_linux_fields(self):
         values = parse_meminfo("MemTotal: 1000 kB\nMemAvailable: 100 kB\nSwapTotal: 0 kB\n")

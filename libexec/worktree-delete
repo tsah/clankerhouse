@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$script_dir/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$script_dir/clankerhouse-mux"
+
 progress() {
   [[ "${CLANKERHOUSE_PROGRESS:-0}" == 1 ]] || return 0
   printf 'CLANKERHOUSE_PROGRESS\t%s\n' "$1" >&2
@@ -17,6 +23,9 @@ root=$(git -C "$path" rev-parse --show-toplevel)
 root=$(realpath "$root")
 branch=$(git -C "$root" branch --show-current)
 [[ -n "$branch" ]] || { echo "Refusing detached worktree" >&2; exit 1; }
+common_dir=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
+common_dir=$(realpath "$common_dir")
+default_branch=$(git --git-dir="$common_dir" symbolic-ref --short HEAD 2>/dev/null || true)
 status=$(git -C "$root" status --porcelain)
 upstream=$(git -C "$root" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
 unsafe=false
@@ -30,8 +39,9 @@ if [[ "$assume_yes" == false ]]; then
   fi
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo "Aborted."; exit 1; }
 fi
-progress "Finding linked tmux sessions"
+progress "Finding linked $(ch_mux_kind) sessions"
 session_ids=()
+mux_snapshot=$(_ch_mux_run_clankers mux observe)
 while IFS=$'\t' read -r session_id worktree_path directory_path session_path; do
   [[ -n "$session_id" ]] || continue
   for candidate in "$worktree_path" "$directory_path" "$session_path"; do
@@ -41,16 +51,55 @@ while IFS=$'\t' read -r session_id worktree_path directory_path session_path; do
       break
     fi
   done
-done < <(tmux list-sessions -F $'#{session_id}\t#{@dotfiles_worktree_path}\t#{@dotfiles_directory_path}\t#{session_path}' 2>/dev/null || true)
+done < <(MUX_SNAPSHOT="$mux_snapshot" python3 - <<'PY'
+import json, os
+for session in json.loads(os.environ["MUX_SNAPSHOT"]).get("sessions", []):
+    print("\t".join(str(session.get(key, "") or "") for key in ("id", "worktreePath", "directoryPath", "path")))
+PY
+)
 
-# Keep the branch: deleting local branch history is a separate explicit action.
-progress "Removing worktree with Worktrunk"
-wt -C "$root" -y remove --foreground --force --no-delete-branch
-progress "Closing linked tmux sessions"
+# Keep ordinary branches: deleting local branch history is a separate explicit
+# action. Worktrunk 0.67 rejects --no-delete-branch for the default branch, so
+# move only that worktree to a unique disposable branch which Worktrunk can
+# remove along with the worktree.
+if [[ -n "$default_branch" && "$branch" == "$default_branch" ]]; then
+  original_head=$(git -C "$root" rev-parse HEAD)
+  while true; do
+    random_suffix=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    temporary_branch="clankerhouse-delete/$random_suffix"
+    git --git-dir="$common_dir" show-ref --verify --quiet "refs/heads/$temporary_branch" || break
+  done
+  progress "Moving default-branch worktree to a disposable branch"
+  git -C "$root" switch --quiet -c "$temporary_branch"
+  progress "Removing disposable worktree with Worktrunk"
+  remove_status=0
+  wt -C "$root" -y remove --foreground --force || remove_status=$?
+  if ((remove_status != 0)) && [[ -d "$root" ]]; then
+    printf 'Worktree removal failed; restoring default branch %s\n' "$default_branch" >&2
+    if git -C "$root" switch --quiet "$default_branch"; then
+      git --git-dir="$common_dir" update-ref -d "refs/heads/$temporary_branch" "$original_head" || true
+    fi
+    exit "$remove_status"
+  fi
+  if git --git-dir="$common_dir" show-ref --verify --quiet "refs/heads/$temporary_branch"; then
+    git --git-dir="$common_dir" update-ref -d "refs/heads/$temporary_branch" "$original_head"
+  fi
+else
+  progress "Removing worktree with Worktrunk"
+  wt -C "$root" -y remove --foreground --force --no-delete-branch
+fi
+progress "Closing linked $(ch_mux_kind) sessions"
 kill_failed=false
+remaining_snapshot=$(_ch_mux_run_clankers mux observe)
+remaining_session_ids=$(MUX_SNAPSHOT="$remaining_snapshot" python3 - <<'PY'
+import json, os
+for session in json.loads(os.environ["MUX_SNAPSHOT"]).get("sessions", []):
+    print(session.get("id", ""))
+PY
+)
 for session_id in "${session_ids[@]}"; do
-  if tmux has-session -t "$session_id" 2>/dev/null && ! tmux kill-session -t "$session_id"; then
-    printf 'Worktree was removed, but tmux session %s could not be closed\n' "$session_id" >&2
+  if grep -Fxq -- "$session_id" <<<"$remaining_session_ids" && ! ch_mux_kill session "$session_id"; then
+    printf 'Worktree was removed, but %s session %s could not be closed\n' "$(ch_mux_kind)" "$session_id" >&2
     kill_failed=true
   fi
 done

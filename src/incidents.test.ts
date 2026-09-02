@@ -81,10 +81,19 @@ describe("resource incidents", () => {
     expect(row?.searchText).toContain("sustained_memory_pressure")
   })
 
-  test("creates a directory-backed row for a session lost on reboot", () => {
+  test("later Workshop activity acknowledges an incident without deleting evidence", () => {
+    const active = session()
+    active.recency = 3
+
+    const [row] = applyResourceIncidents([active], [incident()], 4_000)
+
+    expect(row?.details).toEqual([])
+    expect(row?.recency).toBe(3)
+    expect(incident().status).toBe("open")
+  })
+
+  test("does not resurrect a missing worktree just to display an incident", () => {
     const reboot = incident({ id: "reboot-test", kind: "unclean_boot_clanker_loss", clanker: { clankerId: "clanker-lost", harness: "claude", sessionName: "repo@lost", worktreePath: "/tmp/lost" } })
-    const [row] = applyResourceIncidents([], [reboot])
-    expect(row).toMatchObject({ name: "repo@lost", target: { type: "directory", path: "/tmp/lost" } })
-    expect(row?.details[0]).toMatchObject({ status: "lost on reboot", state: "failed" })
+    expect(applyResourceIncidents([], [reboot])).toEqual([])
   })
 })

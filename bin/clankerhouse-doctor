@@ -15,11 +15,16 @@ required() { command -v "$1" >/dev/null 2>&1 && ok "$1: $(command -v "$1")" || f
 optional() { command -v "$1" >/dev/null 2>&1 && ok "$1: $(command -v "$1")" || warn "$1 is not installed"; }
 
 printf 'Clankerhouse home: %s\n' "$CLANKERHOUSE_HOME"
-[[ -f "$CLANKERHOUSE_HOME/src/main.tsx" ]] && ok 'application source' || fail 'application source missing'
+[[ -f "$CLANKERHOUSE_HOME/src/daemon.ts" ]] && ok 'Bun daemon source' || fail 'Bun daemon source missing'
+[[ -x "$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native" ]] && ok 'Rust native renderer' || fail 'Rust native renderer missing'
 [[ -x "$CLANKERHOUSE_BIN_DIR/clankers" ]] && ok 'clankers command' || fail 'clankers command missing'
 [[ -x "$CLANKERHOUSE_LIBEXEC/worktree-delete" ]] && ok 'worktree helper' || fail 'worktree helper missing'
 required bun
-required tmux
+if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == herdr ]]; then
+    required herdr
+else
+    required tmux
+fi
 required git
 required python3
 required flock
@@ -37,7 +42,7 @@ else
     ok 'no dotfiles path dependencies in standalone runtime'
 fi
 
-if [[ -n "${TMUX:-}" ]]; then
+if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == tmux && -n "${TMUX:-}" ]]; then
     root=$(tmux show-option -gqv @clankerhouse-root 2>/dev/null || true)
     [[ -n "$root" ]] && ok "tmux plugin loaded: $root" || warn 'tmux plugin is not loaded'
 fi

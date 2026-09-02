@@ -2,17 +2,22 @@ import { createHash, randomUUID } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 import { markDirectoryActivity } from "./activity"
-import { ensureManagedTmuxSession } from "./multiplexer"
+import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
+import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { initialHarnessCommand } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
-import { parseTmuxFields, tmuxFields } from "./tmux-fields"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, workshopForId, workshopForPath } from "./workshop"
 
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
+
+const spawnedRuntimeEnv = (multiplexer: ManagedMultiplexer) => {
+  const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
+  return { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
+}
 
 export class ClankerRegistrationError extends Error {
   constructor(message: string, options: ErrorOptions) {
@@ -39,50 +44,50 @@ export async function identity(cwd = process.cwd()): Promise<WorktreeIdentity> {
 const safeName = (value: string) => value.replace(/[.:]/g, "-").replace(/[^A-Za-z0-9_@-]/g, "-").slice(0, 80)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return resolve(path) } }
 
-async function sessionForPath(path: string) {
+const sessionPathOf = (session: MultiplexerSession) => realpathSafe(session.worktreePath || session.directoryPath || session.path)
+
+/** The most recently active session bound to `path`, if any. */
+export async function sessionForPath(path: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   const canonical = realpathSafe(path)
-  const result = await command([
-    "tmux", "list-sessions", "-F",
-    tmuxFields("#{session_id}", "#{session_name}", "#{@dotfiles_worktree_path}", "#{@dotfiles_directory_path}", "#{session_path}", "#{session_activity}"),
-  ], undefined, true)
-  if (result.code !== 0) return undefined
-  return result.stdout.split("\n").filter(Boolean).map((line) => {
-    const [id = "", name = "", worktreePath = "", directoryPath = "", sessionPath = "", activity = "0"] = parseTmuxFields(line)
-    const taggedPath = worktreePath || directoryPath
-    const candidatePath = taggedPath || sessionPath
-    return { id, name, candidatePath, activity: Number(activity) || 0 }
-  }).filter((session) => session.id && session.name && session.candidatePath && realpathSafe(session.candidatePath) === canonical)
-    .sort((a, b) => b.activity - a.activity)[0]
+  const snapshot = await multiplexer.observe()
+  return snapshot.sessions
+    .filter((session) => sessionPathOf(session) === canonical)
+    .sort((a, b) => b.recency - a.recency)
+    .map((session) => ({ id: session.id, name: session.nativeName, candidatePath: session.path, activity: session.recency }))[0]
 }
 
-export async function sessionName(id: WorktreeIdentity) {
+const sessionBySelector = (sessions: MultiplexerSession[], selector: string) => sessions.find((session) => session.id === selector || session.nativeName === selector)
+
+export async function sessionName(id: WorktreeIdentity, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   const human = safeName(`${id.repo}@${id.branch}`)
-  const result = await command(["tmux", "display-message", "-p", "-t", `=${human}`, tmuxFields("#{@dotfiles_worktree_path}", "#{session_path}")], undefined, true)
-  if (result.code !== 0 || !result.stdout) return human
-  const [taggedPath = "", sessionPath = ""] = parseTmuxFields(result.stdout)
-  if (realpathSafe(taggedPath || sessionPath) === id.path) return human
+  const existing = sessionBySelector((await multiplexer.observe()).sessions, human)
+  if (!existing) return human
+  if (sessionPathOf(existing) === id.path) return human
   return `${human}-${createHash("sha256").update(id.path).digest("hex").slice(0, 8)}`
 }
 
-const applyWorkshopOptions = async (target: string, id: WorktreeIdentity, record?: WorkshopRecord) => {
-  await command(["tmux", "set-option", "-t", target, "@dotfiles_worktree_path", id.path])
-  await command(["tmux", "set-option", "-t", target, "@dotfiles_git_common_dir", id.commonDir])
+const applyWorkshopClaims = async (multiplexer: ManagedMultiplexer, nativeSessionId: string, id: WorktreeIdentity, record?: WorkshopRecord) => {
+  const at = sessionLocation(nativeSessionId)
+  await multiplexer.claim(at, "worktreePath", id.path)
+  await multiplexer.claim(at, "gitCommonDir", id.commonDir)
   if (!record) return
-  await command(["tmux", "set-option", "-t", target, "@dotfiles_workshop_id", record.workshopId])
-  await command(["tmux", "set-option", "-t", target, "@dotfiles_workshop_parent_id", record.parentWorkshopId ?? ""])
+  await multiplexer.claim(at, "workshopId", record.workshopId)
+  await multiplexer.claim(at, "workshopParentId", record.parentWorkshopId ?? null)
 }
 
-export async function ensureSession(id: WorktreeIdentity, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode } = {}) {
+export async function ensureSession(id: WorktreeIdentity, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; multiplexer?: ManagedMultiplexer } = {}) {
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   markDirectoryActivity(id.path, "opened")
   const record = persistWorkshopLineage(id, { parentWorkshopId: options.parentWorkshopId, preserveParent: options.preserveParent, mode: options.mode })
-  const existing = await sessionForPath(id.path)
-  const name = existing?.name ?? await sessionName(id)
-  if (!existing && (await command(["tmux", "has-session", "-t", `=${name}`], undefined, true)).code !== 0) {
-    await command(["tmux", "new-session", "-d", "-s", name, "-n", "main", "-c", id.path])
+  const existing = await sessionForPath(id.path, multiplexer)
+  const name = existing?.name ?? await sessionName(id, multiplexer)
+  let nativeSessionId = existing?.id
+  if (!nativeSessionId) {
+    const present = sessionBySelector((await multiplexer.observe()).sessions, name)
+    nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: id.path, windowName: "main", env: spawnedRuntimeEnv(multiplexer) })).nativeSessionId
   }
-  const target = existing?.id || name
-  await applyWorkshopOptions(target, id, record)
-  await ensureManagedTmuxSession(target)
+  await applyWorkshopClaims(multiplexer, nativeSessionId, id, record)
+  await ensureManagedSession(nativeSessionId, multiplexer)
   return name
 }
 
@@ -97,13 +102,15 @@ const codexCommand = (prompt: string, clankerId: string) => [
   prompt,
 ]
 
-export async function spawnClanker(harness: Harness, cwd: string, prompt: string, profile?: string, requestedName?: string, wait = false, resourceClass?: RecoveryResourceClass) {
+export async function spawnClanker(harness: Harness, cwd: string, prompt: string, profile?: string, requestedName?: string, wait = false, resourceClass?: RecoveryResourceClass, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
   const id = await identity(cwd)
-  const session = await ensureSession(id)
+  const session = await ensureSession(id, { multiplexer })
   markDirectoryActivity(id.path, "clanker")
   const prefix = requestedName || harness
-  const existing = (await command(["tmux", "list-windows", "-t", `=${session}`, "-F", "#{window_name}"], undefined, true)).stdout.split("\n")
+  const live = sessionBySelector((await multiplexer.observe()).sessions, session)
+  if (!live) throw new Error(`Session ${session} disappeared before the clanker was launched`)
+  const existing = live.windows.map((window) => window.nativeName)
   let name = prefix; let n = 2
   while (existing.includes(name)) name = `${prefix}-${n++}`
   const clankerId = generatedClankerId()
@@ -141,12 +148,13 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { store?.close() }
   }
-  const result = await command(["tmux", "new-window", "-d", "-P", "-F", tmuxFields("#{window_id}", "#{pane_id}"), "-t", `=${session}`, "-n", name, "-c", id.path, ...argv])
-  const [window, pane] = parseTmuxFields(result.stdout)
-  await command(["tmux", "set-option", "-p", "-t", pane!, "@clankerhouse_clanker_id", clankerId])
-  await command(["tmux", "set-option", "-p", "-t", pane!, "@dotfiles_harness", harness])
-  await command(["tmux", "set-option", "-w", "-t", window!, "@dotfiles_harness", harness])
-  await ensureManagedTmuxSession(session)
+  const spawnedLocation = await multiplexer.spawn({ scope: "window", nativeSessionId: live.id, name, cwd: id.path, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv } })
+  const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = spawnedLocation
+  const at = paneLocation(nativeSessionId, window, pane)
+  await multiplexer.claim(at, "clankerId", clankerId)
+  await multiplexer.claim(at, "harness", harness)
+  await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", harness)
+  await ensureManagedSession(nativeSessionId, multiplexer)
   const spawned: Record<string, unknown> = { identity: id, session, window, pane, name, clankerId, ...(recoverable ? { harnessSessionId } : {}) }
   if (wait) {
     const timeout = Number(Bun.env.CLANKER_WAIT_TIMEOUT || 600) * 1000
@@ -161,7 +169,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   return spawned
 }
 
-export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string } = {}) {
+export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string; multiplexer?: ManagedMultiplexer } = {}) {
   const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(base ? ["--base", base] : []), ...(options.copy ? ["--copy", options.copy] : [])])
   let worktree: { path?: string }
   try { worktree = JSON.parse(result.stdout) }
@@ -171,10 +179,21 @@ export async function createWorkshop(branch: string, base?: string, options: { p
   return { identity: id, session: await ensureSession(id, options) }
 }
 
-const currentSessionTarget = async () => {
-  if (!Bun.env.TMUX) return undefined
-  const result = await command(["tmux", "display-message", "-p", "#{session_id}"], undefined, true)
-  return result.code === 0 && result.stdout ? result.stdout : undefined
+export interface InvokingSessionTarget { nativeSessionId: string; panePath?: string }
+
+export const invokingSessionTarget = async (multiplexer: ManagedMultiplexer, env: Record<string, string | undefined> = Bun.env): Promise<InvokingSessionTarget | undefined> => {
+  if (!multiplexer.adapter.insideRuntime()) return undefined
+  const paneAddress = env[multiplexer.paneAddressEnv()]?.trim()
+  if (paneAddress) {
+    const snapshot = await multiplexer.observe()
+    const matches = snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes
+      .filter((pane) => pane.id === paneAddress)
+      .map((pane) => ({ nativeSessionId: session.id, panePath: pane.currentPath }))))
+    if (matches.length !== 1) throw new Error(`Invoking ${multiplexer.kind} pane ${paneAddress} does not identify exactly one session`)
+    return matches[0]
+  }
+  const current = await multiplexer.currentLocation()
+  return current ? { nativeSessionId: current.nativeSessionId } : undefined
 }
 
 const explicitParentRecord = (parentWorkshopId: string) => {
@@ -183,12 +202,20 @@ const explicitParentRecord = (parentWorkshopId: string) => {
   throw new Error(`Unknown workshop parent id: ${parentWorkshopId}`)
 }
 
-const captureAutomaticParent = async (mode: LineageMode) => {
+const captureAutomaticParent = async (mode: LineageMode, multiplexer: ManagedMultiplexer) => {
   try {
     const parentIdentity = await identity(process.cwd())
     const record = persistWorkshopLineage(parentIdentity, { mode })
-    const target = await currentSessionTarget()
-    if (target && record) await applyWorkshopOptions(target, parentIdentity, record)
+    const target = await invokingSessionTarget(multiplexer)
+    if (target && record) {
+      if (target.panePath) {
+        const paneIdentity = await identity(target.panePath)
+        if (paneIdentity.path !== parentIdentity.path || paneIdentity.commonDir !== parentIdentity.commonDir) {
+          throw new Error(`Invoking pane Workshop ${paneIdentity.path} differs from parent Workshop ${parentIdentity.path}`)
+        }
+      }
+      await applyWorkshopClaims(multiplexer, target.nativeSessionId, parentIdentity, record)
+    }
     return record
   } catch (error) {
     if (mode === "strict") throw error
@@ -196,7 +223,7 @@ const captureAutomaticParent = async (mode: LineageMode) => {
   }
 }
 
-export async function resolveWorkshopParent(options: { parentWorkshopId?: string; noParent?: boolean }, mode = lineageMode()) {
+export async function resolveWorkshopParent(options: { parentWorkshopId?: string; noParent?: boolean }, mode = lineageMode(), multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   if (options.parentWorkshopId && mode === "off") throw new Error("DOTFILES_WORKSHOP_LINEAGE=off does not support --parent")
   if (mode === "off") return { mode, preserveParent: true } as const
   if (options.noParent) return { mode, parentWorkshopId: null, preserveParent: false } as const
@@ -204,23 +231,36 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
     const parent = explicitParentRecord(options.parentWorkshopId)
     return { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const
   }
-  const parent = await captureAutomaticParent(mode)
+  const parent = await captureAutomaticParent(mode, multiplexer)
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 
-export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; resourceClass?: RecoveryResourceClass; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean } = {}) {
-  const parent = await resolveWorkshopParent(options)
-  const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy })
-  return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass))
+export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; resourceClass?: RecoveryResourceClass; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean; multiplexer?: ManagedMultiplexer } = {}) {
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
+  const parent = await resolveWorkshopParent(options, undefined, multiplexer)
+  const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy, multiplexer })
+  return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass, multiplexer), (workshop) => rollbackCreatedWorkshop(workshop, { multiplexer }))
 }
 
 type CreatedWorkshop = Awaited<ReturnType<typeof createWorkshop>>
 type CommandResult = Awaited<ReturnType<typeof command>>
 
-export async function rollbackCreatedWorkshop(created: CreatedWorkshop, run: (argv: string[]) => Promise<CommandResult> = (argv) => command(argv, undefined, true)) {
+export interface RollbackOptions {
+  /** Runs the worktree removal command; injectable for tests. */
+  run?: (argv: string[]) => Promise<CommandResult>
+  multiplexer?: ManagedMultiplexer
+}
+
+export async function rollbackCreatedWorkshop(created: CreatedWorkshop, options: RollbackOptions = {}) {
+  const run = options.run ?? ((argv: string[]) => command(argv, undefined, true))
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const cleanupErrors: string[] = []
-  const killed = await run(["tmux", "kill-session", "-t", `=${created.session}`])
-  if (killed.code !== 0 && !/can't find session|no server running/i.test(killed.stderr)) cleanupErrors.push(killed.stderr || "unable to remove tmux session")
+  try {
+    const session = sessionBySelector((await multiplexer.observe()).sessions, created.session)
+    if (session) await multiplexer.kill(sessionLocation(session.id))
+  } catch (error) {
+    cleanupErrors.push(error instanceof Error ? error.message : `unable to remove ${multiplexer.kind} session`)
+  }
   const removed = await run(["wt", "-C", created.identity.path, "remove", "--foreground", "--force", "--force-delete", "--yes", created.identity.path])
   if (removed.code !== 0) cleanupErrors.push(removed.stderr || "unable to remove worktree and branch")
   if (cleanupErrors.length > 0) throw new Error(cleanupErrors.join("; "))
@@ -239,25 +279,24 @@ export async function completeWorkshopRegistration<T>(created: CreatedWorkshop, 
   }
 }
 
-export async function ensureDirectorySession(directory: string) {
+export async function ensureDirectorySession(directory: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   const canonical = realpathSync(directory)
   markDirectoryActivity(canonical, "opened")
-  const existing = await sessionForPath(canonical)
+  const existing = await sessionForPath(canonical, multiplexer)
   if (existing) {
-    await command(["tmux", "set-option", "-t", existing.id, "@dotfiles_directory_path", canonical])
-    await ensureManagedTmuxSession(existing.id)
+    await multiplexer.claim(sessionLocation(existing.id), "directoryPath", canonical)
+    await ensureManagedSession(existing.id, multiplexer)
     return existing.name
   }
   const base = safeName(basename(canonical)) || "shell"
   let name = base
-  const current = await command(["tmux", "display-message", "-p", "-t", `=${name}`, tmuxFields("#{@dotfiles_worktree_path}", "#{@dotfiles_directory_path}", "#{session_path}")], undefined, true)
-  if (current.code === 0) {
-    const [worktreePath = "", directoryPath = "", sessionPath = ""] = parseTmuxFields(current.stdout)
-    if (realpathSafe(worktreePath || directoryPath || sessionPath) !== canonical) name = `${base}-${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`
-  }
-  if ((await command(["tmux", "has-session", "-t", `=${name}`], undefined, true)).code !== 0) await command(["tmux", "new-session", "-d", "-s", name, "-n", "main", "-c", canonical])
-  await command(["tmux", "set-option", "-t", name, "@dotfiles_directory_path", canonical])
-  await ensureManagedTmuxSession(name)
+  const sessions = (await multiplexer.observe()).sessions
+  const current = sessionBySelector(sessions, name)
+  if (current && sessionPathOf(current) !== canonical) name = `${base}-${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`
+  const present = sessionBySelector(sessions, name)
+  const nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: canonical, windowName: "main", env: spawnedRuntimeEnv(multiplexer) })).nativeSessionId
+  await multiplexer.claim(sessionLocation(nativeSessionId), "directoryPath", canonical)
+  await ensureManagedSession(nativeSessionId, multiplexer)
   return name
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { instanceSlug } from "./paths"
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
@@ -6,7 +7,7 @@ export type ActivitySource = "active" | "clanker" | "opened" | "edited" | "reflo
 export interface ActivityRecord { path: string; updatedAt: number; source: ActivitySource }
 const activitySources = new Set<ActivitySource>(["active", "clanker", "opened", "edited", "reflog", "commit"])
 
-export const activityStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse/activity`
+export const activityStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse${instanceSlug()}/activity`
 
 export const canonicalActivityPath = (path: string) => {
   const expanded = path === "~" ? Bun.env.HOME || path : path.startsWith("~/") ? `${Bun.env.HOME}${path.slice(1)}` : path

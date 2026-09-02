@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,7 @@ from spot_watch import (
     REBALANCE_PATH,
     Config,
     ImdsClient,
+    Notice,
     SpotWatcher,
 )
 
@@ -131,6 +133,52 @@ class SpotWatchTests(unittest.TestCase):
 
     def response(self, path, value, status=200):
         self.state.responses[path] = (status, json.dumps(value).encode())
+
+    def test_managed_herdr_uses_an_instance_scoped_state_directory(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.state_dir, self.root / "state" / "clankerhouse-herdr")
+
+    def test_explicit_tmux_beats_managed_herdr_markers(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "CLANKERHOUSE_MULTIPLEXER": " tmux ",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.multiplexer, "tmux")
+        self.assertEqual(config.state_dir, self.root / "state" / "clankerhouse")
+
+    def test_explicit_instance_changes_only_the_path_suffix(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "CLANKERHOUSE_INSTANCE": " staging ",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        self.assertEqual(config.multiplexer, "herdr")
+        self.assertEqual(config.state_dir, self.root / "state" / "clankerhouse-staging")
+        with self.assertRaisesRegex(ValueError, "invalid CLANKERHOUSE_INSTANCE"):
+            Config.from_env({"CLANKERHOUSE_INSTANCE": "../other"})
+
+    def test_checkpoint_subprocess_receives_the_resolved_multiplexer(self):
+        config = Config.from_env({
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "CLANKERHOUSE_SPOT_ENDPOINT": self.endpoint,
+            "CLANKERHOUSE_SPOT_CHECKPOINT_COMMAND": str(self.command),
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w2:p1",
+        })
+        observed = {}
+        def run(command, **kwargs):
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(command, 0)
+        watcher = SpotWatcher(config, run_command=run)
+        watcher._checkpoint_once(Notice("spot-interruption", "2030-01-02T03:04:05Z", {"time": "2030-01-02T03:04:05Z"}))
+        self.assertEqual(observed["env"]["CLANKERHOUSE_MULTIPLEXER"], "herdr")
 
     def test_config_is_isolatable_and_bounds_network_values(self):
         config = Config.from_env({

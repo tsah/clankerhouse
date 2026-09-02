@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 import type { ClankerState } from "./model"
-import { parseTmuxFields, tmuxFields } from "./tmux-fields"
+import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
+import { paneLocation } from "./multiplexer/interface"
+import { runtimeDirFor } from "./paths"
+import { parseTmuxFields } from "./tmux-fields"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
 export type ClankerDelivery = "steer" | "followUp"
@@ -27,7 +30,7 @@ export interface ClankerResult {
 export interface ClankerCapabilities {
   status: true
   wait: "reports" | false
-  send: "unix-socket" | false
+  send: "unix-socket" | "multiplexer-prompt" | false
   result: "reports" | false
   deliveryModes: ClankerDelivery[]
 }
@@ -76,17 +79,10 @@ export interface SendReceipt {
   delivery: "immediate" | ClankerDelivery
 }
 
-const runtimeRoot = () => `${Bun.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}`
+const runtimeRoot = () => runtimeDirFor()
 const safePane = (pane: string) => pane.replace(/[^A-Za-z0-9_.%-]/g, "_")
 const reportPath = (pane: string) => `${runtimeRoot()}/clanker-state/${safePane(pane)}.json`
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return resolve(path) } }
-
-async function command(argv: string[], allowFailure = false) {
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" })
-  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-  if (code !== 0 && !allowFailure) throw new Error(stderr.trim() || `${argv.join(" ")} exited ${code}`)
-  return { stdout: stdout.trim(), stderr: stderr.trim(), code }
-}
 
 export const generatedClankerId = () => `clanker-${randomUUID()}`
 
@@ -116,10 +112,10 @@ const socketIsOnline = (path: string) => {
   } catch { return false }
 }
 
-const capabilitiesFor = (harness: ClankerHarness, online: boolean): ClankerCapabilities => ({
+const capabilitiesFor = (harness: ClankerHarness, online: boolean, agentPrompt: boolean): ClankerCapabilities => ({
   status: true,
   wait: harness === "opencode" ? false : "reports",
-  send: harness === "pi" && online ? "unix-socket" : false,
+  send: harness === "pi" && online ? "unix-socket" : harness === "claude" && agentPrompt ? "multiplexer-prompt" : false,
   result: harness === "pi" ? "reports" : false,
   deliveryModes: harness === "pi" ? ["steer", "followUp"] : [],
 })
@@ -142,35 +138,64 @@ export const parsePaneMetadata = (output: string): PaneMetadata[] => output.spli
   return { harness, id, socketPath, sessionId, session, window, name, pane, cwd, worktreePath }
 }).filter((row) => row.harness && row.pane)
 
-export async function ensurePaneClankerId(pane: string, preferredId?: string) {
-  const lock = `clankerhouse-clanker-id-${safePane(pane)}`
-  const locked = (await command(["tmux", "wait-for", "-L", lock], true)).code === 0
-  try {
-    const current = await command(["tmux", "show-option", "-p", "-qv", "-t", pane, "@clankerhouse_clanker_id"], true)
-    if (current.stdout) return current.stdout
-    const candidate = preferredId || generatedClankerId()
-    await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_clanker_id", candidate])
-    const stored = await command(["tmux", "show-option", "-p", "-qv", "-t", pane, "@clankerhouse_clanker_id"])
-    if (!stored.stdout) throw new Error(`tmux did not retain a clanker id for pane ${pane}`)
-    return stored.stdout
-  } finally {
-    if (locked) await command(["tmux", "wait-for", "-U", lock], true)
+/** Cross-process mutex for pane-id allocation, runtime-agnostic (atomic mkdir under the runtime dir). */
+const withPaneLock = async <T>(pane: string, work: () => Promise<T>): Promise<T> => {
+  const dir = `${runtimeRoot()}/locks`
+  const lock = `${dir}/clanker-id-${safePane(pane)}.lock`
+  let locked = false
+  try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch {}
+  for (let attempt = 0; attempt < 100 && !locked; attempt += 1) {
+    try { mkdirSync(lock); locked = true }
+    catch { await Bun.sleep(20) }
   }
+  try { return await work() }
+  finally { if (locked) { try { rmSync(lock, { recursive: true, force: true }) } catch {} } }
 }
 
-const discoverRecords = async (): Promise<ClankerRecord[]> => {
-  const format = tmuxFields(
-    "#{@dotfiles_harness}", "#{@clankerhouse_clanker_id}", "#{@clankerhouse_clanker_socket}",
-    "#{session_id}", "#{session_name}", "#{window_id}", "#{window_name}", "#{pane_id}",
-    "#{pane_current_path}", "#{@dotfiles_worktree_path}",
-  )
-  const listed = await command(["tmux", "list-panes", "-a", "-F", format], true)
-  if (listed.code !== 0 || !listed.stdout) return []
-  const rows = parsePaneMetadata(listed.stdout)
+export async function ensurePaneClankerId(pane: string, preferredId?: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+  const at = paneLocation("", null, pane)
+  return withPaneLock(pane, async () => {
+    const current = await multiplexer.readClaim(at, "clankerId")
+    if (current) return current
+    const candidate = preferredId || generatedClankerId()
+    await multiplexer.claim(at, "clankerId", candidate)
+    const stored = await multiplexer.readClaim(at, "clankerId")
+    if (!stored) throw new Error(`${multiplexer.kind} did not retain a clanker id for pane ${pane}`)
+    return stored
+  })
+}
+
+/** Pane metadata rows discovered through the Multiplexer Interface (harness-bearing panes only). */
+export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[]> => {
+  const snapshot = await multiplexer.observe()
+  return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.flatMap((pane) => {
+    const claims = pane.claims ?? {}
+    const harness = claims.harness || pane.harness || ""
+    if (!harness) return []
+    return [{
+      harness,
+      id: claims.clankerId || pane.clankerId || "",
+      socketPath: claims.clankerSocket || "",
+      sessionId: session.id,
+      session: session.nativeName,
+      window: window.id,
+      name: window.nativeName,
+      pane: pane.id,
+      cwd: pane.currentPath,
+      worktreePath: claims.worktreePath || session.worktreePath || "",
+    }]
+  })))
+}
+
+const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ClankerRecord[]> => {
+  let rows: PaneMetadata[]
+  try { rows = await discoverPaneMetadata(multiplexer) }
+  catch { return [] }
+  const agentPrompt = multiplexer.capabilities().agentPrompt
   return Promise.all(rows.map(async (row) => {
     const candidateReport = readReportSync(row.pane)
     const reportedId = typeof candidateReport?.clankerId === "string" && candidateReport.clankerId ? candidateReport.clankerId : undefined
-    const id = row.id || await ensurePaneClankerId(row.pane, reportedId)
+    const id = row.id || await ensurePaneClankerId(row.pane, reportedId, multiplexer)
     const report = candidateReport
       && (!candidateReport.clankerId || candidateReport.clankerId === id)
       && (!candidateReport.pane || candidateReport.pane === row.pane)
@@ -197,7 +222,7 @@ const discoverRecords = async (): Promise<ClankerRecord[]> => {
       settledGeneration,
       updatedAt,
       socketOnline: online,
-      capabilities: capabilitiesFor(row.harness, online),
+      capabilities: capabilitiesFor(row.harness, online, agentPrompt),
       socketPath: row.socketPath,
       report,
     }
@@ -211,15 +236,15 @@ const canonicalFilterPath = (cwd: string) => {
   return realpathSafe(git.exitCode === 0 ? git.stdout.toString().trim() : cwd)
 }
 
-export async function listClankers(options: { cwd?: string } = {}) {
-  const records = await discoverRecords()
+export async function listClankers(options: { cwd?: string; multiplexer?: ManagedMultiplexer } = {}) {
+  const records = await discoverRecords(options.multiplexer)
   if (!options.cwd) return records.map(publicInfo)
   const cwd = canonicalFilterPath(options.cwd)
   return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd).map(publicInfo)
 }
 
-const findRecord = async (id: string) => {
-  const matches = (await discoverRecords()).filter((candidate) => candidate.id === id)
+const findRecord = async (id: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) => {
+  const matches = (await discoverRecords(multiplexer)).filter((candidate) => candidate.id === id)
   if (matches.length === 0) throw new ClankerApiError("NOT_FOUND", `Unknown clanker id: ${id}`, 3)
   if (matches.length > 1) throw new ClankerApiError("AMBIGUOUS", `Ambiguous clanker id ${id}; ${matches.length} live panes advertise it`, 3)
   return matches[0]!
@@ -281,9 +306,22 @@ export function requestUnixSocket(path: string, request: Record<string, unknown>
   })
 }
 
-export async function sendClanker(id: string, text: string, options: { delivery?: ClankerDelivery } = {}): Promise<SendReceipt> {
-  const clanker = await findRecord(id)
+export async function sendClanker(id: string, text: string, options: { delivery?: ClankerDelivery } = {}, multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<SendReceipt> {
+  const clanker = await findRecord(id, multiplexer)
   if (!text.trim()) throw new Error("Clanker message must not be empty")
+  if (clanker.capabilities.send === "multiplexer-prompt") {
+    if (options.delivery) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support ${options.delivery} delivery through the Multiplexer prompt transport`, 4)
+    const location = paneLocation(clanker.sessionId, clanker.window || null, clanker.pane)
+    try {
+      const claimedId = await multiplexer.readClaim(location, "clankerId")
+      if (claimedId !== id) throw new Error(`pane claim changed to ${claimedId || "none"}`)
+      const acceptedAt = Date.now()
+      await multiplexer.promptAgent(location, text)
+      return { clankerId: id, acceptedAt, afterGeneration: clanker.generation, observedGeneration: clanker.generation, delivery: "immediate" }
+    } catch (error) {
+      throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} rejected the Multiplexer prompt: ${error instanceof Error ? error.message : String(error)}`, 5)
+    }
+  }
   if (clanker.capabilities.send !== "unix-socket" || !clanker.socketPath) unsupported(clanker, "send")
   const payload = await requestUnixSocket(clanker.socketPath, { version: 1, action: "send", clankerId: id, text, delivery: options.delivery })
   const responseId = payload.clankerId

@@ -144,8 +144,47 @@ for _ in {1..50}; do [[ -S "$native_socket" ]] && break; sleep 0.02; done
 [[ -S "$native_socket" ]] || fail "native socket did not start"
 tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_clanker_socket "$native_socket"
 
-qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "XDG_CONFIG_HOME=$config_home" "TMUX=$socket,1,0" "DOTFILES_DIR=$repo")
+qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "XDG_CONFIG_HOME=$config_home" "TMUX=$socket,1,0" "HERDR_PANE_ID=" "HERDR_SOCKET_PATH=" "CLANKERHOUSE_MULTIPLEXER=tmux" "DOTFILES_DIR=$repo")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
+
+# Agent workers are separate `pi --no-session` processes that inherit the
+# parent's TMUX_PANE. Loading the global lifecycle extension in such a worker
+# must leave the parent's identity, report, socket, and Recovery untouched.
+cat > "$root/sessionless-extension.ts" <<EOF
+import extension from "$repo/integrations/pi/tmux-clanker-lifecycle.ts"
+const handlers = new Map<string, Function>()
+const pi = {
+  events: { on: () => () => {} },
+  on: (name: string, handler: Function) => { handlers.set(name, handler) },
+  sendUserMessage: () => {},
+}
+extension(pi as never)
+const context = { isIdle: () => true, sessionManager: { getSessionId: () => "ephemeral-worker-session" } }
+await handlers.get("session_start")?.({}, context)
+console.log(JSON.stringify([...handlers.keys()]))
+EOF
+cat > "$root/unexpected-clankers" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SESSIONLESS_RECOVERY_LOG"
+exit 1
+SH
+chmod +x "$root/unexpected-clankers"
+tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_harness_session_id parent-session
+before_options=$(tmux -S "$socket" show-options -p -t "$pi_pane")
+before_report=$(sha256sum "$pi_report")
+before_sockets=$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)
+sessionless_handlers=$("${qa_env[@]}" env \
+    TMUX_PANE="$pi_pane" \
+    CLANKER_ID=clanker-qa-pi \
+    CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" \
+    SESSIONLESS_RECOVERY_LOG="$root/sessionless-recovery.log" \
+    bun "$root/sessionless-extension.ts" --mode json -p --no-session)
+[[ "$sessionless_handlers" == '[]' ]] || fail "sessionless Pi registered lifecycle handlers"
+[[ "$(tmux -S "$socket" show-options -p -t "$pi_pane")" == "$before_options" ]] || fail "sessionless Pi replaced parent pane identity"
+[[ "$(sha256sum "$pi_report")" == "$before_report" ]] || fail "sessionless Pi replaced parent lifecycle report"
+[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "sessionless Pi created a native Clanker socket"
+[[ ! -e "$root/sessionless-recovery.log" ]] || fail "sessionless Pi created or attested Recovery identity"
+
 # Discovery, canonical filtering, ID assignment, and rename stability.
 all=$(api list)
 printf '%s' "$all" | json_assert 'len(data) == 5'

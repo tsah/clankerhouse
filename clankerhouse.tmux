@@ -25,7 +25,7 @@ else
         */lib/clankerhouse) default_root=$plugin_root ;;
         *)
             installed_root=${CLANKERHOUSE_HOME:-$HOME/.local/lib/clankerhouse}
-            if [ -f "$installed_root/src/main.tsx" ]; then default_root=$installed_root; else default_root=$plugin_root; fi
+            if [ -f "$installed_root/src/daemon.ts" ]; then default_root=$installed_root; else default_root=$plugin_root; fi
             ;;
     esac
 fi
@@ -35,21 +35,25 @@ if [ "$installed_entry" = true ] && [ "$runtime_root" = "$default_root" ]; then
     command_dir=$(CDPATH= cd -- "$entry_parent/../bin" && pwd)
 fi
 tmux set-option -gq @clankerhouse-root "$runtime_root"
+# tmux's global environment outlives package upgrades. Replace inherited
+# version-specific paths so popups and newly spawned Clankers cannot execute an
+# obsolete CLI after the active installation changes.
+tmux set-environment -g CLANKERHOUSE_HOME "$runtime_root"
+tmux set-environment -g CLANKERHOUSE_BIN_DIR "$runtime_root/bin"
+tmux set-environment -g CLANKERHOUSE_LIBEXEC "$runtime_root/libexec"
 
 if [ "$(option @clankerhouse-bindings on)" != off ]; then
     open_key=$(option @clankerhouse-key M-k)
     spawn_key=$(option @clankerhouse-spawn-key M-b)
     delete_key=$(option @clankerhouse-delete-key M-d)
     stop_key=$(option @clankerhouse-stop-key M-x)
-    jump_client=$(option @clankerhouse-jump-client native)
-    native_binary=$runtime_root/native-client/target/release/clankerhouse-native
-    if [ "$jump_client" = full ] || [ ! -x "$native_binary" ]; then jump_command=$command_dir/clankerhouse; else jump_command=$command_dir/clankerhouse-native; fi
+    jump_command=$command_dir/clankerhouse-native
 
     tmux bind-key -n "$open_key" run-shell \
-        "tmux display-popup -E -c '#{client_name}' -w 90% -h 80% -e 'CLANKERHOUSE_CURRENT_SESSION=#{session_name}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \"'$jump_command'\""
-    tmux bind-key -n "$spawn_key" display-popup -E -w 90% -h 80% -d '#{pane_current_path}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \
-        "CLANKERHOUSE_MODE=spawn '$command_dir/clankerhouse'"
+        "'$command_dir/clankerhouse-popup' '#{client_name}' '#{session_name}' '$jump_command'"
+    tmux bind-key -n "$spawn_key" run-shell \
+        "tmux display-popup -E -c '#{client_name}' -w 90% -h 80% -d '#{pane_current_path}' -e 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' \"CLANKERHOUSE_MODE=spawn '$command_dir/clankerhouse'\""
     tmux bind-key -n "$delete_key" run-shell \
-        "'$command_dir/clankerhouse-delete' '#{pane_id}' '#{session_id}'"
+        "'$command_dir/clankerhouse-delete' '#{pane_id}' '#{session_id}' #{q:client_name}"
     tmux bind-key -n "$stop_key" run-shell "'$command_dir/clankerhouse-stop-current-session' #{q:session_id}"
 fi

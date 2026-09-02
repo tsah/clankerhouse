@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 uid=$(id -u)
@@ -49,7 +50,7 @@ env \
     HOME="$qa_home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" \
     CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_REFRESH_MS=100 \
     TMUX="$inner_socket,0,0" \
-    "$repo/bin/clankerhouse-picker" --server >"$root/daemon.log" 2>&1 &
+    bun run "$repo/src/daemon.ts" --server >"$root/daemon.log" 2>&1 &
 daemon_pid=$!
 daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
 for _ in {1..200}; do

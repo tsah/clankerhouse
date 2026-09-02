@@ -16,9 +16,17 @@ export type Target =
 export type ClankerState = "failed" | "blocked" | "working" | "done" | "idle" | "unknown"
 export type ReportedClankerState = ClankerState
 
-export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string }
+export interface RuntimeObservation {
+  source: "tmux" | "runtime" | "process" | "lifecycle"
+  confidence: "observed" | "attested" | "rejected"
+  state: ClankerState | "present" | "unreported"
+  observedAt: number
+  reason?: string
+}
+
+export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
-export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; lineageLabel?: string; lineageSearchText?: string }
+export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string }
 export interface TreeRow {
   key: string
   depth: number
@@ -26,6 +34,7 @@ export interface TreeRow {
   detail?: DetailRow
   target: Target
   state: ClankerState
+  containsClanker: boolean
   searchText: string
   matchScore?: number
   expanded: boolean
@@ -72,6 +81,8 @@ interface VisibleTreeNode {
   hiddenDetailCount: number
   hiddenChildCount: number
   state: ClankerState
+  containsClanker: boolean
+  recency: number
   score: number
 }
 
@@ -101,29 +112,13 @@ export const sessionState = (session: SessionRow): ClankerState => {
   return aggregateStates(currentDetails.map((detail) => detail.state))
 }
 
-const clankerStateSortRank = (state: ClankerState) => {
-  switch (state) {
-    case "blocked": return 0
-    case "working": return 1
-    case "done": return 2
-    case "failed": return 3
-    case "idle": return 4
-    case "unknown": return 5
-  }
-}
+const neutralDetailKinds = new Set(["directory", "repository", "session", "window"])
+export const isNeutralDetail = (detail: DetailRow) => neutralDetailKinds.has(detail.kind)
+  || (detail.kind === "observation" && detail.observation?.source === "process" && detail.observation.confidence === "observed" && detail.observation.state === "present")
 
-export const sessionSortRank = (session: SessionRow) => {
-  const state = sessionState(session)
-  if (state === "failed") return clankerStateSortRank(state)
-  if (session.target.type === "directory") return session.directorySource === "worktree" ? 6 : 7
-  return clankerStateSortRank(state)
-}
-
-/** Authoritative ordering for an ungrouped projection before lineage rendering. */
+/** Authoritative newest-first ordering before bottom-up lineage rendering. */
 export const compareProjectedSessions = (a: SessionRow, b: SessionRow) =>
-  sessionSortRank(a) - sessionSortRank(b)
-  || b.recency - a.recency
-  || (b.frecency ?? 0) - (a.frecency ?? 0)
+  b.recency - a.recency
   || a.name.localeCompare(b.name)
 
 export const fuzzyResult = (text: string, query: string): FuzzyResult | undefined => {
@@ -207,25 +202,19 @@ const detailSearchFields = (detail: DetailRow): SearchField[] => [
 ]
 const detailSearchText = (_session: SessionRow, detail: DetailRow) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title, detail.age, detail.state].join(" ").toLowerCase()
 const selectableDetails = (session: SessionRow) => session.details.filter((detail) => !["directory", "repository", "session"].includes(detail.kind))
-const visibleTreeSortRank = (node: VisibleTreeNode) => node.session.target.type === "directory"
-  ? sessionSortRank(node.session)
-  : clankerStateSortRank(node.state)
+const sessionNodeContainsClanker = (node: SessionNode): boolean => node.session.details.some((detail) => detail.kind === "clanker") || node.children.some(sessionNodeContainsClanker)
+const subtreeRecency = (node: SessionNode): number => Math.max(node.session.recency, ...node.children.map(subtreeRecency))
 const containsPrioritySession = (node: VisibleTreeNode, prioritySessionKeys: ReadonlySet<string> | undefined): boolean =>
   Boolean(prioritySessionKeys?.has(node.key) || node.children.some((child) => containsPrioritySession(child, prioritySessionKeys)))
 const visibleTreeTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
   Number(containsPrioritySession(b, prioritySessionKeys)) - Number(containsPrioritySession(a, prioritySessionKeys))
-  || visibleTreeSortRank(a) - visibleTreeSortRank(b)
-  || b.session.recency - a.session.recency
-  || (b.session.frecency ?? 0) - (a.session.frecency ?? 0)
+  || b.recency - a.recency
   || a.session.name.localeCompare(b.session.name)
-// Root groups are reversed as units by the bottom-up picker. Descendants are not
-// independent groups, so place a priority child last within its parent to keep
-// the current session nearest the prompt after rendering.
+// Root groups are reversed as units by the bottom-up picker. Descendants retain
+// their order, so sort children oldest-first and keep the current child last.
 const visibleChildTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
   Number(containsPrioritySession(a, prioritySessionKeys)) - Number(containsPrioritySession(b, prioritySessionKeys))
-  || visibleTreeSortRank(a) - visibleTreeSortRank(b)
-  || b.session.recency - a.session.recency
-  || (b.session.frecency ?? 0) - (a.session.frecency ?? 0)
+  || a.recency - b.recency
   || a.session.name.localeCompare(b.session.name)
 const maxScore = (...scores: number[]) => {
   const score = Math.max(...scores)
@@ -294,7 +283,9 @@ const visibleNode = (
   const children = node.children.flatMap((child) => {
     const visible = visibleNode(child, normalizedQuery, expandedDetailSessions, [...ancestors, node], exposeLineage, prioritySessionKeys)
     return visible ? [visible] : []
-  }).sort((a, b) => b.score - a.score || visibleChildTieBreak(a, b, prioritySessionKeys))
+  // Lineage siblings keep structural (recency) order under search too; a descendant's
+  // incidental fuzzy match against ancestor-derived text must not reorder the subtree.
+  }).sort((a, b) => visibleChildTieBreak(a, b, prioritySessionKeys))
   if (!exposeLineage && detailMatches.length === 0 && children.length === 0) return undefined
 
   const detailsExpanded = Boolean(expandedDetailSessions?.has(node.session.name))
@@ -315,6 +306,8 @@ const visibleNode = (
     hiddenDetailCount: Math.max(0, details.length - visibleDetails.length),
     hiddenChildCount: Math.max(0, node.children.length - children.length),
     state: subtreeState(node),
+    containsClanker: sessionNodeContainsClanker(node),
+    recency: subtreeRecency(node),
     score,
   }
 }
@@ -348,8 +341,17 @@ const expandedNode = (
     hiddenDetailCount: Math.max(0, details.length - visibleDetails.length),
     hiddenChildCount: Math.max(0, node.children.length - visibleChildren.length),
     state: aggregateStates([sessionState(node.session), ...children.map((child) => child.state)]),
+    containsClanker: node.session.details.some((detail) => detail.kind === "clanker") || children.some((child) => child.containsClanker),
+    recency: Math.max(node.session.recency, ...children.map((child) => child.recency)),
     score: 0,
   }
+}
+
+const detailTreeKey = (detail: DetailRow) => {
+  const evidence = detail.kind === "observation" && detail.observation
+    ? `:${detail.observation.source}:${detail.observation.confidence}:${detail.observation.reason ?? ""}`
+    : ""
+  return `${targetKey(detail.target)}:${detail.kind}${evidence}`
 }
 
 const flattenTreeRows = (node: VisibleTreeNode, depth: number, guideColumns: boolean[], isLastSibling: boolean): TreeRow[] => {
@@ -359,6 +361,7 @@ const flattenTreeRows = (node: VisibleTreeNode, depth: number, guideColumns: boo
     session: node.session,
     target: node.session.target,
     state: node.state,
+    containsClanker: node.containsClanker,
     searchText: node.searchText,
     matchScore: node.matchScore,
     expanded: node.expanded,
@@ -380,12 +383,13 @@ const flattenTreeRows = (node: VisibleTreeNode, depth: number, guideColumns: boo
     const childIsLast = index === entries.length - 1
     if ("detail" in entry) {
       return [{
-        key: `${targetKey(entry.detail.detail.target)}:${entry.detail.detail.kind}`,
+        key: detailTreeKey(entry.detail.detail),
         depth: depth + 1,
         session: node.session,
         detail: entry.detail.detail,
         target: entry.detail.detail.target,
         state: entry.detail.detail.state,
+        containsClanker: entry.detail.detail.kind === "clanker",
         searchText: detailSearchText(node.session, entry.detail.detail),
         matchScore: entry.detail.matchScore,
         expanded: false,
@@ -407,14 +411,16 @@ const flattenTreeRows = (node: VisibleTreeNode, depth: number, guideColumns: boo
   return [sessionRow, ...childRows]
 }
 
-export const defaultExpandedLineageSessions = (sessions: SessionRow[], maxChildren = 3) => {
+const expandedLineageRowCount = (node: SessionNode): number => 1 + node.children.reduce((count, child) => count + expandedLineageRowCount(child), 0)
+
+export const defaultExpandedLineageSessions = (sessions: SessionRow[], maxExpandedRows = 10) => {
   const { nodes } = sessionForest(sessions)
   return new Set(
     nodes
       .filter((node) => {
         if (node.children.length === 0) return false
         const state = subtreeState(node)
-        return node.children.length <= maxChildren || state === "failed" || state === "working" || state === "done"
+        return expandedLineageRowCount(node) < maxExpandedRows || state === "working" || state === "done"
       })
       .map((node) => node.session.name),
   )

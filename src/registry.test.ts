@@ -89,7 +89,7 @@ const recoveryFixture = (path: string, version: 1 | 2 | 3, suffix = String(versi
 describe("single durable registry", () => {
   test("creates a private, FK-enforced registry with the complete Phase 3 durable shape", () => {
     const { root, registry } = fixture()
-    expect(registryStatePath(join(root, "state"))).toBe(registry)
+    expect(registryStatePath(join(root, "state"), {})).toBe(registry)
     chmodSync(dirname(registry), 0o755)
     const module = openDurableRegistry({ dbPath: registry })
     expect(module.validate()).toEqual({ foreignKeyViolations: [], semanticViolations: [] })

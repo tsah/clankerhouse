@@ -13,17 +13,23 @@ target="${2:-}"
     exit 2
 }
 
-clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+clankers_cli=${CLANKERHOUSE_CLANKERS:-"$script_dir/clankers"}
+CLANKERHOUSE_CLANKERS=$clankers_cli
+# shellcheck source=/dev/null
+. "$script_dir/../libexec/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$script_dir/../libexec/clankerhouse-mux"
 progress "Finding tracked clankers"
 if [[ "$kind" == pane ]]; then
-    ids=$(tmux display-message -p -t "$target" '#{@clankerhouse_clanker_id}' 2>/dev/null || true)
+    ids=$(ch_mux_pane_clanker_id "$target")
 else
-    ids=$(tmux list-panes -t "$target" -F '#{@clankerhouse_clanker_id}' 2>/dev/null || true)
+    ids=$(ch_mux_session_clanker_ids "$target")
 fi
 while IFS= read -r clanker_id; do
     [[ -n "$clanker_id" ]] || continue
     progress "Persisting stop intent for $clanker_id"
-    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-tmux-stop --no-pane-kill --if-present 2>&1); then
+    if ! stop_output=$(CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_cli" recovery stop "$clanker_id" --reason intentional-multiplexer-stop --no-pane-kill --if-present 2>&1); then
         printf 'Unable to persist stop intent for %s: %s\n' "$clanker_id" "$stop_output" >&2
         exit 1
     fi
@@ -34,8 +40,9 @@ if [[ "$kind" == "mark-session" ]]; then
     exit 0
 fi
 if [[ "$kind" == pane ]]; then
-    progress "Closing tmux pane"
-    exec tmux kill-pane -t "$target"
+    progress "Closing pane"
+    ch_mux_kill pane "$target"
+    exit
 fi
-progress "Closing tmux session"
-exec tmux kill-session -t "$target"
+progress "Closing session"
+ch_mux_kill session "$target"

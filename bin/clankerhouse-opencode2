@@ -1,6 +1,11 @@
 #!/bin/bash
 
 set -euo pipefail
+libexec_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../libexec" && pwd)
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-mux"
 
 session_id=""
 profile=""
@@ -34,9 +39,9 @@ if [[ -z "$session_id" ]]; then
         clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
         attest=(recovery attest "$CLANKER_ID" --session-id "$session_id")
         [[ -z "${CLANKER_RECOVERY_ATTEMPT:-}" ]] || attest+=(--attempt "$CLANKER_RECOVERY_ATTEMPT")
-        "$clankers_cli" "${attest[@]}" >/dev/null
+        CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_cli" "${attest[@]}" >/dev/null
     fi
-    [[ -z "${TMUX_PANE:-}" ]] || tmux set-option -p -t "$TMUX_PANE" @clankerhouse_harness_session_id "$session_id"
+    ch_mux_pane_claim harnessSessionId "$session_id"
 fi
 
 payload=$(jq -cn --arg text "$prompt" '{text: $text, resume: true}')

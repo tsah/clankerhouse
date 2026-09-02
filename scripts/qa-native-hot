@@ -6,7 +6,7 @@ binary="$root/native-client/target/release/clankerhouse-native"
 qa=$(mktemp -d "/tmp/qa-clankerhouse-native-hot-$(id -u)-XXXXXX")
 trap 'rm -rf "$qa"' EXIT INT TERM
 mkdir -m 700 "$qa/runtime" "$qa/home" "$qa/state" "$qa/data" "$qa/config"
-HOME="$qa/home" XDG_RUNTIME_DIR="$qa/runtime" XDG_STATE_HOME="$qa/state" XDG_DATA_HOME="$qa/data" XDG_CONFIG_HOME="$qa/config" BINARY="$binary" python3 - <<'PY'
+HOME="$qa/home" XDG_RUNTIME_DIR="$qa/runtime" XDG_STATE_HOME="$qa/state" XDG_DATA_HOME="$qa/data" XDG_CONFIG_HOME="$qa/config" HERDR_ENV= HERDR_PANE_ID= CLANKERHOUSE_MULTIPLEXER=tmux BINARY="$binary" python3 - <<'PY'
 import json, os, socket, subprocess, threading, time
 from pathlib import Path
 runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / f"clankerhouse-{os.getuid()}"
@@ -17,6 +17,30 @@ server.bind(str(socket_path))
 os.chmod(socket_path, 0o600)
 server.listen(8)
 stopped = False
+
+def session(name, recency, state, kind="clanker"):
+    target = {"type": "tmux_session", "session": name}
+    return {
+        "name": name,
+        "path": f"/{name}",
+        "recency": recency,
+        "target": target,
+        "details": [{
+            "kind": kind,
+            "state": state,
+            "target": target if kind == "incident" else {
+                "type": "tmux_window", "session": name, "windowId": "@1", "pane": "%1",
+            },
+        }],
+    }
+
+snapshot_sessions = [
+    session("old-working", 10, "working"),
+    session("failed", 20, "failed", "incident"),
+    session("ready", 30, "done"),
+    session("idle", 40, "idle"),
+    session("new-neutral", 50, "unknown", "window"),
+]
 
 def serve():
     while not stopped:
@@ -34,7 +58,7 @@ def serve():
                 request = json.loads(line.split(b"\n", 1)[0])
                 response = {"version": 1, "id": request["id"], "ok": True, "result": {
                     "version": 10, "revision": {"source": "hot-daemon", "sequence": 1},
-                    "generatedAt": int(time.time() * 1000), "sessions": []}}
+                    "generatedAt": int(time.time() * 1000), "sessions": snapshot_sessions}}
                 client.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
             except Exception:
                 pass
@@ -43,6 +67,14 @@ thread.start()
 env = dict(os.environ)
 env.pop("TMUX", None)
 command = [os.environ["BINARY"], "--check"]
+dump = subprocess.run(
+    [os.environ["BINARY"], "--dump-tree"], env=env, check=True, capture_output=True, text=True,
+)
+roots = [row["name"] for row in json.loads(dump.stdout)["rows"] if row["depth"] == 0]
+expected = ["new-neutral", "idle", "ready", "failed", "old-working"]
+if roots != expected:
+    raise SystemExit(f"native last-seen order was {roots}, expected {expected}")
+
 # Warm executable pages and allocator before measuring the hot Alt-K path.
 subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
 samples = []
@@ -56,5 +88,5 @@ samples.sort()
 p95 = samples[-2]
 if p95 >= 100:
     raise SystemExit(f"hot native first-frame p95 was {p95:.1f} ms (samples={samples})")
-print(f"Clankerhouse native hot-start QA passed: first-frame p95 {p95:.1f} ms (n={len(samples)}).")
+print(f"Clankerhouse native hot-start QA passed: last-seen ordering and first-frame p95 {p95:.1f} ms (n={len(samples)}).")
 PY

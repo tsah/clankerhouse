@@ -1,0 +1,314 @@
+#!/bin/bash
+# Standalone herdr Adapter scenario: an isolated herdr server, the Clankerhouse daemon
+# selected onto it, and the Multiplexer Interface exercised end to end (observe, spawn
+# with env, claims as tokens, absorption into the registry, lifecycle report keyed by
+# HERDR_PANE_ID, repository popup bootstrap, focus, kill). Never touches the user's
+# herdr config or tmux server.
+set -euo pipefail
+
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-herdr-$uid-$$"}")
+if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
+    printf 'Refusing unsafe Clankerhouse herdr QA root: %s\n' "$root" >&2
+    exit 1
+fi
+marker="$root.clankerhouse-qa-owned"
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+herdr_bin=${HERDR_BIN:-$(command -v herdr || true)}
+if [[ -z "$herdr_bin" ]]; then
+    if [[ -n "${HERDR_OPTIONAL:-}" ]]; then
+        printf 'herdr binary not found; skipping herdr Adapter scenario (set HERDR_BIN to run it).\n' >&2
+        exit 0
+    fi
+    printf 'herdr binary not found; set HERDR_BIN or install herdr\n' >&2
+    exit 1
+fi
+server_pid=""
+herdr_pid=""
+runtime="$root/runtime"
+state_home="$root/state"
+cfg="$root/cfg"
+work="$root/work"
+
+cleanup() {
+    if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+    if [[ -n "$herdr_pid" ]]; then
+        # Never use `herdr server stop` here: a mis-scoped client can resolve the live
+        # default socket. Signal only the exact isolated process group started below,
+        # after revalidating its endpoint so PID reuse cannot target another process.
+        if [[ -r "/proc/$herdr_pid/environ" ]] && tr '\0' '\n' <"/proc/$herdr_pid/environ" | grep -Fqx "HERDR_SOCKET_PATH=$herdr_sock"; then
+            kill -TERM -- "-$herdr_pid" 2>/dev/null || true
+        fi
+        wait "$herdr_pid" 2>/dev/null || true
+    fi
+    if [[ -f "$marker" ]]; then rm -rf "$root"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -e "$root" && ! -f "$marker" ]]; then
+    printf 'Refusing to replace unowned Clankerhouse herdr QA root: %s\n' "$root" >&2
+    exit 1
+fi
+rm -rf "$root"
+mkdir -p "$runtime" "$state_home" "$cfg" "$work" "$root/home" "$root/data"
+touch "$marker"
+git -C "$work" init -q -b main
+git -C "$work" -c user.email=qa@example.com -c user.name=qa commit -q --allow-empty -m init
+
+# Herdr 0.8 resolves its default server independently of XDG_CONFIG_HOME. Pin every
+# server endpoint explicitly and run it in a private process group; otherwise a failed
+# isolated start followed by `server stop` can address the user's live default server.
+export XDG_CONFIG_HOME="$cfg"
+export HERDR_CONFIG_PATH="$cfg/herdr/config.toml"
+export HERDR_SOCKET_PATH="$cfg/herdr/herdr.sock"
+export HERDR_CLIENT_SOCKET_PATH="$cfg/herdr/herdr-client.sock"
+export HERDR_STARTUP_CWD="$root/home"
+mkdir -p "$cfg/herdr"
+herdr_sock=$HERDR_SOCKET_PATH
+live_herdr_sock="$HOME/.config/herdr/herdr.sock"
+[[ "$herdr_sock" != "$live_herdr_sock" ]] || { printf 'Refusing live Herdr socket in standalone QA: %s\n' "$herdr_sock" >&2; exit 1; }
+setsid "$herdr_bin" server >"$root/herdr.log" 2>&1 &
+herdr_pid=$!
+for _ in {1..200}; do
+    [[ -S "$herdr_sock" ]] && break
+    kill -0 "$herdr_pid" 2>/dev/null || break
+    sleep 0.05
+done
+if [[ ! -S "$herdr_sock" ]]; then
+    printf 'isolated herdr server did not start at %s:\n' "$herdr_sock" >&2
+    cat "$root/herdr.log" >&2
+    exit 1
+fi
+if [[ -S "$live_herdr_sock" && "$herdr_sock" -ef "$live_herdr_sock" ]]; then
+    printf 'Refusing isolated Herdr socket alias to live server: %s\n' "$herdr_sock" >&2
+    exit 1
+fi
+
+clankers="$repo/bin/clankers"
+probe_bin="$root/probe-bin"
+tmux_log="$root/forbidden-tmux.log"
+mkdir -p "$probe_bin"
+cat >"$probe_bin/tmux" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$TMUX_LOG"
+exit 97
+SH
+chmod +x "$probe_bin/tmux"
+common_env=(
+    env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data"
+    XDG_CONFIG_HOME="$cfg" HERDR_ENV=1 HERDR_PANE_ID=qa:caller CLANKERHOUSE_INSTANCE=herdr CLANKERHOUSE_CLANKERS="$clankers"
+    PATH="$probe_bin:$PATH" TMUX_LOG="$tmux_log"
+    CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+    CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_PROCESS_OWNER=disabled
+)
+step() { printf '\n==> %s\n' "$1"; }
+fail() { printf 'FAIL: %s\n' "$1" >&2; [[ -f "$root/server.log" ]] && { printf -- '--- daemon log\n' >&2; tail -30 "$root/server.log" >&2; }; exit 1; }
+
+step "Adapter selection and capabilities"
+kind=$("${common_env[@]}" "$clankers" mux kind)
+[[ "$kind" == herdr ]] || fail "expected implicitly inferred herdr adapter, got $kind"
+[[ "$("${common_env[@]}" CLANKERHOUSE_MULTIPLEXER=tmux "$clankers" mux kind)" == tmux ]] || fail "explicit tmux override did not win"
+"${common_env[@]}" "$clankers" mux capabilities | grep -q '"durableIds":true' || fail "herdr capabilities missing durableIds"
+[[ "$("${common_env[@]}" "$clankers" mux pane-address-env)" == HERDR_PANE_ID ]] || fail "pane address env"
+
+step "Spawn a workshop session with an env-injected argv window"
+spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-workshop --name main --cwd "$work")
+session_id=$(printf '%s' "$spawned" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
+[[ "$session_id" == w* ]] || fail "unexpected session id $spawned"
+window=$("${common_env[@]}" "$clankers" mux spawn --session "$session_id" --name pi --cwd "$work" --env CLANKER_ID=clanker-qa --env CLANKERHOUSE_CLANKERS="$clankers" -- sh -c 'echo "PANE=$HERDR_PANE_ID CID=$CLANKER_ID MUX=$CLANKERHOUSE_MULTIPLEXER INSTANCE=$CLANKERHOUSE_INSTANCE" > "$0"; sleep 120' "$root/pane-env.txt")
+pane_id=$(printf '%s' "$window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])')
+for _ in {1..100}; do [[ -s "$root/pane-env.txt" ]] && break; sleep 0.05; done
+grep -q "PANE=$pane_id CID=clanker-qa MUX=herdr INSTANCE=herdr" "$root/pane-env.txt" || fail "pane env not injected: $(cat "$root/pane-env.txt" 2>/dev/null)"
+
+step "Claims round-trip as herdr tokens"
+"${common_env[@]}" "$clankers" mux claim --pane "$pane_id" clankerId clanker-qa
+"${common_env[@]}" "$clankers" mux claim --pane "$pane_id" harness pi
+"${common_env[@]}" "$clankers" mux claim --session "$session_id" worktreePath "$work"
+[[ "$("${common_env[@]}" "$clankers" mux read-claim --pane "$pane_id" clankerId)" == clanker-qa ]] || fail "pane claim did not round-trip"
+observed=$("${common_env[@]}" "$clankers" mux observe)
+printf '%s' "$observed" | python3 -c '
+import json,sys
+snap=json.load(sys.stdin)
+assert snap["kind"]=="herdr", snap["kind"]
+s=[x for x in snap["sessions"] if x["id"]==sys.argv[1]][0]
+assert s["worktreePath"]==sys.argv[2], s
+panes=[p for w in s["windows"] for p in w["panes"]]
+p=[p for p in panes if p["id"]==sys.argv[3]][0]
+assert p["clankerId"]=="clanker-qa" and p["harness"]=="pi", p
+assert p["pid"] and p["command"]=="sleep", p
+assert p["processInfo"]["foregroundProcesses"][-1]["name"]=="sleep", p["processInfo"]
+' "$session_id" "$work" "$pane_id" || fail "observe did not reflect claims and process info"
+
+step "Clanker API discovers the pane through the Adapter"
+"${common_env[@]}" "$clankers" list | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+assert any(r["id"]=="clanker-qa" and r["harness"]=="pi" and r["pane"]==sys.argv[1] for r in rows), rows
+' "$pane_id" || fail "clankers list did not discover the clanker"
+
+step "Herdr runtime agent status is projected without a lifecycle report"
+python3 - "$herdr_sock" "$pane_id" <<'PY' || fail "could not report isolated Herdr agent status"
+import json,socket,sys
+sock=socket.socket(socket.AF_UNIX)
+sock.connect(sys.argv[1])
+sock.sendall((json.dumps({"id":"qa-agent","method":"pane.report_agent","params":{"pane_id":sys.argv[2],"source":"qa","agent":"pi","state":"working","seq":1}})+"\n").encode())
+data=b""
+while b"\n" not in data: data += sock.recv(65536)
+reply=json.loads(data.split(b"\n",1)[0])
+assert "error" not in reply, reply
+PY
+
+step "Daemon projects the herdr topology and absorbs the workshop"
+"${common_env[@]}" bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
+server_pid=$!
+daemon_socket="$runtime/clankerhouse-$uid-herdr/daemon.sock"
+cache="$runtime/clankerhouse-$uid-herdr/state.json"
+for _ in {1..600}; do
+    [[ -S "$daemon_socket" && -s "$cache" ]] && break
+    kill -0 "$server_pid" 2>/dev/null || { printf 'daemon exited:\n' >&2; cat "$root/server.log" >&2; exit 1; }
+    sleep 0.05
+done
+[[ -S "$daemon_socket" && -s "$cache" ]] || { printf 'daemon did not publish:\n' >&2; cat "$root/server.log" >&2; exit 1; }
+python3 - "$cache" "$session_id" "$pane_id" <<'PY' || fail "projection did not contain the herdr workshop and clanker"
+import json,sys
+snap=json.load(open(sys.argv[1]))
+sessions=snap["sessions"] if "sessions" in snap else snap["snapshot"]["sessions"]
+ws=[s for s in sessions if s.get("target",{}).get("location",{}).get("nativeSessionId")==sys.argv[2]]
+assert ws, [s.get("name") for s in sessions]
+row=ws[0]
+assert row["target"]["location"]["kind"]=="herdr", row["target"]
+clankers=[d for d in row["details"] if d.get("kind")=="clanker" and d.get("clankerId")=="clanker-qa"]
+assert clankers, row["details"]
+assert clankers[0]["state"]=="working", clankers[0]
+assert clankers[0]["observation"]["source"]=="runtime", clankers[0]
+PY
+
+step "Lifecycle report keyed by HERDR_PANE_ID is accepted by the running daemon"
+"${common_env[@]}" HERDR_PANE_ID="$pane_id" CLANKER_ID=clanker-qa bash "$repo/bin/clankerhouse-clanker-state-report" pi working </dev/null
+report="$runtime/clankerhouse-$uid-herdr/clanker-state/$(printf '%s' "$pane_id" | sed 's/[^A-Za-z0-9_.%-]/_/g').json"
+for _ in {1..100}; do [[ -s "$report" ]] && break; sleep 0.05; done
+[[ -s "$report" ]] || fail "state report not written at $report"
+grep -q '"state": *"working"' "$report" || grep -q '"state":"working"' "$report" || fail "state report content: $(cat "$report")"
+"${common_env[@]}" "$clankers" status clanker-qa | grep -q '"state":"working"' || fail "clanker status did not read the report"
+
+step "Herdr launcher opens the native client on the Herdr instance"
+native_tree=$("${common_env[@]}" HERDR_SOCKET_PATH="$herdr_sock" timeout 15s bash "$repo/bin/clankerhouse-herdr" --dump-tree) || fail "Herdr launcher did not produce the native tree"
+printf '%s' "$native_tree" >"$root/native-tree.json"
+python3 - "$root/native-tree.json" "$session_id" <<'PY' || fail "native client did not read the Herdr daemon namespace"
+import json,sys
+snap=json.load(open(sys.argv[1]))
+session_id=sys.argv[2]
+assert any(row.get("target",{}).get("location",{}).get("kind")=="herdr"
+           and row.get("target",{}).get("location",{}).get("nativeSessionId")==session_id
+           for row in snap["rows"]), snap
+PY
+
+step "Fresh repository popup regenerates its missing identity cache"
+repository_cache="$runtime/clankerhouse-$uid-herdr/repositories.json"
+rm -f "$repository_cache"
+repository_capture="$root/repository-popup.typescript"
+set +e
+"${common_env[@]}" HERDR_SOCKET_PATH="$herdr_sock" timeout -s INT 3s script -q -e \
+    -c "stty rows 34 cols 73; exec bash '$repo/bin/clankerhouse-herdr' --repo" \
+    "$repository_capture" >/dev/null 2>&1
+popup_status=$?
+set -e
+[[ "$popup_status" == 0 || "$popup_status" == 124 || "$popup_status" == 130 ]] \
+    || fail "repository popup exited unexpectedly with $popup_status"
+[[ -s "$repository_cache" ]] || fail "repository popup did not regenerate repositories.json"
+python3 - "$repository_cache" "$work" "$repository_capture" <<'PY' \
+    || fail "repository popup cache or rendered rows were invalid"
+import json, os, subprocess, sys
+cache_path, work, capture_path = sys.argv[1:]
+cache = json.load(open(cache_path))
+work = os.path.realpath(work)
+expected = subprocess.run(
+    ["git", "-C", work, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+assert cache["version"] == 1, cache
+assert cache["entries"][work]["commonDir"] == expected, cache["entries"].get(work)
+capture = open(capture_path, "rb").read()
+assert b"Open or create branch" in capture, capture[-1000:]
+assert os.path.basename(work).encode() in capture, capture[-1000:]
+PY
+
+step "Absorb the workshop through the workflow path and verify durable claims"
+ensured=$("${common_env[@]}" CLANKERHOUSE_DAEMON_INTERNAL=1 "$clankers" workshop ensure --cwd "$work" 2>"$root/ensure.err") || { cat "$root/ensure.err" >&2; fail "workshop ensure failed"; }
+cat "$root/ensure.err" >&2 || true
+[[ "$ensured" == qa-workshop ]] || fail "workshop ensure returned '$ensured'"
+"${common_env[@]}" "$clankers" diagnose --json >"$root/diagnose.json" || true
+"${common_env[@]}" "$clankers" mux observe | python3 -c '
+import json,sys
+snap=json.load(sys.stdin)
+s=[x for x in snap["sessions"] if x["id"]==sys.argv[1]][0]
+assert s["resourceId"] and s["workshopId"], s
+' "$session_id" || fail "absorption did not stamp session claims"
+
+step "Automatic Workshop parent capture follows the invoking pane, not global Herdr focus"
+focused_elsewhere="$root/focused-elsewhere"
+mkdir -p "$focused_elsewhere"
+focused_spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-focused-elsewhere --name main --cwd "$focused_elsewhere")
+focused_session_id=$(printf '%s' "$focused_spawned" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
+"${common_env[@]}" "$clankers" mux focus --session "$focused_session_id"
+cat >"$root/resolve-parent.ts" <<TS
+import { resolveWorkshopParent } from "file://$repo/src/workflow.ts"
+console.log(JSON.stringify(await resolveWorkshopParent({}, "strict")))
+TS
+parent_result=$(cd "$work" && "${common_env[@]}" HERDR_PANE_ID="$pane_id" bun "$root/resolve-parent.ts") \
+    || fail "automatic parent capture failed from the invoking Herdr pane"
+parent_workshop_id=$(printf '%s' "$parent_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["parentWorkshopId"])')
+"${common_env[@]}" "$clankers" mux observe | python3 -c '
+import json,os,sys
+snap=json.load(sys.stdin)
+origin=[s for s in snap["sessions"] if s["id"]==sys.argv[1]][0]
+focused=[s for s in snap["sessions"] if s["id"]==sys.argv[2]][0]
+assert origin["workshopId"]==sys.argv[3], origin
+assert os.path.realpath(origin["worktreePath"])==os.path.realpath(sys.argv[4]), origin
+assert not focused.get("workshopId") and not focused.get("worktreePath"), focused
+' "$session_id" "$focused_session_id" "$parent_workshop_id" "$work" \
+    || fail "automatic parent capture corrupted the globally focused Herdr workspace"
+"${common_env[@]}" "$clankers" mux kill --session "$focused_session_id"
+
+step "Focus and kill through the Adapter"
+"${common_env[@]}" "$clankers" mux focus --session "$session_id" --window "$(printf '%s' "$window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeWindowId"])')" --pane "$pane_id"
+"${common_env[@]}" "$clankers" mux current-location | grep -q "\"nativePaneId\":\"$pane_id\"" || fail "focus did not move the current location"
+"${common_env[@]}" "$clankers" mux kill --pane "$pane_id"
+sleep 0.5
+"${common_env[@]}" "$clankers" mux observe | python3 -c '
+import json,sys
+snap=json.load(sys.stdin)
+panes=[p["id"] for s in snap["sessions"] for w in s["windows"] for p in w["panes"]]
+assert sys.argv[1] not in panes, panes
+' "$pane_id" || fail "pane survived kill"
+
+step "Keybinding installer is idempotent and sets safe recovery"
+herdr_cfg="$cfg/herdr/config.toml"
+"${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null || fail "keybinding install failed"
+"${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null
+grep -q 'key = "alt+k"' "$herdr_cfg" || fail "alt+k binding missing"
+[[ "$(grep -c 'alt+k' "$herdr_cfg")" == 1 ]] || fail "keybinding installer not idempotent"
+grep -q 'resume_agents_on_restore = false' "$herdr_cfg" || fail "safe-recovery flag not set"
+
+step "Herdr launcher ensures a namespaced daemon separate from tmux"
+# The existing daemon (started above with --server) already owns the herdr instance; the
+# launcher's --ensure-server must find it healthy under the -herdr runtime dir.
+bun_log="$root/hot-bun.log"
+real_bun=$(command -v bun)
+mkdir -p "$probe_bin"
+cat >"$probe_bin/bun" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$BUN_LOG"
+exec "$REAL_BUN" "$@"
+SH
+chmod +x "$probe_bin/bun"
+"${common_env[@]}" HERDR_SOCKET_PATH="$herdr_sock" PATH="$probe_bin:$PATH" REAL_BUN="$real_bun" BUN_LOG="$bun_log" bash "$repo/bin/clankerhouse-herdr" --ensure-server || fail "launcher could not confirm the herdr daemon"
+[[ ! -e "$bun_log" ]] || fail "hot Herdr launcher started Bun: $(cat "$bun_log")"
+[[ -S "$daemon_socket" ]] || fail "herdr daemon socket is not under the -herdr runtime dir"
+[[ ! -S "$runtime/clankerhouse-$uid/daemon.sock" ]] || fail "herdr daemon leaked into the tmux runtime dir"
+
+step "Daemon log is free of adapter failures"
+if grep -Ei 'change stream stopped|Recovery controller stopped|Unsupported multiplexer' "$root/server.log"; then fail "daemon reported adapter failures"; fi
+[[ ! -e "$tmux_log" ]] || fail "implicit Herdr commands invoked tmux: $(cat "$tmux_log")"
+
+printf '\nherdr Adapter scenario passed.\n'

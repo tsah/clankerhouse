@@ -20,12 +20,12 @@ The scripts must create their own `/tmp/qa-clanker-*` roots, mark ownership befo
 
 ## API contract
 
-1. `clankers list [--cwd PATH]` discovers panes with `@dotfiles_harness` and assigns or reads one stable `@clankerhouse_clanker_id`.
-2. Renaming a disposable tmux session does not change its clanker IDs.
+1. `clankers list [--cwd PATH]` discovers harness-bearing panes through the Multiplexer Interface and assigns or reads one stable Clanker ID claim.
+2. Renaming a disposable Multiplexer session does not change its clanker IDs.
 3. Duplicate IDs fail as ambiguous; unknown IDs fail as not found.
 4. `status` and `capabilities` return harness, workshop location, lifecycle generations, and verified native transport capabilities.
 5. Pi `send`, `wait`, and `result` use its mode-0600 Unix socket and clanker-state reports. They never mutate or capture terminal content.
-6. Claude and Codex report lifecycle state but reject unavailable send/result operations. OpenCode remains monitor-only.
+6. Under Herdr, Claude advertises immediate send through the Adapter's semantic `agentPrompt` Capability. Clankerhouse revalidates the exact pane claim before Herdr validates the recognized foreground agent; blocked prompts fail without input. Claude under tmux and Codex on either Adapter reject unavailable send/result operations. OpenCode remains monitor-only.
 7. Timeout is nondestructive and leaves the clanker and workshop intact.
 8. Reports contain only harness/clanker/native-session identity, recovery attempt, pane, lifecycle, state, and result fields under `clanker-state/`.
 9. Revisioned snapshots are committed before publication over the mode-`0600` daemon socket; socket failure leaves version-10 JSON polling operational.
@@ -44,4 +44,4 @@ Use a temporary Git repository and temporary `XDG_STATE_HOME`:
 
 ## Manual isolated smoke check
 
-Inside a disposable tmux server, launch one Pi clanker with `CLANKER_ID=clanker-qa-manual`, verify `clankers list`, send a harmless prompt through `clankers send`, wait for settlement, and inspect `clankers result`. Destroy only the disposable tmux server and temporary worktrees afterward.
+Inside a disposable tmux server, launch one Pi clanker with `CLANKER_ID=clanker-qa-manual`, verify `clankers list`, send a harmless prompt through `clankers send`, wait for settlement, and inspect `clankers result`. In a disposable Herdr workspace, launch one Claude clanker, confirm `send` is `multiplexer-prompt`, submit an exact marker, and observe that marker in Claude's response and lifecycle generation. Destroy only the disposable runtime resources and temporary worktrees afterward.

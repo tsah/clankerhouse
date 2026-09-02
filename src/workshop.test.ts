@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, 
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, detachWorkshopFromParent, identifyWorkshopSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, workshopDetails, workshopTree } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, detachWorkshopFromParent, identifyWorkshopSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopTree } from "./workshop"
 
 const roots: string[] = []
 afterEach(() => {
@@ -190,6 +190,52 @@ describe("workshop lineage store", () => {
     expect(attachWorkshopToParent(child.workshopId, main.workshopId, dbPath).revision).toBe(reattached.revision)
     expect(() => detachWorkshopFromParent("missing-workshop", dbPath)).toThrow(/does not exist/)
     expect(() => attachWorkshopToParent("missing-workshop", main.workshopId, dbPath)).toThrow(/does not exist/)
+  })
+
+  test("splices children to the available parent when a middle Workshop is deleted", () => {
+    const { dbPath, workshops } = fixture()
+    const main = registerWorkshop(workshops.main, { dbPath })
+    const child = registerWorkshop(workshops.child, { dbPath, parentWorkshopId: main.workshopId })
+    const grandchild = registerWorkshop(workshops.grandchild, { dbPath, parentWorkshopId: child.workshopId })
+    rmSync(workshops.child.path, { recursive: true, force: true })
+
+    const spliced = spliceDeletedWorkshopFromLineage(child.workshopId, dbPath)
+
+    expect(spliced).toEqual({ workshopId: child.workshopId, parentWorkshopId: main.workshopId, childWorkshopIds: [grandchild.workshopId] })
+    expect(workshopDetails(workshops.child.path, { dbPath })).toBeUndefined()
+    expect(workshopDetails(workshops.grandchild.path, { dbPath })?.parentWorkshopId).toBe(main.workshopId)
+    expect(manifest(workshops.grandchild.path).parentWorkshopId).toBe(main.workshopId)
+    expect(workshopTree(workshops.main.path, dbPath)[0]?.children.map((workshop) => workshop.workshopId)).toEqual([grandchild.workshopId])
+    expect(spliceDeletedWorkshopFromLineage(child.workshopId, dbPath)).toBeUndefined()
+  })
+
+  test("validates captured lineage before mutating a deleted Workshop", () => {
+    const { dbPath, workshops } = fixture()
+    const main = registerWorkshop(workshops.main, { dbPath })
+    const child = registerWorkshop(workshops.child, { dbPath, parentWorkshopId: main.workshopId })
+    const grandchild = registerWorkshop(workshops.grandchild, { dbPath, parentWorkshopId: child.workshopId })
+    rmSync(workshops.child.path, { recursive: true, force: true })
+    expect(workshopDetails(workshops.child.path, { dbPath })?.children.map((record) => record.workshopId)).toEqual([grandchild.workshopId])
+
+    expect(() => spliceDeletedWorkshopFromLineage(child.workshopId, dbPath, {
+      parentWorkshopId: null,
+      revision: child.revision,
+      children: [{ workshopId: grandchild.workshopId, revision: grandchild.revision }],
+    })).toThrow(/parent changed/)
+    expect(workshopForId(child.workshopId, dbPath)?.workshopId).toBe(child.workshopId)
+    expect(workshopForId(grandchild.workshopId, dbPath)?.parentWorkshopId).toBe(child.workshopId)
+  })
+
+  test("splices a stale missing child without trying to rewrite its absent manifest", () => {
+    const { dbPath, workshops } = fixture()
+    const main = registerWorkshop(workshops.main, { dbPath })
+    const child = registerWorkshop(workshops.child, { dbPath, parentWorkshopId: main.workshopId })
+    const grandchild = registerWorkshop(workshops.grandchild, { dbPath, parentWorkshopId: child.workshopId })
+    rmSync(workshops.child.path, { recursive: true, force: true })
+    rmSync(workshops.grandchild.path, { recursive: true, force: true })
+
+    expect(spliceDeletedWorkshopFromLineage(child.workshopId, dbPath)?.childWorkshopIds).toEqual([grandchild.workshopId])
+    expect(workshopForId(grandchild.workshopId, dbPath)?.parentWorkshopId).toBe(main.workshopId)
   })
 
   test("writes a clean ignored manifest atomically and refuses unsafe conflicts", () => {

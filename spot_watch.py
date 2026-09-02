@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shlex
 import signal
 import subprocess
@@ -61,6 +62,8 @@ class Config:
     watch_rebalance: bool = False
     checkpoint_prefix: tuple[str, ...] = ("clankers", "recovery", "checkpoint")
     state_home: pathlib.Path = pathlib.Path.home() / ".local/state"
+    multiplexer: str = "tmux"
+    instance_suffix: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
@@ -86,6 +89,18 @@ class Config:
                         break
         env = resolved
         home = pathlib.Path(env.get("HOME", str(pathlib.Path.home())))
+        requested_multiplexer = env.get("CLANKERHOUSE_MULTIPLEXER", "").strip().lower()
+        if requested_multiplexer and requested_multiplexer not in ("tmux", "herdr"):
+            raise ValueError(f"unsupported CLANKERHOUSE_MULTIPLEXER: {requested_multiplexer} (expected tmux or herdr)")
+        multiplexer = requested_multiplexer or (
+            "herdr" if env.get("HERDR_ENV", "").strip() == "1" and env.get("HERDR_PANE_ID", "").strip() else "tmux"
+        )
+        instance = env.get("CLANKERHOUSE_INSTANCE", "").strip()
+        if instance and (instance in (".", "..") or re.fullmatch(r"[A-Za-z0-9._-]+", instance) is None):
+            raise ValueError(f"invalid CLANKERHOUSE_INSTANCE: {instance}")
+        instance_suffix = (
+            "" if instance in ("default", "tmux") else f"-{instance}"
+        ) if instance else ("" if multiplexer == "tmux" else f"-{multiplexer}")
         endpoint = env.get("CLANKERHOUSE_SPOT_ENDPOINT", "http://169.254.169.254").rstrip("/")
         parsed = urllib.parse.urlsplit(endpoint)
         if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.query or parsed.fragment:
@@ -102,11 +117,13 @@ class Config:
             watch_rebalance=_env_bool(env, "CLANKERHOUSE_SPOT_WATCH_REBALANCE"),
             checkpoint_prefix=tuple(command),
             state_home=pathlib.Path(env.get("XDG_STATE_HOME", str(home / ".local/state"))),
+            multiplexer=multiplexer,
+            instance_suffix=instance_suffix,
         )
 
     @property
     def state_dir(self) -> pathlib.Path:
-        return self.state_home / "clankerhouse"
+        return self.state_home / f"clankerhouse{self.instance_suffix}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -276,7 +293,8 @@ class SpotWatcher:
             # across overlapping services and process restarts.
             self._atomic_write(marker_path, marker)
             command = [*self.config.checkpoint_prefix, "--reason", notice.kind, "--deadline", notice.deadline]
-            result = self.run_command(command, check=False)
+            child_env = {**os.environ, "CLANKERHOUSE_MULTIPLEXER": self.config.multiplexer}
+            result = self.run_command(command, check=False, env=child_env)
             marker["checkpoint"] = "succeeded" if result.returncode == 0 else "failed"
             marker["checkpointExitCode"] = result.returncode
             self._atomic_write(marker_path, marker)

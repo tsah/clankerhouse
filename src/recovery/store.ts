@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { instanceSlug } from "../paths"
 import { chmodSync, existsSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import {
@@ -20,8 +21,8 @@ import {
   type RuntimeEpochs,
 } from "./model"
 
-export const recoveryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state")) =>
-  join(stateHome, "clankerhouse", "recovery.sqlite3")
+export const recoveryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state"), env: Record<string, string | undefined> = Bun.env) =>
+  join(stateHome, `clankerhouse${instanceSlug(env)}`, "recovery.sqlite3")
 
 interface DesiredRow {
   clanker_id: string

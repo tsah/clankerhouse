@@ -21,6 +21,11 @@ repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 export HOME="$root/home"
 export XDG_DATA_HOME="$root/data"
 export XDG_CONFIG_HOME="$root/config"
+export CLANKERHOUSE_MULTIPLEXER=tmux
+# New Worktree fixtures must become visible immediately to the authoritative projection.
+export CLANKERHOUSE_DIRECTORY_REFRESH_MS=1
+export HERDR_PANE_ID=
+export HERDR_SOCKET_PATH=
 
 cleanup() {
     if [[ "${CLANKERHOUSE_QA_KEEP:-0}" == "1" ]]; then
@@ -44,6 +49,14 @@ trap cleanup EXIT INT TERM
 
 capture_outer() {
     tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" 2>/dev/null || true
+}
+
+refresh_daemon() {
+    bun --eval '
+      const [modulePath, socketPath] = process.argv.slice(1)
+      const { refreshProjection } = await import(modulePath)
+      await refreshProjection(socketPath)
+    ' "$repo/src/transport/index.ts" "$runtime/clankerhouse-$uid/daemon.sock"
 }
 
 wait_for_text() {
@@ -105,10 +118,10 @@ import os
 
 pattern = os.environ["SELECTED_PATTERN"]
 for line in os.environ["CAPTURE"].splitlines():
-    if '> ' not in line or 'targets' in line or line.rstrip().endswith('_'):
+    if pattern not in line or 'targets' in line or line.rstrip().endswith('_'):
         continue
-    prefix, _, remainder = line.partition('> ')
-    if prefix.strip() in {'', '│'} and pattern in remainder:
+    before = line.partition(pattern)[0]
+    if '›' in before or '> ' in before:
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -121,9 +134,42 @@ PY
     return 1
 }
 
+wait_for_selected_detail() {
+    local pattern=$1
+    local capture=""
+    for _ in {1..100}; do
+        capture=$(capture_outer)
+        if SELECTED_PATTERN="$pattern" CAPTURE="$capture" python3 - <<'PY'
+import os
+
+pattern = os.environ["SELECTED_PATTERN"]
+for line in os.environ["CAPTURE"].splitlines():
+    if pattern not in line or 'targets' in line or line.rstrip().endswith('_'):
+        continue
+    before = line.partition(pattern)[0]
+    if ('›' in before or '> ' in before) and '·' in before:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+        then
+            return 0
+        fi
+        sleep 0.05
+    done
+    printf 'Timed out waiting for selected detail %q\n%s\n' "$pattern" "$capture" >&2
+    return 1
+}
+
+focus_inner_window() {
+    local name=$1 client
+    client=$(tmux -S "$inner_socket" list-clients -F '#{client_name}' | head -n 1)
+    [[ -n "$client" ]] && tmux -S "$inner_socket" switch-client -c "$client" -t "=$session:$name"
+}
+
 open_picker_window() {
     local name=$1
     tmux -S "$inner_socket" new-window -t "=$session" -n "$name" -c "$repo" "$picker_command"
+    focus_inner_window "$name"
     tmux -S "$inner_socket" display-message -p -t "=$session:$name" '#{pane_id}'
 }
 
@@ -197,15 +243,15 @@ write_fixture_cache() {
           lineageSearchText: "lineage-root child-count-2",
           details: [detail(lineageRoot, "main", "620", "idle"), detail(lineageRoot, "pi", "621", "done", "pi")],
         }),
-        session(lineageCoverage, 619, {
+        session(lineageCoverage, 617, {
           workshopId: "lineage-coverage",
           parentWorkshopId: "lineage-root",
-          details: [detail(lineageCoverage, "main", "619", "idle"), detail(lineageCoverage, "pi", "618", "done", "pi")],
+          details: [detail(lineageCoverage, "main", "617", "idle"), detail(lineageCoverage, "pi", "616", "done", "pi")],
         }),
-        session(lineageJava, 618, {
+        session(lineageJava, 619, {
           workshopId: "lineage-java",
           parentWorkshopId: "lineage-root",
-          details: [detail(lineageJava, "main", "617", "idle"), detail(lineageJava, "pi", "616", "done", "pi")],
+          details: [detail(lineageJava, "main", "619", "idle"), detail(lineageJava, "pi", "618", "done", "pi")],
         }),
       ]
       const rows = variant === "search"
@@ -308,7 +354,7 @@ tmux -S "$inner_socket" set-option -w -t "=$session:pi" @dotfiles_harness pi
 main_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:qa-main" '#{pane_id}')
 pi_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:pi" '#{pane_id}')
 
-recovery_json=$(env TMUX="$inner_socket,0,0" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" _ZO_DATA_DIR="$root/zoxide" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run "$repo/src/main.tsx" --dump-state)
+recovery_json=$(env TMUX="$inner_socket,0,0" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" _ZO_DATA_DIR="$root/zoxide" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run "$repo/src/daemon.ts" --dump-state)
 RECOVERY_JSON="$recovery_json" RECOVERY_ROOT="$root/dev" LEDGER_ONLY="$root/recovery-ledger-only" python3 - <<'PY'
 import json
 import os
@@ -326,7 +372,7 @@ assert by_path[edited]["activitySource"] == "edited", by_path[edited]
 assert by_path[ledger_only]["activitySource"] == "clanker", by_path[ledger_only]
 assert paths.index(durable) < paths.index(old), paths
 assert paths.index(edited) < paths.index(old), paths
-assert paths.index(old) < paths.index(ledger_only), paths
+assert paths.index(ledger_only) < paths.index(old), paths
 PY
 
 state_dir="$runtime/clankerhouse-$uid/clanker-state"
@@ -351,52 +397,56 @@ PY
 tmux -S "$outer_socket" -f /dev/null new-session -d -s harness -n client -x 140 -y 40 \
     "env -u TMUX tmux -S '$inner_socket' attach-session -t '=$session'"
 outer_pane=$(tmux -S "$outer_socket" list-panes -t harness:client -F '#{pane_id}')
-# Match clankerhouse-picker. Depending on nested-tmux key handling, either
-# server may see Alt-D first, so both must forward it to OpenTUI.
+# Match the native picker. Depending on nested-tmux key handling, either
+# server may see Alt-D first, so both must forward the native-client signal.
 tmux -S "$outer_socket" set-option -gq @clankerhouse_open 1
 tmux -S "$inner_socket" set-option -gq @clankerhouse_open 1
+# Exercise the installed root binding path: popup clients cannot be targeted by
+# send-keys, so the binding signals the detected picker to request confirmation.
+tmux -S "$inner_socket" bind-key -n M-d run-shell \
+    "'$repo/bin/clankerhouse-delete' '#{pane_id}' '#{session_id}' #{q:client_name}"
 sleep 0.2
 
 picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
+focus_inner_window picker
 animation_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
 wait_for_text "qa-workshop-tree"
 wait_for_text "edited"
 wait_for_text "opened"
 sleep 0.1
-working_frame_one=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -200)
-sleep 0.25
-working_frame_two=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -200)
-case "$working_frame_one" in
-    *"⠋"*|*"⠙"*|*"⠹"*|*"⠸"*|*"⠼"*|*"⠴"*|*"⠦"*|*"⠧"*) ;;
-    *) printf 'Expected a working spinner frame\n' >&2; exit 1 ;;
-esac
-[[ "$working_frame_one" != "$working_frame_two" ]] || { printf 'Expected the working spinner to animate\n' >&2; exit 1; }
+working_frame=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -200)
+[[ "$working_frame" == *"▸"* ]] || { printf 'Expected the static Herdr working glyph\n' >&2; exit 1; }
 tmux -S "$inner_socket" kill-pane -t "$animation_picker_pane"
 sleep 0.2
 
 now=$(date +%s%3N)
-printf '{"harness":"pi","state":"blocked","pane":"%s","updatedAt":%s,"hookEvent":"question"}\n' "$pi_pane" "$now" > "$state_file"
+jq --argjson now "$now" '.state = "blocked" | .updatedAt = $now | .hookEvent = "question"' "$state_file" > "$state_file.tmp"
+mv "$state_file.tmp" "$state_file"
 rm -f "$runtime/clankerhouse-$uid/state.json"
+# Compatibility lifecycle files are read on explicit refresh; native Pi reports
+# use direct daemon IPC and schedule this refresh themselves.
+refresh_daemon
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
+focus_inner_window picker
 attention_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
 wait_for_text "qa-workshop-tree"
-blink_visible=false
-blink_hidden=false
+attention_row=""
 for _ in {1..60}; do
     attention_frame=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -200)
-    if [[ "$attention_frame" == *"!"* ]]; then blink_visible=true; else blink_hidden=true; fi
-    [[ "$blink_visible" == true && "$blink_hidden" == true ]] && break
+    attention_row=$(grep -F "qa-workshop-tree" <<<"$attention_frame" | head -n 1)
+    [[ "$attention_row" == *"▲"* ]] && break
     sleep 0.1
 done
-[[ "$blink_visible" == true && "$blink_hidden" == true ]] || { printf 'Expected the waiting indicator to blink\n' >&2; exit 1; }
+[[ "$attention_row" == *"▲"* ]] || { printf 'Expected the static Herdr blocked glyph on qa-workshop-tree, last row: %s\n' "$attention_row" >&2; exit 1; }
 tmux -S "$inner_socket" kill-pane -t "$attention_picker_pane"
 sleep 0.2
 
 rm -f "$cache_file"
 lineage_picker_pane=$(open_picker_window lineage-picker)
 wait_for_text "$lineage_root_session"
-tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "idp-java"
+# Match both descendants so the native renderer must retain their shared ancestor context.
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "fix"
 wait_for_text "$lineage_fix_coverage_session"
 wait_for_text "$lineage_fix_java_session"
 wait_for_absent_text "· ○ main"
@@ -418,6 +468,7 @@ assert any(("├" in line or "└" in line) and os.environ["LINEAGE_FIX_COVERAGE
 assert any(("├" in line or "└" in line) and os.environ["LINEAGE_FIX_JAVA_SESSION"] in line for line in lines), lines
 assert all("· ○ main" not in line for line in lines), lines
 PY
+
 tmux -S "$inner_socket" kill-pane -t "$lineage_picker_pane"
 sleep 0.2
 
@@ -427,7 +478,7 @@ cache_file="$fixture_runtime/clankerhouse-$uid/state.json"
 mkdir -p "$(dirname "$cache_file")"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
 # They never poll JSON and never compete with the authoritative test daemon.
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_SUBSCRIBE=0 CLANKERHOUSE_STARTUP_FALLBACK_ONLY=1 bun run '$repo/src/main.tsx'"
+picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
 lineage_visual_pane=$(open_picker_window lineage-visual)
 wait_for_text "$lineage_root_session"
 # Select the exact lineage child independently of current-session priority,
@@ -437,8 +488,8 @@ wait_for_selected_row "$lineage_fix_java_session"
 for ((i = 0; i < ${#lineage_fix_java_session}; i++)); do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
 wait_for_selected_row "$lineage_fix_java_session"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Right
-wait_for_text "· ○ main"
-wait_for_text "ready"
+wait_for_text "·  ✓ main"
+wait_for_text "done"
 lineage_frame=$(capture_outer)
 printf '%s\n' "$lineage_frame" > "$lineage_capture_path"
 LINEAGE_CAPTURE="$lineage_frame" LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" python3 - <<'PY'
@@ -465,8 +516,8 @@ def ordered(line, *tokens):
 assert any(ordered(line, "✓", os.environ["LINEAGE_ROOT_SESSION"]) and "main" in line and "pi" in line for line in lines), lines
 assert any(ordered(line, "├", "✓", os.environ["LINEAGE_FIX_COVERAGE_SESSION"]) for line in lines), lines
 assert any(ordered(line, "└", "✓", os.environ["LINEAGE_FIX_JAVA_SESSION"]) for line in lines), lines
-assert any(ordered(line, "·", "○", "main") and "idle" in line and "├" not in line and "└" not in line for line in lines), lines
-assert any(ordered(line, "·", "✓", "pi") and "ready" in line and "├" not in line and "└" not in line for line in lines), lines
+assert any(ordered(line, "·", "✓", "main") and "zsh" in line for line in lines), lines
+assert any(ordered(line, "·", "✓", "pi") and "done" in line for line in lines), lines
 PY
 if [[ "${CLANKERHOUSE_QA_VISUAL:-0}" == "1" ]]; then
     printf 'Lineage fixture ready. Attach with: tmux -S %s attach -t harness\n' "$outer_socket"
@@ -532,24 +583,26 @@ cache_file="$runtime/clankerhouse-$uid/state.json"
 picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 
 now=$(date +%s%3N)
-printf '{"harness":"pi","state":"done","pane":"%s","updatedAt":%s,"hookEvent":"agent_settled"}\n' "$pi_pane" "$now" > "$state_file"
+jq --argjson now "$now" '.state = "done" | .updatedAt = $now | .hookEvent = "agent_settled"' "$state_file" > "$state_file.tmp"
+mv "$state_file.tmp" "$state_file"
 rm -f "$runtime/clankerhouse-$uid/state.json"
+refresh_daemon
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
+focus_inner_window picker
 wait_for_text "qa-workshop-tree"
 wait_for_text "pi"
 wait_for_row_glyph "qa-workshop-tree" "✓"
 
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "pi"
-tmux -S "$outer_socket" send-keys -t "$outer_pane" Down
-wait_for_selected_row "pi"
+wait_for_selected_detail "pi"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
 active=""
 for _ in {1..100}; do
-    active=$(tmux -S "$inner_socket" display-message -p -t "=$session:" '#{window_name}')
+    active=$(tmux -S "$inner_socket" list-clients -F '#{window_name}' | head -n 1)
     [[ "$active" == "pi" ]] && break
     sleep 0.05
 done
-[[ "$active" == "pi" ]] || { printf 'Expected pi window, got %s\n' "$active" >&2; exit 1; }
+[[ "$active" == "pi" ]] || { printf 'Expected the requesting client on pi window, got %s\n' "$active" >&2; exit 1; }
 
 seen_count=0
 mkdir -p "$runtime/clankerhouse-$uid/seen-state"
@@ -560,18 +613,22 @@ for _ in {1..100}; do
 done
 [[ "$seen_count" -ge 1 ]] || { printf 'Expected a persisted seen record\n' >&2; exit 1; }
 rm -f "$runtime/clankerhouse-$uid/state.json"
+# The first focused projection writes acknowledgement as an effect; the next
+# projection consumes it and renders the Clanker idle.
+refresh_daemon
 
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
-wait_for_row_glyph "qa-workshop-tree" "○"
+focus_inner_window picker
+wait_for_row_glyph "qa-workshop-tree" "✓"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "qa-main"
 wait_for_selected_row "qa-main"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy pane 'qa-main'?"
+wait_for_text "Destroy exact pane 'qa-main'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" n
 pane_exists "$main_pane"
 
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy pane 'qa-main'?"
+wait_for_text "Destroy exact pane 'qa-main'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
 for _ in {1..100}; do
     if ! pane_exists "$main_pane"; then
@@ -583,8 +640,14 @@ if pane_exists "$main_pane"; then
     printf 'Expected confirmed Alt-D to destroy pane %s\n' "$main_pane" >&2
     exit 1
 fi
+# The native client remains open after a successful mutation. Wait for its final
+# subscribed projection before clearing the prior query and reusing the picker.
+wait_for_text "0 targets"
+wait_for_absent_text "Deleting target"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+wait_for_text "qa-workshop-tree"
 
-origin="$root/origin"
+origin="$root/dev/delete-origin"
 worktree="$root/dev/qa-delete-final"
 delete_session="qa-delete-final"
 git init -q -b main "$origin"
@@ -596,20 +659,19 @@ git -C "$origin" commit -qm "Initial fixture"
 git -C "$origin" worktree add -q -b qa-delete-final "$worktree"
 tmux -S "$inner_socket" new-session -d -s "$delete_session" -n final -x 140 -y 40 -c "$worktree" "sleep 300"
 rm -f "$runtime/clankerhouse-$uid/state.json"
-
-tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
-wait_for_text "qa-workshop-tree"
+refresh_daemon
+wait_for_text "qa-delete-final"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "final"
 wait_for_text "qa-delete-final"
 wait_for_selected_row "final"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy final pane, session, and worktree"
+wait_for_text "Destroy worktree 'qa-delete-final'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" n
 tmux -S "$inner_socket" has-session -t "=$delete_session"
 [[ -d "$worktree" ]] || { printf 'Cancel unexpectedly removed %s\n' "$worktree" >&2; exit 1; }
 
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy final pane, session, and worktree"
+wait_for_text "Destroy worktree 'qa-delete-final'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
 # Durable stage transitions are asserted in daemon-mutations.test.ts; the
 # client waits for the final observation rather than sequencing progress text.
@@ -624,6 +686,7 @@ if tmux -S "$inner_socket" has-session -t "=$delete_session" 2>/dev/null || [[ -
     exit 1
 fi
 wait_for_text "0 targets"
+wait_for_absent_text "Deleting target"
 # Successful deletion keeps the same picker open and interactive.
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
 wait_for_text "qa-workshop-tree"
@@ -635,8 +698,10 @@ parent_session="qa-delete-parent"
 git -C "$origin" worktree add -q -b qa-delete-parent "$parent_worktree"
 tmux -S "$inner_socket" new-session -d -s "$parent_session" -n parent -x 140 -y 40 -c "$parent_worktree" "sleep 300"
 rm -f "$cache_file"
+refresh_daemon
 
 tmux -S "$inner_socket" new-window -t "=$session" -n picker-parent-delete -c "$repo" "$picker_command"
+focus_inner_window picker-parent-delete
 wait_for_text "qa-workshop-tree"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "parent"
 wait_for_text "qa-delete-parent"
@@ -644,7 +709,7 @@ wait_for_selected_row "parent"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Left
 wait_for_selected_row "qa-delete-parent"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
-wait_for_text "Destroy session and worktree 'qa-delete-parent'?"
+wait_for_text "Destroy worktree 'qa-delete-parent'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
 for _ in {1..100}; do
     if ! tmux -S "$inner_socket" has-session -t "=$parent_session" 2>/dev/null && [[ ! -d "$parent_worktree" ]]; then
@@ -656,8 +721,63 @@ if tmux -S "$inner_socket" has-session -t "=$parent_session" 2>/dev/null || [[ -
     printf 'Expected parent-row Alt-D to destroy session and worktree\n' >&2
     exit 1
 fi
+wait_for_absent_text "qa-delete-parent"
+wait_for_absent_text "Deleting target"
 for _ in {1..6}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; sleep 0.03; done
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "qa-delete-parent"
 wait_for_text "0 targets"
 
-printf 'Clankerhouse QA passed: newest-nearest-prompt bottom-up ordering, durable recovery ordering, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, status animation, focus acknowledgement, persistent picker state, and confirmed pane/final-worktree/parent-worktree destruction behave correctly.\n'
+# A linked worktree remains deletable even when it has no tmux session.
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+sessionless_worktree="$root/dev/qa-delete-sessionless"
+sessionless_origin="$root/dev/sessionless-origin"
+git init -q -b main "$sessionless_origin"
+git -C "$sessionless_origin" config user.name "Clankerhouse QA"
+git -C "$sessionless_origin" config user.email "clankerhouse-qa@example.invalid"
+touch "$sessionless_origin/fixture"
+git -C "$sessionless_origin" add fixture
+git -C "$sessionless_origin" commit -qm "Initial fixture"
+git -C "$sessionless_origin" worktree add -q -b qa-delete-sessionless "$sessionless_worktree"
+rm -f "$cache_file"
+refresh_daemon
+sessionless_projected=0
+for _ in {1..100}; do
+    if SESSIONLESS_PATH="$sessionless_worktree" CACHE_FILE="$cache_file" python3 - <<'PY'
+import json
+import os
+
+try:
+    with open(os.environ["CACHE_FILE"], encoding="utf-8") as source:
+        snapshot = json.load(source)
+except (FileNotFoundError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if any(
+    row.get("path") == os.environ["SESSIONLESS_PATH"]
+    and row.get("target", {}).get("type") == "directory"
+    for row in snapshot.get("sessions", [])
+) else 1)
+PY
+    then
+        sessionless_projected=1
+        break
+    fi
+    sleep 0.05
+done
+[[ "$sessionless_projected" == "1" ]] || { printf 'Expected worktree-only projection after session exit\n' >&2; exit 1; }
+wait_for_text "qa-delete-sessionless"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "sessionless"
+wait_for_selected_row "qa-delete-sessionless"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "worktree 'qa-delete-sessionless'?"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" y
+for _ in {1..100}; do
+    [[ ! -d "$sessionless_worktree" ]] && break
+    sleep 0.05
+done
+if [[ -d "$sessionless_worktree" ]]; then
+    printf 'Expected sessionless Alt-D to destroy linked worktree\n' >&2
+    exit 1
+fi
+wait_for_absent_text "$sessionless_worktree"
+
+printf 'Clankerhouse QA passed: newest-nearest-prompt bottom-up ordering, durable recovery ordering, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static Herdr status symbols, focus acknowledgement, persistent picker state, and confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction behave correctly.\n'

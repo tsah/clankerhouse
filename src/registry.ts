@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { instanceSlug } from "./paths"
 import { createHash, randomUUID } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
@@ -6,8 +7,8 @@ import { dirname, join, resolve } from "node:path"
 /** The expanded, single durable registry described by ADR-0002. Legacy stores are import inputs only. */
 export const REGISTRY_SCHEMA_VERSION = 2 as const
 
-export const registryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state")) =>
-  join(stateHome, "clankerhouse", "registry.sqlite3")
+export const registryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state"), env: Record<string, string | undefined> = Bun.env) =>
+  join(stateHome, `clankerhouse${instanceSlug(env)}`, "registry.sqlite3")
 
 export interface LegacyRegistrySources {
   workshops?: string

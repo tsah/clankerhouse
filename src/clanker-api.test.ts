@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { generatedClankerId, parsePaneMetadata, requestUnixSocket } from "./clanker-api"
+import { generatedClankerId, listClankers, parsePaneMetadata, requestUnixSocket, sendClanker } from "./clanker-api"
+import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 
 const roots: string[] = []
 afterEach(() => {
@@ -51,6 +52,8 @@ describe("report generations", () => {
       XDG_RUNTIME_DIR: runtime,
       XDG_STATE_HOME: join(root, "state"),
       TMUX_PANE: "%99",
+      HERDR_PANE_ID: "",
+      CLANKERHOUSE_MULTIPLEXER: "tmux",
       CLANKER_ID: "clanker-test",
     }
     const emit = async (state: string, hookEvent: string) => {
@@ -77,7 +80,20 @@ describe("report generations", () => {
     mkdirSync(nested)
     expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0)
     const tmux = join(bin, "tmux")
-    writeFileSync(tmux, `#!/bin/sh\ncase "$1" in\n  list-panes) printf '%b\\n' 'claude\\tclanker-claude\\t\\t$1\\tfixture\\t@2\\tclaude\\t%7\\t${root}\\t${root}' 'pi\\tclanker-pi\\t\\t$1\\tfixture\\t@3\\tpi\\t%8\\t${nested}\\t' ;;\n  *) exit 1 ;;\nesac\n`)
+    // Observe-compatible tmux double: one session with a claude pane and a pi pane, in the
+    // multiplexer snapshot field order the interface adapter parses.
+    writeFileSync(tmux, [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  display-message) printf '/tmp/clankerhouse-fixture.sock\\n' ;;",
+      "  show-options|show-option) printf 'epoch-1\\n' ;;",
+      "  set-option) : ;;",
+      `  list-sessions) printf 's1\\tfixture\\t0\\t100\\t0\\t${root}\\t\\t${root}\\t0\\t\\t\\t\\t\\t\\t\\n' ;;`,
+      `  list-panes) printf 's1\\t@2\\t0\\tclaudewin\\t1\\t%%7\\t0\\t111\\tclaude\\ttitle\\t${root}\\t100\\t1\\t\\t\\t\\t\\tclanker-claude\\tclaude\\t\\t\\t\\t\\t\\n'; printf 's1\\t@3\\t1\\tpiwin\\t0\\t%%8\\t0\\t222\\tpi\\ttitle\\t${nested}\\t100\\t0\\t\\t\\t\\t\\tclanker-pi\\tpi\\t\\t\\t\\t\\t\\n' ;;`,
+      "  *) exit 1 ;;",
+      "esac",
+      "",
+    ].join("\n"))
     chmodSync(tmux, 0o755)
     writeFileSync(join(reportDirectory, "%7.json"), JSON.stringify({ harness: "claude", clankerId: "clanker-claude", pane: "%7", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "Stop" }))
     writeFileSync(join(reportDirectory, "%8.json"), JSON.stringify({
@@ -85,7 +101,7 @@ describe("report generations", () => {
     }))
     const repository = join(import.meta.dir, "..")
     const clankerhouse = join(repository, "bin/clankers")
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime }
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_ENV: "", HERDR_PANE_ID: "", CLANKERHOUSE_MULTIPLEXER: "tmux" }
     const list = Bun.spawnSync([clankerhouse, "list", "--cwd", root], { env, stdout: "pipe", stderr: "pipe" })
     expect(list.exitCode).toBe(0)
     const listed = JSON.parse(list.stdout.toString())
@@ -117,6 +133,44 @@ describe("report generations", () => {
     const error = await new Response(send.stderr).text()
     expect(await send.exited).toBe(4)
     expect(JSON.parse(error)).toMatchObject({ apiVersion: 1, error: { code: "UNSUPPORTED", message: expect.stringMatching(/does not support send.*no verified native transport/) } })
+  })
+})
+
+describe("Herdr semantic prompt transport", () => {
+  test("advertises and dispatches Claude sends to the exact claimed pane", async () => {
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = `clanker-claude-herdr-${Date.now()}`
+    const paneId = `w1:p${Date.now()}`
+    const adapter = {
+      kind: "herdr",
+      capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, clientRouting: false, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
+      observe: async () => ({
+        kind: "herdr",
+        instanceId: "herdr:/tmp/test.sock",
+        sessions: [{
+          id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
+            id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
+              id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true,
+              claims: { clankerId, harness: "claude" },
+            }],
+          }],
+        }],
+      }),
+      readClaim: async (_location: unknown, key: string) => key === "clankerId" ? clankerId : undefined,
+      promptAgent: async (location: { nativePaneId?: string | null }, text: string) => { prompts.push({ pane: location.nativePaneId || "", text }) },
+    } as unknown as Multiplexer
+    const multiplexer = new ManagedMultiplexer(adapter)
+
+    const listed = await listClankers({ multiplexer })
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: false, deliveryModes: [] } })
+
+    const receipt = await sendClanker(clankerId, "review this exact change", {}, multiplexer)
+    expect(prompts).toEqual([{ pane: paneId, text: "review this exact change" }])
+    expect(receipt).toMatchObject({ clankerId, afterGeneration: 0, observedGeneration: 0, delivery: "immediate" })
+    expect(receipt.acceptedAt).toBeGreaterThan(0)
+
+    await expect(sendClanker(clankerId, "queue this", { delivery: "followUp" }, multiplexer)).rejects.toMatchObject({ code: "UNSUPPORTED", exitCode: 4 })
   })
 })
 
@@ -183,7 +237,7 @@ await Bun.sleep(10)
 console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, steerReceipt, sent, report, socketMode, socketRemoved: !existsSync(socketPath) }))
 `)
     const child = Bun.spawnSync([process.execPath, script], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), TMUX_PANE: "%44", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKER_RECOVERY_ATTEMPT: "", CLANKERHOUSE_CLANKERS: "/bin/true" },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), TMUX_PANE: "%44", HERDR_PANE_ID: "", CLANKERHOUSE_MULTIPLEXER: "tmux", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKER_RECOVERY_ATTEMPT: "", CLANKERHOUSE_CLANKERS: "/bin/true" },
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -206,6 +260,127 @@ console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, ste
     ])
     expect(output.socketMode).toBe("600")
     expect(output.socketRemoved).toBe(true)
+  })
+
+  test("does not let a sessionless Pi subprocess claim its parent pane", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-sessionless-pi-"))
+    roots.push(root)
+    const bin = join(root, "bin")
+    const runtime = join(root, "runtime")
+    const tmuxLog = join(root, "tmux.log")
+    const clankersLog = join(root, "clankers.log")
+    mkdirSync(bin)
+    mkdirSync(runtime)
+    writeFileSync(join(bin, "tmux"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$TMUX_LOG"
+case "$*" in
+  *"show-option"*"@clankerhouse_clanker_id"*) printf 'clanker-parent\\n' ;;
+  *"show-option"*"@dotfiles_harness"*) printf 'pi\\n' ;;
+  *"show-option"*"@clankerhouse_harness_session_id"*) printf 'parent-session\\n' ;;
+esac
+`, { mode: 0o755 })
+    writeFileSync(join(bin, "clankers"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$CLANKERS_LOG"
+`, { mode: 0o755 })
+    const extension = join(import.meta.dir, "../integrations/pi/tmux-clanker-lifecycle.ts")
+    const script = join(root, "sessionless-test.ts")
+    writeFileSync(script, `
+import { existsSync, readdirSync } from "node:fs"
+import extension from ${JSON.stringify(extension)}
+const handlers = new Map<string, Function>()
+const pi = {
+  events: { on: () => () => {} },
+  on: (name: string, handler: Function) => { handlers.set(name, handler) },
+  sendUserMessage: () => {},
+}
+extension(pi as never)
+const context = { isIdle: () => true, sessionManager: { getSessionId: () => "ephemeral-subagent-session" } }
+await handlers.get("session_start")?.({}, context)
+await Bun.sleep(10)
+const root = ${JSON.stringify(runtime)} + "/clankerhouse-" + (process.getuid?.() || 0)
+const observed = {
+  handlers: [...handlers.keys()],
+  reportExists: existsSync(root + "/clanker-state/%77.json"),
+  sockets: existsSync(root + "/clanker-sockets") ? readdirSync(root + "/clanker-sockets") : [],
+}
+await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
+console.log(JSON.stringify(observed))
+`)
+    const child = Bun.spawnSync([process.execPath, script, "--mode", "json", "-p", "--no-session"], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH || ""}`,
+        XDG_RUNTIME_DIR: runtime,
+        XDG_STATE_HOME: join(root, "state"),
+        TMUX_PANE: "%77",
+        HERDR_PANE_ID: "",
+        CLANKERHOUSE_MULTIPLEXER: "tmux",
+        TMUX_LOG: tmuxLog,
+        CLANKERS_LOG: clankersLog,
+        CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(child.exitCode, child.stderr.toString()).toBe(0)
+    expect(JSON.parse(child.stdout.toString())).toEqual({ handlers: [], reportExists: false, sockets: [] })
+    expect(existsSync(tmuxLog) ? readFileSync(tmuxLog, "utf8") : "").toBe("")
+    expect(existsSync(clankersLog) ? readFileSync(clankersLog, "utf8") : "").toBe("")
+  })
+
+  test("routes inferred Herdr pane claims through the Herdr Clankerhouse instance", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herdr-pi-"))
+    roots.push(root)
+    const bin = join(root, "bin")
+    const runtime = join(root, "runtime")
+    const clankersLog = join(root, "clankers.log")
+    mkdirSync(bin)
+    mkdirSync(runtime)
+    writeFileSync(join(bin, "clankers"), `#!/bin/sh
+printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
+`, { mode: 0o755 })
+    const extension = join(import.meta.dir, "../integrations/pi/tmux-clanker-lifecycle.ts")
+    const script = join(root, "herdr-claims-test.ts")
+    writeFileSync(script, `
+import extension from ${JSON.stringify(extension)}
+const handlers = new Map<string, Function>()
+const pi = {
+  events: { on: () => () => {} },
+  on: (name: string, handler: Function) => { handlers.set(name, handler) },
+  sendUserMessage: () => {},
+}
+extension(pi as never)
+const context = { isIdle: () => true, sessionManager: { getSessionId: () => "pi-herdr-session" } }
+await handlers.get("session_start")?.({}, context)
+await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
+`)
+    const child = Bun.spawnSync([process.execPath, script], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH || ""}`,
+        XDG_RUNTIME_DIR: runtime,
+        XDG_STATE_HOME: join(root, "state"),
+        HERDR_ENV: "1",
+        HERDR_PANE_ID: "w1:p2",
+        HERDR_SOCKET_PATH: join(root, "herdr.sock"),
+        TMUX_PANE: "%77",
+        CLANKERHOUSE_MULTIPLEXER: "",
+        CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
+        CLANKER_ID: "clanker-herdr-test",
+        CLANKER_SESSION_ID: "pi-herdr-session",
+        CLANKERS_LOG: clankersLog,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(child.exitCode, child.stderr.toString()).toBe(0)
+    const calls = readFileSync(clankersLog, "utf8").trim().split("\n")
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every((call) => call.startsWith("herdr|"))).toBe(true)
+    expect(calls).toContain("herdr|mux claim --pane w1:p2 harness pi")
+    expect(calls.some((call) => call.includes("--pane %77"))).toBe(false)
+    expect(existsSync(join(root, "state", "clankerhouse-herdr", "activity"))).toBe(true)
+    expect(existsSync(join(root, "state", "clankerhouse", "activity"))).toBe(false)
   })
 
   test("uses one newline-delimited request and response", async () => {

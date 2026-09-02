@@ -36,8 +36,8 @@ const mode = (path: string) => statSync(path).mode & 0o777
 describe("recovery store", () => {
   test("uses a separate state database and migrates once across idempotent reopen", () => {
     const { root, dbPath } = fixture()
-    expect(recoveryStatePath(root)).toBe(join(root, "clankerhouse", "recovery.sqlite3"))
-    expect(recoveryStatePath(root)).not.toContain("workshops.sqlite3")
+    expect(recoveryStatePath(root, {})).toBe(join(root, "clankerhouse", "recovery.sqlite3"))
+    expect(recoveryStatePath(root, {})).not.toContain("workshops.sqlite3")
     mkdirSync(dirname(dbPath), { recursive: true })
     chmodSync(dirname(dbPath), 0o755)
     const empty = new Database(dbPath, { create: true })
@@ -271,6 +271,7 @@ describe("recovery store", () => {
     const ownerB = { scope, ownerToken: "owner-b", bootId: "boot-a", pid: 11, processStartTicks: 110 }
     expect(store.acquireLease({ ...ownerA, ttlMs: 100, now: 10 })?.ownerToken).toBe("owner-a")
     expect(store.acquireLease({ ...ownerB, ttlMs: 100, now: 20 })).toBeUndefined()
+    expect(store.acquireLease({ ...ownerA, ttlMs: 100, now: 25 })?.expiresAt).toBe(125)
     expect(store.renewLease(ownerA, 100, 30)?.expiresAt).toBe(130)
     expect(store.acquireLease({ ...ownerB, ttlMs: 100, now: 129 })).toBeUndefined()
     expect(store.acquireLease({ ...ownerB, ttlMs: 100, now: 130 })?.ownerToken).toBe("owner-b")

@@ -31,8 +31,8 @@
     "clankerhouse-doctor": "bin/clankerhouse-doctor"
   },
   "scripts": {
-    "start": "bun run src/main.tsx",
-    "server": "bun run src/main.tsx --server",
+    "start": "bin/clankerhouse",
+    "server": "bun run src/daemon.ts --server",
     "check": "tsc --noEmit",
     "test": "bun test",
     "test:all": "./test",
@@ -74,10 +74,7 @@
     "tsconfig.json"
   ],
   "dependencies": {
-    "@opentui/core": "latest",
-    "@opentui/solid": "^0.2.15",
-    "effect": "latest",
-    "solid-js": "^1.9.13"
+    "effect": "latest"
   },
   "devDependencies": {
     "@types/bun": "latest",

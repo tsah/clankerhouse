@@ -10,7 +10,7 @@ export const mutationStages = (intent: MutationIntent): readonly string[] => {
     case "reparent": return ["identity.validated", "lineage.updated", "tmux-parent.updated", "projection.refreshed"]
     case "detach": return ["identity.validated", "lineage.updated", "tmux-parent.updated", "projection.refreshed"]
     case "delete": return intent.kind === "worktree"
-      ? ["identity.validated", "tmux.marked", "worktree.deleted", "tmux.deleted", "projection.refreshed"]
+      ? ["identity.validated", "tmux.marked", "worktree.deleted", "lineage.spliced", "tmux-children.updated", "tmux.deleted", "projection.refreshed"]
       : ["identity.validated", "target.deleted", "projection.refreshed"]
     case "create": return ["identity.validated", "worktree.ready", "tmux.ready", "projection.refreshed"]
     case "start": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]
@@ -36,7 +36,13 @@ export type MutationStageReconciler = (intent: MutationIntent, stage: string, ex
  */
 export const createStagedMutationExecutor = (reconcile: MutationStageReconciler): MutationExecutor => async (intent, execution) => {
   const stages = mutationStages(intent)
-  const completedIndex = stages.indexOf(execution.operation.stage)
+  const persistedCheckpoint = execution.operation.result && typeof execution.operation.result === "object" ? execution.operation.result as Record<string, unknown> : undefined
+  const persistedIndex = stages.indexOf(execution.operation.stage)
+  const lineageStageIndex = stages.indexOf("lineage.spliced")
+  const legacyDeleteNeedsLineage = intent.type === "delete" && intent.kind === "worktree"
+    && lineageStageIndex >= 0 && persistedIndex >= lineageStageIndex
+    && persistedCheckpoint?.lineageSpliceVersion !== 1
+  const completedIndex = legacyDeleteNeedsLineage ? stages.indexOf("worktree.deleted") : persistedIndex
   const initial = execution.operation.result
   let publicResult = initial && typeof initial === "object" && "outcome" in initial ? (initial as { outcome: unknown }).outcome : initial
   for (let index = completedIndex + 1; index < stages.length; index += 1) {

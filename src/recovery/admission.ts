@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
+import { instanceSlug } from "../paths"
 import { RECOVERY_POLICY } from "./model"
 
 export interface RecoveryHostState {
@@ -21,7 +22,7 @@ export type RecoveryAdmissionDecision = { admit: true } | { admit: false; reason
 
 export const readRecoveryHostState = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state")): RecoveryHostState | undefined => {
   try {
-    const value = JSON.parse(readFileSync(join(stateHome, "clankerhouse", "recovery-admission.json"), "utf8")) as RecoveryHostState
+    const value = JSON.parse(readFileSync(join(stateHome, `clankerhouse${instanceSlug()}`, "recovery-admission.json"), "utf8")) as RecoveryHostState
     return Number.isFinite(value.now) && Number.isFinite(value.bootObservedAt) ? value : undefined
   } catch { return undefined }
 }

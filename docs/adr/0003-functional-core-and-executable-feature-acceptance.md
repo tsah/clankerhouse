@@ -5,7 +5,7 @@
 
 ## Context
 
-Clankerhouse crosses durable state, tmux, processes, Git, systemd, a Unix socket, TypeScript and native TUIs, and several harness integrations. Component tests can all pass while product behavior is wrong at a boundary: a projection can render one Workshop twice, or a daemon can open the correct target for the wrong tmux client.
+Clankerhouse crosses durable state, multiplexers, processes, Git, systemd, a Unix socket, a TypeScript daemon, a native TUI, and several harness integrations. Component tests can all pass while product behavior is wrong at a boundary: a projection can render one Workshop twice, or a daemon can open the correct target for the wrong tmux client.
 
 Effect provides typed composition, services, Layers, scopes, retries, and test clocks, but Effect alone does not make code functional or testable. Domain decisions must not depend on live commands, ambient environment, wall-clock time, or mutable singleton state.
 
@@ -17,7 +17,7 @@ The functional core consists of ordinary deterministic TypeScript functions. Inp
 
 New or materially refactored orchestration uses Effect services and Layers for those capabilities. Production Layers call real adapters. Unit tests call the core directly and use deterministic test Layers/TestClock for Effect use-case orchestration. Adapter contract tests validate translation at each boundary. Existing async adapters are migrated incrementally; accepting this ADR does not claim that every legacy shell, notably the current Recovery controller, has already been converted to Effect.
 
-The first explicit diagnostic core is `src/diagnostics.ts`; the authoritative projection comparator is exported from `src/model.ts`; and `src/recovery/planner.ts` extracts one-Clanker Recovery decisions from the async controller. Existing pure projection, tree, Recovery admission/campaign, protocol parsing, and mutation-stage functions remain core seams. New behavior must deepen these seams rather than add policy to `src/main.tsx`, shell scripts, or the native renderer.
+The first explicit diagnostic core is `src/diagnostics.ts`; the authoritative projection comparator is exported from `src/model.ts`; and `src/recovery/planner.ts` extracts one-Clanker Recovery decisions from the async controller. Existing pure projection, tree, Recovery admission/campaign, protocol parsing, and mutation-stage functions remain core seams. New behavior must deepen these seams rather than add policy to `src/daemon.ts`, shell scripts, or the native renderer.
 
 Every product feature is recorded in `docs/features.json` and must have:
 
@@ -40,4 +40,4 @@ End-to-end scenarios isolate `HOME`, all XDG directories, tmux sockets, installa
 - Cross-component regressions require standalone scenarios as well as unit tests.
 - Feature work is incomplete until catalogue coverage is updated.
 - Full acceptance is slower, so `./test --unit` and `./test --standalone` remain available while local/release acceptance uses `./test`. CI may run the portable unit profile plus explicitly provisioned adapter suites until its runner provides every required host capability; that narrower CI result is not a release acceptance.
-- Native and TypeScript adapters may retain implementation differences, but both must consume the same domain contract and satisfy the same feature scenarios.
+- The native renderer and TypeScript daemon must consume the same domain contract and satisfy the feature scenarios at their socket boundary.

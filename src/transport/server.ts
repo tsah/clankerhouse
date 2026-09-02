@@ -3,7 +3,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import type { ProjectionSnapshot } from "../projection"
 import type { DurableRegistry } from "../registry"
 import { OperationJournal, type MutationExecutor } from "./operations"
-import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION } from "./protocol"
+import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION, type ObservationReport } from "./protocol"
 
 export interface SnapshotServerOptions<T> {
   socketPath: string
@@ -15,6 +15,7 @@ export interface SnapshotServerOptions<T> {
   maxOutboundBytes?: number
   maxClients?: number
   refresh?: () => Promise<ProjectionSnapshot<T>>
+  reportObservation?: (report: ObservationReport) => boolean | Promise<boolean>
   executeMutation?: MutationExecutor
   /** Omit only for explicitly test-injected in-memory operation mode. */
   operationRegistry?: DurableRegistry
@@ -127,6 +128,9 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
           const operation = operations?.get(request.params.operationId)
           if (!operation) send(socket, protocolError(request.id, "not_found", "operation was not found"))
           else succeed(operation)
+        } else if (request.method === "observation.report") {
+          if (!options.reportObservation) { send(socket, protocolError(request.id, "method_not_found", "observation reporting is unavailable")); continue }
+          void Promise.resolve(options.reportObservation(request.params)).then((accepted) => succeed({ accepted })).catch((error) => send(socket, protocolError(request.id, "bad_request", error instanceof Error ? error.message : String(error))))
         } else {
           subscribers.add(socket)
           if (succeed({ subscribed: true, epoch })) send(socket, { version: SNAPSHOT_PROTOCOL_VERSION, event: "snapshot", epoch, snapshot: latest })

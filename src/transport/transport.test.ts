@@ -123,6 +123,20 @@ describe("Unix snapshot transport", () => {
     expect(await getSnapshot<Row>(socketPath)).toEqual(next)
   })
 
+  test("delivers typed lifecycle observations to the authoritative producer", async () => {
+    const { socketPath } = await fixture()
+    const reports: unknown[] = []
+    await start(socketPath, snapshot("initial"), { reportObservation: (report: unknown) => { reports.push(report); return true } })
+    const response = await rawRequest(socketPath, JSON.stringify({
+      version: 1,
+      id: "observation",
+      method: "observation.report",
+      params: { source: "opencode:42", seq: 1, pane: "%4", harness: "opencode", state: "working", updatedAt: 123, harnessSessionId: "session-1" },
+    }) + "\n")
+    expect(response).toMatchObject({ ok: true, result: { accepted: true } })
+    expect(reports).toEqual([expect.objectContaining({ pane: "%4", state: "working", seq: 1 })])
+  })
+
   test("reports unexpected disconnects so callers can retain polling fallback", async () => {
     const { socketPath } = await fixture()
     const server = await start(socketPath)

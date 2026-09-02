@@ -50,10 +50,10 @@ connectors; explicitly expanded window and clanker details use subdued bullet
 rows beneath their workshop. Collapsed workshops summarize their windows and
 harnesses inline.
 
-Actionable workshops are nearest the prompt in this order: failed incidents,
-working or blocked clankers, ready clankers, idle clankers, neutral workshops,
-sessionless worktrees, then plain directories. Recency and frecency break ties
-within those groups.
+Rows are ordered only by last-seen recency, oldest at the top and newest nearest
+the prompt. A lineage subtree uses the newest last-seen value among all of its
+descendants, and the current session remains pinned nearest the prompt. Runtime
+state does not participate in ordering and changes only the glyph.
 
 Search matches structured fields independently and retains the complete
 workshop ancestor chain for matching descendants. It must not manufacture
@@ -74,13 +74,14 @@ matches by concatenating unrelated fields.
 
 ## Implementation
 
-The implementation lives in `clankerhouse/` and uses Bun, TypeScript, Effect,
-Solid, and OpenTUI. Collection adapters produce tmux, Git, lifecycle, directory,
-and lineage observations; a deterministic projection turns them into typed rows
-and explicit persistence effects. The cache server atomically commits revisioned
-version-10 snapshots and publishes them over a private Unix socket, while clients
-retain JSON polling as a compatible fallback. Typed rows carry concrete
-tmux/worktree actions; hierarchy is never inferred from rendered strings.
+The implementation is split between a Bun/TypeScript/Effect daemon and the sole
+Rust/ratatui renderer in `native-client/`. Collection adapters produce
+multiplexer, Git, lifecycle, directory, and lineage observations; a deterministic
+projection turns them into typed rows and explicit persistence effects. The daemon
+atomically commits revisioned version-10 snapshots and publishes them over a
+private Unix socket. The native client reads JSON only once as a startup/crash
+fallback and uses the socket for live synchronization. Typed rows carry concrete
+multiplexer/worktree actions; hierarchy is never inferred from rendered strings.
 Clanker communication uses the native `clankers` API and never tmux input or
 pane capture. Linux foreground-process discovery reads process metadata only and
 cannot assign clanker identity or authorize destructive actions.
@@ -104,13 +105,10 @@ See `clankerhouse/README.md` for the CLI and runtime contract and
 
 ## Native client
 
-The default Alt-K jump client is the fast Rust/ratatui application in
-`native-client/` when its release binary is built, with the feature-complete
-TypeScript picker as a fallback. Set `@clankerhouse-jump-client full` before
-loading the tmux plugin to always use the compatibility picker instead. Both
-receive the same version-10 observation from the authoritative TypeScript daemon;
-JSON is only a one-time startup/crash fallback. Build and validate the native
-client with:
+The Alt-K jump client is the Rust/ratatui application in `native-client/`, the
+sole interactive renderer. It receives version-10 observations from the
+authoritative Bun/TypeScript daemon; JSON is only a one-time startup/crash
+fallback. Build and validate the native client with:
 
 ```sh
 scripts/build-native

@@ -202,32 +202,87 @@ const nodeAccess: ProcessDiscoveryAccess = {
   readDirectory: (path) => readdirSync(path),
 }
 
-export const createProcessDiscoveryProvider = (access: ProcessDiscoveryAccess = nodeAccess): ForegroundAgentProbe => ({
-  discover(paneChildPid) {
+export const createProcessDiscoveryProvider = (access: ProcessDiscoveryAccess = nodeAccess): ForegroundAgentProbe => {
+  let processStats: Map<number, ProcStat> | undefined
+  const targetedStats = new Map<number, ProcStat>()
+  const groups = new Map<number, ForegroundProcessEvidence[]>()
+
+  const snapshotStats = () => {
+    if (processStats) return processStats
+    const snapshot = new Map<number, ProcStat>()
+    for (const entry of access.readDirectory("/proc")) {
+      if (!/^\d+$/.test(entry)) continue
+      try {
+        const stat = parseProcStat(access.readFile(`/proc/${entry}/stat`))
+        if (stat) snapshot.set(stat.pid, stat)
+      } catch {
+        // /proc is inherently racy; one disappearing process must not abort discovery.
+      }
+    }
+    processStats = snapshot
+    return snapshot
+  }
+
+  const readStat = (pid: number) => {
+    const cached = targetedStats.get(pid)
+    if (cached) return cached
+    const stat = parseProcStat(access.readFile(`/proc/${pid}/stat`))
+    if (stat) targetedStats.set(pid, stat)
+    return stat
+  }
+
+  const descendantStats = (rootPid: number): ProcStat[] | undefined => {
+    const stats: ProcStat[] = []
+    const pending = [rootPid]
+    const seen = new Set<number>()
+    while (pending.length) {
+      const pid = pending.pop()!
+      if (seen.has(pid)) continue
+      seen.add(pid)
+      try {
+        const stat = readStat(pid)
+        if (stat) stats.push(stat)
+        const children = access.readFile(`/proc/${pid}/task/${pid}/children`).trim()
+        for (const child of children ? children.split(/\s+/).map(Number) : []) {
+          if (Number.isSafeInteger(child) && child > 0) pending.push(child)
+        }
+      } catch {
+        // Descendants race with observation continuously; only an unreadable root
+        // means this procfs cannot support targeted traversal.
+        if (pid === rootPid) return undefined
+      }
+    }
+    return stats
+  }
+
+  const processesForGroup = (processGroupId: number, paneChildPid: number) => {
+    const cached = groups.get(processGroupId)
+    if (cached) return cached
+    const candidates = descendantStats(paneChildPid) ?? [...snapshotStats().values()]
+    const processes = candidates
+      .filter((stat) => stat.processGroupId === processGroupId)
+      .map((stat) => {
+        let cmdline = ""
+        try {
+          cmdline = access.readFile(`/proc/${stat.pid}/cmdline`)
+        } catch {
+          // Kernel threads and processes racing with discovery may have no readable argv.
+        }
+        return normalizeProcess(stat, cmdline)
+      })
+      .sort((left, right) => left.pid - right.pid)
+    groups.set(processGroupId, processes)
+    return processes
+  }
+
+  return { discover(paneChildPid) {
     if (access.platform !== "linux" || !Number.isSafeInteger(paneChildPid) || paneChildPid <= 0) return undefined
     try {
-      const child = parseProcStat(access.readFile(`/proc/${paneChildPid}/stat`))
+      const child = readStat(paneChildPid)
       const foregroundGroup = child?.terminalForegroundProcessGroupId ?? -1
       if (!child || foregroundGroup <= 0) return undefined
 
-      const processes: ForegroundProcessEvidence[] = []
-      for (const entry of access.readDirectory("/proc")) {
-        if (!/^\d+$/.test(entry)) continue
-        try {
-          const stat = parseProcStat(access.readFile(`/proc/${entry}/stat`))
-          if (!stat || stat.processGroupId !== foregroundGroup) continue
-          let cmdline = ""
-          try {
-            cmdline = access.readFile(`/proc/${entry}/cmdline`)
-          } catch {
-            // Kernel threads and processes racing with discovery may have no readable argv.
-          }
-          processes.push(normalizeProcess(stat, cmdline))
-        } catch {
-          // /proc is inherently racy; one disappearing process must not abort discovery.
-        }
-      }
-      processes.sort((left, right) => left.pid - right.pid)
+      const processes = processesForGroup(foregroundGroup, paneChildPid)
       const candidates = processes.flatMap((candidate) => {
         const match = identifyAgentProcess(candidate)
         return match ? [{ candidate, match }] : []
@@ -250,8 +305,8 @@ export const createProcessDiscoveryProvider = (access: ProcessDiscoveryAccess = 
     } catch {
       return undefined
     }
-  },
-})
+  } }
+}
 
 export const discoverForegroundAgent = (paneChildPid: number, access?: ProcessDiscoveryAccess) =>
   createProcessDiscoveryProvider(access).discover(paneChildPid)

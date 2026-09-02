@@ -1,20 +1,62 @@
-import type { Plugin } from "@opencode-ai/plugin"
 import { spawnSync } from "node:child_process"
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { createConnection } from "node:net"
 
-const pane = process.env.TMUX_PANE?.trim() || ""
+const inferredHerdr = process.env.HERDR_ENV?.trim() === "1" && Boolean(process.env.HERDR_PANE_ID?.trim())
+const requestedMultiplexer = process.env.CLANKERHOUSE_MULTIPLEXER?.trim().toLowerCase()
+if (requestedMultiplexer && requestedMultiplexer !== "tmux" && requestedMultiplexer !== "herdr") throw new Error(`Unsupported CLANKERHOUSE_MULTIPLEXER: ${requestedMultiplexer}`)
+const multiplexerKind = (requestedMultiplexer || (inferredHerdr ? "herdr" : "tmux")) as "tmux" | "herdr"
+const pane = (multiplexerKind === "herdr" ? process.env.HERDR_PANE_ID?.trim() : process.env.TMUX_PANE?.trim()) || ""
+const clankersEnv = { ...process.env, CLANKERHOUSE_MULTIPLEXER: multiplexerKind }
 const clankerId = process.env.CLANKER_ID?.trim() || ""
 const expectedSessionId = process.env.CLANKER_SESSION_ID?.trim() || ""
 const recoveryAttemptId = process.env.CLANKER_RECOVERY_ATTEMPT?.trim() || ""
 const tracked = Boolean(clankerId)
 let attestedSessionId = ""
+let observedSessionId = ""
+let generation = 0
+let settledGeneration = 0
+let currentState: ClankerState = "idle"
+let reportSeq = Date.now() * 1000
+let lastReportFingerprint = ""
+let reportInFlight = false
+let queuedReport: Record<string, unknown> | undefined
 
+type ClankerState = "blocked" | "working" | "done" | "idle" | "unknown"
+
+const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || ""
+if (requestedInstance && (requestedInstance === "." || requestedInstance === ".." || !/^[A-Za-z0-9._-]+$/.test(requestedInstance))) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${requestedInstance}`)
+const instanceSlug = requestedInstance
+  ? (["default", "tmux"].includes(requestedInstance) ? "" : `-${requestedInstance}`)
+  : (multiplexerKind === "tmux" ? "" : `-${multiplexerKind}`)
+const runtime = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}${instanceSlug}`
+const reportPath = `${runtime}/clanker-state/${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`
+const daemonSocketPath = `${runtime}/daemon.sock`
+const daemonAvailable = Boolean(pane && existsSync(daemonSocketPath))
+
+const claimKeyForOption: Record<string, string> = {
+  "@clankerhouse_clanker_id": "clankerId",
+  "@dotfiles_harness": "harness",
+  "@clankerhouse_harness_session_id": "harnessSessionId",
+  "@clankerhouse_recovery_attempt": "recoveryAttemptId",
+}
+
+/** Pane-option claims: direct tmux on tmux, `clankers mux` on any other runtime. */
 const tmux = (args: string[]) => {
-  if (!pane) return
-  spawnSync("tmux", args, { stdio: "ignore" })
+  if (!pane) return undefined
+  if (multiplexerKind === "tmux") return spawnSync("tmux", args, { encoding: "utf8" })
+  const cli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
+  const target = args.indexOf("-t")
+  const option = args[target + 2] ?? ""
+  const key = claimKeyForOption[option] ?? option
+  if (args[0] === "show-option") return spawnSync(cli, ["mux", "read-claim", "--pane", pane, key], { env: clankersEnv, encoding: "utf8" })
+  const unset = args.some((arg) => /^-p?u$/.test(arg))
+  return spawnSync(cli, ["mux", "claim", "--pane", pane, key, unset ? "--unset" : args[target + 3] ?? ""], { env: clankersEnv, encoding: "utf8" })
 }
 
 const attest = (sessionId: string) => {
   if (!tracked || !sessionId || attestedSessionId === sessionId) return
+  if (attestedSessionId && attestedSessionId !== sessionId) return
   if (expectedSessionId && expectedSessionId !== sessionId) return
   tmux(["set-option", "-p", "-t", pane, "@clankerhouse_clanker_id", clankerId])
   tmux(["set-option", "-p", "-t", pane, "@dotfiles_harness", "opencode"])
@@ -23,18 +65,206 @@ const attest = (sessionId: string) => {
   const cli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
   const args = ["recovery", "attest", clankerId, "--session-id", sessionId]
   if (recoveryAttemptId) args.push("--attempt", recoveryAttemptId)
-  const result = spawnSync(cli, args, { stdio: "ignore" })
+  const result = spawnSync(cli, args, { env: clankersEnv, stdio: "ignore" })
   if (result.status === 0) attestedSessionId = sessionId
 }
 
-export const ClankerhouseLifecyclePlugin: Plugin = async () => ({
-  event: async ({ event }) => {
-    if (event.type === "session.created") return attest(event.properties.info.id)
-    if (event.type === "session.updated" && expectedSessionId && event.properties.info.id === expectedSessionId) attest(event.properties.info.id)
-  },
-  "chat.message": async ({ sessionID }) => {
-    attest(sessionID)
-  },
+const trackedSession = (sessionId: string) => {
+  if (expectedSessionId) attest(sessionId)
+  return Boolean(pane && clankerId && sessionId && sessionId === attestedSessionId)
+}
+
+const currentSession = (sessionId: string) => tracked
+  ? trackedSession(sessionId)
+  : Boolean(pane && sessionId && sessionId === observedSessionId)
+
+const writeLegacyReport = (record: Record<string, unknown>) => {
+  try {
+    const directory = `${runtime}/clanker-state`
+    const temporary = `${reportPath}.tmp-${process.pid}`
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const runtimeStat = lstatSync(runtime)
+    const directoryStat = lstatSync(directory)
+    const uid = process.getuid?.()
+    if (runtimeStat.isSymbolicLink() || directoryStat.isSymbolicLink() || !runtimeStat.isDirectory() || !directoryStat.isDirectory()) return
+    if (uid !== undefined && (runtimeStat.uid !== uid || directoryStat.uid !== uid)) return
+    chmodSync(directory, 0o700)
+    writeFileSync(temporary, JSON.stringify(record), { mode: 0o600 })
+    renameSync(temporary, reportPath)
+  } catch {}
+}
+
+const sendReport = (record: Record<string, unknown>) => new Promise<void>((resolve) => {
+  const request = {
+    version: 1,
+    id: `opencode:${process.pid}:${record.seq}`,
+    method: "observation.report",
+    params: record,
+  }
+  const socket = createConnection(daemonSocketPath)
+  let settled = false
+  const finish = () => {
+    if (settled) return
+    settled = true
+    socket.destroy()
+    resolve()
+  }
+  socket.setTimeout(500, finish)
+  socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`))
+  socket.once("data", finish)
+  socket.once("error", finish)
+  socket.once("end", finish)
+  socket.once("close", finish)
 })
+
+const drainReports = async () => {
+  if (reportInFlight) return
+  reportInFlight = true
+  try {
+    while (queuedReport) {
+      const next = queuedReport
+      queuedReport = undefined
+      await sendReport(next)
+    }
+  } finally {
+    reportInFlight = false
+    if (queuedReport) void drainReports()
+  }
+}
+
+const report = (state: ClankerState, hookEvent: string) => {
+  const harnessSessionId = tracked ? attestedSessionId : observedSessionId
+  if (!pane || !harnessSessionId) return
+  currentState = state
+  const fingerprint = [state, harnessSessionId, clankerId, recoveryAttemptId, generation, settledGeneration].join("\0")
+  if (fingerprint === lastReportFingerprint) return
+  lastReportFingerprint = fingerprint
+  reportSeq += 1
+  const record = {
+    source: `opencode:${process.pid}`,
+    seq: reportSeq,
+    harness: "opencode",
+    ...(clankerId ? { clankerId } : {}),
+    harnessSessionId,
+    ...(recoveryAttemptId ? { recoveryAttemptId } : {}),
+    state,
+    pane,
+    generation,
+    settledGeneration,
+    updatedAt: Date.now(),
+    hookEvent,
+  }
+  if (!daemonAvailable) return writeLegacyReport(record)
+  queuedReport = record
+  void drainReports()
+}
+
+const withdraw = () => {
+  const currentId = tmux(["show-option", "-pqv", "-t", pane, "@clankerhouse_clanker_id"])?.stdout.trim()
+  if (currentId !== clankerId) return
+  for (const option of ["@clankerhouse_clanker_id", "@dotfiles_harness", "@clankerhouse_harness_session_id", "@clankerhouse_recovery_attempt"]) {
+    tmux(["set-option", "-pu", "-t", pane, option])
+  }
+}
+
+if (expectedSessionId) try {
+  const previous = JSON.parse(readFileSync(reportPath, "utf8")) as { clankerId?: string; harnessSessionId?: string; pane?: string; generation?: number; settledGeneration?: number; state?: ClankerState }
+  if (previous.clankerId === clankerId && previous.harnessSessionId === expectedSessionId && previous.pane === pane) {
+    generation = Math.max(0, Number(previous.generation) || 0)
+    settledGeneration = Math.max(0, Number(previous.settledGeneration) || 0)
+    if (["blocked", "working", "done", "idle", "unknown"].includes(previous.state || "")) currentState = previous.state!
+  }
+} catch {}
+
+type LifecycleEvent = { type: string; properties?: Record<string, any>; data?: Record<string, any> }
+type SessionInfo = { id: string; parentID?: string }
+type SessionLookup = (sessionId: string) => Promise<SessionInfo | undefined>
+
+export const handleLifecycleEvent = async (event: LifecycleEvent, lookupSession?: SessionLookup) => {
+    const data = event.data ?? event.properties ?? {}
+    const eventSessionId = data.sessionID
+    if (!tracked && !observedSessionId && eventSessionId && lookupSession) {
+      const info = await lookupSession(eventSessionId)
+      if (info && !info.parentID) observedSessionId = info.id
+    }
+    if (event.type === "session.created" || event.type === "session.updated") {
+      const info = data.info ?? data
+      const sessionId = info.sessionID ?? info.id
+      const firstObservation = !(tracked ? attestedSessionId : observedSessionId)
+      if (!info.parentID) {
+        if (tracked) attest(sessionId)
+        else if (!observedSessionId) observedSessionId = sessionId
+      }
+      if (currentSession(sessionId) && firstObservation) report(currentState, event.type)
+      return
+    }
+    const sessionId = data.sessionID
+    if (event.type === "session.status" && currentSession(sessionId)) {
+      if (data.status.type === "busy") {
+        if (generation <= settledGeneration) generation = settledGeneration + 1
+        report("working", event.type)
+      } else if (data.status.type === "retry") report("blocked", event.type)
+      else {
+        settledGeneration = generation
+        report(generation > 0 ? "done" : "idle", event.type)
+      }
+      return
+    }
+    if (event.type === "session.idle" && currentSession(sessionId)) {
+      settledGeneration = generation
+      report(generation > 0 ? "done" : "idle", event.type)
+      return
+    }
+    if (["session.error", "session.execution.failed", "session.step.failed"].includes(event.type) && sessionId && currentSession(sessionId)) {
+      report("blocked", event.type)
+      return
+    }
+    if (["permission.updated", "permission.asked"].includes(event.type) && currentSession(sessionId)) {
+      report("blocked", event.type)
+      return
+    }
+    if (event.type === "permission.replied" && currentSession(sessionId)) {
+      report("working", event.type)
+      return
+    }
+    if (event.type === "question.asked" && sessionId && currentSession(sessionId)) {
+      report("blocked", event.type)
+      return
+    }
+    if (["question.replied", "question.rejected"].includes(event.type) && sessionId && currentSession(sessionId)) {
+      report("working", event.type)
+      return
+    }
+    const deletedSessionId = data.info?.id ?? data.sessionID
+    if (event.type === "session.deleted" && deletedSessionId === (tracked ? attestedSessionId : observedSessionId)) {
+      report("unknown", event.type)
+      if (tracked) withdraw()
+      attestedSessionId = ""
+      observedSessionId = ""
+    }
+}
+
+interface PluginContext {
+  event: { subscribe(options?: { signal?: AbortSignal }): AsyncIterable<LifecycleEvent> }
+  session: { get(input: { sessionID: string }): Promise<SessionInfo> }
+}
+
+export const ClankerhouseLifecyclePlugin = {
+  id: "clankerhouse.lifecycle",
+  setup(context: PluginContext) {
+    if (!pane) return () => {}
+    const controller = new AbortController()
+    const lookupSession: SessionLookup = async (sessionId) => context.session.get({ sessionID: sessionId }).catch(() => undefined)
+    const task = (async () => {
+      for await (const event of context.event.subscribe({ signal: controller.signal })) await handleLifecycleEvent(event, lookupSession)
+    })().catch((error) => {
+      if (!controller.signal.aborted) console.error("Clankerhouse lifecycle event stream failed", error)
+    })
+    return async () => {
+      controller.abort()
+      await task
+    }
+  },
+}
 
 export default ClankerhouseLifecyclePlugin

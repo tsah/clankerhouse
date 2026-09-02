@@ -16,21 +16,26 @@ case "$state" in
     *) exit 0 ;;
 esac
 
-pane="${TMUX_PANE:-}"
+libexec_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../libexec" && pwd)
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-env"
+# shellcheck source=/dev/null
+. "$libexec_dir/clankerhouse-mux"
+pane=$(ch_mux_pane)
 [[ -n "$pane" ]] || exit 0
 
-clanker_id=$(tmux show-option -p -qv -t "$pane" @clankerhouse_clanker_id 2>/dev/null || true)
+clanker_id=$(ch_mux_pane_read clankerId)
 if [[ -z "$clanker_id" ]]; then
     clanker_id="${CLANKER_ID:-clanker-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
-    tmux set-option -p -t "$pane" @clankerhouse_clanker_id "$clanker_id" 2>/dev/null || true
+    ch_mux_pane_claim clankerId "$clanker_id"
 fi
-tmux set-option -p -t "$pane" @dotfiles_harness "$harness" 2>/dev/null || true
+ch_mux_pane_claim harness "$harness"
 
-state_dir="${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)/clanker-state"
+state_dir="$(ch_runtime_dir)/clanker-state"
 mkdir -p "$state_dir"
 chmod 700 "$state_dir"
-activity_dir="${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/activity"
-activity_path=$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null || pwd -P)
+activity_dir="$(ch_state_dir)/activity"
+activity_path=$(ch_mux_pane_path)
 
 # Consume hook stdin so callers that provide JSON never block on a full pipe.
 hook_input=$(cat 2>/dev/null || true)
@@ -48,10 +53,10 @@ PY
 expected_session_id="${CLANKER_SESSION_ID:-}"
 recovery_attempt_id="${CLANKER_RECOVERY_ATTEMPT:-}"
 if [[ -n "$harness_session_id" ]]; then
-    tmux set-option -p -t "$pane" @clankerhouse_harness_session_id "$harness_session_id" 2>/dev/null || true
+    ch_mux_pane_claim harnessSessionId "$harness_session_id"
 fi
 if [[ -n "$recovery_attempt_id" ]]; then
-    tmux set-option -p -t "$pane" @clankerhouse_recovery_attempt "$recovery_attempt_id" 2>/dev/null || true
+    ch_mux_pane_claim recoveryAttemptId "$recovery_attempt_id"
 fi
 
 HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" ACTIVITY_DIR="$activity_dir" ACTIVITY_PATH="$activity_path" python3 - <<'PY'
@@ -135,9 +140,9 @@ if [[ -n "$harness_session_id" ]]; then
     clankers_cli=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
     attest_args=(recovery attest "$clanker_id" --session-id "$harness_session_id" --state "$state")
     [[ -n "$recovery_attempt_id" ]] && attest_args+=(--attempt "$recovery_attempt_id")
-    "$clankers_cli" "${attest_args[@]}" >/dev/null 2>&1 || true
+    CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_cli" "${attest_args[@]}" >/dev/null 2>&1 || true
 fi
 
 if [[ "$state" == "unknown" ]]; then
-    tmux set-option -p -u -t "$pane" @dotfiles_harness 2>/dev/null || true
+    ch_mux_pane_unset harness
 fi

@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$script_dir/clankerhouse-env"
+clankerhouse_require_tmux opencode-attach-target || exit $?
+
 SESSION_NAME="${1:-}"
 PANE_TARGET="${2:-}"
 

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 real_home=$HOME
@@ -79,9 +80,17 @@ old_target=$(readlink -f "$active")
 "$prefix/bin/clankers" help >/dev/null
 nvim --headless -u NONE --cmd "set runtimepath^=$active" \
     '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
+tmux -S "$socket" set-environment -g CLANKERHOUSE_HOME /stale/clankerhouse
+tmux -S "$socket" set-environment -g CLANKERHOUSE_BIN_DIR /stale/clankerhouse/bin
+tmux -S "$socket" set-environment -g CLANKERHOUSE_LIBEXEC /stale/clankerhouse/libexec
 TMUX="$socket,$(tmux -S "$socket" display-message -p '#{pid}'),0" "$active/clankerhouse.tmux"
 [[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$active" ]]
+[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_HOME)" == "CLANKERHOUSE_HOME=$active" ]]
+[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_BIN_DIR)" == "CLANKERHOUSE_BIN_DIR=$active/bin" ]]
+[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_LIBEXEC)" == "CLANKERHOUSE_LIBEXEC=$active/libexec" ]]
 tmux -S "$socket" list-keys -T root M-k | grep -F "$prefix/bin/clankerhouse-native" >/dev/null
+tmux -S "$socket" list-keys -T root M-b | grep -F 'run-shell' >/dev/null
+tmux -S "$socket" list-keys -T root M-b | grep -F 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' >/dev/null
 
 # A failed preflight never quiesces or switches the selected isolated daemon.
 old_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
@@ -121,6 +130,22 @@ new_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
 [[ -L "$home/.agents/skills/clanker-coordination" ]]
 [[ -L "$home/.claude/skills/clanker-coordination" ]]
 [[ -L "$home/.codex/skills/clanker-coordination" ]]
+opencode_plugin="$home/.config/opencode/plugins/clankerhouse-lifecycle.ts"
+opencode_skill="$home/.config/opencode/skills/clanker-coordination"
+plugin_inode=$(stat -c %i "$opencode_plugin")
+plugin_mtime=$(stat -c %Y "$opencode_plugin")
+skill_inode=$(stat -c %i "$opencode_skill")
+skill_mtime=$(stat -c %Y "$opencode_skill")
+
+# Reinstalling integrations whose stable targets are already correct must not
+# replace their symlink inodes and trigger live harness/plugin reloads.
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --integrations >/dev/null
+new_target=$(readlink -f "$active")
+[[ "$(stat -c %i "$opencode_plugin")" == "$plugin_inode" ]]
+[[ "$(stat -c %Y "$opencode_plugin")" == "$plugin_mtime" ]]
+[[ "$(stat -c %i "$opencode_skill")" == "$skill_inode" ]]
+[[ "$(stat -c %Y "$opencode_skill")" == "$skill_mtime" ]]
+
 grep -F "$prefix/bin/clankerhouse-clanker-state-report" "$home/.claude/settings.json" >/dev/null
 grep -F "ExecStart=\"$prefix/bin/clankerhouse-recovery\"" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
 grep -F "Documentation=file:$active/README.md" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null

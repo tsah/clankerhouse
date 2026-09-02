@@ -35,6 +35,9 @@ fi
 rm -rf "$root"
 mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/work"
 touch "$marker"
+export CLANKERHOUSE_MULTIPLEXER=tmux
+export HERDR_ENV=
+export HERDR_PANE_ID=
 tmux -S "$socket" new-session -d -s qa-daemon -n main -x 100 -y 30 -c "$root/work" "sleep 300"
 
 env \
@@ -45,7 +48,7 @@ env \
     XDG_DATA_HOME="$root/data" \
     CLANKERHOUSE_DEV_ROOT="$root/missing" \
     CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
-    bun run "$repo/src/main.tsx" --server >"$root/server.log" 2>&1 &
+    bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
 server_pid=$!
 
 daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
@@ -74,7 +77,7 @@ transport_result=$(bun --eval '
   if (status.protocolVersion !== 1) throw new Error("unexpected protocol version")
   if (before.version !== 10 || after.version !== 10) throw new Error("unexpected cache version")
   if (refreshed.revision.source !== after.revision.source || refreshed.revision.sequence !== after.revision.sequence) throw new Error("refresh receipt mismatch")
-  if (before.revision.source === after.revision.source && after.revision.sequence <= before.revision.sequence) throw new Error("revision did not advance")
+  if (before.revision.source === after.revision.source && after.revision.sequence !== before.revision.sequence) throw new Error("semantic no-op refresh advanced the revision")
   console.log(JSON.stringify({ protocol: status.protocolVersion, revision: after.revision }))
 ' "$repo/src/transport/index.ts" "$daemon_socket")
 [[ "$transport_result" == *'"protocol":1'* ]] || { printf 'Unexpected daemon response: %s\n' "$transport_result" >&2; exit 1; }

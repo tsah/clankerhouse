@@ -77,12 +77,16 @@ export const refreshProjection = (socketPath: string, options?: SnapshotClientOp
 export const submitMutation = (socketPath: string, idempotencyKey: string, intent: MutationIntent, options?: SnapshotClientOptions) => request<MutationSubmitResult>(socketPath, "mutation.submit", options, { idempotencyKey, intent })
 export const getOperationStatus = (socketPath: string, operationId: string, options?: SnapshotClientOptions) => request<OperationRecord>(socketPath, "operation.status", options, { operationId })
 
-export const waitForOperation = async (socketPath: string, operationId: string, options: SnapshotClientOptions & { timeoutMs?: number; retryMs?: number } = {}) => {
+export const waitForOperation = async (socketPath: string, operationId: string, options: SnapshotClientOptions & { timeoutMs?: number; retryMs?: number; onStatus?: (operation: OperationRecord) => void } = {}) => {
   const deadline = Date.now() + (options.timeoutMs ?? 30_000)
   let lastError: Error | undefined
   while (true) {
     let operation: OperationRecord | undefined
-    try { operation = await getOperationStatus(socketPath, operationId, options); lastError = undefined }
+    try {
+      operation = await getOperationStatus(socketPath, operationId, options)
+      options.onStatus?.(operation)
+      lastError = undefined
+    }
     catch (error) { lastError = asError(error) }
     if (operation?.state === "succeeded") return operation
     if (operation?.state === "failed") throw new Error(operation.error || "daemon operation failed")

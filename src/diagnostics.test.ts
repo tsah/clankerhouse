@@ -58,6 +58,21 @@ describe("projection diagnostics functional core", () => {
     expect(report.counts.unknownClankers).toBe(1)
   })
 
+  test("reports rejected runtime evidence without treating it as an unhealthy managed identity", () => {
+    const observed = session("observed", {
+      details: [{
+        kind: "observation", harness: "pi", status: "reported working", detail: "rejected lifecycle identity: clanker-id-mismatch", title: "stale report", age: "1m", state: "unknown",
+        target: { type: "tmux_window", session: "observed", windowId: "@1", pane: "%1" }, updatedAt: 10,
+        observation: { source: "lifecycle", confidence: "rejected", state: "working", observedAt: 10, reason: "clanker-id-mismatch" },
+      }],
+    })
+    const report = diagnoseProjection([observed])
+
+    expect(report.healthy).toBe(true)
+    expect(report.counts).toMatchObject({ observations: 1, rejectedObservations: 1, unknownClankers: 0 })
+    expect(report.issues).toContainEqual(expect.objectContaining({ code: "rejected-runtime-observation", severity: "info" }))
+  })
+
   test("detects lineage cycles and projection sorting drift", () => {
     const first = session("old-idle", { workshopId: "a", parentWorkshopId: "b", recency: 1 })
     const second = session("new-idle", { workshopId: "b", parentWorkshopId: "a", recency: 2 })

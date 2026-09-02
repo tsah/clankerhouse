@@ -20,6 +20,8 @@ export interface ProjectionDiagnosticReport {
     directories: number
     managed: number
     unknownClankers: number
+    observations: number
+    rejectedObservations: number
     expectedUnknownResources: number
     renderedSessionRows: number
   }
@@ -134,6 +136,14 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
       "Inspect the explicit Clanker report, socket ownership, generation, and harness session identity.",
       { clankerId: detail.clankerId ?? null, status: detail.status, title: detail.title },
     ))
+    for (const detail of row.details) if (detail.observation?.confidence === "rejected") issues.push(issue(
+      "rejected-runtime-observation",
+      "info",
+      `${detail.harness || "Runtime"} evidence in ${row.name} did not match owned identity`,
+      [targetKey(detail.target)],
+      "Inspect the reported and owned Clanker, harness-session, and recovery-attempt identities without suppressing the observed fact.",
+      { source: detail.observation.source, state: detail.observation.state, reason: detail.observation.reason ?? null, observedAt: detail.observation.observedAt },
+    ))
   }
 
   const expectedOrder = [...rows].sort(compareProjectedSessions).map((row) => targetKey(row.target))
@@ -161,6 +171,8 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
   ))
 
   const unknownClankers = rows.flatMap((row) => row.details).filter((detail) => detail.kind === "clanker" && detail.state === "unknown").length
+  const observations = rows.flatMap((row) => row.details).filter((detail) => detail.kind === "observation").length
+  const rejectedObservations = rows.flatMap((row) => row.details).filter((detail) => detail.observation?.confidence === "rejected").length
   const expectedUnknownResources = rows.filter((row) => sessionState(row) === "unknown" && !row.details.some((detail) => detail.kind === "clanker")).length
   return {
     version: 1,
@@ -171,6 +183,8 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
       directories: rows.filter((row) => row.target.type === "directory").length,
       managed: rows.filter((row) => row.management === "managed").length,
       unknownClankers,
+      observations,
+      rejectedObservations,
       expectedUnknownResources,
       renderedSessionRows: renderedSessions.length,
     },

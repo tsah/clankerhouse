@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 uid=$(id -u)
@@ -27,16 +28,18 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$(dirname "$cache")" "$state_home" "$qa_home"
+ln -s /bin/sleep "$root/codex"
 cat > "$cache" <<'JSON'
 {"version":10,"sessions":[
   {"name":"qa-working","path":"/tmp/qa-working","recency":200,"target":{"type":"tmux_session","session":"qa-working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"qa-working","windowId":"@1","pane":"%1"}}]},
-  {"name":"qa-extract-workers","path":"/tmp/qa-extract-workers","recency":100,"target":{"type":"tmux_session","session":"qa-extract-workers"},"details":[{"kind":"clanker","state":"idle","target":{"type":"tmux_window","session":"qa-extract-workers","windowId":"@2","pane":"%2"}}]}
+  {"name":"qa-observed","path":"/tmp/qa-observed","recency":150,"target":{"type":"tmux_session","session":"qa-observed"},"details":[{"kind":"observation","harness":"codex","state":"unknown","target":{"type":"tmux_window","session":"qa-observed","windowId":"@3","pane":"%3"},"observation":{"source":"process","confidence":"observed","state":"present","observedAt":10}}]},
+  {"name":"qa-extract-workers","path":"/tmp/qa-extract-workers","recency":100,"target":{"type":"tmux_session","session":"qa-extract-workers"},"details":[{"kind":"window","state":"unknown","target":{"type":"tmux_window","session":"qa-extract-workers","windowId":"@2","pane":"%2"}}]}
 ]}
 JSON
 
 tmux -S "$inner_socket" -f /dev/null new-session -d -s qa-working -n main -x 100 -y 24 "sleep 300"
+tmux -S "$inner_socket" new-session -d -s qa-observed -n main -x 100 -y 24 "$root/codex 300"
 tmux -S "$inner_socket" new-session -d -s qa-extract-workers -n main -x 100 -y 24 "sleep 300"
-tmux -S "$inner_socket" set-option -g @clankerhouse-jump-client full
 inner_pid=$(tmux -S "$inner_socket" display-message -p '#{pid}')
 TMUX="$inner_socket,$inner_pid,0" CLANKERHOUSE_HOME="$repo" "$repo/clankerhouse.tmux"
 
@@ -71,10 +74,15 @@ CAPTURE="$capture" python3 - <<'PY'
 import os
 
 lines = os.environ["CAPTURE"].splitlines()
-for binding in ("Alt-R rename", "Alt-A attach", "Alt-L detach"):
-    assert binding in os.environ["CAPTURE"], f"{binding} missing from popup:\n" + os.environ["CAPTURE"]
+actions = "Alt-R/A/L/D actions"
+assert actions in os.environ["CAPTURE"], f"{actions} missing from native popup:\n" + os.environ["CAPTURE"]
 selected = [line for line in lines if "qa-extract-workers" in line and (">" in line or "›" in line)]
 assert selected, "qa-extract-workers was not selected:\n" + os.environ["CAPTURE"]
+observed = [line for line in lines if "qa-observed" in line]
+assert observed and "○" in observed[0] and "?" not in observed[0] and "codex" in observed[0], "known process presence was not rendered as a neutral observation:\n" + os.environ["CAPTURE"]
+assert "current" in selected[0], "current session lacked explicit current metadata:\n" + os.environ["CAPTURE"]
+assert "○" in selected[0], "neutral current session did not retain its neutral glyph:\n" + os.environ["CAPTURE"]
+assert not any(glyph in selected[0] for glyph in "⠋⠙⠹⠸⠼⠴⠦⠧"), "current session was falsely rendered as working:\n" + os.environ["CAPTURE"]
 working = next(i for i, line in enumerate(lines) if "qa-working" in line)
 current = next(i for i, line in enumerate(lines) if "qa-extract-workers" in line)
 assert current > working, "current session was not nearest the bottom prompt:\n" + os.environ["CAPTURE"]
@@ -85,4 +93,4 @@ rendered_rows = [
 assert rendered_rows and current == max(rendered_rows), "another target sorted below the current session:\n" + os.environ["CAPTURE"]
 PY
 
-printf 'Clankerhouse current-session QA passed: Alt-K selected and prioritized qa-extract-workers with rename/attach/detach controls.\n'
+printf 'Clankerhouse current-session QA passed: neutral process-observation rendering, current-session priority, neutral glyph, and explicit current metadata are correct.\n'

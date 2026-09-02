@@ -75,6 +75,30 @@ describe("tmux multiplexer adapter", () => {
     registry.close()
   })
 
+  test("reconciles missing windows and panes in an already absorbed session", async () => {
+    const calls: string[][] = []
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-multiplexer-"))
+    roots.push(root)
+    const registryPath = join(root, "resources.sqlite3")
+    const command = topologyCommand(calls)
+    const multiplexer = new TmuxMultiplexer({ command, registryPath })
+    const snapshot = await multiplexer.observe()
+    const absorbed = await multiplexer.absorb({ kind: "tmux", instanceId: snapshot.instanceId, nativeSessionId: "$1", nativeWindowId: "@2", nativePaneId: "%3" }, snapshot)
+    const current = await multiplexer.observe()
+    const session = current.sessions[0]!
+    session.workshopId = absorbed.workshopId
+    session.resourceId = absorbed.session.id
+    session.windows[0]!.resourceId = absorbed.windows[0]!.id
+    session.windows[0]!.panes[0]!.terminalId = absorbed.terminals[0]!.id
+    session.windows.push({ id: "@9", index: "9", nativeName: "new", active: false, panes: [{ id: "%9", index: "0", pid: "900", command: "zsh", title: "new", currentPath: session.path, activity: 1, active: false }] })
+    calls.length = 0
+
+    expect(await multiplexer.reconcileAbsorbedTopology(current)).toBe(true)
+    expect(calls.some((argv) => argv.includes("@clankerhouse_window_id") && argv.includes("@9"))).toBe(true)
+    expect(calls.some((argv) => argv.includes("@clankerhouse_terminal_id") && argv.includes("%9"))).toBe(true)
+    expect(calls.some((argv) => argv.includes("@clankerhouse_session_id"))).toBe(false)
+  })
+
   test("resolves managed resources from the registry rather than stale target hints", async () => {
     const registryPath = fixture()
     const registry = openResourceRegistry({ dbPath: registryPath })

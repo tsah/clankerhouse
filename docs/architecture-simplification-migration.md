@@ -34,7 +34,7 @@ Port the recovery schema-v3 compatibility fix, failed-Workshop rollback, OpenCod
 - Project stable display rows, search text, ordering, exact targets, and typed available actions in each observation.
 - Move repository refresh and mutation sequencing out of picker handlers.
 - Native subscribes to the socket, retains its last valid snapshot through reconnects, and reads JSON at most once during startup.
-- Keep the interactive TypeScript picker as an opt-in compatibility Adapter until native action parity is verified; do not remove the TypeScript daemon implementation.
+- Rust/ratatui is now the sole interactive Adapter after native action parity was accepted. Keep the TypeScript daemon implementation; remove only its obsolete Solid/OpenTUI renderer.
 
 ### Phase 3 — Expand and migrate the durable registry
 
@@ -87,5 +87,5 @@ Install into a validated versioned directory, run preflight/build/QA there, then
 5. Start and health-check the new daemon, including epoch ownership and registry validation.
 6. On failure, atomically restore the prior target and restart/probe the prior daemon.
 7. On success, retain legacy databases and the prior version for the compatibility window.
-8. Enable native as default only after action-parity and latency QA pass.
-9. Contract legacy protocol fields, picker behavior, and stores in a later release with an explicit rollback cutoff.
+8. Native action-parity and latency were accepted; contract the obsolete Bun renderer while retaining the daemon and old installed versions for rollback.
+9. Contract remaining legacy protocol fields and stores in a later release with an explicit rollback cutoff.

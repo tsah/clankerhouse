@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStagedMutationExecutor } from "./daemon-mutations"
+import { createStagedMutationExecutor, mutationStages } from "./daemon-mutations"
 import { openDurableRegistry } from "./registry"
 import { OperationJournal } from "./transport/operations"
 import type { OperationRecord } from "./transport/protocol"
@@ -25,6 +25,40 @@ const settled = async (journal: OperationJournal, id: string) => {
 }
 
 describe("staged daemon mutation durability", () => {
+  test("splices deleted Workshop lineage before closing its tmux session", () => {
+    expect(mutationStages({ type: "delete", kind: "worktree", session: "middle", path: "/repo/middle", confirmed: true })).toEqual([
+      "identity.validated",
+      "tmux.marked",
+      "worktree.deleted",
+      "lineage.spliced",
+      "tmux-children.updated",
+      "tmux.deleted",
+      "projection.refreshed",
+    ])
+  })
+
+  test("replays inserted lineage stages for legacy deletes already past them", async () => {
+    for (const legacyStage of ["tmux.deleted", "projection.refreshed"]) {
+      const { dbPath } = fixture()
+      const registry = openDurableRegistry({ dbPath })
+      const intent = { type: "delete" as const, kind: "worktree" as const, session: "middle", path: "/repo/middle", confirmed: true as const }
+      const operation = registry.beginOperation(`legacy-${legacyStage}`, "mutation.delete", intent)
+      registry.startOperation(operation.id)
+      registry.advanceOperation(operation.id, legacyStage, "running", { result: { path: "/repo/middle" } })
+      const reconciled: string[] = []
+      const executor = createStagedMutationExecutor(async (_intent, stage, execution) => {
+        reconciled.push(stage)
+        const checkpoint = execution.operation.result as Record<string, unknown>
+        return { checkpoint: stage === "lineage.spliced" ? { ...checkpoint, lineageSpliceVersion: 1 } : checkpoint }
+      })
+      const journal = await OperationJournal.open(executor, registry)
+
+      expect(await settled(journal, operation.id)).toMatchObject({ state: "succeeded", stage: "completed" })
+      expect(reconciled).toEqual(["lineage.spliced", "tmux-children.updated", "tmux.deleted", "projection.refreshed"])
+      registry.close()
+    }
+  })
+
   test("reconciles a partial tmux rename and metadata write instead of repeating either effect", async () => {
     const { dbPath } = fixture()
     const registry = openDurableRegistry({ dbPath })

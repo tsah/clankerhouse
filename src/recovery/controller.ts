@@ -5,21 +5,17 @@ import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from
 import { initialHarnessCommand, recoveryHarnessCommand } from "./harness"
 import { openRecoveryStore, type RecoveryStore } from "./store"
 import { recordRecoveryIncident } from "../incidents"
-import { ensureManagedTmuxSession } from "../multiplexer"
-import { parseTmuxFields, tmuxFields } from "../tmux-fields"
+import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "../multiplexer"
+import { paneLocation, sessionLocation, windowLocation } from "../multiplexer/interface"
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
 import { recoveryUnitName } from "./process-owner"
 import { decideRecovery } from "./planner"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
-
-interface CommandResult { code: number; stdout: string; stderr: string }
-const command = async (argv: string[], allowFailure = false): Promise<CommandResult> => {
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" })
-  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-  if (code !== 0 && !allowFailure) throw new Error(stderr.trim() || `${argv.join(" ")} exited ${code}`)
-  return { code, stdout: stdout.trim(), stderr: stderr.trim() }
+const spawnedRuntimeEnv = (multiplexer: ManagedMultiplexer) => {
+  const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
+  return { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
 }
 
 export const linuxBootId = (path = Bun.env.CLANKERHOUSE_BOOT_ID_PATH || "/proc/sys/kernel/random/boot_id") => readFileSync(path, "utf8").trim()
@@ -32,47 +28,56 @@ export const processStartTicks = (pid = process.pid, procRoot = Bun.env.CLANKERH
 export interface ObservedPane {
   pane: string
   session: string
+  nativeSessionId: string
+  windowId: string
   clankerId: string
   harness: string
   harnessSessionId: string
   recoveryAttemptId: string
 }
 
-export const observePanes = async (): Promise<ObservedPane[]> => {
-  const result = await command(["tmux", "list-panes", "-a", "-F", tmuxFields("#{pane_id}", "#{session_name}", "#{@clankerhouse_clanker_id}", "#{@dotfiles_harness}", "#{@clankerhouse_harness_session_id}", "#{@clankerhouse_recovery_attempt}")], true)
-  if (result.code !== 0) return []
-  return result.stdout.split("\n").filter(Boolean).map((line) => {
-    const [pane = "", session = "", clankerId = "", harness = "", harnessSessionId = "", recoveryAttemptId = ""] = parseTmuxFields(line)
-    return { pane, session, clankerId, harness, harnessSessionId, recoveryAttemptId }
-  }).filter((row) => row.pane && row.session)
+export const observePanes = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ObservedPane[]> => {
+  let snapshot
+  try { snapshot = await multiplexer.observe() }
+  catch { return [] }
+  return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => {
+    const claims = pane.claims ?? {}
+    return {
+      pane: pane.id,
+      session: session.nativeName,
+      nativeSessionId: session.id,
+      windowId: window.id,
+      clankerId: claims.clankerId || pane.clankerId || "",
+      harness: claims.harness || pane.harness || "",
+      harnessSessionId: claims.harnessSessionId || pane.harnessSessionId || "",
+      recoveryAttemptId: claims.recoveryAttemptId || pane.recoveryAttemptId || "",
+    }
+  })))
 }
 
-interface ObservedSession { id: string; name: string; path: string; workshopId: string }
-const observeSessions = async (): Promise<ObservedSession[]> => {
-  const result = await command(["tmux", "list-sessions", "-F", tmuxFields("#{session_id}", "#{session_name}", "#{@dotfiles_worktree_path}", "#{session_path}", "#{@dotfiles_workshop_id}")], true)
-  if (result.code !== 0) return []
-  return result.stdout.split("\n").filter(Boolean).map((line) => {
-    const [id = "", name = "", taggedPath = "", sessionPath = "", workshopId = ""] = parseTmuxFields(line)
-    return { id, name, path: taggedPath || sessionPath, workshopId }
-  })
+interface ObservedSession { id: string; name: string; path: string; workshopId: string; windowNames: string[] }
+const observeSessions = async (multiplexer: ManagedMultiplexer): Promise<ObservedSession[]> => {
+  let snapshot
+  try { snapshot = await multiplexer.observe() }
+  catch { return [] }
+  return snapshot.sessions.map((session) => ({ id: session.id, name: session.nativeName, path: session.worktreePath || session.path, workshopId: session.workshopId || "", windowNames: session.windows.map((window) => window.nativeName) }))
 }
 
-const ensureWorkshop = async (desired: DesiredClankerRecord) => {
-  const sessions = await observeSessions()
+const ensureWorkshop = async (desired: DesiredClankerRecord, multiplexer: ManagedMultiplexer) => {
+  const sessions = await observeSessions(multiplexer)
   const existing = sessions.find((row) => row.workshopId === desired.workshopId || realpathSafe(row.path) === realpathSafe(desired.workshopPath))
-  if (existing) return existing.name
+  if (existing) return existing
   if (!existsSync(desired.workshopPath)) throw new Error(`Workshop path no longer exists: ${desired.workshopPath}`)
   let name = desired.tmuxSessionName
   if (sessions.some((row) => row.name === name)) name = `${name}-${createHash("sha256").update(desired.workshopPath).digest("hex").slice(0, 8)}`
-  await command(["tmux", "new-session", "-d", "-s", name, "-n", "main", "-c", desired.workshopPath, Bun.env.SHELL || "/bin/sh"])
-  await command(["tmux", "set-option", "-t", name, "@dotfiles_worktree_path", desired.workshopPath])
-  await command(["tmux", "set-option", "-t", name, "@dotfiles_workshop_id", desired.workshopId])
-  return name
+  const spawned = await multiplexer.spawn({ scope: "session", name, cwd: desired.workshopPath, windowName: "main", env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv: [Bun.env.SHELL || "/bin/sh"] } })
+  await multiplexer.claim(sessionLocation(spawned.nativeSessionId), "worktreePath", desired.workshopPath)
+  await multiplexer.claim(sessionLocation(spawned.nativeSessionId), "workshopId", desired.workshopId)
+  return { id: spawned.nativeSessionId, name, path: desired.workshopPath, workshopId: desired.workshopId, windowNames: ["main"] }
 }
 
-const nextWindowName = async (session: string, preferred: string) => {
-  const result = await command(["tmux", "list-windows", "-t", `=${session}`, "-F", "#{window_name}"], true)
-  const names = new Set(result.stdout.split("\n").filter(Boolean))
+const nextWindowName = (existing: string[], preferred: string) => {
+  const names = new Set(existing)
   let name = preferred
   let suffix = 2
   while (names.has(name)) name = `${preferred}-${suffix++}`
@@ -89,15 +94,16 @@ const backoffRemaining = (desired: DesiredClankerRecord, store: RecoveryStore, n
 }
 
 export interface ReconcileResult { launched: string[]; adopted: string[]; pending: string[]; skipped: Array<{ clankerId: string; reason: string }> }
-export interface ReconcileOptions { trigger?: string; now?: number; allowLaunch?: boolean; automatic?: boolean; automaticCandidates?: string[]; clankerId?: string; bootEpoch?: number; hostState?: RecoveryHostState; bypassAdmission?: boolean }
+export interface ReconcileOptions { trigger?: string; now?: number; allowLaunch?: boolean; automatic?: boolean; automaticCandidates?: string[]; clankerId?: string; bootEpoch?: number; hostState?: RecoveryHostState; bypassAdmission?: boolean; multiplexer?: ManagedMultiplexer }
 
 export const reconcileRecovery = async (providedStore?: RecoveryStore, options: ReconcileOptions = {}): Promise<ReconcileResult> => {
   const ownStore = !providedStore
   const store = providedStore ?? openRecoveryStore()
   const result: ReconcileResult = { launched: [], adopted: [], pending: [], skipped: [] }
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   try {
     const now = options.now ?? Date.now()
-    let panes = await observePanes()
+    let panes = await observePanes(multiplexer)
     for (const original of store.listDesired()) {
       if (options.clankerId && original.clankerId !== options.clankerId) continue
       let desired = original
@@ -166,22 +172,23 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       store.setRecoveryOwner(desired.clankerId, recoveryUnitName(desired.clankerId, attemptId), { now })
       store.setMetadata("recovery.last_admission_at", now, { now })
       try {
-        const session = await ensureWorkshop(desired)
-        const windowName = await nextWindowName(session, desired.tmuxWindowName)
+        const session = await ensureWorkshop(desired, multiplexer)
+        const windowName = nextWindowName(session.windowNames, desired.tmuxWindowName)
         const argv = previousSucceeded
           ? recoveryHarnessCommand(desired, attemptId)
           : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId })
-        const launched = await command(["tmux", "new-window", "-d", "-P", "-F", tmuxFields("#{window_id}", "#{pane_id}"), "-t", `=${session}`, "-n", windowName, "-c", desired.cwd, ...argv])
-        const [window = "", pane = ""] = parseTmuxFields(launched.stdout)
-        if (!pane) throw new Error("tmux did not return a pane id")
-        await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_clanker_id", desired.clankerId])
-        await command(["tmux", "set-option", "-p", "-t", pane, "@dotfiles_harness", desired.harness])
-        await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_recovery_attempt", attemptId])
-        if (desired.harnessSessionId) await command(["tmux", "set-option", "-p", "-t", pane, "@clankerhouse_harness_session_id", desired.harnessSessionId])
-        if (window) await command(["tmux", "set-option", "-w", "-t", window, "@dotfiles_harness", desired.harness])
-        await ensureManagedTmuxSession(session)
+        const launched = await multiplexer.spawn({ scope: "window", nativeSessionId: session.id, name: windowName, cwd: desired.cwd, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv } })
+        const { nativeWindowId: window, nativePaneId: pane } = launched
+        if (!pane) throw new Error(`${multiplexer.kind} did not return a pane id`)
+        const at = paneLocation(session.id, window, pane)
+        await multiplexer.claim(at, "clankerId", desired.clankerId)
+        await multiplexer.claim(at, "harness", desired.harness)
+        await multiplexer.claim(at, "recoveryAttemptId", attemptId)
+        if (desired.harnessSessionId) await multiplexer.claim(at, "harnessSessionId", desired.harnessSessionId)
+        if (window) await multiplexer.claim(windowLocation(session.id, window), "windowHarness", desired.harness)
+        await ensureManagedSession(session.id, multiplexer)
         result.launched.push(desired.clankerId)
-        panes = [...panes, { pane, session, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
+        panes = [...panes, { pane, session: session.name, nativeSessionId: session.id, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
       } catch (error) {
         store.finishAttempt(attempt.id, "failed", { error: error instanceof Error ? error.message : String(error), now: Date.now() })
         result.skipped.push({ clankerId: desired.clankerId, reason: error instanceof Error ? error.message : String(error) })
@@ -195,13 +202,13 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
 
 export const controllerIdentity = (): ProcessIdentity => ({ bootId: linuxBootId(), pid: process.pid, processStartTicks: processStartTicks() })
 
-const tmuxServerEpoch = async () => {
-  const current = await command(["tmux", "show-options", "-gqv", "@clankerhouse_server_epoch"], true)
-  if (current.code !== 0) return undefined
-  if (current.stdout) return current.stdout
-  const epoch = randomUUID()
-  await command(["tmux", "set-option", "-g", "@clankerhouse_server_epoch", epoch])
-  return epoch
+/** Runtime instance epoch. For tmux this is the server epoch stored in a global option, so persisted metadata stays comparable across upgrades. */
+const runtimeServerEpoch = async (multiplexer: ManagedMultiplexer) => {
+  try {
+    if (!await multiplexer.available()) return undefined
+    const instanceId = await multiplexer.instanceId()
+    return multiplexer.kind === "tmux" ? instanceId.split(":").at(-1) : instanceId
+  } catch { return undefined }
 }
 
 export interface RecoveryCampaign {
@@ -242,7 +249,7 @@ export const advanceRecoveryCampaign = (campaign: RecoveryCampaign, desiredRows:
 export class RecoveryController {
   readonly ownerToken = randomUUID()
   private stopped = false
-  constructor(readonly store = openRecoveryStore(), readonly intervalMs = Number(Bun.env.CLANKERHOUSE_RECOVERY_INTERVAL_MS || 10_000)) {}
+  constructor(readonly store = openRecoveryStore(), readonly intervalMs = Number(Bun.env.CLANKERHOUSE_RECOVERY_INTERVAL_MS || 30_000), readonly multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {}
 
   stop() { this.stopped = true }
 
@@ -255,7 +262,7 @@ export class RecoveryController {
         const previousBoot = this.store.runtimeEpochs().bootId
         const epochs = this.store.observeBoot(identity.bootId)
         const hardReboot = Boolean(previousBoot && previousBoot !== identity.bootId)
-        const beforeServerEpoch = await tmuxServerEpoch()
+        const beforeServerEpoch = await runtimeServerEpoch(this.multiplexer)
         const recordedServerEpoch = this.store.getMetadata<string>("runtime.tmux_server_epoch")
         const trigger = hardReboot ? "hard_reboot" : recordedServerEpoch && beforeServerEpoch && recordedServerEpoch !== beforeServerEpoch ? "tmux_restart" : "reconcile"
         const automaticEnabled = Bun.env.CLANKERHOUSE_AUTO_RECOVER === undefined ? RECOVERY_POLICY.automaticRecovery : Bun.env.CLANKERHOUSE_AUTO_RECOVER !== "0"
@@ -272,17 +279,17 @@ export class RecoveryController {
           automatic: Boolean(activeCampaign),
           automaticCandidates: activeCampaign?.pending,
           bootEpoch: epochs.bootEpoch,
+          multiplexer: this.multiplexer,
         })
         if (activeCampaign) {
           campaign = advanceRecoveryCampaign(activeCampaign, this.store.listDesired({ includeTombstoned: true }), result.adopted)
           if (JSON.stringify(campaign) !== JSON.stringify(activeCampaign)) this.store.setMetadata("recovery.campaign", campaign)
         }
-        const serverEpoch = await tmuxServerEpoch()
+        const serverEpoch = await runtimeServerEpoch(this.multiplexer)
         if (serverEpoch && serverEpoch !== recordedServerEpoch) {
           if (recordedServerEpoch) this.store.advanceTmuxEpoch()
           this.store.setMetadata("runtime.tmux_server_epoch", serverEpoch)
         }
-        this.store.renewLease({ ...identity, scope, ownerToken: this.ownerToken }, Math.max(10_000, this.intervalMs * 4))
       }
       if (options.once && lease) break
       await sleep(this.intervalMs)

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { instanceSlug } from "./paths"
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { canonicalActivityPath } from "./activity"
@@ -37,7 +38,7 @@ export interface ResourceIncident {
   }
 }
 
-export const incidentStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse/incidents`
+export const incidentStateDirectory = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}/clankerhouse${instanceSlug()}/incidents`
 const incidentKinds = new Set<IncidentKind>(["resource_pressure_termination", "resource_pressure_workload_stop", "resource_pressure_clanker_stop", "unclean_boot_clanker_loss", "recovery_quarantined", "recovery_pressure_suspension", "recovery_descendant_cleanup_failed", "aggregate_io_saturation", "interrupted_tool_requires_confirmation"])
 const harnesses = new Set(["pi", "claude", "opencode", "codex"])
 
@@ -140,27 +141,10 @@ export const applyResourceIncidents = (rows: SessionRow[], incidents: ResourceIn
   const result = rows.map((row) => ({ ...row, details: [...row.details] }))
   for (const incident of incidents) {
     let row = result.find((candidate) => rowMatches(candidate, incident))
-    if (!row) {
-      const path = incidentPath(incident)
-      if (!path) continue
-      const canonicalPath = canonicalActivityPath(path)
-      const target: Target = { type: "directory", path: canonicalPath }
-      row = {
-        name: incident.clanker.sessionName || canonicalPath,
-        path: canonicalPath,
-        branch: "",
-        flags: "",
-        markers: [],
-        age: ageFromTimestamp(incident.occurredAt, observedAt),
-        recency: Math.floor(incident.occurredAt / 1000),
-        target,
-        details: [],
-        searchText: "",
-        directorySource: "activity",
-        activitySource: "incident",
-      }
-      result.push(row)
-    }
+    // Any later Workshop activity acknowledges the incident in the actionable
+    // projection while preserving its durable record for diagnostics.
+    if (row && row.recency > Math.floor(incident.occurredAt / 1000)) continue
+    if (!row) continue
     row.details.push(incidentDetail(incident, row.target, observedAt))
     row.recency = Math.max(row.recency, Math.floor(incident.occurredAt / 1000))
     row.searchText = [row.searchText, incident.id, incident.kind, incidentStatus(incident), incident.clanker.harness, incident.clanker.clankerId, incident.evidence?.reason].filter(Boolean).join(" ").toLowerCase()

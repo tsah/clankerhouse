@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Clankerhouse currently distributes correctness across a Bash supervisor, TypeScript projection process, Rust and TypeScript picker policy, JSON snapshots, a Unix socket, several SQLite databases, manifests, lifecycle files, tmux options, and direct workflow side effects. On one host this creates distributed-system failure modes without useful isolation: multiple authorities, partial mutations, stale producers, incompatible schemas, and live files replaced beneath old processes.
+Clankerhouse distributed correctness across a Bash supervisor, TypeScript projection process, Rust and TypeScript picker policy, JSON snapshots, a Unix socket, several SQLite databases, manifests, lifecycle files, tmux options, and direct workflow side effects. On one host this creates distributed-system failure modes without useful isolation: multiple authorities, partial mutations, stale producers, incompatible schemas, and live files replaced beneath old processes.
 
 ADR-0001 requires the Multiplexer to remain a replaceable runtime and makes durable Clankerhouse identity authoritative over tmux names and claims.
 
@@ -26,7 +26,7 @@ Installation stages and validates a versioned application, atomically activates 
 
 ## Consequences
 
-- Rust becomes a thin default rendering/input Adapter after action parity; the interactive TypeScript picker remains temporarily for compatibility.
+- Rust/ratatui is the sole rendering/input Adapter after action parity; Bun/TypeScript remains the daemon and control plane.
 - Tree, search, ordering, target, and available-action policy has one owner.
 - State-changing legacy commands become socket clients while preserving command shapes during the compatibility window.
 - Recovery and workflow retries can reconcile partial external effects from durable operation stages.

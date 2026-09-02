@@ -1,5 +1,6 @@
 import type { ActivitySource } from "../activity"
 import type { ClankerState, DirectorySource } from "../model"
+import type { RuntimeAgentStatus } from "../multiplexer/interface"
 
 export interface TmuxSession {
   id: string
@@ -23,6 +24,7 @@ export interface TmuxWindow {
   name: string
   pane: string
   pid: string
+  currentPath: string
   command: string
   title: string
   activity: number
@@ -34,6 +36,8 @@ export interface TmuxWindow {
   clankerId?: string
   explicitHarness?: string
   harnessSessionId?: string
+  recoveryAttemptId?: string
+  agentStatus?: { agent?: string; status: RuntimeAgentStatus }
 }
 
 export interface OpencodeStatus {
@@ -59,6 +63,7 @@ export interface DirectoryRow {
 }
 
 export interface ClankerReport {
+  clankerId: string
   harness: string
   state: ClankerState
   pane: string

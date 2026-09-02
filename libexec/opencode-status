@@ -102,7 +102,7 @@ def api_get(port, path, timeout):
 
 def opencode2_api_get(path, cwd=None, timeout=3):
     try:
-        # Bun extracts OpenTUI's native library for every short-lived CLI call
+        # opencode2 extracts its native UI library for every short-lived CLI call
         # but does not remove it afterward. Isolate the extraction so the
         # temporary directory is removed as soon as the API call exits.
         with tempfile.TemporaryDirectory(prefix="opencode2-api-") as bun_tmpdir:

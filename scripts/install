@@ -6,6 +6,7 @@ source_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 prefix=${CLANKERHOUSE_PREFIX:-${PREFIX:-$HOME/.local}}
 with_systemd=false
 with_integrations=false
+with_herdr=false
 enable_services=true
 dry_run=false
 force=false
@@ -16,13 +17,14 @@ preflight_hook=
 activation_hook=
 
 usage() {
-    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--no-enable] [--runtime-dir PATH --tmux-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--no-enable] [--runtime-dir PATH --tmux-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
 }
 while (($#)); do
     case "$1" in
         --prefix) prefix=${2:?}; shift 2 ;;
         --systemd) with_systemd=true; shift ;;
         --integrations) with_integrations=true; shift ;;
+        --herdr) with_herdr=true; shift ;;
         --no-enable) enable_services=false; shift ;;
         --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
         --tmux-socket) tmux_socket=${2:?}; shift 2 ;;
@@ -75,6 +77,16 @@ refuse_unmanaged() {
     managed_or_absent "$path" || { echo "Refusing unmanaged $description: $path" >&2; exit 1; }
 }
 record() { printf '%s\n' "$1" >> "$manifest_next"; }
+install_symlink() {
+    local source=$1 destination=$2 temporary
+    if [[ -L "$destination" && "$(readlink -- "$destination")" == "$source" ]]; then
+        return
+    fi
+    mkdir -p "$(dirname "$destination")"
+    temporary="$(dirname "$destination")/.$(basename "$destination").next.$$"
+    ln -s "$source" "$temporary"
+    mv -Tf "$temporary" "$destination"
+}
 
 refuse_unmanaged "$active" "installation"
 if [[ (-e "$active" || -L "$active") && -z "$runtime_dir" && "$no_daemon_handoff" == false && "$dry_run" == false ]]; then
@@ -159,7 +171,7 @@ versions={shlex.quote(versions)}
 target=$(readlink -f -- "$active") || {{ echo "Clankerhouse has no valid active installation" >&2; exit 1; }}
 case "$target/" in
   "$versions/"*) [ -f "$target/.clankerhouse-install" ] || {{ echo "Refusing unvalidated Clankerhouse target: $target" >&2; exit 1; }} ;;
-  "$active/") [ -f "$target/src/main.tsx" ] || {{ echo "Refusing invalid legacy Clankerhouse target: $target" >&2; exit 1; }} ;;
+  "$active/") [ -f "$target/src/daemon.ts" ] || [ -f "$target/src/main.tsx" ] || {{ echo "Refusing invalid legacy Clankerhouse target: $target" >&2; exit 1; }} ;;
   *) echo "Refusing unsafe Clankerhouse active target: $target" >&2; exit 1 ;;
 esac
 export CLANKERHOUSE_HOME="$target"
@@ -180,18 +192,22 @@ if [[ "$with_integrations" == true ]]; then
     )
     for pair in "${links[@]}"; do
         source=${pair%%:*}; destination=${pair#*:}
-        mkdir -p "$(dirname "$destination")"
-        temporary="$(dirname "$destination")/.$(basename "$destination").next.$$"
-        ln -s "$source" "$temporary"
-        mv -Tf "$temporary" "$destination"
+        install_symlink "$source" "$destination"
     done
     for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" "$HOME/.codex/skills"; do
         destination="$skill_root/clanker-coordination"
-        mkdir -p "$skill_root"
-        temporary="$skill_root/.clanker-coordination.next.$$"
-        ln -s "$active/integrations/skills/clanker-coordination" "$temporary"
-        mv -Tf "$temporary" "$destination"
+        install_symlink "$active/integrations/skills/clanker-coordination" "$destination"
     done
+fi
+
+if [[ "$with_herdr" == true ]]; then
+    if command -v herdr >/dev/null 2>&1; then
+        # Run the staged installer ($final); the launcher path is the stable bin wrapper.
+        CLANKERHOUSE_HERDR_LAUNCHER="$bin_dir/clankerhouse-herdr" "$final/bin/clankerhouse-install-herdr" \
+            || echo "Warning: herdr keybinding install failed; core install continues" >&2
+    else
+        echo "Skipping --herdr: herdr binary not found on PATH" >&2
+    fi
 fi
 
 if [[ "$with_systemd" == true ]]; then

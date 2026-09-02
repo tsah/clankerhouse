@@ -1,0 +1,27 @@
+# ADR-0004: Separate Owned Declarations from Runtime Observations
+
+## Status
+
+Accepted
+
+## Context
+
+Clankerhouse owns durable Workshop, Terminal, and Clanker identity while tmux, processes, harnesses, Git, and the host own their current facts. The existing projection sometimes discarded facts that failed identity correlation, then presentation inferred replacement state such as treating the current session as working. This made missing attestation look like missing reality and allowed derived UI state to masquerade as runtime state.
+
+## Decision
+
+Clankerhouse is authoritative for Declarations: stable identity, Display Names, Workshop lineage, desired recovery state, acknowledgement, and durable mutation intent.
+
+Runtime Adapters are authoritative for their Observations. Every Observation carries its source, observed time, reported state when available, and confidence. Identity correlation may classify evidence as attested, observed, or rejected. Rejected or incomplete evidence cannot establish managed identity, drive Recovery, or become an actionable Clanker, but remains reportable when it has a current target.
+
+A pane-addressed harness lifecycle report that makes no Clanker identity claim may establish observed harness state when a current process observation on the same pane confirms the harness. It remains an Observation, not a Clanker: it cannot establish owned identity, expose Clanker actions, or drive Recovery. A report that claims Clanker identity still requires exact owned identity, harness-session, and recovery-attempt correlation to become attested state.
+
+Projection keeps existing state and target fields as compatibility outputs while adding structured observation metadata. Unknown runtime state remains unknown. Attention, current selection, and subtree aggregation must not overwrite runtime facts. Clients render the projection and do not invent stronger runtime claims.
+
+## Consequences
+
+- A detected harness process can be visible without becoming a Clanker.
+- A mismatched lifecycle report remains diagnosable without affecting aggregate runtime state.
+- Stable identity and mutation safety continue to use validated registry records and Multiplexer Locations.
+- Snapshot additions remain optional and backward-compatible during migration.
+- Recovery adoption must eventually consume the same validated observation model instead of raw tmux claims.

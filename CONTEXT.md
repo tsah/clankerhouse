@@ -10,7 +10,7 @@ A durable Clankerhouse-owned terminal surface belonging to a Workshop. A Termina
 
 ## Clanker
 
-A durable Clankerhouse-owned agent belonging to a Workshop and running in a Terminal. A Clanker has a stable Clankerhouse ID. A process that merely resembles an agent is not a Clanker until it explicitly registers or is launched by Clankerhouse.
+An externally running harness session correlated to a Workshop and Terminal. Clankerhouse assigns a stable internal ID so it can track the Clanker across changing process and Multiplexer Locations, but the harness remains authoritative about whether it exists and its current lifecycle state. Launching through Clankerhouse is a convenience, not a prerequisite for becoming visible or managed.
 
 ## Display Name
 
@@ -32,7 +32,7 @@ A Tmux Location is a Multiplexer Location whose instance identity includes the t
 
 A Workshop, Terminal, or Clanker carrying explicit Clankerhouse identity. Managed resources are matched only through stable Clankerhouse IDs and validated Multiplexer Locations or process identities.
 
-The Clankerhouse resource registry is authoritative. Multiplexer metadata carries identity claims used for observation and reconciliation; a claim is managed only when it validates against the registry.
+The Clankerhouse resource registry is authoritative about internal correlation, names, and intent, never present-tense external state. Multiplexer metadata carries identity claims used for observation and reconciliation; a claim is managed only when it validates against the registry and current external evidence.
 
 ## Unmanaged Resource
 
@@ -40,12 +40,26 @@ A visible tmux session, window, pane, or process without explicit Clankerhouse i
 
 ## Absorption
 
-The explicit transaction performed when a user enters an unmanaged target through Clankerhouse. Absorption registers a Workshop for the canonical worktree or directory, assigns Clankerhouse identities to the entire multiplexer session's terminal topology, seeds Display Names from native labels, records current Multiplexer Locations, and then switches to the target.
+The explicit transaction performed when a user enters an unmanaged target through Clankerhouse. Absorption registers a Workshop for the canonical worktree or directory, maps the current multiplexer session's terminal topology, seeds Display Names from native labels, records current Multiplexer Locations, and then switches to the target. It also establishes the session as a scope for continuous Herd Reconciliation.
 
-Switching outside Clankerhouse does not trigger Absorption. Processes in absorbed terminals remain unmanaged unless they explicitly register as Clankers.
+Switching outside Clankerhouse does not trigger Absorption. After Absorption, new and removed windows, panes, and supported harness processes are continuously reconciled into or out of the Workshop's internal representation regardless of whether Clankerhouse launched them.
 
 The active pane determines the Workshop that owns an absorbed tmux session. Different working directories in sibling panes do not imply different ownership.
 
 ## Recovery
 
-Recovery reconciles durable Clanker desired state with managed resources and their current Multiplexer Locations. A missing desired Clanker may cause its Terminal to be recreated. Ordinary shell Terminals do not create a recovery obligation and are not recreated merely because they once had stable identity.
+Recovery reconciles recoverable intent with current external Observations. A supported harness manually or programmatically started in an absorbed Workshop becomes recoverable while it is observed active. A graceful harness exit or manual removal while the host and Multiplexer remain healthy cancels that obligation; disappearance during process, Multiplexer, or host failure may recreate its Terminal and resume its harness session. Ordinary shell Terminals do not create a recovery obligation and are not recreated merely because they once had stable identity.
+
+## Herd Reconciliation
+
+The continuous process that consumes Multiplexer topology, foreground process, harness lifecycle, host, and recovery Observations for absorbed Workshops. It maintains stable internal correlation, current presentation, and recoverable intent without replacing the external facts. Starting through Clankerhouse and starting directly in tmux enter the same reconciliation path.
+
+## Declaration
+
+An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, recoverable intent, user acknowledgement, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
+
+## Observation
+
+A timestamped fact reported by an external runtime Adapter, such as tmux topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
+
+Harness state can remain an Observation without becoming a Clanker. A lifecycle report with no Clanker claim may describe a pane's current harness state only while a matching harness process is observed on that pane. It provides presentation state, not owned identity, Clanker actions, or Recovery authority.

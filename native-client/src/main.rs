@@ -305,6 +305,7 @@ struct App {
     expanded_details: HashSet<String>,
     selected: usize,
     query: String,
+    unfiltered_selection: Option<String>,
     current_session: String,
     tmux_client: Option<String>,
     error: String,
@@ -781,6 +782,7 @@ impl App {
             expanded_details: HashSet::new(),
             selected: 0,
             query: String::new(),
+            unfiltered_selection: None,
             current_session,
             tmux_client: None,
             error: String::new(),
@@ -830,6 +832,7 @@ impl App {
             expanded_details: HashSet::new(),
             selected: 0,
             query: String::new(),
+            unfiltered_selection: None,
             current_session,
             tmux_client: None,
             error: String::new(),
@@ -1124,7 +1127,14 @@ impl App {
             self.selected = 0;
             return;
         }
-        let key = self.rows.get(self.selected).map(|row| row.key.clone());
+        let mut key = self.rows.get(self.selected).map(|row| row.key.clone());
+        if self.query.is_empty() && !query.is_empty() {
+            // Searching temporarily changes selection (and its derived viewport).
+            // Keep a stable anchor, not old rows: snapshots may change while filtering.
+            self.unfiltered_selection = key.clone();
+        } else if !self.query.is_empty() && query.is_empty() {
+            key = self.unfiltered_selection.take();
+        }
         let broadening = query.chars().count() < self.query.chars().count();
         self.query = query;
         self.rebuild(key.as_deref());
@@ -1257,6 +1267,7 @@ impl App {
     fn enter_repository_mode(&mut self) {
         self.mode = Mode::Repository;
         self.query.clear();
+        self.unfiltered_selection = None;
         self.selected = 0;
         self.error.clear();
         self.clear_action_mode();
@@ -1317,6 +1328,7 @@ impl App {
         self.action_session = Some(source);
         self.mode = Mode::Attach;
         self.query.clear();
+        self.unfiltered_selection = None;
         self.selected = 0;
     }
 }
@@ -3147,7 +3159,7 @@ mod tests {
     }
 
     #[test]
-    fn broadening_a_lineage_search_preserves_the_selected_row_anchor() {
+    fn broadening_a_lineage_search_preserves_the_match_until_cleared() {
         let mut app = app_with_sessions(
             r#"[
                 {"name":"tweezr@idp-java","path":"/root","workshopId":"root","target":{"type":"tmux_session","session":"root"}},
@@ -3155,17 +3167,110 @@ mod tests {
                 {"name":"tweezr@fix-java-failed-tests","path":"/failed","workshopId":"failed","parentWorkshopId":"root","target":{"type":"tmux_session","session":"failed"}}
             ]"#,
         );
+        app.selected = app.rows.iter().position(|row| row.session.name == "tweezr@idp-java").unwrap();
+        let original_key = app.selected().unwrap().key.clone();
         let query = "tweezr@fix-java-failed-tests";
         for end in 1..=query.len() {
             app.update_query(query[..end].into());
         }
         assert_eq!(app.selected().unwrap().session.name, query);
 
-        for end in (0..query.len()).rev() {
+        for end in (1..query.len()).rev() {
             app.update_query(query[..end].into());
+            assert_eq!(app.selected().unwrap().session.name, query);
         }
+        app.update_query(String::new());
         assert!(app.query.is_empty());
-        assert_eq!(app.selected().unwrap().session.name, query);
+        assert_eq!(app.selected().unwrap().key, original_key);
+    }
+
+    fn rendered_view(app: &mut App) -> ratatui::buffer::Buffer {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn clearing_search_restores_the_entire_unfiltered_view() {
+        let sessions = (0..50).map(|index| serde_json::json!({
+            "name": format!("workshop-{index:02}"),
+            "path": format!("/workshop-{index:02}"),
+            "recency": 100 - index,
+            "workshopId": format!("workshop-{index:02}"),
+            "parentWorkshopId": if index == 26 { Some("workshop-25") } else { None },
+            "target": { "type": "tmux_session", "session": format!("workshop-{index:02}") },
+            "details": [{
+                "kind": "window", "title": "shell", "state": "idle",
+                "target": { "type": "tmux_window", "session": format!("workshop-{index:02}"),
+                    "windowId": format!("@{index}"), "pane": format!("%{index}") }
+            }]
+        })).collect::<Vec<_>>();
+        let mut app = app_with_sessions(&serde_json::to_string(&sessions).unwrap());
+        app.current_session = "workshop-00".into();
+        app.expanded_details.insert("workshop-25".into());
+        app.rebuild(None);
+
+        // Cover the initial view, a scrolled selection, and an expanded detail.
+        for key in ["session:workshop-00", "session:workshop-40", "window:workshop-25:@25:window"] {
+            app.selected = app.rows.iter().position(|row| row.key == key).unwrap();
+            for query in ["workshop-49", "shell", "no-match-λ", " "] {
+                for clear_with_escape in [false, true] {
+                    let before = rendered_view(&mut app);
+                    for character in query.chars() {
+                        handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+                    }
+                    if clear_with_escape {
+                        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                    } else {
+                        for _ in query.chars() {
+                            handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                        }
+                    }
+                    assert!(app.query.is_empty());
+                    assert_eq!(app.selected().unwrap().key, key);
+                    assert_eq!(rendered_view(&mut app), before, "query={query:?}, escape={clear_with_escape}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clearing_search_restores_stable_identity_after_a_snapshot_update() {
+        let mut app = app_with_sessions(r#"[
+            {"name":"original","path":"/original","target":{"type":"tmux_session","session":"original","resourceId":"stable-id"}},
+            {"name":"result","path":"/result","target":{"type":"tmux_session","session":"result"}}
+        ]"#);
+        app.update_query("result".into());
+        let sessions = serde_json::from_str(r#"[
+            {"name":"result","path":"/result","recency":100,"target":{"type":"tmux_session","session":"result"}},
+            {"name":"renamed","path":"/original","target":{"type":"tmux_session","session":"renamed","resourceId":"stable-id"}}
+        ]"#).unwrap();
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions }, false).unwrap();
+        app.update_query(String::new());
+        assert_eq!(app.selected().unwrap().key, "session:stable-id");
+        assert_eq!(app.selected().unwrap().session.name, "renamed");
+    }
+
+    #[test]
+    fn clearing_search_falls_back_when_the_original_target_disappears() {
+        let mut app = app_with_sessions(r#"[
+            {"name":"original","path":"/original","target":{"type":"tmux_session","session":"original"}},
+            {"name":"result","path":"/result","target":{"type":"tmux_session","session":"result"}},
+            {"name":"current","path":"/current","target":{"type":"tmux_session","session":"current"}}
+        ]"#);
+        app.current_session = "current".into();
+        app.selected = app.rows.iter().position(|row| row.session.name == "original").unwrap();
+        app.update_query("result".into());
+        let sessions = app.sessions.iter().filter(|row| row.name != "original").cloned().collect();
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions }, false).unwrap();
+        app.update_query(String::new());
+        assert_eq!(app.selected().unwrap().session.name, "current");
+        assert!(app.rows.iter().all(|row| row.session.name != "original"));
+
+        app.update_query("result".into());
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: vec![] }, false).unwrap();
+        app.update_query(String::new());
+        assert!(app.selected().is_none());
     }
 
     #[test]

@@ -50,6 +50,7 @@
       ],
       "manual": [
         "Search exact, fuzzy, hyphenated, and absent terms",
+        "Clear typed and pasted searches with Backspace or Escape; confirm the pre-search selection, expansion, and viewport return, including from a scrolled view and after no matches",
         "Navigate parent, child, and detail rows",
         "Confirm selected row and footer refer to the same target"
       ]

@@ -134,6 +134,23 @@ PY
     return 1
 }
 
+capture_view() {
+    # Ignore blank-cell padding and the outer tmux status bar's wall clock.
+    capture_outer | python3 -c 'import sys; print("\n".join(line.rstrip() for line in sys.stdin.read().splitlines()[:-1]))'
+}
+
+wait_for_restored_view() {
+    local expected=$1 capture=""
+    for _ in {1..100}; do
+        capture=$(capture_view)
+        [[ "$capture" == "$expected" ]] && return 0
+        sleep 0.05
+    done
+    printf 'Clearing search did not restore the original view\n' >&2
+    diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$capture") >&2 || true
+    return 1
+}
+
 wait_for_selected_detail() {
     local pattern=$1
     local capture=""
@@ -481,8 +498,9 @@ LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$line
 picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
 lineage_visual_pane=$(open_picker_window lineage-visual)
 wait_for_text "$lineage_root_session"
-# Select the exact lineage child independently of current-session priority,
-# then clear the query while preserving its stable row anchor.
+# The newest child is initially selected. Searching and clearing must return
+# to that unfiltered selection before we expand its details.
+wait_for_selected_row "$lineage_fix_java_session"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$lineage_fix_java_session"
 wait_for_selected_row "$lineage_fix_java_session"
 for ((i = 0; i < ${#lineage_fix_java_session}; i++)); do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
@@ -534,18 +552,28 @@ wait_for_text "qa-workshop-tree"
 wait_for_selected_row "qa-workshop-tree"
 for _ in {1..20}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" Up; done
 wait_for_selected_row "qa-scroll-19"
+scrolled_view=$(capture_view)
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "z-root"
+wait_for_selected_row "z-root"
+for _ in {1..6}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
+wait_for_restored_view "$scrolled_view"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "no-such-target"
+wait_for_text "0 targets"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+wait_for_restored_view "$scrolled_view"
 for _ in {1..20}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" Down; done
 wait_for_selected_row "qa-workshop-tree"
+unfiltered_view=$(capture_view)
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l $'\033[200~z-root\033[201~'
 wait_for_selected_row "z-root"
 wait_for_text "2 targets"
 wait_for_absent_text "false-positive"
 for _ in {1..6}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
-wait_for_text "45 targets"
+wait_for_restored_view "$unfiltered_view"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "search-root"
 wait_for_selected_row "search-root"
 for _ in {1..11}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
-wait_for_text "45 targets"
+wait_for_restored_view "$unfiltered_view"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "exact-hit"
 wait_for_text "search-root"
 wait_for_text "search-child"
@@ -553,7 +581,7 @@ wait_for_text "exact-hit"
 wait_for_selected_row "exact-hit"
 wait_for_absent_text "unrelated-log"
 for _ in {1..9}; do tmux -S "$outer_socket" send-keys -t "$outer_pane" BSpace; done
-wait_for_text "45 targets"
+wait_for_restored_view "$unfiltered_view"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "no-such-target"
 wait_for_text "0 targets"
 no_match_window=$(tmux -S "$inner_socket" display-message -p -t "=$session:" '#{window_name}')
@@ -561,6 +589,8 @@ tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
 sleep 0.2
 [[ "$(tmux -S "$inner_socket" display-message -p -t "=$session:" '#{window_name}')" == "$no_match_window" ]] || { printf 'Enter unexpectedly closed the no-match picker\n' >&2; exit 1; }
 wait_for_text "0 targets"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+wait_for_restored_view "$unfiltered_view"
 tmux -S "$inner_socket" kill-pane -t "$synthetic_picker_pane"
 sleep 0.2
 

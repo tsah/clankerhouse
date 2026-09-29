@@ -282,13 +282,17 @@
       "id": "installation",
       "title": "Atomic installation, daemon handoff, integrations, and rollback",
       "core": false,
-      "unit": [],
+      "unit": [
+        "src/claude-hooks.test.ts"
+      ],
       "standalone": [
         "scripts/qa-install"
       ],
       "manual": [
         "Install into an isolated prefix",
         "Verify active target and service templates",
+        "Upgrade settings with a missing Herdr startup hook; confirm Claude startup uses the Clankerhouse reporter, custom hooks survive, a private rollback copy exists, and reinstall is idempotent",
+        "Upgrade old unguarded Claude hooks; confirm ordinary terminals and missing-reporter environments produce no hook errors, while lifecycle reporting still works inside Multiplexer panes",
         "Inject preflight and activation failures and confirm rollback"
       ]
     },

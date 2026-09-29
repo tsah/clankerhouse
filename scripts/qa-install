@@ -57,6 +57,27 @@ export RUSTUP_HOME="$rustup_home"
 export CARGO_HOME="$cargo_home"
 export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log"
 export PATH="$fake_bin:$PATH"
+export CLAUDE_CONFIG_DIR="$home/.claude"
+
+# Reproduce an upgrade from removed Herdr hooks without touching live settings.
+python3 - "$CLAUDE_CONFIG_DIR" "$prefix" <<'PY'
+import json, sys
+from pathlib import Path
+config = Path(sys.argv[1])
+config.mkdir()
+(config / "settings.json").write_text(json.dumps({
+    "model": "qa-preserved-model",
+    "hooks": {
+        "SessionStart": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"bash '{config}/hooks/herdr-agent-state.sh' session", "timeout": 10},
+            {"type": "command", "command": "echo qa-custom-start"},
+        ]}],
+        "PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"bash '{sys.argv[2]}/bin/clankerhouse-clanker-state-report' claude working", "timeout": 2},
+        ]}],
+    },
+}, indent=2) + "\n")
+PY
 
 tmux -S "$socket" -f /dev/null new-session -d -s qa-install 'sleep 300'
 
@@ -147,6 +168,54 @@ new_target=$(readlink -f "$active")
 [[ "$(stat -c %Y "$opencode_skill")" == "$skill_mtime" ]]
 
 grep -F "$prefix/bin/clankerhouse-clanker-state-report" "$home/.claude/settings.json" >/dev/null
+python3 - "$home/.claude/settings.json" "$prefix/bin/clankerhouse-clanker-state-report" "$socket" <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+settings = Path(sys.argv[1])
+data = json.loads(settings.read_text())
+assert data["model"] == "qa-preserved-model"
+commands = [h["command"] for entry in data["hooks"]["SessionStart"] for h in entry["hooks"]]
+assert len(commands) == 2 and commands[0] == "echo qa-custom-start", commands
+assert sys.argv[2] in commands[1], commands
+assert "herdr-agent-state.sh" not in settings.read_text()
+backup = settings.with_name(settings.name + ".pre-clankerhouse-migration")
+assert "herdr-agent-state.sh" in backup.read_text()
+assert backup.stat().st_mode & 0o777 == 0o600
+
+# Run the actual installed commands, not merely inspect generated JSON.
+# A plain Claude terminal must not invoke even an installed reporter.
+env = dict(os.environ)
+for key in ("TMUX", "TMUX_PANE", "HERDR_ENV", "HERDR_PANE_ID"):
+    env.pop(key, None)
+owned = [h["command"] for entries in data["hooks"].values() for entry in entries for h in entry["hooks"] if sys.argv[2] in h.get("command", "")]
+assert len(owned) == 6, owned
+payload = '{"hook_event_name":"PreToolUse"}'
+def run_hook(command, environment):
+    result = subprocess.run(["sh", "-c", command], input=payload, text=True, capture_output=True, env=environment, timeout=5)
+    assert result.returncode == 0 and not result.stdout and not result.stderr, result
+for command in owned:
+    run_hook(command, env)
+
+# Inside the isolated tmux pane, lifecycle reporting still works.
+pane = subprocess.check_output(["tmux", "-S", sys.argv[3], "list-panes", "-t", "qa-install", "-F", "#{pane_id}"], text=True).strip()
+pane_env = {**env, "TMUX": f"{sys.argv[3]},0,0", "TMUX_PANE": pane}
+pre_tool = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+run_hook(pre_tool, pane_env)
+state_path = Path(env["XDG_RUNTIME_DIR"]) / f"clankerhouse-{os.getuid()}" / "clanker-state" / f"{pane}.json"
+report = json.loads(state_path.read_text())
+assert report["harness"] == "claude" and report["state"] == "working" and report["pane"] == pane, report
+
+# Simulate settings shared with an environment where the installed path is absent.
+reporter = Path(sys.argv[2])
+hidden = reporter.with_name(reporter.name + ".qa-hidden")
+reporter.rename(hidden)
+try:
+    for environment in (env, pane_env):
+        for command in owned:
+            run_hook(command, environment)
+finally:
+    hidden.rename(reporter)
+PY
 grep -F "ExecStart=\"$prefix/bin/clankerhouse-recovery\"" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
 grep -F "Documentation=file:$active/README.md" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
 grep -Fx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
@@ -160,4 +229,5 @@ printf 'preserve\n' > "$state/preserved-state"
 [[ ! -e "$active" && ! -L "$active" && ! -e "$versions" ]]
 [[ -f "$state/preserved-state" && -d "$runtime" ]]
 ! grep -q clankerhouse-clanker-state-report "$home/.claude/settings.json"
+grep -q qa-custom-start "$home/.claude/settings.json"
 printf 'Clankerhouse install QA passed: same-filesystem staging, atomic active resolution, isolated daemon handoff, preflight/activation rollback, optional integrations/systemd, ownership, and state preservation behave correctly.\n'

@@ -10,25 +10,83 @@ mkdir -p "$(dirname "$settings_file")"
 SETTINGS_FILE="$settings_file" REPORTER="$reporter" python3 - <<'PY'
 import json
 import os
+import shlex
 from pathlib import Path
 
 settings_path = Path(os.environ["SETTINGS_FILE"])
 reporter = os.environ["REPORTER"]
 
-if settings_path.exists():
-    data = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
-else:
-    data = {}
-
+original = settings_path.read_text(encoding="utf-8") if settings_path.exists() else ""
+data = json.loads(original or "{}")
 hooks = data.setdefault("hooks", {})
-
-desired = {
-    "PermissionRequest": ("*", f"bash '{reporter}' claude blocked"),
-    "PreToolUse": ("*", f"bash '{reporter}' claude working"),
-    "UserPromptSubmit": ("*", f"bash '{reporter}' claude working"),
-    "Stop": ("*", f"bash '{reporter}' claude done"),
-    "SessionEnd": ("*", f"bash '{reporter}' claude unknown"),
+states = {
+    "SessionStart": "idle",
+    "PermissionRequest": "blocked",
+    "PreToolUse": "working",
+    "UserPromptSubmit": "working",
+    "Stop": "done",
+    "SessionEnd": "unknown",
 }
+
+def reporter_command(state):
+    quoted = shlex.quote(reporter)
+    # Claude settings are global, including shells/containers without Clankerhouse.
+    # Only invoke an available reporter from a possible pane; the reporter remains
+    # responsible for selecting and validating the Multiplexer context.
+    return (
+        'if { [ -n "${TMUX_PANE:-}" ] || [ -n "${HERDR_PANE_ID:-}" ]; } '
+        f'&& [ -r {quoted} ]; then bash {quoted} claude {state}; fi'
+    )
+
+def command_args(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return []
+    try:
+        return shlex.split(hook.get("command", ""))
+    except (ValueError, TypeError):
+        return []
+
+# Older Herdr installs left commands behind after removing their reporter. Only
+# migrate that exact missing script; installed Herdr hooks and custom commands
+# (including shell compositions) are not ours to remove.
+legacy_reporter = settings_path.parent / "hooks" / "herdr-agent-state.sh"
+def missing_legacy_hook(hook):
+    argv = command_args(hook)
+    return (
+        len(argv) == 3 and argv[0] == "bash"
+        and argv[1] == str(legacy_reporter)
+        and argv[2] in {"session", "working", "idle", "done", "blocked", "unknown", "release"}
+        and not legacy_reporter.exists()
+    )
+
+migrated = False
+for event, entries in hooks.items():
+    kept_entries = []
+    for entry in entries:
+        commands = entry.get("hooks", [])
+        kept = []
+        for hook in commands:
+            if missing_legacy_hook(hook):
+                migrated = True
+                continue
+            argv = command_args(hook)
+            # Upgrade only our exact old invocation, including stale install paths.
+            # Shell compositions and similarly named custom scripts are not ours.
+            if (
+                len(argv) == 4 and argv[0] == "bash"
+                and Path(argv[1]).is_absolute()
+                and Path(argv[1]).name == "clankerhouse-clanker-state-report"
+                and argv[2] == "claude" and argv[3] in states.values()
+            ):
+                hook["command"] = reporter_command(argv[3])
+                migrated = True
+            kept.append(hook)
+        entry["hooks"] = kept
+        if kept or not commands:
+            kept_entries.append(entry)
+    hooks[event] = kept_entries
+
+desired = {event: ("*", reporter_command(state)) for event, state in states.items()}
 
 for event, (matcher, command) in desired.items():
     entries = hooks.setdefault(event, [])
@@ -46,5 +104,17 @@ for event, (matcher, command) in desired.items():
     if not found:
         entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": 2}]})
 
-settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+updated = json.dumps(data, indent=2) + "\n"
+if updated != original:
+    if migrated:
+        backup = settings_path.with_name(settings_path.name + ".pre-clankerhouse-migration")
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass  # Never overwrite the original rollback copy on a later run.
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(original)
+        print(f"Migrated legacy Claude lifecycle hooks; rollback settings: {backup}")
+    settings_path.write_text(updated, encoding="utf-8")
 PY

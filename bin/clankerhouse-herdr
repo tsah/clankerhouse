@@ -1,5 +1,5 @@
 #!/bin/bash
-# Herdr jump client. Invoked from a herdr `[[keys.command]]` popup (Alt-K). It selects
+# Herdr native client. Invoked from a herdr `[[keys.command]]` popup. It selects
 # the herdr Multiplexer, pins the workspace that was active when the popup opened, ensures
 # the herdr-instance Clankerhouse daemon is running (separate socket/state from tmux), and
 # launches the picker. The popup closes when this process exits.
@@ -18,8 +18,19 @@ if [[ -z "${HERDR_SOCKET_PATH:-}" ]]; then
 fi
 export HERDR_SOCKET_PATH
 export CLANKERHOUSE_MULTIPLEXER=herdr
-# Pin the workspace that was focused when Alt-K fired (herdr popups export this, not HERDR_PANE_ID).
-export CLANKERHOUSE_CURRENT_SESSION="${CLANKERHOUSE_CURRENT_SESSION:-${HERDR_ACTIVE_WORKSPACE_ID:-}}"
+# Delete always targets the invoking popup's workspace, never inherited picker context.
+if [[ ${1:-} == "--delete" ]]; then
+    if [[ -z "${HERDR_ACTIVE_WORKSPACE_ID:-}" ]]; then
+        echo "Refusing delete without HERDR_ACTIVE_WORKSPACE_ID from the invoking herdr popup." >&2
+        exit 1
+    fi
+    export CLANKERHOUSE_CURRENT_SESSION="$HERDR_ACTIVE_WORKSPACE_ID"
+    shift
+    set -- --delete-current "$@"
+else
+    # Herdr popups export this workspace id, not HERDR_PANE_ID.
+    export CLANKERHOUSE_CURRENT_SESSION="${CLANKERHOUSE_CURRENT_SESSION:-${HERDR_ACTIVE_WORKSPACE_ID:-}}"
+fi
 
 [[ -S "$HERDR_SOCKET_PATH" ]] || { echo "No herdr server at $HERDR_SOCKET_PATH — start one with 'herdr'." >&2; exit 1; }
 

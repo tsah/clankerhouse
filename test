@@ -17,7 +17,7 @@ case "${1:-}" in
 unit/static:
   feature-catalogue, TypeScript, Python, Rust
 standalone/end-to-end:
-  native-hot, Neovim, Clanker API, daemon, Recovery, Resource Guard, process owner,
+  native-hot, Neovim, Clanker API, spawn model, daemon, Recovery, Resource Guard, process owner,
   stop popup, current session, lineage actions, absorption, client routing, installer, full TUI
 EOF
         exit 0
@@ -48,6 +48,7 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "native hot-start scenario" scripts/qa-native-hot
     run "Neovim integration scenario" scripts/qa-nvim
     run "Clanker API scenario" scripts/qa-clanker-api
+    run "spawn model override scenario" scripts/qa-spawn-model
     run "authoritative daemon scenario" scripts/qa-daemon
     run "Recovery campaign scenario" scripts/qa-recovery
     run "Resource Guard workload mitigation scenario" scripts/qa-resource-guard

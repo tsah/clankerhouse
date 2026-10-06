@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ClankerRegistrationError, completeWorkshopRegistration, invokingSessionTarget, resolveWorkshopParent, rollbackCreatedWorkshop } from "./workflow"
+import { ClankerRegistrationError, completeWorkshopRegistration, invokingSessionTarget, resolveWorkshopParent, rollbackCreatedWorkshop, spawnClanker, spawnWorkshop } from "./workflow"
 import type { ManagedMultiplexer } from "./multiplexer"
 
 describe("workshop parent resolution", () => {
@@ -51,6 +51,21 @@ describe("workshop parent resolution", () => {
   })
 })
 
+describe("spawn model validation", () => {
+  test("rejects unsupported and malformed overrides before touching the multiplexer or worktree", async () => {
+    const multiplexer = new Proxy({}, { get: () => { throw new Error("multiplexer must not be touched") } }) as ManagedMultiplexer
+    for (const [harness, model, error] of [
+      ["opencode", "provider/new-model", /--model is not supported for OpenCode/],
+      ["pi", " ", /Invalid model/],
+      ["claude", "model\nother", /Invalid model/],
+      ["codex", "--flag", /Invalid model/],
+    ] as const) {
+      await expect(spawnClanker(harness, "/not-a-workshop", "task", { model, multiplexer })).rejects.toThrow(error)
+      await expect(spawnWorkshop(harness, "must-not-create", "task", { model, multiplexer })).rejects.toThrow(error)
+    }
+  })
+})
+
 describe("workshop spawn rollback", () => {
   test("removes the new tmux session, worktree, and branch after registry failure", async () => {
     const created = {
@@ -64,7 +79,7 @@ describe("workshop spawn rollback", () => {
       observe: async () => ({ kind: "tmux", instanceId: "tmux:test", sessions: [{ id: "$7", nativeName: "repo@failed-workshop", path: "/tmp/repo/failed-workshop", recency: 0, attached: false, worktreePath: "", directoryPath: "", windows: [] }] }),
       kill: async (location: { nativeSessionId: string }) => { killed.push(location.nativeSessionId) },
     } as unknown as ManagedMultiplexer
-    const rollback = (workshop: typeof created) => rollbackCreatedWorkshop(workshop, {
+    const rollback = (workshop: Parameters<typeof rollbackCreatedWorkshop>[0]) => rollbackCreatedWorkshop(workshop, {
       multiplexer,
       run: async (argv) => {
         commands.push(argv)
@@ -80,6 +95,22 @@ describe("workshop spawn rollback", () => {
     expect(commands).toEqual([
       ["wt", "-C", "/tmp/repo/failed-workshop", "remove", "--foreground", "--force", "--force-delete", "--yes", "/tmp/repo/failed-workshop"],
     ])
+  })
+
+  test("rolls back the worktree without touching runtime sessions when the agent was not registered", async () => {
+    const created = {
+      identity: { path: "/tmp/repo/failed-workshop", commonDir: "/tmp/repo/.git", repo: "repo", branch: "failed-workshop" },
+      session: undefined,
+    }
+    const commands: string[][] = []
+    const multiplexer = new Proxy({}, { get: () => { throw new Error("runtime must not be touched") } }) as ManagedMultiplexer
+    await expect(completeWorkshopRegistration(created, async () => {
+      throw new ClankerRegistrationError("invalid profile", { cause: new Error("profile") })
+    }, (workshop) => rollbackCreatedWorkshop(workshop, {
+      multiplexer,
+      run: async (argv) => { commands.push(argv); return { stdout: "", stderr: "", code: 0 } },
+    }))).rejects.toThrow("invalid profile")
+    expect(commands).toEqual([["wt", "-C", created.identity.path, "remove", "--foreground", "--force", "--force-delete", "--yes", created.identity.path]])
   })
 
   test("does not remove a workshop for failures after registration", async () => {

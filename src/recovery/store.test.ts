@@ -60,6 +60,17 @@ describe("recovery store", () => {
     expect(mode(dbPath)).toBe(0o600)
   })
 
+  test("persists the explicit model override across reopen", () => {
+    const { dbPath } = fixture()
+    const launchSpec = { version: 3 as const, profile: "worker", model: "provider/future-model", resourceClass: "validation-heavy" as const }
+    const store = openRecoveryStore({ dbPath })
+    store.createDesired(desired({ launchSpec }))
+    store.close()
+    const reopened = openRecoveryStore({ dbPath })
+    try { expect(reopened.getDesired("clanker-1")?.launchSpec).toEqual(launchSpec) }
+    finally { reopened.close() }
+  })
+
   test("rejects a newer schema without modifying it", () => {
     const { dbPath } = fixture()
     mkdirSync(dirname(dbPath), { recursive: true })

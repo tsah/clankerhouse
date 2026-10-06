@@ -80,7 +80,7 @@ The Interface is extracted and every out-of-Adapter tmux invocation is routed th
 
 ## Implementation status
 
-Phases 0–4 and the Alt-K/Alt-B portion of Phase 5 in `docs/herdr-adapter-migration.md` are implemented. The Interface lives in
+Phases 0–4 and the Alt-K/Alt-B/Alt-D portion of Phase 5 in `docs/herdr-adapter-migration.md` are implemented. The Interface lives in
 `src/multiplexer/interface.ts`; the tmux Adapter in `src/multiplexer/tmux.ts` (behaviour and
 `@option` names unchanged); the registry-backed managed layer in `src/multiplexer/managed.ts`;
 the herdr Adapter in `src/multiplexer/herdr.ts`; selection in `src/multiplexer/select.ts`.
@@ -92,6 +92,6 @@ before using it, while tmux declares the Capability absent. Shell and Python cal
 use `clankers mux` via `libexec/clankerhouse-mux`; the Pi extension, OpenCode plugin, and the
 `clankerhouse-clanker-state-report`/`-tmux-stop`/`-harness-lifecycle`/`-opencode2` scripts write
 claims runtime-neutrally. tmux stays the default outside a managed Herdr pane; explicit selection remains available for parallel administration.
-`scripts/qa-herdr` exercises implicit managed-pane inference and the herdr Adapter end to end against an explicitly socket-scoped isolated herdr server, with tmux replaced by a rejecting probe. The installer writes Herdr popup bindings for Alt-K and Alt-B; their launcher selects the Herdr instance, checks daemon health through the native client without starting Bun on the hot path, and opens the instance-scoped native picker. Generic picker/native commands dispatch to that launcher under Herdr. Runtime agent status is projected as observed evidence while exact lifecycle attestation remains authoritative.
+`scripts/qa-herdr` exercises implicit managed-pane inference and the herdr Adapter end to end against an explicitly socket-scoped isolated herdr server, with tmux replaced by a rejecting probe. The installer writes Herdr popup bindings for Alt-K, Alt-B, and Alt-D; their launcher selects the Herdr instance, checks daemon health through the native client without starting Bun on the hot path, and opens the instance-scoped native picker. Alt-D pins the invoking popup's workspace and opens explicit native deletion confirmation; missing invocation context or a missing live daemon snapshot fails closed. Native mutation progress does not lock navigation: accepted operations remain daemon-owned after a user jumps elsewhere. Generic picker/native commands dispatch to that launcher under Herdr. Runtime agent status is projected as observed evidence while exact lifecycle attestation remains authoritative.
 
-Still incomplete in Phases 5–6: the Herdr Alt-D/Alt-X bindings and user unit, retirement of the tmux popup compatibility helpers, and contraction of the dual-emitted `tmux_*` target kinds.
+Still incomplete in Phases 5–6: the Herdr Alt-X binding and user unit, retirement of the tmux popup compatibility helpers, and contraction of the dual-emitted `tmux_*` target kinds.

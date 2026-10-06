@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install or refresh Clankerhouse herdr integration: Alt-K/Alt-B popup keybindings and
+"""Install or refresh Clankerhouse herdr integration: Alt-K/Alt-B/Alt-D popup keybindings and
 the safe-recovery setting (resume_agents_on_restore = false) in herdr's config.toml.
 
 Idempotent: the keybindings live inside a managed marker block that is replaced on reruns;
@@ -30,6 +30,14 @@ def managed_block(launcher: str) -> str:
         'type = "popup"',
         f'command = "{launcher} --repo"',
         'description = "Clankerhouse open/create branch"',
+        'width = "90%"',
+        'height = "80%"',
+        "",
+        "[[keys.command]]",
+        'key = "alt+d"',
+        'type = "popup"',
+        f'command = "{launcher} --delete"',
+        'description = "Clankerhouse delete current session"',
         'width = "90%"',
         'height = "80%"',
         END,
@@ -70,7 +78,7 @@ def set_session_flag(text: str) -> str:
         seen = True
     text = "\n".join(lines)
     if not seen:
-        text = text.rstrip("\n") + "\n\n[session]\nresume_agents_on_restore = false\n"
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + "[session]\nresume_agents_on_restore = false\n"
     return text
 
 
@@ -84,13 +92,21 @@ def main() -> int:
         Path(__file__).resolve().parent / "clankerhouse-herdr"
     )
 
+    # Dotfile managers symlink config.toml into a repository. Write through the link
+    # (an atomic replace of the link itself would silently detach it) and leave an
+    # already-current file untouched so that repository stays clean.
+    config = config.resolve()
     config.parent.mkdir(parents=True, exist_ok=True)
-    text = config.read_text(encoding="utf-8") if config.exists() else ""
+    original = config.read_text(encoding="utf-8") if config.exists() else ""
 
-    text = strip_block(text)
+    text = strip_block(original)
     if not uninstall:
         text = set_session_flag(text)
         text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + managed_block(launcher) + "\n"
+
+    if text == original:
+        print(f"Clankerhouse herdr keybindings already current in {config}")
+        return 0
 
     tmp = config.with_suffix(config.suffix + ".clankerhouse-tmp")
     tmp.write_text(text, encoding="utf-8")

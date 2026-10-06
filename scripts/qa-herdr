@@ -54,6 +54,9 @@ mkdir -p "$runtime" "$state_home" "$cfg" "$work" "$root/home" "$root/data"
 touch "$marker"
 git -C "$work" init -q -b main
 git -C "$work" -c user.email=qa@example.com -c user.name=qa commit -q --allow-empty -m init
+# Register before the daemon's first directory scan (which is deliberately cached).
+external_worktree="$root/external-delete"
+git -C "$work" worktree add -q -b qa-external-delete "$external_worktree"
 
 # Herdr 0.8 resolves its default server independently of XDG_CONFIG_HOME. Pin every
 # server endpoint explicitly and run it in a private process group; otherwise a failed
@@ -99,7 +102,7 @@ common_env=(
     XDG_CONFIG_HOME="$cfg" HERDR_ENV=1 HERDR_PANE_ID=qa:caller CLANKERHOUSE_INSTANCE=herdr CLANKERHOUSE_CLANKERS="$clankers"
     PATH="$probe_bin:$PATH" TMUX_LOG="$tmux_log"
     CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
-    CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_PROCESS_OWNER=disabled
+    CLANKERHOUSE_DEV_ROOT="$root" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_PROCESS_OWNER=disabled
 )
 step() { printf '\n==> %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; [[ -f "$root/server.log" ]] && { printf -- '--- daemon log\n' >&2; tail -30 "$root/server.log" >&2; }; exit 1; }
@@ -145,6 +148,39 @@ import json,sys
 rows=json.load(sys.stdin)
 assert any(r["id"]=="clanker-qa" and r["harness"]=="pi" and r["pane"]==sys.argv[1] for r in rows), rows
 ' "$pane_id" || fail "clankers list did not discover the clanker"
+
+step "New agent Workshops contain only the agent tab and preserve it on subsequent spawns"
+agent_work="$root/agent-work"
+git init -q -b main "$agent_work"
+git -C "$agent_work" -c user.email=qa@example.com -c user.name=qa commit -q --allow-empty -m init
+cat >"$probe_bin/codex" <<'SH'
+#!/bin/sh
+exec sleep 120
+SH
+chmod +x "$probe_bin/codex"
+cat >"$root/spawn-agent.ts" <<TS
+import { spawnClanker } from "file://$repo/src/workflow.ts"
+console.log(JSON.stringify(await spawnClanker("codex", process.argv[2]!, "QA fixture", { name: "worker" })))
+TS
+"${common_env[@]}" bun "$root/spawn-agent.ts" "$agent_work" >"$root/first-agent.json"
+"${common_env[@]}" "$clankers" mux observe | python3 -c '
+import json,sys
+agent=json.load(open(sys.argv[1]))
+session=next(s for s in json.load(sys.stdin)["sessions"] if s["nativeName"]==agent["session"])
+assert [w["id"] for w in session["windows"]]==[agent["window"]], session
+assert [p["id"] for p in session["windows"][0]["panes"]]==[agent["pane"]], session
+' "$root/first-agent.json" || fail "new Workshop contains a redundant shell tab"
+"${common_env[@]}" bun "$root/spawn-agent.ts" "$agent_work" >"$root/second-agent.json"
+agent_session_id=$("${common_env[@]}" "$clankers" mux observe | python3 -c '
+import json,sys
+first,second=[json.load(open(path)) for path in sys.argv[1:]]
+session=next(s for s in json.load(sys.stdin)["sessions"] if s["nativeName"]==first["session"])
+assert second["session"]==first["session"] and second["name"]=="worker-2", second
+assert {w["id"] for w in session["windows"]}=={first["window"],second["window"]}, session
+assert {p["id"] for w in session["windows"] for p in w["panes"]}=={first["pane"],second["pane"]}, session
+print(session["id"])
+' "$root/first-agent.json" "$root/second-agent.json") || fail "subsequent spawn replaced an existing agent tab"
+"${common_env[@]}" "$clankers" mux kill --session "$agent_session_id"
 
 step "Herdr runtime agent status is projected without a lifecycle report"
 python3 - "$herdr_sock" "$pane_id" <<'PY' || fail "could not report isolated Herdr agent status"
@@ -287,8 +323,18 @@ herdr_cfg="$cfg/herdr/config.toml"
 "${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null || fail "keybinding install failed"
 "${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null
 grep -q 'key = "alt+k"' "$herdr_cfg" || fail "alt+k binding missing"
-[[ "$(grep -c 'alt+k' "$herdr_cfg")" == 1 ]] || fail "keybinding installer not idempotent"
+grep -q 'key = "alt+d"' "$herdr_cfg" || fail "alt+d binding missing"
+grep -q 'command = "/opt/ch-herdr --delete"' "$herdr_cfg" || fail "alt+d does not use the confirmation launcher"
+[[ "$(grep -c 'alt+k' "$herdr_cfg")" == 1 && "$(grep -c 'alt+d' "$herdr_cfg")" == 1 ]] || fail "keybinding installer not idempotent"
 grep -q 'resume_agents_on_restore = false' "$herdr_cfg" || fail "safe-recovery flag not set"
+
+step "Keybinding installer writes through a symlinked config"
+linked_cfg="$cfg/herdr-linked/config.toml"
+mkdir -p "$(dirname "$linked_cfg")"
+ln -s "$herdr_cfg" "$linked_cfg"
+"${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr-linked python3 "$repo/bin/clankerhouse-install-herdr" "$linked_cfg" >/dev/null || fail "symlinked keybinding install failed"
+[[ -L "$linked_cfg" ]] || fail "keybinding installer replaced the config symlink"
+grep -q '/opt/ch-herdr-linked' "$herdr_cfg" || fail "keybinding installer did not write through the symlink"
 
 step "Herdr launcher ensures a namespaced daemon separate from tmux"
 # The existing daemon (started above with --server) already owns the herdr instance; the
@@ -306,6 +352,80 @@ chmod +x "$probe_bin/bun"
 [[ ! -e "$bun_log" ]] || fail "hot Herdr launcher started Bun: $(cat "$bun_log")"
 [[ -S "$daemon_socket" ]] || fail "herdr daemon socket is not under the -herdr runtime dir"
 [[ ! -S "$runtime/clankerhouse-$uid/daemon.sock" ]] || fail "herdr daemon leaked into the tmux runtime dir"
+
+# The hot-launch probe is no longer needed; later CLI calls use real Bun.
+rm "$probe_bin/bun"
+step "External Herdr deletion confirms the invoking Workshop and preserves other sessions"
+external_spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-external-delete --name main --cwd "$external_worktree")
+external_session=$(printf '%s' "$external_spawned" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
+"${common_env[@]}" "$clankers" mux claim --session "$external_session" worktreePath "$external_worktree"
+"${common_env[@]}" "$clankers" mux focus --session "$session_id"
+# A cached projection is not sufficient authority for external confirmation.
+mkdir -p "$root/offline-popup"
+cp "$cache" "$root/offline-popup/state.json"
+set +e
+"${common_env[@]}" CLANKERHOUSE_RUNTIME_DIR="$root/offline-popup" CLANKERHOUSE_CURRENT_SESSION="$external_session" \
+    "$repo/native-client/target/release/clankerhouse-native" --delete-current >"$root/offline-popup.log" 2>&1
+offline_status=$?
+set -e
+[[ $offline_status -ne 0 ]] && grep -q 'requires a live daemon snapshot' "$root/offline-popup.log" || fail "external confirmation trusted the offline cache"
+"${common_env[@]}" python3 - "$repo" "$daemon_socket" "$herdr_sock" "$external_session" "$session_id" "$external_worktree" "$root" <<'PY' || fail "external deletion confirmation scenario failed"
+import fcntl, json, os, pathlib, pty, select, signal, socket, struct, sys, termios, time
+repo, daemon, runtime, target, survivor, worktree, root = sys.argv[1:]
+def rpc(path, method, params=None):
+    req = {"id":"qa-external-delete", "method":method, "params":params or {}}
+    if path == daemon: req["version"] = 1
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(15); sock.connect(path); sock.sendall((json.dumps(req)+"\n").encode())
+        data=b""
+        while b"\n" not in data:
+            part=sock.recv(65536)
+            assert part, "socket closed without response"
+            data+=part
+    reply=json.loads(data.split(b"\n",1)[0]); assert not reply.get("error"), reply
+    return reply["result"]
+def sessions(): return {s["workspace_id"] for s in rpc(runtime,"session.snapshot")["snapshot"]["workspaces"]}
+rpc(daemon,"projection.refresh")
+rows=rpc(daemon,"snapshot.get")["sessions"]
+row=next(r for r in rows if r["target"].get("location",{}).get("nativeSessionId")==target)
+assert row.get("directorySource")=="worktree", row
+for answer in [b"n", b"y"]:
+    pid, fd=pty.fork()
+    if pid==0:
+        fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack("HHHH",32,120,0,0))
+        os.execvpe("bash",["bash",repo+"/bin/clankerhouse-herdr","--delete"],{
+            **os.environ, "TERM":"xterm-256color", "HERDR_ACTIVE_WORKSPACE_ID":target,
+            "CLANKERHOUSE_CURRENT_SESSION":survivor,
+        })
+    output=bytearray(); reaped=False
+    def pump():
+        if select.select([fd],[],[],0.05)[0]:
+            try: output.extend(os.read(fd,65536))
+            except OSError: pass
+    try:
+        deadline=time.monotonic()+15
+        while b"Destroy worktree 'qa-external-delete'?" not in output and time.monotonic()<deadline: pump()
+        assert b"Destroy worktree 'qa-external-delete'?" in output, output[-3000:]
+        assert pathlib.Path(worktree,".git").is_file() and target in sessions(), "deleted without confirmation"
+        os.write(fd,answer)
+        while time.monotonic()<deadline:
+            pump()
+            exited,status=os.waitpid(pid,os.WNOHANG)
+            if exited:
+                reaped=True
+                assert os.waitstatus_to_exitcode(status)==0, output[-3000:]
+                break
+        assert reaped, output[-3000:]
+        assert survivor in sessions(), "deleted the globally focused Workshop instead of the invoking one"
+        if answer==b"n": assert pathlib.Path(worktree,".git").is_file() and target in sessions(), "cancel deleted the target"
+        else: assert not pathlib.Path(worktree).exists() and target not in sessions(), "confirmed delete did not finish"
+    finally:
+        pathlib.Path(root,"external-delete-"+answer.decode()+".ansi").write_bytes(output)
+        if not reaped:
+            os.kill(pid,signal.SIGKILL); os.waitpid(pid,0)
+        os.close(fd)
+PY
+git -C "$work" show-ref --verify --quiet refs/heads/qa-external-delete || fail "external deletion removed branch history"
 
 step "Daemon log is free of adapter failures"
 if grep -Ei 'change stream stopped|Recovery controller stopped|Unsupported multiplexer' "$root/server.log"; then fail "daemon reported adapter failures"; fi

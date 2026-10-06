@@ -147,8 +147,8 @@ tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_clanker_socket "$nat
 qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "XDG_CONFIG_HOME=$config_home" "TMUX=$socket,1,0" "HERDR_PANE_ID=" "HERDR_SOCKET_PATH=" "CLANKERHOUSE_MULTIPLEXER=tmux" "DOTFILES_DIR=$repo")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 
-# Agent workers are separate `pi --no-session` processes that inherit the
-# parent's TMUX_PANE. Loading the global lifecycle extension in such a worker
+# Subprocess workers using `pi --no-session` inherit the parent's TMUX_PANE.
+# Loading the global lifecycle extension in such a worker
 # must leave the parent's identity, report, socket, and Recovery untouched.
 cat > "$root/sessionless-extension.ts" <<EOF
 import extension from "$repo/integrations/pi/tmux-clanker-lifecycle.ts"
@@ -184,6 +184,48 @@ sessionless_handlers=$("${qa_env[@]}" env \
 [[ "$(sha256sum "$pi_report")" == "$before_report" ]] || fail "sessionless Pi replaced parent lifecycle report"
 [[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "sessionless Pi created a native Clanker socket"
 [[ ! -e "$root/sessionless-recovery.log" ]] || fail "sessionless Pi created or attested Recovery identity"
+
+# SDK workers have no --no-session argv marker. They load multiple extension
+# instances within one process, but only the visible TUI context owns the pane.
+# Exercise real claims/report/socket adapters on this isolated tmux server.
+cp "$pi_report" "$root/pi-before-sdk.json"
+python3 - "$pi_report" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+report = json.loads(path.read_text())
+report.update(state="working", generation=2, harnessSessionId="parent-session")
+path.write_text(json.dumps(report))
+PY
+sdk_before_report=$(sha256sum "$pi_report")
+cat > "$root/sdk-extension.ts" <<EOF
+import extension from "$repo/integrations/pi/tmux-clanker-lifecycle.ts"
+for (const mode of ["print", "json", "rpc"]) {
+  const handlers = new Map<string, Function>()
+  const events = new Map<string, Function>()
+  extension({
+    events: { on: (name: string, handler: Function) => { events.set(name, handler); return () => events.delete(name) } },
+    on: (name: string, handler: Function) => { handlers.set(name, handler) },
+    sendUserMessage: () => {},
+  } as never)
+  const ctx = { mode, isIdle: () => true, sessionManager: { getSessionId: () => "sdk-worker-" + mode } }
+  for (const name of ["session_start", "agent_start", "turn_start", "tool_execution_start"]) await handlers.get(name)?.({}, ctx)
+  events.get("subagents:created")?.({ id: "nested-worker" })
+  events.get("subagents:completed")?.({ id: "nested-worker" })
+  await handlers.get("agent_end")?.({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "worker done" }] }] }, ctx)
+  await handlers.get("agent_settled")?.({}, ctx)
+  await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx)
+}
+EOF
+"${qa_env[@]}" env TMUX_PANE="$pi_pane" CLANKER_ID=clanker-qa-pi \
+    CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" SESSIONLESS_RECOVERY_LOG="$root/sdk-recovery.log" \
+    bun "$root/sdk-extension.ts"
+[[ "$(tmux -S "$socket" show-options -p -t "$pi_pane")" == "$before_options" ]] || fail "SDK Pi worker replaced parent pane identity"
+[[ "$(sha256sum "$pi_report")" == "$sdk_before_report" ]] || fail "SDK Pi worker replaced parent lifecycle report"
+[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "SDK Pi worker created a native Clanker socket"
+[[ ! -e "$root/sdk-recovery.log" ]] || fail "SDK Pi worker created or attested Recovery identity"
+api status clanker-qa-pi | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
+mv "$root/pi-before-sdk.json" "$pi_report"
 
 # Discovery, canonical filtering, ID assignment, and rename stability.
 all=$(api list)
@@ -241,6 +283,23 @@ python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["cla
 printf '{}' | "${qa_env[@]}" env TMUX_PANE="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex done
 api wait "$codex_id" --after 0 --timeout 2 | json_assert 'data["settledGeneration"] == 1'
 
+# A foreground Stop with a running native background task is not completion.
+# Replay the documented Claude payload through the real reporter and API; do not
+# infer background work from the fixture's processes or scrape terminal output.
+claude_reporter=("${qa_env[@]}" env TMUX_PANE="$claude_pane" CLANKER_ID=clanker-qa-claude "$repo/bin/clankerhouse-clanker-state-report" claude)
+printf '%s' '{"hook_event_name":"UserPromptSubmit"}' | "${claude_reporter[@]}" working
+printf '%s' '{"hook_event_name":"Stop","background_tasks":[{"id":"shell-task","type":"shell","status":"running"}]}' | "${claude_reporter[@]}" done
+api status clanker-qa-claude | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
+set +e
+background_error=$(api wait clanker-qa-claude --after 1 --timeout 0 2>&1 >/dev/null); background_code=$?
+set -e
+[[ $background_code -eq 124 ]] || fail "Claude background task prematurely completed its wait: $background_code"
+printf '%s' "$background_error" | json_assert 'data["error"]["code"] == "TIMEOUT"'
+printf '%s' '{"hook_event_name":"Stop","background_tasks":[{"id":"queued-task","type":"subagent","status":"pending"}]}' | "${claude_reporter[@]}" done
+api status clanker-qa-claude | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
+printf '%s' '{"hook_event_name":"Stop","background_tasks":[]}' | "${claude_reporter[@]}" done
+api wait clanker-qa-claude --after 1 --timeout 2 | json_assert 'data["state"] == "done" and data["generation"] == 2 and data["settledGeneration"] == 2'
+
 printf '%s' '{"harness":"claude","clankerId":"clanker-qa-claude","pane":"'"$claude_pane"'","state":"working","generation":3,"settledGeneration":2,"updatedAt":3,"hookEvent":"UserPromptSubmit"}' > "$claude_report"
 (
     sleep 0.2
@@ -271,4 +330,4 @@ if rg -n 'send-keys|load-buffer|paste-buffer|capture-pane' \
     fail "production clanker communication path contains forbidden tmux terminal manipulation"
 fi
 
-echo "Clankerhouse clanker API QA passed: discovery, stable identity, filtering, rename safety, duplicate rejection, status/capabilities, native sends, delivery modes, correlated waits/results, terminal non-mutation, identity mismatch, report waiting, stale-report reset, timeout behavior, and unsupported transports all behave correctly."
+echo "Clankerhouse clanker API QA passed: discovery, stable identity, filtering, rename safety, duplicate rejection, status/capabilities, native sends, delivery modes, correlated waits/results, terminal non-mutation, identity mismatch, report waiting, Claude background-task settlement, stale-report reset, timeout behavior, and unsupported transports all behave correctly."

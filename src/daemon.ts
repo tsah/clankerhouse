@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { dirname, resolve } from "node:path"
 import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestActivity, readDirectoryActivities } from "./activity"
 import type { ActivityRecord } from "./activity"
+import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { listClankers } from "./clanker-api"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
@@ -215,10 +216,12 @@ const collectDevWorktrees = existsSync(devRoot)
   ? runCommand(["fd", "--hidden", "--exclude", ".archive", "--type", "directory", "^\\.git$", devRoot], { allowFailure: true }).pipe(
       Effect.flatMap((output) => Effect.forEach(
         output.split("\n").filter(Boolean),
-        (gitDir) => runCommand(["git", "-C", dirname(gitDir), "worktree", "list", "--porcelain"], { allowFailure: true }),
+        (gitDir) => runCommand(["git", "-C", dirname(gitDir), "worktree", "list", "--porcelain"], { allowFailure: true }).pipe(
+          Effect.map((worktrees) => ({ repositoryPath: dirname(gitDir), worktrees: parseWorktrees(worktrees) })),
+        ),
         { concurrency: 8 },
       )),
-      Effect.map((outputs) => outputs.flatMap(parseWorktrees)),
+      Effect.map(selectIndependentRepositoryWorktrees),
     )
   : Effect.succeed([] as DirectoryRow[])
 
@@ -246,23 +249,45 @@ const collectDirectoriesUncached = Effect.all([collectDevWorktrees, collectZoxid
 
 let directoryCache: { refreshedAt: number; rows: DirectoryRow[] } | undefined
 let directoryRefreshInFlight: Promise<DirectoryRow[]> | undefined
-const invalidateDirectoryCache = () => {
-  directoryCache = undefined
-  gitRecoveryCache.clear()
-  gitMetaCache.clear()
+// Mutations patch the cached rows they affect; a full rediscovery walks every dev repository.
+const rememberDirectory = (row: DirectoryRow) => {
+  const path = canonicalActivityPath(row.path)
+  gitRecoveryCache.delete(path)
+  gitMetaCache.delete(path)
+  if (!directoryCache) return
+  directoryCache = { ...directoryCache, rows: [...directoryCache.rows.filter((candidate) => candidate.path !== path), { ...row, path }] }
+}
+const forgetMissingDirectories = () => {
+  if (!directoryCache) return
+  const rows = directoryCache.rows.filter((row) => existsSync(row.path))
+  if (rows.length === directoryCache.rows.length) return
+  const present = new Set(rows.map((row) => row.path))
+  for (const row of directoryCache.rows) {
+    if (present.has(row.path)) continue
+    gitRecoveryCache.delete(row.path)
+    gitMetaCache.delete(row.path)
+  }
+  directoryCache = { ...directoryCache, rows }
+}
+const refreshDirectoryCache = () => {
+  if (!directoryRefreshInFlight) {
+    directoryRefreshInFlight = Effect.runPromise(collectDirectoriesUncached)
+      .then((rows) => {
+        directoryCache = { refreshedAt: Date.now(), rows }
+        return rows
+      })
+      .finally(() => { directoryRefreshInFlight = undefined })
+  }
+  return directoryRefreshInFlight
 }
 const collectDirectories = Effect.tryPromise({
   try: async () => {
-    if (directoryCache && Date.now() - directoryCache.refreshedAt < directoryRefreshMs) return directoryCache.rows
-    if (!directoryRefreshInFlight) {
-      directoryRefreshInFlight = Effect.runPromise(collectDirectoriesUncached)
-        .then((rows) => {
-          directoryCache = { refreshedAt: Date.now(), rows }
-          return rows
-        })
-        .finally(() => { directoryRefreshInFlight = undefined })
+    if (!directoryCache) return refreshDirectoryCache()
+    if (Date.now() - directoryCache.refreshedAt >= directoryRefreshMs && !directoryRefreshInFlight) {
+      // Serve the stale rows now; the projection catches up when rediscovery lands.
+      void refreshDirectoryCache().then(() => scheduleProjectionRefresh()).catch((error) => console.error(`Directory refresh failed: ${error instanceof Error ? error.message : String(error)}`))
     }
-    return directoryRefreshInFlight
+    return directoryCache.rows
   },
   catch: (error) => error instanceof Error ? error : new Error(String(error)),
 })
@@ -426,7 +451,7 @@ const refreshProjectionAfterMutation = async () => {
     try { await previousRefresh } catch {}
   }
   invalidateProjectionEnrichment()
-  invalidateDirectoryCache()
+  forgetMissingDirectories()
   return refreshProjectionSnapshot()
 }
 
@@ -796,6 +821,13 @@ const ensureWorktreeSession = async (path: string) => {
 const reconcileMutationStage = async (intent: MutationIntent, stage: string, execution: MutationExecution) => {
   const checkpoint = mutationCheckpoint(execution)
   if (stage === "projection.refreshed") {
+    if (intent.type === "create") {
+      // The caller opens the new session straight away; the projection catches up behind it.
+      void refreshProjectionAfterMutation()
+        .then((refreshed) => snapshotServer?.publish(refreshed))
+        .catch((error) => console.error(`Projection refresh after create failed: ${error instanceof Error ? error.message : String(error)}`))
+      return { checkpoint, result: checkpoint.outcome ?? checkpoint }
+    }
     const refreshed = await refreshProjectionAfterMutation()
     snapshotServer?.publish(refreshed)
     return { checkpoint, result: checkpoint.outcome ?? checkpoint }
@@ -856,7 +888,9 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
         && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)
-      if (!alreadyOpen) {
+      if (!alreadyOpen && (intent.target.type === "tmux_session" || intent.target.type === "tmux_window")) {
+        await multiplexer.openTarget(intent.target, requestingClient)
+      } else if (!alreadyOpen) {
         const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target), ...(requestingClient ? ["--client", requestingClient] : [])])
         if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
       }
@@ -1085,6 +1119,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     if (stage === "tmux.ready") {
       const path = realpathSync(String(checkpoint.path))
       const session = await ensureWorktreeSession(path)
+      rememberDirectory({ path, source: "worktree", branch: intent.branch, activityAt: Date.now(), activitySource: "opened" })
       return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "tmux_session", session } } } }
     }
   }
@@ -1139,7 +1174,7 @@ const stagedDaemonMutation = createStagedMutationExecutor(reconcileMutationStage
 const executeDaemonMutation: MutationExecutor = async (intent, execution) => {
   const result = await stagedDaemonMutation(intent, execution)
   invalidateProjectionEnrichment()
-  invalidateDirectoryCache()
+  forgetMissingDirectories()
   return result
 }
 

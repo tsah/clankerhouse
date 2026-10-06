@@ -1,4 +1,4 @@
-import type { DesiredClankerRecord, LaunchSpec, RecoveryHarness } from "./model"
+import { validateModelName, type DesiredClankerRecord, type LaunchSpec, type RecoveryHarness } from "./model"
 import { binPath, libexecPath } from "../installation"
 import { ownedHarnessCommand } from "./process-owner"
 
@@ -14,7 +14,15 @@ const plannotatorEnv = () => [
   `PLANNOTATOR_PORT=${Bun.env.PLANNOTATOR_PORT || "19432-19439"}`,
 ]
 
-const resourceClass = (spec: LaunchSpec) => spec.version === 2 ? spec.resourceClass : "untrusted" as const
+const resourceClass = (spec: LaunchSpec) => spec.version === 1 ? "untrusted" : spec.resourceClass
+const modelOverride = (spec: LaunchSpec) => spec.version === 3 ? spec.model : undefined
+
+export const harnessModelArgs = (harness: RecoveryHarness | "codex", model?: string): string[] => {
+  if (model === undefined) return []
+  validateModelName(model)
+  if (harness === "opencode") throw new Error("--model is not supported for OpenCode; configure the model in OpenCode instead")
+  return ["--model", model]
+}
 
 const trackedEnvironment = (clankerId: string, sessionId: string | null, attemptId?: string) => [
   ...plannotatorEnv(),
@@ -24,14 +32,14 @@ const trackedEnvironment = (clankerId: string, sessionId: string | null, attempt
   ...(attemptId ? [`CLANKER_RECOVERY_ATTEMPT=${attemptId}`] : []),
 ]
 
-const piProfileArgs = (cwd: string, profile: string | null) => {
+const piProfileArgs = (cwd: string, profile: string | null, model?: string) => {
   if (!profile) return []
   const helper = libexecPath("pi-agent-config")
   const resolved = Bun.spawnSync([helper, "--cwd", cwd, "--format", "json", profile], { stdout: "pipe", stderr: "pipe" })
   if (resolved.exitCode !== 0) throw new Error(resolved.stderr.toString().trim() || `Unknown pi profile: ${profile}`)
   const config = JSON.parse(resolved.stdout.toString())
   const args: string[] = []
-  if (config.model) args.push("--model", config.model)
+  if (config.model && model === undefined) args.push("--model", config.model)
   if (config.thinking) args.push("--thinking", config.thinking)
   if (config.tools?.length) args.push("--tools", config.tools.join(","))
   const body = Bun.spawnSync([helper, "--cwd", cwd, "--body", profile], { stdout: "pipe" }).stdout.toString()
@@ -52,13 +60,15 @@ export interface InitialHarnessCommandInput {
 export const initialHarnessCommand = (input: InitialHarnessCommandInput) => {
   const env = trackedEnvironment(input.clankerId, input.harnessSessionId, input.attemptId)
   const profile = input.launchSpec.profile
+  const model = modelOverride(input.launchSpec)
+  const modelArgs = harnessModelArgs(input.harness, model)
   let command: string[]
   if (input.harness === "pi") {
     if (!input.harnessSessionId) throw new Error("Pi requires a preallocated session id")
-    command = ["env", ...env, lifecycleWrapper, "--", "pi", "--session-id", input.harnessSessionId, ...piProfileArgs(input.cwd, profile), input.prompt]
+    command = ["env", ...env, lifecycleWrapper, "--", "pi", "--session-id", input.harnessSessionId, ...piProfileArgs(input.cwd, profile, model), ...modelArgs, input.prompt]
   } else if (input.harness === "claude") {
     if (!input.harnessSessionId) throw new Error("Claude requires a preallocated session id")
-    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--session-id", input.harnessSessionId, ...(profile ? ["--agent", profile] : []), input.prompt]
+    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--session-id", input.harnessSessionId, ...(profile ? ["--agent", profile] : []), ...modelArgs, input.prompt]
   } else {
     command = ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, ...(profile ? ["--profile", profile] : []), "--", input.cwd, input.prompt]
   }
@@ -70,10 +80,12 @@ export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId:
   const env = trackedEnvironment(desired.clankerId, desired.harnessSessionId, attemptId)
   const prompt = recoveryPrompt(attemptId)
   const profile = desired.launchSpec.profile
+  const model = modelOverride(desired.launchSpec)
+  const modelArgs = harnessModelArgs(desired.harness, model)
   const command = desired.harness === "pi"
-    ? ["env", ...env, lifecycleWrapper, "--", "pi", "--session", desired.harnessSessionId, ...piProfileArgs(desired.cwd, profile), prompt]
+    ? ["env", ...env, lifecycleWrapper, "--", "pi", "--session", desired.harnessSessionId, ...piProfileArgs(desired.cwd, profile, model), ...modelArgs, prompt]
     : desired.harness === "claude"
-      ? ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--resume", desired.harnessSessionId, ...(profile ? ["--agent", profile] : []), prompt]
+      ? ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--resume", desired.harnessSessionId, ...(profile ? ["--agent", profile] : []), ...modelArgs, prompt]
       : ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, "--session", desired.harnessSessionId, "--", desired.cwd, prompt]
   return ownedHarnessCommand(command, desired.clankerId, attemptId, resourceClass(desired.launchSpec))
 }

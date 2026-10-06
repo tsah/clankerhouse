@@ -186,6 +186,41 @@ if git --git-dir="$default_repository/.git" for-each-ref --format='%(refname)' r
     exit 1
 fi
 
+# Large runtime snapshots must travel through stdin, not an environment variable.
+# Use real Worktrunk and private tmux sessions, adding only irrelevant snapshot
+# padding through an adapter proxy. A malformed observation must fail BEFORE wt.
+large_worktree="$root/large-worktree"
+git --git-dir="$default_repository/.git" worktree add -q -b large-runtime-delete "$large_worktree" main
+tmux -S "$socket" new-session -d -s large-runtime-delete -c "$large_worktree" 'sleep 60'
+tmux -S "$socket" set-option -t large-runtime-delete @dotfiles_worktree_path "$large_worktree"
+cat >"$root/large-clankers" <<'SH'
+#!/bin/bash
+set -euo pipefail
+if [[ "$*" == "mux observe" ]]; then
+    if [[ "${QA_MALFORMED_SNAPSHOT:-0}" == 1 ]]; then printf 'invalid-json\n'; exit 0; fi
+    "$REAL_CLANKERS" "$@" | python3 -c 'import json,sys; snapshot=json.load(sys.stdin); snapshot["qaPadding"]="x"*(512*1024); json.dump(snapshot,sys.stdout)'
+else
+    exec "$REAL_CLANKERS" "$@"
+fi
+SH
+chmod +x "$root/large-clankers"
+large_env=(env "PATH=$default_bin:$PATH" "REAL_WT=$real_wt" "DEFAULT_WT_LOG=$root/large-wt.log" "REAL_CLANKERS=$repo/bin/clankers" "CLANKERHOUSE_CLANKERS=$root/large-clankers" "TMUX=$socket,$server_pid,0")
+set +e
+"${large_env[@]}" QA_MALFORMED_SNAPSHOT=1 "$repo/libexec/worktree-delete" --yes "$large_worktree" >"$root/large-malformed-output" 2>&1
+malformed_status=$?
+set -e
+[[ $malformed_status -ne 0 && -f "$large_worktree/.git" && ! -e "$root/large-wt.log" ]] || {
+    printf 'Malformed runtime observation did not stop worktree deletion before Worktrunk\n' >&2; exit 1;
+}
+tmux -S "$socket" has-session -t '=large-runtime-delete' || { printf 'Malformed observation closed the target session\n' >&2; exit 1; }
+"${large_env[@]}" "$repo/libexec/worktree-delete" --yes "$large_worktree"
+[[ ! -d "$large_worktree" && -s "$root/large-wt.log" ]] || { printf 'Large snapshot blocked worktree removal\n' >&2; exit 1; }
+if tmux -S "$socket" has-session -t '=large-runtime-delete' 2>/dev/null; then
+    printf 'Large snapshot left the removed worktree session alive\n' >&2; exit 1;
+fi
+tmux -S "$socket" has-session -t '=survivor' || { printf 'Large-snapshot deletion closed an unrelated session\n' >&2; exit 1; }
+git --git-dir="$default_repository/.git" show-ref --verify --quiet refs/heads/large-runtime-delete || { printf 'Large-snapshot deletion removed branch history\n' >&2; exit 1; }
+
 # The root M-d binding must forward to either picker implementation rather
 # than opening the standalone deletion popup over an active TUI.
 cp /bin/sleep "$root/clankerhouse-native"

@@ -1,5 +1,11 @@
-import { describe, expect, test } from "bun:test"
-import { initialHarnessCommand, recoveryHarnessCommand, recoveryPrompt } from "./harness"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { harnessModelArgs, initialHarnessCommand, recoveryHarnessCommand, recoveryPrompt } from "./harness"
+
+const roots: string[] = []
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 import type { DesiredClankerRecord } from "./model"
 
 const desired = (harness: DesiredClankerRecord["harness"]): DesiredClankerRecord => ({
@@ -34,6 +40,61 @@ describe("harness recovery commands", () => {
     expect(claude.some((part) => part.endsWith("/clankerhouse-harness-lifecycle"))).toBe(true)
     expect(claude).toContain("--session-id")
     expect(claude[claude.indexOf("--session-id") + 1]).toBe("claude-id")
+  })
+
+  test("passes an arbitrary model override unchanged on launch and exact-session recovery", () => {
+    for (const harness of ["pi", "claude"] as const) {
+      const record = desired(harness)
+      record.launchSpec = { version: 3, profile: null, model: "provider/future-model:high", resourceClass: "validation-heavy" }
+      const initial = initialHarnessCommand({ ...record, prompt: "task" })
+      const recovery = recoveryHarnessCommand(record, "attempt-model")
+      for (const argv of [initial, recovery]) {
+        expect(argv.filter((arg) => arg === "--model")).toHaveLength(1)
+        expect(argv[argv.indexOf("--model") + 1]).toBe("provider/future-model:high")
+        expect(argv).toContain(record.harnessSessionId!)
+      }
+      expect(initial.at(-1)).toBe("task")
+      if (recovery[0] === "systemd-run") expect(recovery).toContain("--property=IOWeight=5")
+    }
+    expect(harnessModelArgs("codex", "new-codex-model")).toEqual(["--model", "new-codex-model"])
+    expect(() => harnessModelArgs("opencode", "provider/model")).toThrow(/not supported for OpenCode/)
+  })
+
+  test("an explicit Pi model wins over the profile without losing its other settings", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "clankerhouse-model-profile-"))
+    roots.push(cwd)
+    mkdirSync(join(cwd, ".pi/agents"), { recursive: true })
+    writeFileSync(join(cwd, ".pi/agents/model-override-fixture.md"), "---\nmodel: profile-model\nthinking: high\ntools: read\n---\nFixture instructions.\n")
+    const record = { ...desired("pi"), cwd }
+    record.launchSpec = { version: 3, profile: "model-override-fixture", model: "explicit-model", resourceClass: "untrusted" }
+    for (const argv of [initialHarnessCommand({ ...record, prompt: "task" }), recoveryHarnessCommand(record, "attempt-model")]) {
+      expect(argv.filter((arg) => arg === "--model")).toHaveLength(1)
+      expect(argv[argv.indexOf("--model") + 1]).toBe("explicit-model")
+      expect(argv).not.toContain("profile-model")
+      expect(argv[argv.indexOf("--thinking") + 1]).toBe("high")
+      expect(argv[argv.indexOf("--tools") + 1]).toBe("read")
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Fixture instructions.")
+    }
+    record.launchSpec = { version: 1, profile: "model-override-fixture" }
+    const fallback = initialHarnessCommand({ ...record, prompt: "task" })
+    expect(fallback[fallback.indexOf("--model") + 1]).toBe("profile-model")
+  })
+
+  test("keeps Claude profile selection alongside the explicit model", () => {
+    const record = desired("claude")
+    record.launchSpec = { version: 3, profile: "reviewer", model: "custom-claude", resourceClass: "untrusted" }
+    for (const argv of [initialHarnessCommand({ ...record, prompt: "task" }), recoveryHarnessCommand(record, "attempt-model")]) {
+      expect(argv[argv.indexOf("--agent") + 1]).toBe("reviewer")
+      expect(argv[argv.indexOf("--model") + 1]).toBe("custom-claude")
+    }
+  })
+
+  test("leaves harness defaults alone without a model or profile", () => {
+    for (const harness of ["pi", "claude", "opencode"] as const) {
+      const record = desired(harness)
+      expect(initialHarnessCommand({ ...record, prompt: "task" })).not.toContain("--model")
+      expect(recoveryHarnessCommand(record, "attempt-default")).not.toContain("--model")
+    }
   })
 
   test("resumes exact IDs automatically without replaying expensive or external tools", () => {

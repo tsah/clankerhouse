@@ -5,7 +5,7 @@ import { markDirectoryActivity } from "./activity"
 import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
-import { initialHarnessCommand } from "./recovery/harness"
+import { harnessModelArgs, initialHarnessCommand } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
@@ -91,7 +91,7 @@ export async function ensureSession(id: WorktreeIdentity, options: { parentWorks
   return name
 }
 
-const codexCommand = (prompt: string, clankerId: string) => [
+const codexCommand = (prompt: string, clankerId: string, model?: string) => [
   "env",
   `BROWSER=${Bun.env.BROWSER || "xdg-open"}`,
   `PLANNOTATOR_BROWSER=${Bun.env.PLANNOTATOR_BROWSER || `${Bun.env.HOME}/.local/bin/xdg-open`}`,
@@ -99,35 +99,52 @@ const codexCommand = (prompt: string, clankerId: string) => [
   `PLANNOTATOR_PORT=${Bun.env.PLANNOTATOR_PORT || "19432-19439"}`,
   `CLANKER_ID=${clankerId}`,
   "codex",
+  ...harnessModelArgs("codex", model),
   prompt,
 ]
 
-export async function spawnClanker(harness: Harness, cwd: string, prompt: string, profile?: string, requestedName?: string, wait = false, resourceClass?: RecoveryResourceClass, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+export interface SpawnClankerOptions {
+  profile?: string
+  model?: string
+  name?: string
+  wait?: boolean
+  resourceClass?: RecoveryResourceClass
+  multiplexer?: ManagedMultiplexer
+}
+
+export async function spawnClanker(harness: Harness, cwd: string, prompt: string, options: SpawnClankerOptions = {}) {
+  const { profile, model, name: requestedName, wait = false, resourceClass } = options
+  harnessModelArgs(harness, model)
   if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const id = await identity(cwd)
-  const session = await ensureSession(id, { multiplexer })
+  const workshop = persistWorkshopLineage(id, { preserveParent: true })
+  const current = await sessionForPath(id.path, multiplexer)
+  const session = current?.name ?? await sessionName(id, multiplexer)
+  const live = current ? (await multiplexer.observe()).sessions.find((row) => row.id === current.id) : undefined
+  if (current && !live) throw new Error(`Session ${session} disappeared before the clanker was launched`)
   markDirectoryActivity(id.path, "clanker")
   const prefix = requestedName || harness
-  const live = sessionBySelector((await multiplexer.observe()).sessions, session)
-  if (!live) throw new Error(`Session ${session} disappeared before the clanker was launched`)
-  const existing = live.windows.map((window) => window.nativeName)
+  const existing = live?.windows.map((window) => window.nativeName) ?? []
   let name = prefix; let n = 2
   while (existing.includes(name)) name = `${prefix}-${n++}`
   const clankerId = generatedClankerId()
   const recoverable = harness !== "codex"
   const harnessSessionId = harness === "pi" || harness === "claude" ? randomUUID() : null
-  let argv = codexCommand(prompt, clankerId)
+  let argv = codexCommand(prompt, clankerId, model)
   if (recoverable) {
     const recoverableHarness = harness as Exclude<Harness, "codex">
-    const workshop = workshopForPath(id.path)
+    const recoveryWorkshop = workshop ?? workshopForPath(id.path)
     let store: RecoveryStore | undefined
     try {
       store = openRecoveryStore()
-      const launchSpec: LaunchSpec = resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
+      const launchSpec: LaunchSpec = model !== undefined
+        ? { version: 3, profile: profile || null, model, resourceClass: resourceClass ?? "untrusted" }
+        : resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
       store.createDesired({
         clankerId,
         harness: recoverableHarness,
-        workshopId: workshop?.workshopId || `path-${createHash("sha256").update(id.path).digest("hex").slice(0, 24)}`,
+        workshopId: recoveryWorkshop?.workshopId || `path-${createHash("sha256").update(id.path).digest("hex").slice(0, 24)}`,
         workshopPath: id.path,
         tmuxSessionName: session,
         tmuxWindowName: name,
@@ -148,8 +165,12 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { store?.close() }
   }
-  const spawnedLocation = await multiplexer.spawn({ scope: "window", nativeSessionId: live.id, name, cwd: id.path, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv } })
+  const launch = { cwd: id.path, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv" as const, argv } }
+  const spawnedLocation = await multiplexer.spawn(live
+    ? { ...launch, scope: "window", nativeSessionId: live.id, name }
+    : { ...launch, scope: "session", name: session, windowName: name })
   const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = spawnedLocation
+  await applyWorkshopClaims(multiplexer, nativeSessionId, id, workshop)
   const at = paneLocation(nativeSessionId, window, pane)
   await multiplexer.claim(at, "clankerId", clankerId)
   await multiplexer.claim(at, "harness", harness)
@@ -169,13 +190,18 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   return spawned
 }
 
-export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string; multiplexer?: ManagedMultiplexer } = {}) {
+export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string; deferSession?: boolean; multiplexer?: ManagedMultiplexer } = {}) {
   const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(base ? ["--base", base] : []), ...(options.copy ? ["--copy", options.copy] : [])])
   let worktree: { path?: string }
   try { worktree = JSON.parse(result.stdout) }
   catch { throw new Error(`Worktrunk returned invalid JSON while creating '${branch}'`) }
   if (!worktree.path) throw new Error(`Worktrunk created '${branch}', but did not return its path`)
   const id = await identity(worktree.path)
+  if (options.deferSession) {
+    // The first Clanker creates the runtime session with its own initial tab.
+    persistWorkshopLineage(id, options)
+    return { identity: id, session: undefined }
+  }
   return { identity: id, session: await ensureSession(id, options) }
 }
 
@@ -235,11 +261,12 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 
-export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: { profile?: string; resourceClass?: RecoveryResourceClass; base?: string; copy?: string; window?: string; wait?: boolean; parentWorkshopId?: string; noParent?: boolean; multiplexer?: ManagedMultiplexer } = {}) {
+export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: SpawnClankerOptions & { base?: string; copy?: string; window?: string; parentWorkshopId?: string; noParent?: boolean } = {}) {
+  harnessModelArgs(harness, options.model)
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const parent = await resolveWorkshopParent(options, undefined, multiplexer)
-  const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy, multiplexer })
-  return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, options.profile, options.window, options.wait, options.resourceClass, multiplexer), (workshop) => rollbackCreatedWorkshop(workshop, { multiplexer }))
+  const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy, deferSession: true, multiplexer })
+  return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, { ...options, name: options.window, multiplexer }), (workshop) => rollbackCreatedWorkshop(workshop, { multiplexer }))
 }
 
 type CreatedWorkshop = Awaited<ReturnType<typeof createWorkshop>>
@@ -256,7 +283,7 @@ export async function rollbackCreatedWorkshop(created: CreatedWorkshop, options:
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const cleanupErrors: string[] = []
   try {
-    const session = sessionBySelector((await multiplexer.observe()).sessions, created.session)
+    const session = created.session ? sessionBySelector((await multiplexer.observe()).sessions, created.session) : undefined
     if (session) await multiplexer.kill(sessionLocation(session.id))
   } catch (error) {
     cleanupErrors.push(error instanceof Error ? error.message : `unable to remove ${multiplexer.kind} session`)

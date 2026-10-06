@@ -75,6 +75,7 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
   const startedAt = Date.now()
   const epoch = options.epoch ?? latest.revision.source
   const owner = options.owner ?? "snapshot-server"
+  const connections = new Set<Socket>()
   const clients = new Set<Socket>()
   const subscribers = new Set<Socket>()
   const operations = options.executeMutation ? await OperationJournal.open(options.executeMutation, options.operationRegistry) : undefined
@@ -95,12 +96,13 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
   }
 
   const server = createServer((socket) => {
+    connections.add(socket)
+    const remove = () => { connections.delete(socket); clients.delete(socket); subscribers.delete(socket) }
+    socket.on("close", remove)
+    socket.on("error", () => {})
     if (clients.size >= maxClients) { send(socket, protocolError(null, "server_busy", "too many clients")); socket.end(); return }
     clients.add(socket)
     let input = Buffer.alloc(0)
-    const remove = () => { clients.delete(socket); subscribers.delete(socket) }
-    socket.on("close", remove)
-    socket.on("error", () => {})
     socket.on("data", (chunk: Buffer) => {
       input = Buffer.concat([input, chunk])
       while (true) {
@@ -149,7 +151,7 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
     async close() {
       if (closed) return
       closed = true
-      for (const socket of clients) socket.destroy()
+      for (const socket of connections) socket.destroy()
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
       const current = await pathIdentity(options.socketPath)
       if (current && ownedIdentity && current.dev === ownedIdentity.dev && current.ino === ownedIdentity.ino && current.uid === ownedIdentity.uid) await unlink(options.socketPath)

@@ -271,8 +271,26 @@ write_fixture_cache() {
           details: [detail(lineageJava, "main", "619", "idle"), detail(lineageJava, "pi", "618", "done", "pi")],
         }),
       ]
+      const largeCurrentLineage = [
+        session("crowded-root", 800, { workshopId: "crowded-root" }),
+        session("crowded-branch", 799, { workshopId: "crowded-branch", parentWorkshopId: "crowded-root" }),
+        session("qa-workshop-tree", 100, { workshopId: "current", parentWorkshopId: "crowded-branch" }),
+        ...Array.from({ length: 12 }, (_, index) => session(`crowded-sibling-${index}`, 600 - index, { parentWorkshopId: "crowded-branch" })),
+      ]
+      const neutralSort = [
+        session("qa-workshop-tree", 1, { details: [] }),
+        session("sort-directory", 500, { target: { type: "directory", path: "/tmp/sort-directory" }, details: [] }),
+        session("sort-idle", 100, { details: [detail("sort-idle", "pi", "100", "idle", "pi")] }),
+        session("sort-root", 50, { workshopId: "sort-root", details: [] }),
+        session("sort-idle-child", 25, { parentWorkshopId: "sort-root", details: [detail("sort-idle-child", "pi", "25", "idle", "pi")] }),
+        session("sort-neutral-child", 400, { parentWorkshopId: "sort-root", details: [] }),
+      ]
       const rows = variant === "search"
         ? [session("qa-workshop-tree", 700), ...scrollRows, ...searchRows]
+        : variant === "neutral-sort"
+          ? neutralSort
+        : variant === "large-current"
+          ? largeCurrentLineage
         : variant === "refresh-initial"
           ? refreshInitial
           : variant === "lineage-visual"
@@ -301,6 +319,10 @@ touch "$qa_marker"
 real_wt=$(command -v wt)
 cat > "$root/bin/wt" <<SH
 #!/bin/bash
+if [[ -f "$root/delete-paused" && " \$* " == *" remove "* ]]; then
+    touch "$root/delete-started"
+    while [[ -f "$root/delete-paused" ]]; do sleep 0.05; done
+fi
 sleep 1
 exec "$real_wt" "\$@"
 SH
@@ -316,6 +338,22 @@ for recovery_repo in recovery-old recovery-durable recovery-edited; do
     GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" git -C "$recovery_path" commit -qm "Initial fixture"
 done
 printf 'recent edit\n' > "$root/dev/recovery-edited/fixture"
+
+independent_repository="$root/dev/discovery-product"
+nested_fixture_repository="$independent_repository/temp/cpw-fixture/popen-gw0/test_builder/repo"
+git init -q -b main "$independent_repository"
+git -C "$independent_repository" config user.name "Clankerhouse QA"
+git -C "$independent_repository" config user.email "clankerhouse-qa@example.invalid"
+touch "$independent_repository/fixture"
+git -C "$independent_repository" add fixture
+git -C "$independent_repository" commit -qm "Initial product fixture"
+git init -q -b main "$nested_fixture_repository"
+git -C "$nested_fixture_repository" config user.name "Clankerhouse QA"
+git -C "$nested_fixture_repository" config user.email "clankerhouse-qa@example.invalid"
+touch "$nested_fixture_repository/fixture"
+git -C "$nested_fixture_repository" add fixture
+git -C "$nested_fixture_repository" commit -qm "Nested test fixture"
+
 mkdir -p "$root/recovery-ledger-only"
 recovery_now=$(date +%s%3N)
 printf '{"path":"%s","source":"opened","updatedAt":%s}\n' "$root/dev/recovery-durable" "$recovery_now" > "$state_home/clankerhouse/activity/recovery-durable.json"
@@ -372,7 +410,7 @@ main_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:qa-main" '#
 pi_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:pi" '#{pane_id}')
 
 recovery_json=$(env TMUX="$inner_socket,0,0" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" _ZO_DATA_DIR="$root/zoxide" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run "$repo/src/daemon.ts" --dump-state)
-RECOVERY_JSON="$recovery_json" RECOVERY_ROOT="$root/dev" LEDGER_ONLY="$root/recovery-ledger-only" python3 - <<'PY'
+RECOVERY_JSON="$recovery_json" RECOVERY_ROOT="$root/dev" LEDGER_ONLY="$root/recovery-ledger-only" INDEPENDENT_REPOSITORY="$independent_repository" NESTED_FIXTURE_REPOSITORY="$nested_fixture_repository" python3 - <<'PY'
 import json
 import os
 
@@ -387,6 +425,8 @@ by_path = {row["path"]: row for row in rows}
 assert by_path[durable]["activitySource"] == "opened", by_path[durable]
 assert by_path[edited]["activitySource"] == "edited", by_path[edited]
 assert by_path[ledger_only]["activitySource"] == "clanker", by_path[ledger_only]
+assert os.environ["INDEPENDENT_REPOSITORY"] in paths, paths
+assert os.environ["NESTED_FIXTURE_REPOSITORY"] not in paths, paths
 assert paths.index(durable) < paths.index(old), paths
 assert paths.index(edited) < paths.index(old), paths
 assert paths.index(ledger_only) < paths.index(old), paths
@@ -546,6 +586,29 @@ tmux -S "$inner_socket" kill-pane -t "$lineage_visual_pane"
 sleep 0.2
 rm -f "$cache_file"
 
+write_fixture_cache neutral-sort
+neutral_sort_pane=$(open_picker_window neutral-sort)
+wait_for_selected_row "qa-workshop-tree"
+wait_for_row_glyph "sort-idle-child" "✓"
+neutral_sort_frame=$(capture_outer)
+printf '%s\n' "$neutral_sort_frame" > "$root/neutral-sort-render.txt"
+CAPTURE="$neutral_sort_frame" python3 - <<'PY'
+import os
+
+lines = os.environ["CAPTURE"].splitlines()
+names = ["sort-directory", "sort-idle", "sort-root", "sort-neutral-child", "sort-idle-child", "qa-workshop-tree"]
+positions = {name: next(i for i, line in enumerate(lines) if name in line.split()) for name in names}
+assert [positions[name] for name in names] == sorted(positions.values()), os.environ["CAPTURE"]
+for name in ("sort-directory", "sort-neutral-child", "qa-workshop-tree"):
+    assert "○" in lines[positions[name]], lines[positions[name]]
+for name in ("sort-idle", "sort-root", "sort-idle-child"):
+    assert "✓" in lines[positions[name]], lines[positions[name]]
+PY
+# The current neutral session remains nearest the prompt; other grey-orb
+# roots/siblings stay above blue checkmarks despite their newer recency.
+tmux -S "$inner_socket" kill-pane -t "$neutral_sort_pane"
+rm -f "$cache_file"
+
 write_fixture_cache search
 synthetic_picker_pane=$(open_picker_window synthetic-picker)
 wait_for_text "qa-workshop-tree"
@@ -607,6 +670,21 @@ wait_for_absent_text "refresh-new-top"
 wait_for_text "refresh-remove"
 wait_for_selected_row "refresh-keep"
 tmux -S "$inner_socket" kill-pane -t "$refresh_picker_pane"
+sleep 0.2
+
+# Neither a large root nor a large intermediate branch may hide the current
+# Workshop. It starts selected, and clearing search restores that same view.
+write_fixture_cache large-current
+large_current_picker_pane=$(open_picker_window large-current-picker)
+wait_for_selected_row "qa-workshop-tree"
+wait_for_text "crowded-root"
+wait_for_text "crowded-branch"
+large_current_view=$(capture_view)
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "crowded-root"
+wait_for_selected_row "crowded-root"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Left Escape
+wait_for_restored_view "$large_current_view"
+tmux -S "$inner_socket" kill-pane -t "$large_current_picker_pane"
 sleep 0.2
 rm -f "$cache_file"
 cache_file="$runtime/clankerhouse-$uid/state.json"
@@ -809,5 +887,48 @@ if [[ -d "$sessionless_worktree" ]]; then
     exit 1
 fi
 wait_for_absent_text "$sessionless_worktree"
+wait_for_absent_text "Deleting target"
 
-printf 'Clankerhouse QA passed: newest-nearest-prompt bottom-up ordering, durable recovery ordering, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static Herdr status symbols, focus acknowledgement, persistent picker state, and confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction behave correctly.\n'
+# The daemon owns an accepted deletion after the picker exits. Hold real
+# Worktrunk at its effect boundary and jump elsewhere BEFORE releasing it.
+async_worktree="$root/dev/qa-delete-async"
+async_session=qa-delete-async
+jump_session=qa-delete-jump
+git -C "$origin" worktree add -q -b qa-delete-async "$async_worktree"
+tmux -S "$inner_socket" new-session -d -s "$async_session" -n main -c "$async_worktree" 'sleep 300'
+tmux -S "$inner_socket" new-session -d -s "$jump_session" -n main -c "$root" 'sleep 300'
+refresh_daemon
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+wait_for_text "qa-workshop-tree"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$async_session"
+wait_for_selected_row "$async_session"
+touch "$root/delete-paused"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "Destroy worktree 'qa-delete-async'?"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" y
+for _ in {1..100}; do [[ -f "$root/delete-started" ]] && break; sleep 0.05; done
+[[ -f "$root/delete-started" && -d "$async_worktree" ]] || { printf 'Deletion did not reach its held Worktrunk stage\n' >&2; exit 1; }
+wait_for_text "navigation available"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Escape
+wait_for_absent_text "> $async_session"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$jump_session"
+wait_for_selected_row "$jump_session"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" Enter
+for _ in {1..100}; do
+    active=$(tmux -S "$inner_socket" list-clients -F '#{session_name}' | head -n 1)
+    [[ "$active" == "$jump_session" ]] && break
+    sleep 0.05
+done
+[[ "$active" == "$jump_session" && -d "$async_worktree" ]] || { printf 'Picker did not jump before deletion completed\n' >&2; exit 1; }
+tmux -S "$inner_socket" has-session -t "=$async_session" || { printf 'Delete fixture completed before jump\n' >&2; exit 1; }
+rm "$root/delete-paused"
+for _ in {1..160}; do
+    if [[ ! -d "$async_worktree" ]] && ! tmux -S "$inner_socket" has-session -t "=$async_session" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+[[ ! -d "$async_worktree" ]] || { printf 'Deletion stopped when the picker exited\n' >&2; exit 1; }
+if tmux -S "$inner_socket" has-session -t "=$async_session" 2>/dev/null; then printf 'Background deletion left its session alive\n' >&2; exit 1; fi
+tmux -S "$inner_socket" has-session -t "=$jump_session" || { printf 'Background deletion closed the jump destination\n' >&2; exit 1; }
+git -C "$origin" show-ref --verify --quiet refs/heads/qa-delete-async || { printf 'Background deletion removed branch history\n' >&2; exit 1; }
+
+printf 'Clankerhouse QA passed: neutral-last bottom-up ordering with last-seen priority within each group, durable recovery ordering, nested fixture repository exclusion, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static Herdr status symbols, focus acknowledgement, persistent picker state, confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction, and jumping away during daemon-owned deletion behave correctly.\n'

@@ -164,12 +164,14 @@ export default function (pi: ExtensionAPI) {
 	if (sessionless) return;
 
 	const activeSubagents = new Set<string>();
-	const persisted = readPersistedReport();
-	let clankerId = paneOption("@clankerhouse_clanker_id") || process.env.CLANKER_ID?.trim() || `clanker-${randomUUID()}`;
-	const persistedId = persisted.clankerId;
-	let generation = Number(persistedId === clankerId ? persisted.generation : 0) || 0;
-	let settledGeneration = Number(persistedId === clankerId ? persisted.settledGeneration : 0) || 0;
-	let results = persistedId === clankerId && Array.isArray(persisted.results) ? persisted.results.slice(-20) : [];
+	// SDK workers share the visible Pi's argv, PID and pane environment. Only
+	// the TUI session owns that Terminal; decide from its session_start context
+	// before reading claims, publishing lifecycle state or starting resources.
+	let ownsPane = false;
+	let clankerId = "";
+	let generation = 0;
+	let settledGeneration = 0;
+	let results: ClankerResult[] = [];
 	let latestResult = { status: 1, stopReason: "no_result", errorMessage: "Clanker settled without an assistant result.", reply: "" };
 	let parentState: State = "idle";
 	let currentContext: { isIdle(): boolean } | undefined;
@@ -187,7 +189,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const report = (state: State, event: string) => {
-		if (!pane || !stateFile) return;
+		if (!ownsPane || !pane || !stateFile) return;
 		const result = results.at(-1);
 		const fingerprint = [state, clankerId, harnessSessionId, recoveryAttemptId, generation, settledGeneration, result?.generation ?? "", activeSubagents.size].join("\0");
 		if (fingerprint === lastReportFingerprint) return;
@@ -349,8 +351,16 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (!pane || ctx.mode !== "tui") return;
+		ownsPane = true;
 		currentContext = ctx;
 		harnessSessionId = ctx.sessionManager.getSessionId();
+		clankerId = paneOption("@clankerhouse_clanker_id") || process.env.CLANKER_ID?.trim() || `clanker-${randomUUID()}`;
+		const persisted = readPersistedReport();
+		const persistedId = persisted.clankerId;
+		generation = Number(persistedId === clankerId ? persisted.generation : 0) || 0;
+		settledGeneration = Number(persistedId === clankerId ? persisted.settledGeneration : 0) || 0;
+		results = persistedId === clankerId && Array.isArray(persisted.results) ? persisted.results.slice(-20) : [];
 		// Declare owned identity before validating a preallocated session. A
 		// mismatch must remain attributable to this Pi process rather than
 		// degrading into identity-free lifecycle evidence.
@@ -391,6 +401,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (event) => {
 		for (const unsubscribe of unsubscribeSubagentEvents) unsubscribe();
 		activeSubagents.clear();
+		if (!ownsPane) return;
 		reportParentState("unknown", "session_shutdown");
 		stopSocket();
 		clearPaneOptionIf("@clankerhouse_clanker_pid", String(process.pid));
@@ -400,5 +411,6 @@ export default function (pi: ExtensionAPI) {
 		}
 		externalSendInFlight = false;
 		currentContext = undefined;
+		ownsPane = false;
 	});
 }

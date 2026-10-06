@@ -23,6 +23,14 @@ describe("cli argument parsing", () => {
     expect(() => parseArgs(["workshop", "spawn", "--parent", "--wait", "--name", "branch"]).take("--parent")).toThrow(/requires a value/)
   })
 
+  test("consumes model overrides without leaking them into the prompt", () => {
+    const parsed = parseArgs(["--model", "provider/new-model:high", "Review", "this"])
+    expect(parsed.take("--model")).toBe("provider/new-model:high")
+    expect(parsed.args.join(" ")).toBe("Review this")
+    expect(() => parseArgs(["--model"]).take("--model")).toThrow(/--model requires a value/)
+    expect(() => parseArgs(["--model", "--prompt", "task"]).take("--model")).toThrow(/--model requires a value/)
+  })
+
   test("describes durable worktree deletion in effect order", () => {
     expect(mutationProgressSteps({ type: "delete", kind: "worktree", session: "$42", path: "/repo/feature", confirmed: true })).toEqual([
       "Validating worktree identity",

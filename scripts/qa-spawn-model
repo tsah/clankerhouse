@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Standalone spawn --model acceptance. Requires Bun, Git, tmux and real Worktrunk.
+Only external harnesses are faked. Set CLANKERHOUSE_SPAWN_MODEL_QA_KEEP=1 to keep
+isolated evidence (the private tmux server is still stopped).
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+FAKE_HARNESS = r'''#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys, time
+harness = pathlib.Path(sys.argv[0]).name
+argv = sys.argv[1:]
+clanker = os.environ.get("CLANKER_ID", "unexpected")
+mode = "recovery" if "--session" in argv or "--resume" in argv else "initial"
+path = pathlib.Path(os.environ["CLANKERHOUSE_QA_LOG_DIR"]) / (clanker + "." + mode + ".json")
+record = {"harness": harness, "argv": argv, "cwd": os.getcwd(), "complete": False,
+          "pane": os.environ.get("TMUX_PANE"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT")}
+def save():
+    pending = path.with_suffix(".tmp")
+    pending.write_text(json.dumps(record), encoding="utf-8")
+    pending.replace(path)
+save()
+try:
+    if harness not in ("pi", "claude", "codex"):
+        raise RuntimeError("Unsupported harness unexpectedly launched")
+    if harness != "codex":
+        flag = ("--session" if harness == "pi" else "--resume") if mode == "recovery" else "--session-id"
+        session = argv[argv.index(flag) + 1]
+        record["sessionId"] = session
+        subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "recovery", "attest", clanker,
+                        "--session-id", session, "--attempt", os.environ["CLANKER_RECOVERY_ATTEMPT"]],
+                       check=True, capture_output=True, text=True, timeout=15)
+        subprocess.run(["tmux", "set-option", "-p", "-t", os.environ["TMUX_PANE"],
+                        "@clankerhouse_harness_session_id", session], check=True, timeout=5)
+    record["complete"] = True
+    save()
+except Exception as error:
+    record["error"] = str(error)
+    save()
+    raise
+# Some shells only signal the lifecycle wrapper when a pane dies. Do not leave
+# fake harness descendants behind after the isolated fixture is removed.
+while path.parent.is_dir():
+    time.sleep(0.1)
+os._exit(143)
+'''
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def main():
+    repo = Path(__file__).resolve().parent.parent
+    tools = {name: shutil.which(name) for name in ("bun", "git", "tmux", "wt", "python3")}
+    require(all(tools.values()), "Required executables: bun, git, tmux, wt, python3")
+    root = Path(tempfile.mkdtemp(prefix="qa-clankerhouse-spawn-model-", dir="/tmp"))
+    token = uuid.uuid4().hex
+    marker = root / ".qa-owned"
+    marker.write_text(token)
+    socket = root / "tmux.sock"
+    keep = os.environ.get("CLANKERHOUSE_SPAWN_MODEL_QA_KEEP") == "1"
+    env = {}
+
+    def run(argv, cwd=None, check=True, timeout=30):
+        result = subprocess.run([str(arg) for arg in argv], cwd=cwd or root, env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=timeout)
+        if check and result.returncode:
+            raise RuntimeError(f"{argv!r} exited {result.returncode}\n{result.stdout}\n{result.stderr}")
+        return result
+
+    def mux(*args, check=True):
+        return run([tools["tmux"], "-S", socket, *args], check=check, timeout=10)
+
+    def cli(*args, cwd=None, check=True):
+        return run([repo / "bin/clankers", *args], cwd=cwd, check=check)
+
+    def status():
+        return json.loads(cli("recovery", "status").stdout)
+
+    def wait_log(clanker, mode="initial"):
+        path = root / "logs" / f"{clanker}.{mode}.json"
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if path.exists():
+                record = json.loads(path.read_text())
+                require("error" not in record, f"Harness fixture failed: {record}")
+                if record["complete"]:
+                    return record
+            time.sleep(0.05)
+        raise AssertionError(f"Timed out waiting for harness argv/attestation: {path}")
+
+    def stop_signal(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    old_handlers = {sig: signal.signal(sig, stop_signal) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for directory in ("bin", "home", "runtime", "state", "config", "cache", "data", "tmp",
+                          "config-dirs", "data-dirs", "logs", "worktrees", "pi/agents", "hooks", "templates"):
+            (root / directory).mkdir(parents=True, exist_ok=True, mode=0o700)
+        for name, executable in tools.items():
+            (root / "bin" / name).symlink_to(executable)
+        for name in ("pi", "claude", "codex", "opencode"):
+            path = root / "bin" / name
+            path.write_text(FAKE_HARNESS)
+            path.chmod(0o700)
+        (root / "boot-id").write_text("qa-spawn-model-boot\n")
+        (root / "config/gitconfig").write_text("")
+        (root / "config/wt-empty.toml").write_text("")
+        (root / "config/wt.toml").write_text(
+            'worktree-path = "' + str(root / "worktrees") + '/{{ repo }}.{{ branch | sanitize }}"\n')
+        env.update({
+            "HOME": str(root / "home"), "PATH": f"{root}/bin:/usr/bin:/bin", "SHELL": "/bin/sh",
+            "TERM": "xterm-256color", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
+            "XDG_RUNTIME_DIR": str(root / "runtime"), "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_DATA_HOME": str(root / "data"), "XDG_CONFIG_DIRS": str(root / "config-dirs"),
+            "XDG_DATA_DIRS": str(root / "data-dirs"), "TMPDIR": str(root / "tmp"),
+            "PI_CODING_AGENT_DIR": str(root / "pi"), "CLAUDE_CONFIG_DIR": str(root / "home/.claude"),
+            "CODEX_HOME": str(root / "home/.codex"), "BUN_INSTALL": str(root / "home/.bun"),
+            "BUN_INSTALL_CACHE_DIR": str(root / "cache/bun"), "TMUX_TMPDIR": str(root / "runtime"),
+            "TMUX": f"{socket},0,0", "CLANKERHOUSE_MULTIPLEXER": "tmux",
+            "CLANKERHOUSE_HOME": str(repo), "CLANKERHOUSE_BIN_DIR": str(repo / "bin"),
+            "CLANKERHOUSE_LIBEXEC": str(repo / "libexec"),
+            "CLANKERHOUSE_CLANKERS": str(repo / "bin/clankers"),
+            "CLANKERHOUSE_OPENCODE_LAUNCHER": str(root / "bin/opencode"),
+            "CLANKERHOUSE_PROCESS_OWNER": "disabled", "CLANKERHOUSE_AUTO_RECOVER": "0",
+            "CLANKERHOUSE_BOOT_ID_PATH": str(root / "boot-id"),
+            "CLANKERHOUSE_QA_LOG_DIR": str(root / "logs"),
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(root / "config/gitconfig"),
+            "GIT_TEMPLATE_DIR": str(root / "templates"), "GIT_TERMINAL_PROMPT": "0",
+            "WORKTRUNK_CONFIG_PATH": str(root / "config/wt.toml"),
+            "WORKTRUNK_SYSTEM_CONFIG_PATH": str(root / "config/wt-empty.toml"),
+            "WORKTRUNK_PROJECT_CONFIG_PATH": str(root / "config/wt-empty.toml"),
+        })
+        # No inherited credentials, shell hooks, runtime identifiers or host configuration.
+        profile = root / "pi/agents/qa-model-profile.md"
+        profile.write_text("---\nname: qa-model-profile\nmodel: qa/profile-default\n"
+                           "thinking: high\ntools: read,grep\n---\nQA profile body stays intact.\n")
+        fixtures = {}
+        for kind in ("direct", "workshop"):
+            fixture = root / f"repo-{kind}"
+            run([tools["git"], "init", "-q", "-b", "main", fixture])
+            for key, value in (("user.name", "Spawn Model QA"), ("user.email", "qa@example.invalid"),
+                               ("commit.gpgsign", "false"), ("core.hooksPath", str(root / "hooks"))):
+                run([tools["git"], "-C", fixture, "config", key, value])
+            (fixture / "tracked.txt").write_text("fixture\n")
+            run([tools["git"], "-C", fixture, "add", "tracked.txt"])
+            run([tools["git"], "-C", fixture, "commit", "-qm", "fixture"])
+            fixtures[kind] = fixture
+        config = root / "config/tmux.conf"
+        config.write_text('set -g default-shell /bin/sh\nset -g update-environment ""\n')
+        mux("-f", str(config), "new-session", "-d", "-s", "qa-anchor", "-c", str(root), "/bin/sh")
+        mux("set-option", "-g", "@qa_spawn_model_owner", token)
+        require(mux("display-message", "-p", "#{socket_path}").stdout.strip() == str(socket),
+                "tmux did not select the isolated socket")
+
+        def command(kind, harness, name):
+            if kind == "direct":
+                return ["spawn", "--workshop", str(fixtures[kind]), "--name", name, "--harness", harness]
+            return ["workshop", "spawn", "--name", name, "--harness", harness, "--no-parent"]
+
+        def snapshot():
+            # Rejections must not even register a Workshop or modify Git metadata.
+            files = {}
+            for directory in (root / "state", root / "runtime", root / "worktrees", root / "logs", *fixtures.values()):
+                for path in sorted(directory.rglob("*")):
+                    relative = str(path.relative_to(root))
+                    files[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "directory"
+            return files, mux("list-panes", "-a", "-F", "#{session_id}:#{window_id}:#{pane_id}").stdout
+
+        before = snapshot()
+        for kind in fixtures:
+            for harness in ("pi", "claude", "codex", "opencode"):
+                values = [[], [""], [" \t "], ["\n"], ["qa/model\nother"]]
+                if harness == "opencode":
+                    values.append(["qa/unsupported"])
+                for index, value in enumerate(values):
+                    result = cli(*command(kind, harness, f"reject-{harness}-{index}"), "--model", *value,
+                                 cwd=fixtures[kind], check=False)
+                    require(result.returncode != 0, f"Accepted invalid/unsupported model: {kind}, {harness}, {value!r}")
+                    require("model" in (result.stdout + result.stderr).lower(), "Rejection did not identify model")
+                    require(snapshot() == before, f"Rejected {kind}/{harness}/{value!r} mutated fixture state")
+        print("PASS: invalid models and OpenCode rejected before Workshop/Git/runtime mutations", flush=True)
+
+        cli("workshop", "ensure", "--cwd", str(fixtures["direct"]))
+
+        def launch(kind, harness, name, model=None, profile_name=None, resource=None, prompt_mode="default"):
+            args = command(kind, harness, name)
+            if model is not None:
+                args += ["--model", model]
+            if profile_name:
+                args += ["--profile", profile_name]
+            if resource:
+                args += ["--resource-class", resource]
+            prompt = "Ready for instructions."
+            if prompt_mode == "explicit":
+                prompt = "QA explicit prompt; not a model"
+                args += ["--prompt", prompt]
+            elif prompt_mode == "positional":
+                prompt = "QA positional prompt"
+                args += ["QA", "positional", "prompt"]
+            previous_panes = set(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}:#{pane_pid}").stdout.splitlines())
+            result = json.loads(cli(*args, cwd=fixtures[kind]).stdout)
+            log = wait_log(result["clankerId"])
+            current_panes = set(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}:#{pane_pid}").stdout.splitlines())
+            require(previous_panes <= current_panes, "Spawning an agent replaced an existing terminal")
+            require(len(current_panes - previous_panes) == 1, "Agent spawn created an unnecessary shell tab")
+            if kind == "workshop":
+                windows = mux("list-windows", "-t", result["session"], "-F", "#{window_id}").stdout.splitlines()
+                require(windows == [result["window"]], f"New Workshop should contain only its agent tab: {windows}")
+            cwd = Path(result["identity"]["path"]).resolve()
+            require(root in cwd.parents, f"Worktrunk escaped the isolated root: {cwd}")
+            require(log["harness"] == harness and log["cwd"] == str(cwd), f"Wrong harness/cwd: {log}")
+            if kind == "workshop":
+                require(cwd != fixtures[kind] and cwd.parent == root / "worktrees", "Worktrunk did not create the configured worktree")
+                require(run([tools["git"], "-C", cwd, "branch", "--show-current"]).stdout.strip() == name,
+                        "Wrong Worktrunk branch")
+            argv = log["argv"]
+            expected_model = model or ("qa/profile-default" if harness == "pi" and profile_name else None)
+            expected = []
+            if harness != "codex":
+                expected += ["--session-id", result["harnessSessionId"]]
+            if expected_model:
+                require(argv.count("--model") == 1, f"Duplicate/missing model: {argv}")
+                index = argv.index("--model")
+                require(argv[index + 1] == expected_model, f"Model was split or transformed: {argv}")
+                argv = argv[:index] + argv[index + 2:]
+            else:
+                require("--model" not in argv, f"Unexpected model: {argv}")
+            if harness == "pi" and profile_name:
+                expected += ["--thinking", "high", "--tools", "read,grep", "--append-system-prompt", "QA profile body stays intact.\n"]
+            if harness == "claude" and profile_name:
+                expected += ["--agent", profile_name]
+            require(argv == expected + [prompt], f"Profile options or prompt changed: {argv!r}")
+            rows = status()["clankers"]
+            if harness == "codex":
+                require(not any(row["clankerId"] == result["clankerId"] for row in rows), "Codex unexpectedly became recoverable")
+                spec = None
+            else:
+                spec = {"version": 3 if model is not None else 2 if resource else 1, "profile": profile_name}
+                if model is not None:
+                    spec.update(model=model, resourceClass=resource or "untrusted")
+                elif resource:
+                    spec["resourceClass"] = resource
+                desired = next(row for row in rows if row["clankerId"] == result["clankerId"])
+                require(desired["launchSpec"] == spec, f"Wrong durable launchSpec: {desired['launchSpec']}")
+                require(desired["harnessSessionId"] == log["sessionId"], "Session identity was not persisted")
+            require(not (root / "shell-expanded").exists(), "Model was executed by a shell")
+            print(f"PASS: {kind} {name}", flush=True)
+            return result, log, spec
+
+        # Spaces, quotes, dollars and semicolons must remain in one raw argv value.
+        model = f"qa/vendor:model 'single' \"double\";$(touch {root}/shell-expanded)-$HOME"
+        pi = launch("direct", "pi", "pi-model", model, "qa-model-profile", prompt_mode="explicit")
+        launch("workshop", "pi", "pi-model", model, "qa-model-profile", "validation-heavy", "positional")
+        launch("direct", "claude", "claude-model", "qa/claude model")
+        claude = launch("workshop", "claude", "claude-model", "qa/claude model", "qa-claude", "interactive", "explicit")
+        launch("direct", "codex", "codex-model", "qa/codex model", prompt_mode="positional")
+        launch("workshop", "codex", "codex-model", "qa/codex model")
+        launch("direct", "pi", "pi-legacy-v1", profile_name="qa-model-profile")
+        launch("workshop", "pi", "pi-legacy-v2", profile_name="qa-model-profile", resource="interactive")
+        launch("direct", "claude", "claude-default")
+        launch("workshop", "claude", "claude-legacy-v2", resource="validation-heavy")
+        launch("direct", "codex", "codex-default")
+
+        # A registered Workshop with no runtime should also launch directly into one
+        # agent tab, even through the ordinary (non-worktree-creating) spawn command.
+        dormant = root / "repo-dormant"
+        run([tools["git"], "init", "-q", "-b", "main", dormant])
+        run([tools["git"], "-C", dormant, "-c", "user.name=QA", "-c", "user.email=qa@example.invalid", "commit", "-qm", "fixture", "--allow-empty"])
+        dormant_session = cli("workshop", "ensure", "--cwd", str(dormant)).stdout.strip()
+        mux("kill-session", "-t", dormant_session)
+        dormant_spawn = json.loads(cli("spawn", "--workshop", str(dormant), "--name", "only-agent", "--harness", "pi", cwd=dormant).stdout)
+        wait_log(dormant_spawn["clankerId"])
+        require(mux("list-windows", "-t", dormant_spawn["session"], "-F", "#{window_id}").stdout.splitlines() == [dormant_spawn["window"]],
+                "Dormant Workshop spawn created an unnecessary shell tab")
+        print("PASS: dormant Workshop starts with only its agent tab", flush=True)
+
+        before_failure = mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}").stdout
+        failed = cli("workshop", "spawn", "--name", "failed-profile", "--harness", "pi", "--profile", "missing-qa-profile", "--no-parent",
+                     cwd=fixtures["workshop"], check=False)
+        require(failed.returncode != 0 and "profile" in failed.stderr.lower(), "Invalid profile was accepted")
+        require(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}").stdout == before_failure, "Failed registration changed terminal topology")
+        require(not (root / "worktrees/repo-workshop.failed-profile").exists(), "Failed Workshop was not rolled back")
+        require(not run([tools["git"], "-C", fixtures["workshop"], "branch", "--list", "failed-profile"]).stdout.strip(), "Failed Workshop branch survived rollback")
+        print("PASS: registration failure rolls back without creating a shell tab", flush=True)
+
+        # The saved model, not a changed profile default, controls exact recovery.
+        profile.write_text(profile.read_text().replace("qa/profile-default", "qa/changed-profile-default"))
+        cli("recovery", "reconcile")
+        for result, initial, spec in (pi, claude):
+            clanker = result["clankerId"]
+            require(mux("show-option", "-p", "-t", result["pane"], "-qv", "@clankerhouse_clanker_id").stdout.strip() == clanker,
+                    "Refusing to kill a pane without the expected fixture ownership")
+            mux("kill-pane", "-t", result["pane"])
+            cli("recovery", "reconcile")
+            resumed = json.loads(cli("recovery", "resume", clanker, "--force").stdout)
+            require(clanker in resumed["launched"], f"Exact recovery not launched: {resumed}")
+            recovered = wait_log(clanker, "recovery")
+            require(recovered["sessionId"] == initial["sessionId"], "Recovery changed exact session identity")
+            require(recovered["cwd"] == initial["cwd"], "Recovery changed worktree")
+            if initial["harness"] == "claude":
+                require(len(mux("list-windows", "-t", result["session"], "-F", "#{window_id}").stdout.splitlines()) == 1,
+                        "Recovery recreated an unnecessary shell tab")
+            expected = list(initial["argv"][:-1])
+            expected[expected.index("--session-id")] = "--session" if initial["harness"] == "pi" else "--resume"
+            require(recovered["argv"][:-1] == expected, f"Recovery lost model/profile options: {recovered}")
+            require(recovered["argv"][-1].startswith("Clankerhouse recovery attempt "), "Recovery replayed the original prompt")
+            desired = next(row for row in status()["clankers"] if row["clankerId"] == clanker)
+            require(desired["launchSpec"] == spec, "Recovery changed the saved launch spec")
+            # Admission permits only one active Recovery. Stop this reviewed fixture
+            # through the real API before testing the next recoverable harness.
+            cli("recovery", "stop", clanker, "--reason", "qa-model-verified")
+            print(f"PASS: {initial['harness']} exact recovery retains model and profile", flush=True)
+        require(not (root / "shell-expanded").exists(), "Recovery shell-expanded the model")
+        print("Clankerhouse spawn model QA passed.")
+    finally:
+        for sig in old_handlers:
+            signal.signal(sig, signal.SIG_IGN)
+        owned = (root.parent == Path("/tmp") and root.name.startswith("qa-clankerhouse-spawn-model-")
+                 and not root.is_symlink() and root.stat().st_uid == os.getuid()
+                 and marker.is_file() and not marker.is_symlink() and marker.read_text() == token)
+        if not owned:
+            raise RuntimeError(f"Refusing cleanup of unowned QA root: {root}")
+        safe_to_remove = True
+        if socket.exists() or socket.is_symlink():
+            info = socket.lstat()
+            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid(), "Refusing unowned tmux socket cleanup")
+            # The fresh, mode-700 marked directory owns this socket even if setup
+            # failed before the server's descriptive @qa option was installed.
+            killed = mux("kill-server", check=False)
+            if killed.returncode and "no server running" not in killed.stderr:
+                safe_to_remove = False
+                print(f"Private tmux cleanup failed: {killed.stderr}", file=sys.stderr)
+        if keep or not safe_to_remove:
+            print(f"QA evidence: {root}", file=sys.stderr)
+        else:
+            shutil.rmtree(root)
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        require(safe_to_remove, "Could not stop the private tmux server; evidence retained")
+
+
+if __name__ == "__main__":
+    main()

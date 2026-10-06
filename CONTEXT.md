@@ -58,6 +58,22 @@ The continuous process that consumes Multiplexer topology, foreground process, h
 
 An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, recoverable intent, user acknowledgement, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
 
+## Label
+
+A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering, identity, or Recovery. Clankerhouse itself understands exactly one Label, Done.
+
+## Done
+
+The built-in Label `status=done`: the operator's statement that active work in a Workshop is finished. It changes nothing external; clankers, sessions, and the worktree stay as they are. The delete key sets it on a worktree Workshop, and pressing the key again on a Done Workshop offers destruction or reopening.
+
+## Reaper
+
+The daemon process that deletes a Done Workshop once it has been left alone for the retention period (seven days by default). Any observed use of the Workshop restarts the period. The Reaper removes only linked worktrees with no uncommitted changes and no clanker that is working, waiting, or finished-but-unseen, and it deletes through the ordinary delete mutation, which keeps the branch.
+
+## Workshop Hook
+
+A tracked executable the target repository supplies at `.clankerhouse/hooks/<event>` and Clankerhouse runs inside the Workshop. `labels-changed` runs detached after a Label actually changes and cannot fail that change. `done` replaces the built-in delete-key rule for that repository: exit `0` means the repository handled the key, exit `1` leaves Clankerhouse's destroy confirmation, and any other exit is reported as a failure. Repository-specific workflow lives in these scripts, never in Clankerhouse.
+
 ## Observation
 
 A timestamped fact reported by an external runtime Adapter, such as tmux topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.

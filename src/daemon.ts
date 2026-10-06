@@ -9,7 +9,7 @@ import { listClankers } from "./clanker-api"
 import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopStatePath } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopStatePath, workshopsWithLabel } from "./workshop"
 import { sessionState } from "./model"
 import type { DetailRow, SessionRow } from "./model"
 import { advanceProjection, parseProjectionSnapshot } from "./projection"
@@ -24,6 +24,9 @@ import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
+import { completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
+import { DONE_LABEL, doneTtlMs, reapDecision } from "./labels"
+import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
 import { createProcessDiscoveryProvider } from "./server/process-discovery"
 import type { ForegroundAgentDiscovery, ForegroundAgentHarness } from "./server/process-discovery"
@@ -578,7 +581,10 @@ const serverProgram = Effect.gen(function* () {
       })),
     )
     if (snapshot) {
-      if (snapshotServer) snapshotServer.publish(snapshot)
+      if (snapshotServer) {
+        snapshotServer.publish(snapshot)
+        void reapDoneWorkshops(snapshot.sessions).catch((error) => console.error(`Done Workshop reaper failed: ${error instanceof Error ? error.message : String(error)}`))
+      }
       else if (!transportUnavailable) {
         const started = yield* Effect.tryPromise({
           try: () => startSnapshotServer({
@@ -680,6 +686,7 @@ const dumpState = collectSessions.pipe(
       workshopId: session.workshopId,
       parentWorkshopId: session.parentWorkshopId,
       childWorkshopCount: session.childWorkshopCount,
+      labels: session.labels,
       lineageLabel: session.lineageLabel,
       clankers: session.details
         .filter((detail) => detail.kind === "clanker")
@@ -1094,6 +1101,31 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
   }
 
+  if (intent.type === "label") {
+    if (stage === "identity.validated") {
+      const workshop = ensureWorkshopForLabels(expandHome(intent.path))
+      return { checkpoint: { ...checkpoint, workshopId: workshop.workshopId } }
+    }
+    const workshop = workshopForId(String(checkpoint.workshopId))
+    if (!workshop) throw new Error("Labelled Workshop disappeared")
+    if (stage === "labels.updated") {
+      const change = changeWorkshopLabel(workshop.workshopId, intent.key, intent.value)
+      return { checkpoint: { ...checkpoint, ...change, outcome: { workshopId: workshop.workshopId, labels: change.labels, changed: change.changed } } }
+    }
+    if (stage === "hook.dispatched") {
+      if (checkpoint.changed === true) dispatchLabelsChangedHook(workshop, checkpoint.previous as Record<string, string>, checkpoint.labels as Record<string, string>)
+      return { checkpoint }
+    }
+  }
+
+  if (intent.type === "done") {
+    if (stage === "identity.validated") return { checkpoint: { ...checkpoint, path: realpathSync(expandHome(intent.path)) } }
+    if (stage === "hook.completed") {
+      const outcome = await completeDone(String(checkpoint.path))
+      return { checkpoint: { ...checkpoint, outcome } }
+    }
+  }
+
   if (intent.type === "create") {
     if (stage === "identity.validated") {
       const repository = realpathSync(expandHome(intent.repository))
@@ -1170,6 +1202,39 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
   }
 
   throw new Error(`Unsupported mutation stage ${intent.type}/${stage}`)
+}
+
+const reapIntervalMs = 10 * 60_000
+let lastReapAt = 0
+/**
+ * Removes Workshops that were marked done and then left alone for the retention period. It only
+ * decides; the deletion itself is an ordinary durable delete mutation.
+ */
+const reapDoneWorkshops = async (rows: readonly SessionRow[], now = Date.now()) => {
+  const ttlMs = doneTtlMs()
+  if (ttlMs === undefined || now - lastReapAt < Math.min(reapIntervalMs, ttlMs)) return
+  lastReapAt = now
+  for (const workshop of workshopsWithLabel(DONE_LABEL.key, DONE_LABEL.value)) {
+    // A Workshop the projection cannot see has no observed activity to judge, so it is left alone.
+    const row = rows.find((candidate) => candidate.workshopId === workshop.workshopId) ?? rows.find((candidate) => expandHome(candidate.path) === workshop.canonicalPath)
+    if (!row || !existsSync(workshop.canonicalPath)) continue
+    if (now - Math.max(workshop.labelledAt, row.recency * 1000) < ttlMs) continue
+    const status = Bun.spawnSync(["git", "-C", workshop.canonicalPath, "status", "--porcelain"], { stdout: "pipe", stderr: "ignore" })
+    const decision = reapDecision({
+      markedAt: workshop.labelledAt,
+      lastActivityAt: row.recency * 1000,
+      linkedWorktree: isLinkedWorktreeSync(workshop.canonicalPath),
+      dirty: status.exitCode !== 0 || status.stdout.toString().trim().length > 0,
+      busyClanker: row.details.some((detail) => detail.kind === "clanker" && (detail.state === "working" || detail.state === "blocked" || detail.state === "done")),
+    }, now, ttlMs)
+    if (!decision.reap) {
+      if (decision.reason !== "not-expired") console.error(`Keeping done Workshop ${workshop.canonicalPath}: ${decision.reason}`)
+      continue
+    }
+    console.error(`Reaping done Workshop ${workshop.canonicalPath}`)
+    const session = row.target.type === "tmux_session" ? row.target.session : row.name
+    await submitMutation(daemonSocketPath, `reap:${workshop.workshopId}:${workshop.labelledAt}`, { type: "delete", kind: "worktree", session, path: workshop.canonicalPath, confirmed: true })
+  }
 }
 
 const stagedDaemonMutation = createStagedMutationExecutor(reconcileMutationStage)

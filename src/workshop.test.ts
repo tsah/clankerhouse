@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, 
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, detachWorkshopFromParent, identifyWorkshopSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopTree } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, changeWorkshopLabel, detachWorkshopFromParent, identifyWorkshopSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 
 const roots: string[] = []
 afterEach(() => {
@@ -376,5 +376,40 @@ describe("workshop lineage store", () => {
     registerWorkshop(workshops.child, { dbPath, parentWorkshopId: main.workshopId })
     registerWorkshop(workshops.grandchild, { dbPath, parentWorkshopId: main.workshopId })
     expect(readLineageSnapshot(dbPath).byPath.get(workshops.main.path)?.childWorkshopCount).toBe(2)
+  })
+})
+
+describe("workshop labels", () => {
+  test("labels persist per workshop, reach the lineage snapshot, and leave the lineage store at version 1", () => {
+    const { dbPath, workshops } = fixture()
+    const child = registerWorkshop(workshops.child, { dbPath })
+    const other = registerWorkshop(workshops.grandchild, { dbPath })
+
+    expect(changeWorkshopLabel(child.workshopId, "stage", "implementing", dbPath)).toEqual({ previous: {}, labels: { stage: "implementing" }, changed: true })
+    expect(changeWorkshopLabel(child.workshopId, "stage", "merged", dbPath)).toMatchObject({ previous: { stage: "implementing" }, labels: { stage: "merged" }, changed: true })
+    expect(changeWorkshopLabel(child.workshopId, "stage", "merged", dbPath).changed).toBe(false)
+    expect(workshopLabels(child.workshopId, dbPath)).toEqual({ stage: "merged" })
+    expect(workshopLabels(other.workshopId, dbPath)).toEqual({})
+
+    const snapshot = readLineageSnapshot(dbPath, "strict")
+    expect(snapshot.byId.get(child.workshopId)?.labels).toEqual({ stage: "merged" })
+    expect(snapshot.byId.get(other.workshopId)?.labels).toBeUndefined()
+
+    const db = new Database(dbPath, { readonly: true })
+    try { expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1) }
+    finally { db.close() }
+    expect(() => changeWorkshopLabel("missing", "stage", "x", dbPath)).toThrow("does not exist")
+  })
+
+  test("labels disappear with their workshop", () => {
+    const { dbPath, workshops } = fixture()
+    const child = registerWorkshop(workshops.child, { dbPath })
+    changeWorkshopLabel(child.workshopId, "stage", "retro", dbPath)
+    rmSync(workshops.child.path, { recursive: true, force: true })
+
+    expect(spliceDeletedWorkshopFromLineage(child.workshopId, dbPath)).toMatchObject({ workshopId: child.workshopId })
+    const db = new Database(dbPath, { readonly: true })
+    try { expect((db.query("SELECT COUNT(*) AS count FROM workshop_labels").get() as { count: number }).count).toBe(0) }
+    finally { db.close() }
   })
 })

@@ -38,6 +38,19 @@ if [[ -n "$candidate_path" && -d "$candidate_path" ]]; then
     fi
 fi
 
+if [[ "$delete_kind" == worktree ]]; then
+    # The repository's done hook gets the key first; only an unhandled key
+    # reaches the destroy confirmation.
+    if ! done_result=$("$script_dir/clankers" workshop done --cwd "$delete_path" 2>&1); then
+        tmux display-message -t "$pane" "Clankerhouse done hook failed: ${done_result##*$'\n'}"
+        exit 1
+    fi
+    if [[ "$done_result" == *'"handled":true'* ]]; then
+        tmux display-message -t "$pane" "Clankerhouse: marked '$name' done"
+        exit 0
+    fi
+fi
+
 exec tmux display-popup -E -t "$pane" -w 64 -h 16 \
     -e "CLANKERHOUSE_TARGET=$session" \
     -e "CLANKERHOUSE_TARGET_NAME=$name" \

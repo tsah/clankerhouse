@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { recordRecoveryIncident, resolveRecoveredClankerIncidents } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
@@ -15,11 +15,13 @@ import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
-import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopTree } from "./workshop"
+import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
+import { parseLabelAssignment, validLabelKey } from "./labels"
+import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
 
 const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
@@ -232,6 +234,8 @@ const usage = `Usage:
   clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--model MODEL] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
+  clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]
+  clankers workshop done [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
@@ -542,12 +546,29 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       return console.log(await ensureSession(worktree))
     }
     if (subcommand === "identity") return console.log(JSON.stringify(await identity(cwd)))
+    if (subcommand === "label") {
+      const action = parsed.shift()
+      if (action === "list") return console.log(JSON.stringify(workshopLabels(ensureWorkshopForLabels(cwd).workshopId)))
+      const argument = parsed.shift()
+      if ((action !== "set" && action !== "unset") || !argument) throw new Error("Usage: clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]")
+      if (action === "unset" && !validLabelKey(argument)) throw new Error(`Invalid label key '${argument}'`)
+      const { key, value } = action === "set" ? parseLabelAssignment(argument) : { key: argument, value: null }
+      const routed = await routeCompatibilityMutation({ type: "label", path: resolve(cwd), key, value })
+      if (routed) return console.log(JSON.stringify(routed.result))
+      const applied = applyWorkshopLabel(cwd, key, value)
+      if (applied.changed) dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)
+      return console.log(JSON.stringify({ workshopId: applied.workshop.workshopId, labels: applied.labels, changed: applied.changed }))
+    }
+    if (subcommand === "done") {
+      const routed = await routeCompatibilityMutation({ type: "done", path: resolve(cwd) })
+      return console.log(JSON.stringify(routed ? routed.result : await completeDone(cwd)))
+    }
     if (subcommand === "show") return console.log(JSON.stringify(workshopDetails(cwd, { id: parsed.take("--id"), path: parsed.take("--path") }) ?? null, null, 2))
     if (subcommand === "tree") return console.log(JSON.stringify(workshopTree(cwd), null, 2))
     if (subcommand === "project") return console.log(JSON.stringify(projectSnapshot(cwd), null, 2))
     if (subcommand === "reconcile") return console.log(JSON.stringify(reconcileRepositoryWorkshops(cwd), null, 2))
     if (subcommand === "bootstrap") return console.log(JSON.stringify(bootstrapRepositoryFromManifests(cwd), null, 2))
-    throw new Error("Usage: clankers workshop spawn|ensure|identity|show|tree|project|reconcile|bootstrap ...")
+    throw new Error("Usage: clankers workshop spawn|ensure|identity|label|done|show|tree|project|reconcile|bootstrap ...")
   }
 
   if (command === "spawn") {

@@ -37,7 +37,9 @@ exit 0
 SH
 chmod +x "$root/clankers"
 
-tmux -S "$socket" new-session -d -s delete-me 'sleep 60'
+# Pin the working directory: inheriting it would make this a worktree session
+# (and aim the popup at the invoking checkout) whenever QA runs from a linked worktree.
+tmux -S "$socket" new-session -d -s delete-me -c "$root" 'sleep 60'
 pane=$(tmux -S "$socket" list-panes -t delete-me -F '#{pane_id}')
 tmux -S "$socket" set-option -p -t "$pane" @clankerhouse_clanker_id clanker-popup-qa
 tmux -S "$socket" new-session -d -s survivor 'sleep 60'

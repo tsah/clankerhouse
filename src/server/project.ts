@@ -1,5 +1,6 @@
 import type { ActivitySource } from "../activity"
 import { applyResourceIncidents, type ResourceIncident } from "../incidents"
+import { labelTags } from "../labels"
 import { compareProjectedSessions, stateWithSeen } from "../model"
 import type { ClankerState, DetailRow, RuntimeObservation, SessionRow } from "../model"
 import type { ResourceRecord } from "../resource-registry"
@@ -265,8 +266,8 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const displayName = managedSession?.displayName || session.name
     const workshopId = workshop?.workshopId || managedSession?.workshopId || session.workshopId
     const availableActions = ["open", "rename", ...(workshopId ? ["attach"] : []), ...(parentWorkshopId ? ["detach"] : []), "delete"] as SessionRow["availableActions"]
-    const row: SessionRow = { name: displayName, path: sessionPath, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", availableActions, directorySource: worktreePaths.has(expandHome(sessionPath, home)) ? "worktree" : undefined, workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
-    row.searchText = [row.name, row.path, row.branch, row.flags, row.markers.join(" "), row.lineageLabel, row.lineageSearchText, ...row.details.flatMap((detail) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title])].join(" ").toLowerCase()
+    const row: SessionRow = { name: displayName, path: sessionPath, branch: meta.branch, flags: meta.flags, markers, age: ageFromTimestamp(session.recency * 1000, observedAt), recency: session.recency, target: { type: "tmux_session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: managedSession?.id, location: sessionLocation }, details, searchText: "", availableActions, directorySource: worktreePaths.has(expandHome(sessionPath, home)) ? "worktree" : undefined, workshopId, resourceId: managedSession?.id, management: sessionManaged ? "managed" : "unmanaged", parentWorkshopId, childWorkshopCount, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText, labels: labelTags(workshop?.labels) }
+    row.searchText = [row.name, row.path, row.branch, row.flags, row.markers.join(" "), ...(row.labels ?? []), row.lineageLabel, row.lineageSearchText, ...row.details.flatMap((detail) => [detail.kind, detail.harness, detail.status, detail.detail, detail.title])].join(" ").toLowerCase()
     rows.push(row)
   }
 
@@ -287,8 +288,8 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const childWorkshopCount = workshop ? projectedChildCount(workshop) : 0
     const lineageFields = buildLineageFields(workshop?.workshopId, parentWorkshopId, childWorkshopCount)
     const availableActions = ["open", "create", ...(workshop ? ["attach"] : []), ...(parentWorkshopId ? ["detach"] : [])] as SessionRow["availableActions"]
-    const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", availableActions, directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId, childWorkshopCount, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText }
-    row.searchText = [row.name, row.path, row.branch, `${directory.source} directory`, row.activitySource, row.lineageLabel, row.lineageSearchText].join(" ").toLowerCase()
+    const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", availableActions, directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId, childWorkshopCount, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText, labels: labelTags(workshop?.labels) }
+    row.searchText = [row.name, row.path, row.branch, `${directory.source} directory`, row.activitySource, ...(row.labels ?? []), row.lineageLabel, row.lineageSearchText].join(" ").toLowerCase()
     rows.push(row)
   }
 

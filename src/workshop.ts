@@ -3,6 +3,7 @@ import { instanceSlug } from "./paths"
 import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
+import { applyLabelChange, type LabelChange, type WorkshopLabels } from "./labels"
 import { readRegistryWorkshops, registryStatePath } from "./registry"
 
 export type LineageMode = "off" | "best-effort" | "strict"
@@ -38,7 +39,8 @@ export interface ReconcileResult {
   removedPaths: string[]
   rewrittenManifestPaths: string[]
 }
-export interface LineageSnapshot { byPath: Map<string, WorkshopRecord & { childWorkshopCount: number }>; byId: Map<string, WorkshopRecord & { childWorkshopCount: number }> }
+export type LineageSnapshotRecord = WorkshopRecord & { childWorkshopCount: number; labels?: WorkshopLabels }
+export interface LineageSnapshot { byPath: Map<string, LineageSnapshotRecord>; byId: Map<string, LineageSnapshotRecord> }
 
 const schemaVersion = 1
 const manifestVersion = 1
@@ -76,6 +78,17 @@ const openStore = (dbPath = workshopStatePath) => {
   const journalMode = db.query("PRAGMA journal_mode").get() as { journal_mode?: string } | null
   if (journalMode?.journal_mode?.toLowerCase() !== "wal") db.exec("PRAGMA journal_mode = WAL")
   initializeStore(db)
+  // Labels are additive and deliberately do not bump user_version: the registry importer and a
+  // rolled-back installation accept only version 1 and simply ignore this table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workshop_labels (
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (workshop_id, key)
+    )
+  `)
   return db
 }
 
@@ -367,6 +380,53 @@ export const workshopForId = (id: string, dbPath = workshopStatePath) => {
   }
 }
 
+const labelsForWorkshop = (db: Database, workshopId: string): WorkshopLabels => Object.fromEntries(
+  (db.query("SELECT key, value FROM workshop_labels WHERE workshop_id = ?1 ORDER BY key").all(workshopId) as Array<{ key: string; value: string }>).map((row) => [row.key, row.value]),
+)
+
+export const workshopLabels = (workshopId: string, dbPath = workshopStatePath): WorkshopLabels => {
+  if (!existsSync(dbPath)) return {}
+  const db = openStore(dbPath)
+  try { return labelsForWorkshop(db, workshopId) }
+  finally { db.close() }
+}
+
+/** Sets one label key, or removes it when value is null. Reports whether anything actually changed. */
+export const changeWorkshopLabel = (workshopId: string, key: string, value: string | null, dbPath = workshopStatePath): LabelChange => {
+  const db = openStore(dbPath)
+  try {
+    return db.transaction(() => {
+      if (!workshopById(db, workshopId)) throw new Error(`Workshop ${workshopId} does not exist`)
+      const change = applyLabelChange(labelsForWorkshop(db, workshopId), key, value)
+      if (!change.changed) return change
+      if (value === null) db.query("DELETE FROM workshop_labels WHERE workshop_id = ?1 AND key = ?2").run(workshopId, key)
+      else db.query("INSERT INTO workshop_labels (workshop_id, key, value, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (workshop_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(workshopId, key, value, Date.now())
+      return change
+    }).immediate()
+  } finally {
+    db.close()
+  }
+}
+
+/** Every Workshop currently carrying key=value, with the time that value was set. */
+export const workshopsWithLabel = (key: string, value: string, dbPath = workshopStatePath): Array<WorkshopRecord & { labelledAt: number }> => {
+  if (!existsSync(dbPath)) return []
+  const db = openStore(dbPath)
+  try {
+    const rows = db.query(`
+      SELECT w.id, w.repo_id, w.canonical_path, w.branch, w.parent_id, w.revision, w.created_at, w.updated_at, r.common_dir, l.updated_at AS labelled_at
+      FROM workshop_labels l
+      JOIN workshops w ON w.id = l.workshop_id
+      JOIN repositories r ON r.id = w.repo_id
+      WHERE l.key = ?1 AND l.value = ?2
+      ORDER BY l.updated_at
+    `).all(key, value) as Array<WorkshopRow & { common_dir: string; labelled_at: number }>
+    return rows.map((row) => ({ ...rowToRecord(row), labelledAt: row.labelled_at }))
+  } finally {
+    db.close()
+  }
+}
+
 export const attachWorkshopToParent = (workshopId: string, parentWorkshopId: string, dbPath = workshopStatePath) => {
   const workshop = workshopForId(workshopId, dbPath)
   if (!workshop) throw new Error(`Workshop ${workshopId} does not exist`)
@@ -516,8 +576,14 @@ const addSnapshotRows = (snapshot: LineageSnapshot, dbPath: string, table: "work
       FROM ${table} w
       JOIN repositories r ON r.id = w.repo_id
     `).all() as Array<WorkshopRow & { common_dir: string; child_count: number }>
+    const labels = new Map<string, Record<string, string>>()
+    if (table === "workshops") {
+      for (const label of db.query("SELECT workshop_id, key, value FROM workshop_labels ORDER BY key").all() as Array<{ workshop_id: string; key: string; value: string }>) {
+        labels.set(label.workshop_id, { ...labels.get(label.workshop_id), [label.key]: label.value })
+      }
+    }
     for (const row of rows) {
-      const record = { ...rowToRecord(row), childWorkshopCount: Number(row.child_count) || 0 }
+      const record: LineageSnapshotRecord = { ...rowToRecord(row), childWorkshopCount: Number(row.child_count) || 0, labels: labels.get(row.id) }
       snapshot.byPath.set(record.canonicalPath, record)
       snapshot.byId.set(record.workshopId, record)
     }
@@ -537,7 +603,7 @@ export const readLineageSnapshot = (dbPath = workshopStatePath, mode: LineageMod
       const records = readRegistryWorkshops(durableRegistryPath)
       const childCounts = Map.groupBy(records.filter((record) => record.parentWorkshopId), (record) => record.parentWorkshopId!)
       for (const record of records) {
-        const preferred: WorkshopRecord & { childWorkshopCount: number } = { ...record, version: manifestVersion, childWorkshopCount: childCounts.get(record.workshopId)?.length ?? 0 }
+        const preferred: LineageSnapshotRecord = { ...record, version: manifestVersion, childWorkshopCount: childCounts.get(record.workshopId)?.length ?? 0, labels: snapshot.byId.get(record.workshopId)?.labels }
         snapshot.byPath.set(record.canonicalPath, preferred)
         snapshot.byId.set(record.workshopId, preferred)
       }

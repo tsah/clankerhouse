@@ -1,0 +1,177 @@
+#!/bin/bash
+
+set -euo pipefail
+export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
+
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-workshop-labels-$uid-$$"}")
+if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
+    printf 'Refusing unsafe Clankerhouse workshop-labels QA root: %s\n' "$root" >&2
+    exit 1
+fi
+marker="$root.clankerhouse-qa-owned"
+tmux_socket="$root/tmux.sock"
+runtime="$root/runtime"
+state_home="$root/state"
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+server_pid=""
+
+cleanup() {
+    if [[ -n "$server_pid" ]]; then
+        kill -TERM "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
+    tmux -S "$tmux_socket" kill-server 2>/dev/null || true
+    if [[ -f "$marker" ]]; then rm -rf "$root"; rm -f "$marker"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -e "$root" && ! -f "$marker" ]]; then
+    printf 'Refusing to replace unowned Clankerhouse workshop-labels QA root: %s\n' "$root" >&2
+    exit 1
+fi
+rm -rf "$root"
+mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/dev"
+touch "$marker"
+
+origin="$root/dev/repository"
+feature_path="$root/dev/feature"
+plain_path="$root/dev/plain"
+dirty_path="$root/dev/dirty"
+hook_log="$root/hook.log"
+git init -q -b main "$origin"
+git -C "$origin" config user.name "Clankerhouse QA"
+git -C "$origin" config user.email "clankerhouse-qa@example.invalid"
+printf 'fixture\n' > "$origin/fixture"
+git -C "$origin" add fixture
+git -C "$origin" commit -qm "Initial fixture"
+git -C "$origin" worktree add -q -b feature "$feature_path"
+git -C "$origin" worktree add -q -b plain "$plain_path"
+git -C "$origin" worktree add -q -b dirty "$dirty_path"
+printf 'unsaved work\n' > "$dirty_path/scratch"
+
+# The repository, not Clankerhouse, gives labels their meaning: this done hook
+# is the whole "first press marks retro, second press deletes" policy.
+mkdir -p "$feature_path/.clankerhouse/hooks"
+cat > "$feature_path/.clankerhouse/hooks/done" <<'EOF'
+#!/bin/sh
+if [ "${CLANKERHOUSE_LABEL_STAGE:-}" != retro ]; then
+    exec clankers workshop label set stage=retro >/dev/null
+fi
+exit 1
+EOF
+cat > "$feature_path/.clankerhouse/hooks/labels-changed" <<EOF
+#!/bin/sh
+printf '%s %s->%s %s\\n' "\$CLANKERHOUSE_HOOK_EVENT" "\${CLANKERHOUSE_PREVIOUS_LABEL_STAGE:-}" "\${CLANKERHOUSE_LABEL_STAGE:-}" "\$CLANKERHOUSE_WORKSHOP_BRANCH" >> "$hook_log"
+EOF
+chmod +x "$feature_path/.clankerhouse/hooks/done" "$feature_path/.clankerhouse/hooks/labels-changed"
+
+tmux -S "$tmux_socket" -f /dev/null new-session -d -s qa-feature -n main -x 100 -y 30 -c "$feature_path" "sleep 300"
+tmux -S "$tmux_socket" set-option -t qa-feature @dotfiles_worktree_path "$feature_path"
+
+env \
+    HOME="$root/home" \
+    TMUX="$tmux_socket,0,0" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_STATE_HOME="$state_home" \
+    XDG_DATA_HOME="$root/data" \
+    CLANKERHOUSE_HOME="$repo" \
+    CLANKERHOUSE_DEV_ROOT="$root/dev" \
+    CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
+    CLANKERHOUSE_DONE_TTL_DAYS=0.00004 \
+    bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
+server_pid=$!
+daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
+for _ in {1..600}; do
+    [[ -S "$daemon_socket" ]] && break
+    kill -0 "$server_pid" 2>/dev/null || {
+        printf 'Clankerhouse workshop-labels daemon exited during startup:\n' >&2
+        cat "$root/server.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+[[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
+
+clankers() {
+    env \
+        HOME="$root/home" \
+        TMUX="$tmux_socket,0,0" \
+        XDG_RUNTIME_DIR="$runtime" \
+        XDG_STATE_HOME="$state_home" \
+        XDG_DATA_HOME="$root/data" \
+        CLANKERHOUSE_HOME="$repo" \
+        "$repo/bin/clankers" "$@"
+}
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+hook_lines() { if [[ -f "$hook_log" ]]; then wc -l < "$hook_log"; else echo 0; fi; }
+wait_for_hook_lines() {
+    for _ in {1..100}; do
+        [[ "$(hook_lines)" -ge "$1" ]] && return 0
+        sleep 0.05
+    done
+    fail "Expected $1 labels-changed hook run(s), saw $(hook_lines)"
+}
+projected_labels() {
+    SOCKET_PATH="$daemon_socket" FEATURE_PATH="$feature_path" bun --eval '
+      const [transportPath] = process.argv.slice(1)
+      const { getSnapshot } = await import(transportPath)
+      const snapshot = await getSnapshot(process.env.SOCKET_PATH)
+      const row = snapshot.sessions.find((candidate) => candidate.path === process.env.FEATURE_PATH)
+      if (!row) throw new Error("labelled Workshop was not projected")
+      console.log(JSON.stringify(row.labels ?? []))
+    ' "$repo/src/transport/index.ts"
+}
+
+set_result=$(clankers workshop label set stage=implementing --cwd "$feature_path")
+[[ "$(jq -c '[.changed, .labels]' <<<"$set_result")" == '[true,{"stage":"implementing"}]' ]] || fail "Unexpected label set result: $set_result"
+wait_for_hook_lines 1
+[[ "$(projected_labels)" == '["implementing"]' ]] || fail "Expected the projection to carry the label tag, got $(projected_labels)"
+
+# Re-setting the same value is not a change, so the hook must stay quiet.
+repeat_result=$(clankers workshop label set stage=implementing --cwd "$feature_path")
+[[ "$(jq -r '.changed' <<<"$repeat_result")" == false ]] || fail "Expected an unchanged label to report changed=false: $repeat_result"
+
+# First done press: the repository hook handles it by advancing the stage.
+done_result=$(clankers workshop done --cwd "$feature_path")
+[[ "$(jq -r '.handled' <<<"$done_result")" == true ]] || fail "Expected the done hook to handle the first press: $done_result"
+wait_for_hook_lines 2
+[[ "$(clankers workshop label list --cwd "$feature_path")" == '{"stage":"retro"}' ]] || fail "Expected the done hook to set stage=retro"
+[[ "$(projected_labels)" == '["retro"]' ]] || fail "Expected the projection to follow the hook's label change, got $(projected_labels)"
+sleep 0.3
+expected_log=$'labels-changed ->implementing feature\nlabels-changed implementing->retro feature'
+[[ "$(cat "$hook_log")" == "$expected_log" ]] || fail "Unexpected labels-changed hook history: $(cat "$hook_log")"
+
+# Second press: the hook declines, leaving the default destroy confirmation to the client.
+second_result=$(clankers workshop done --cwd "$feature_path")
+[[ "$(jq -c '[.handled, .hook]' <<<"$second_result")" == '[false,true]' ]] || fail "Expected the second done press to fall through: $second_result"
+[[ -d "$feature_path" ]] || fail "A declined done hook must not delete the worktree"
+
+# Without a done hook the built-in rule applies: the first press marks the
+# Workshop done, the second is left for the destroy confirmation.
+plain_result=$(clankers workshop done --cwd "$plain_path")
+[[ "$(jq -c '[.handled, .hook]' <<<"$plain_result")" == '[true,false]' ]] || fail "Expected the built-in rule to mark a hookless Workshop done: $plain_result"
+[[ "$(clankers workshop label list --cwd "$plain_path")" == '{"status":"done"}' ]] || fail "Expected the built-in done label"
+plain_again=$(clankers workshop done --cwd "$plain_path")
+[[ "$(jq -c '[.handled, .hook]' <<<"$plain_again")" == '[false,false]' ]] || fail "Expected a done Workshop to fall through to destruction: $plain_again"
+clankers workshop done --cwd "$dirty_path" >/dev/null
+
+# The reaper (retention shortened to a few seconds here) removes the idle done
+# worktree but keeps its branch, and never touches uncommitted work.
+for _ in {1..400}; do
+    [[ ! -d "$plain_path" ]] && break
+    sleep 0.05
+done
+[[ ! -d "$plain_path" ]] || { cat "$root/server.log" >&2; fail "Expected the reaper to remove the expired done worktree"; }
+git -C "$origin" show-ref --verify --quiet refs/heads/plain || fail "Reaping must keep the branch"
+sleep 8
+[[ -f "$dirty_path/scratch" ]] || fail "The reaper must not delete a done worktree with uncommitted changes"
+grep -q "Keeping done Workshop $dirty_path: uncommitted-changes" "$root/server.log" || fail "Expected the reaper to report why it kept the dirty worktree"
+[[ -d "$feature_path" ]] || fail "The reaper must ignore Workshops without the built-in done label"
+
+unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
+[[ "$(jq -c '[.changed, .labels]' <<<"$unset_result")" == '[true,{}]' ]] || fail "Unexpected label unset result: $unset_result"
+[[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
+if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
+
+printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, and the reaper removes only idle, clean done worktrees.\n'

@@ -6,6 +6,7 @@ import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resu
 import { recordRecoveryIncident, resolveRecoveredClankerIncidents } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
+import { harnessModelArgs } from "./recovery/harness"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { libexecPath } from "./installation"
 import { openManagedMultiplexer } from "./multiplexer"
@@ -228,12 +229,12 @@ const adoptLivePiSessions = async (store: RecoveryStore) => {
 
 const usage = `Usage:
   clankerhouse
-  clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--prompt TEXT]
+  clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--model MODEL] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
-  clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
+  clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION] [--timeout SECONDS]
@@ -250,7 +251,10 @@ const usage = `Usage:
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION) [--client CLIENT]
   clankers mux clanker-ids|pane-path (--pane PANE|--session SESSION)
-  clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]`
+  clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
+
+--model MODEL overrides the profile/default model for Pi, Claude, and Codex.
+Pi and Claude retain the override during Recovery. OpenCode does not support this flag.`
 
 const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities"])
 
@@ -507,6 +511,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       const name = parsed.take("--name")
       if (!name) throw new Error("--name is required")
       const selectedHarness = harness(parsed.take("--harness"))
+      const model = parsed.take("--model")
       const base = parsed.take("--base"); const copy = parsed.take("--copy"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
       if (parentWorkshopId && noParent) throw new Error("--parent and --no-parent are mutually exclusive")
       const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
@@ -515,6 +520,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         copy,
         window,
         profile,
+        model,
         resourceClass: selectedResourceClass,
         wait,
         parentWorkshopId,
@@ -549,8 +555,10 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const name = parsed.take("--name")
     if (!selector || !name) throw new Error("--workshop and --name are required")
     const selectedHarness = harness(parsed.take("--harness")); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait")
+    const model = parsed.take("--model")
+    harnessModelArgs(selectedHarness, model)
     const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
-    return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, profile, name, wait, selectedResourceClass)))
+    return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, { profile, model, name, wait, resourceClass: selectedResourceClass })))
   }
 
   throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|result ...")

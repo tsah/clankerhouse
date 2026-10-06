@@ -63,17 +63,14 @@ const observeSessions = async (multiplexer: ManagedMultiplexer): Promise<Observe
   return snapshot.sessions.map((session) => ({ id: session.id, name: session.nativeName, path: session.worktreePath || session.path, workshopId: session.workshopId || "", windowNames: session.windows.map((window) => window.nativeName) }))
 }
 
-const ensureWorkshop = async (desired: DesiredClankerRecord, multiplexer: ManagedMultiplexer) => {
+const resolveWorkshop = async (desired: DesiredClankerRecord, multiplexer: ManagedMultiplexer) => {
   const sessions = await observeSessions(multiplexer)
   const existing = sessions.find((row) => row.workshopId === desired.workshopId || realpathSafe(row.path) === realpathSafe(desired.workshopPath))
   if (existing) return existing
   if (!existsSync(desired.workshopPath)) throw new Error(`Workshop path no longer exists: ${desired.workshopPath}`)
   let name = desired.tmuxSessionName
   if (sessions.some((row) => row.name === name)) name = `${name}-${createHash("sha256").update(desired.workshopPath).digest("hex").slice(0, 8)}`
-  const spawned = await multiplexer.spawn({ scope: "session", name, cwd: desired.workshopPath, windowName: "main", env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv: [Bun.env.SHELL || "/bin/sh"] } })
-  await multiplexer.claim(sessionLocation(spawned.nativeSessionId), "worktreePath", desired.workshopPath)
-  await multiplexer.claim(sessionLocation(spawned.nativeSessionId), "workshopId", desired.workshopId)
-  return { id: spawned.nativeSessionId, name, path: desired.workshopPath, workshopId: desired.workshopId, windowNames: ["main"] }
+  return { id: undefined, name, path: desired.workshopPath, workshopId: desired.workshopId, windowNames: [] }
 }
 
 const nextWindowName = (existing: string[], preferred: string) => {
@@ -172,23 +169,30 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       store.setRecoveryOwner(desired.clankerId, recoveryUnitName(desired.clankerId, attemptId), { now })
       store.setMetadata("recovery.last_admission_at", now, { now })
       try {
-        const session = await ensureWorkshop(desired, multiplexer)
+        const session = await resolveWorkshop(desired, multiplexer)
         const windowName = nextWindowName(session.windowNames, desired.tmuxWindowName)
         const argv = previousSucceeded
           ? recoveryHarnessCommand(desired, attemptId)
           : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId })
-        const launched = await multiplexer.spawn({ scope: "window", nativeSessionId: session.id, name: windowName, cwd: desired.cwd, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv", argv } })
-        const { nativeWindowId: window, nativePaneId: pane } = launched
+        const launch = { cwd: desired.cwd, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv" as const, argv } }
+        const launched = await multiplexer.spawn(session.id
+          ? { ...launch, scope: "window", nativeSessionId: session.id, name: windowName }
+          : { ...launch, scope: "session", name: session.name, windowName })
+        const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = launched
         if (!pane) throw new Error(`${multiplexer.kind} did not return a pane id`)
-        const at = paneLocation(session.id, window, pane)
+        if (!session.id) {
+          await multiplexer.claim(sessionLocation(nativeSessionId), "worktreePath", desired.workshopPath)
+          await multiplexer.claim(sessionLocation(nativeSessionId), "workshopId", desired.workshopId)
+        }
+        const at = paneLocation(nativeSessionId, window, pane)
         await multiplexer.claim(at, "clankerId", desired.clankerId)
         await multiplexer.claim(at, "harness", desired.harness)
         await multiplexer.claim(at, "recoveryAttemptId", attemptId)
         if (desired.harnessSessionId) await multiplexer.claim(at, "harnessSessionId", desired.harnessSessionId)
-        if (window) await multiplexer.claim(windowLocation(session.id, window), "windowHarness", desired.harness)
-        await ensureManagedSession(session.id, multiplexer)
+        if (window) await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", desired.harness)
+        await ensureManagedSession(nativeSessionId, multiplexer)
         result.launched.push(desired.clankerId)
-        panes = [...panes, { pane, session: session.name, nativeSessionId: session.id, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
+        panes = [...panes, { pane, session: session.name, nativeSessionId, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
       } catch (error) {
         store.finishAttempt(attempt.id, "failed", { error: error instanceof Error ? error.message : String(error), now: Date.now() })
         result.skipped.push({ clankerId: desired.clankerId, reason: error instanceof Error ? error.message : String(error) })

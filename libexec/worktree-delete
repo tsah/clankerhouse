@@ -41,7 +41,17 @@ if [[ "$assume_yes" == false ]]; then
 fi
 progress "Finding linked $(ch_mux_kind) sessions"
 session_ids=()
-mux_snapshot=$(_ch_mux_run_clankers mux observe)
+# Runtime snapshots can exceed the per-environment-variable exec limit. Stream
+# JSON through stdin, and finish parsing before any removal: failures hidden in
+# process substitution would otherwise let Worktrunk run without cleanup targets.
+session_rows=$(_ch_mux_run_clankers mux observe | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin)["sessions"]
+if not isinstance(sessions, list):
+    raise ValueError("Invalid multiplexer session list")
+for session in sessions:
+    print("\t".join(str(session.get(key, "") or "") for key in ("id", "worktreePath", "directoryPath", "path")))
+')
 while IFS=$'\t' read -r session_id worktree_path directory_path session_path; do
   [[ -n "$session_id" ]] || continue
   for candidate in "$worktree_path" "$directory_path" "$session_path"; do
@@ -51,12 +61,7 @@ while IFS=$'\t' read -r session_id worktree_path directory_path session_path; do
       break
     fi
   done
-done < <(MUX_SNAPSHOT="$mux_snapshot" python3 - <<'PY'
-import json, os
-for session in json.loads(os.environ["MUX_SNAPSHOT"]).get("sessions", []):
-    print("\t".join(str(session.get(key, "") or "") for key in ("id", "worktreePath", "directoryPath", "path")))
-PY
-)
+done <<<"$session_rows"
 
 # Keep ordinary branches: deleting local branch history is a separate explicit
 # action. Worktrunk 0.67 rejects --no-delete-branch for the default branch, so
@@ -90,13 +95,14 @@ else
 fi
 progress "Closing linked $(ch_mux_kind) sessions"
 kill_failed=false
-remaining_snapshot=$(_ch_mux_run_clankers mux observe)
-remaining_session_ids=$(MUX_SNAPSHOT="$remaining_snapshot" python3 - <<'PY'
-import json, os
-for session in json.loads(os.environ["MUX_SNAPSHOT"]).get("sessions", []):
+remaining_session_ids=$(_ch_mux_run_clankers mux observe | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin)["sessions"]
+if not isinstance(sessions, list):
+    raise ValueError("Invalid multiplexer session list")
+for session in sessions:
     print(session.get("id", ""))
-PY
-)
+')
 for session_id in "${session_ids[@]}"; do
   if grep -Fxq -- "$session_id" <<<"$remaining_session_ids" && ! ch_mux_kill session "$session_id"; then
     printf 'Worktree was removed, but %s session %s could not be closed\n' "$(ch_mux_kind)" "$session_id" >&2

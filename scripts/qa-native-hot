@@ -71,9 +71,9 @@ dump = subprocess.run(
     [os.environ["BINARY"], "--dump-tree"], env=env, check=True, capture_output=True, text=True,
 )
 roots = [row["name"] for row in json.loads(dump.stdout)["rows"] if row["depth"] == 0]
-expected = ["new-neutral", "idle", "ready", "failed", "old-working"]
+expected = ["idle", "ready", "failed", "old-working", "new-neutral"]
 if roots != expected:
-    raise SystemExit(f"native last-seen order was {roots}, expected {expected}")
+    raise SystemExit(f"native neutral-last, last-seen order was {roots}, expected {expected}")
 
 # Warm executable pages and allocator before measuring the hot Alt-K path.
 subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
@@ -88,5 +88,5 @@ samples.sort()
 p95 = samples[-2]
 if p95 >= 100:
     raise SystemExit(f"hot native first-frame p95 was {p95:.1f} ms (samples={samples})")
-print(f"Clankerhouse native hot-start QA passed: last-seen ordering and first-frame p95 {p95:.1f} ms (n={len(samples)}).")
+print(f"Clankerhouse native hot-start QA passed: neutral-last, last-seen ordering and first-frame p95 {p95:.1f} ms (n={len(samples)}).")
 PY

@@ -309,7 +309,8 @@ struct App {
     current_session: String,
     tmux_client: Option<String>,
     error: String,
-    mutation_progress: Option<String>,
+    mutation: Option<PendingMutation>,
+    delete_only: bool,
     animation_frame: usize,
     mode: Mode,
     repositories: Vec<RepositoryRow>,
@@ -330,6 +331,74 @@ enum AppCommand {
     Close,
     Submit(MutationIntent),
     CreateAndOpen(MutationIntent),
+}
+
+struct PendingMutation {
+    progress: String,
+    submitted: bool,
+    exit_after_submit: Option<AppCommand>,
+}
+
+enum MutationUpdate {
+    Submitted,
+    Finished(Result<serde_json::Value, String>),
+}
+
+#[derive(Debug, PartialEq)]
+enum CommandDispatch {
+    Continue,
+    Background(MutationIntent),
+    Exit(AppCommand),
+}
+
+// Navigation stays available while a mutation runs. Only another mutation is
+// refused; leaving waits for durable acceptance, never for effect completion.
+fn dispatch_command(app: &mut App, command: AppCommand) -> CommandDispatch {
+    match command {
+        AppCommand::Submit(intent) if !matches!(intent, MutationIntent::Open { .. }) => {
+            if app.mutation.is_some() {
+                app.error = "An action is already running; navigation and opening remain available".into();
+                return CommandDispatch::Continue;
+            }
+            app.mutation = Some(PendingMutation {
+                progress: mutation_progress_label(&intent).into(),
+                submitted: false,
+                exit_after_submit: None,
+            });
+            CommandDispatch::Background(intent)
+        }
+        command => {
+            if let Some(pending) = app.mutation.as_mut()
+                && !pending.submitted
+            {
+                pending.exit_after_submit = Some(command);
+                CommandDispatch::Continue
+            } else {
+                CommandDispatch::Exit(command)
+            }
+        }
+    }
+}
+
+fn apply_mutation_update(app: &mut App, update: MutationUpdate) -> Option<AppCommand> {
+    match update {
+        MutationUpdate::Submitted => {
+            let pending = app.mutation.as_mut()?;
+            pending.submitted = true;
+            pending.exit_after_submit.take()
+        }
+        MutationUpdate::Finished(result) => {
+            let pending = app.mutation.take()?;
+            match result {
+                Ok(_) => pending.exit_after_submit.or_else(|| app.delete_only.then_some(AppCommand::Close)),
+                Err(error) => {
+                    // Keep a failed submission visible rather than silently closing.
+                    app.error = error;
+                    None
+                }
+            }
+        }
+    }
 }
 
 fn aggregate(states: impl Iterator<Item = ClankerState>) -> ClankerState {
@@ -362,7 +431,6 @@ fn session_state(session: &SessionRow) -> ClankerState {
     )
 }
 
-#[cfg(test)]
 fn neutral_session(session: &SessionRow) -> bool {
     matches!(session.target, Target::Directory { .. })
         || session
@@ -786,7 +854,8 @@ impl App {
             current_session,
             tmux_client: None,
             error: String::new(),
-            mutation_progress: None,
+            mutation: None,
+            delete_only: false,
             animation_frame: 0,
             mode: Mode::Jump,
             repositories: Vec::new(),
@@ -836,7 +905,8 @@ impl App {
             current_session,
             tmux_client: None,
             error: String::new(),
-            mutation_progress: None,
+            mutation: None,
+            delete_only: false,
             animation_frame: 0,
             mode: Mode::Jump,
             repositories: Vec::new(),
@@ -851,6 +921,29 @@ impl App {
             delete_label: String::new(),
             repository_identities,
         }
+    }
+
+    fn confirm_current_deletion(&mut self) -> Result<(), String> {
+        // Unlike presentation priority, destructive popup targeting must never
+        // fall back to a native/display name that happens to resemble an ID.
+        let native_id = self.current_session.split('\t').next().unwrap_or_default();
+        let candidates = self.rows.iter().enumerate().filter(|(_, row)| {
+            row.detail.is_none()
+                && matches!(&row.session.target, Target::TmuxSession { location: Some(location), .. }
+                    if location.native_session_id == native_id)
+        }).map(|(index, _)| index).collect::<Vec<_>>();
+        if self.current_session.is_empty() || candidates.len() != 1 {
+            return Err("Cannot resolve the exact invoking Workshop for deletion".into());
+        }
+        let index = candidates[0];
+        let row = &self.rows[index];
+        let intent = delete_intent(row).ok_or("The invoking Workshop is not deletable")?;
+        self.delete_label = delete_label(row, &intent);
+        self.delete_intent = Some(intent);
+        self.delete_only = true;
+        self.selected = index;
+        self.mode = Mode::DeleteConfirm;
+        Ok(())
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot, initial: bool) -> Result<(), String> {
@@ -957,6 +1050,9 @@ impl App {
             if !current_lineage.insert(index) {
                 break;
             }
+            // Size defaults and manual collapse must never hide the current
+            // Workshop. Reapply on refresh too, since lineage/names may change.
+            self.expanded_lineage.insert(self.sessions[index].name.clone());
             current = self.sessions[index]
                 .parent_workshop_id
                 .as_ref()
@@ -972,7 +1068,7 @@ impl App {
                 let left = &self.sessions[*left_index];
                 let right = &self.sessions[*right_index];
                 // Roots float by search relevance; lineage children keep structural
-                // (current-lineage, recency, name) order so a descendant's incidental
+                // (current-lineage, neutral-last, recency, name) order so a descendant's incidental
                 // fuzzy match against ancestor-derived text never reorders the subtree.
                 let score_order = if roots {
                     let left_score = scores.get(&target_key(&left.target)).copied().unwrap_or(0);
@@ -991,6 +1087,18 @@ impl App {
                             current_lineage
                                 .contains(left_index)
                                 .cmp(&current_lineage.contains(right_index))
+                        }
+                    })
+                    .then_with(|| {
+                        let neutral = |index: usize| {
+                            states[index] == ClankerState::Unknown
+                                && !has_clankers[index]
+                                && neutral_session(&self.sessions[index])
+                        };
+                        if roots {
+                            neutral(*left_index).cmp(&neutral(*right_index))
+                        } else {
+                            neutral(*right_index).cmp(&neutral(*left_index))
                         }
                     })
                     .then_with(|| {
@@ -1507,12 +1615,7 @@ fn uses_neutral_glyph(row: &TreeRow) -> bool {
     }
     row.state == ClankerState::Unknown
         && !row.contains_clanker
-        && (matches!(row.session.target, Target::Directory { .. })
-            || row
-                .session
-                .details
-                .iter()
-                .all(neutral_detail))
+        && neutral_session(&row.session)
 }
 
 fn neutral_detail(detail: &DetailRow) -> bool {
@@ -2010,18 +2113,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
         areas[1],
         &mut state,
     );
-    let (footer, footer_color) = if let Some(progress) = &app.mutation_progress {
+    let (footer, footer_color) = if !app.error.is_empty() {
+        (app.error.clone(), Color::LightYellow)
+    } else if let Some(pending) = &app.mutation {
         let (glyph, color) = state_glyph(ClankerState::Working, app.animation_frame);
-        (format!("{glyph} {progress}"), color)
-    } else if app.error.is_empty() {
+        (format!("{glyph} {} · navigation available", pending.progress), color)
+    } else {
         (
             app.selected()
                 .map(|row| row.session.path.clone())
                 .unwrap_or_else(|| "No matches".into()),
             Color::DarkGray,
         )
-    } else {
-        (app.error.clone(), Color::LightYellow)
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(footer_color)),
@@ -2040,18 +2143,28 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     app.error.clear();
+    if app.mutation.is_some()
+        && key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('r' | 'a' | 'l' | 'd'))
+    {
+        app.error = "An action is already running; navigation and opening remain available".into();
+        return None;
+    }
 
     if app.mode == Mode::DeleteConfirm {
         match key.code {
-            KeyCode::Char('y') => {
+            KeyCode::Char('y' | 'Y') => {
                 let intent = app.delete_intent.take()?;
                 app.mode = Mode::Jump;
                 app.clear_action_mode();
                 return Some(AppCommand::Submit(intent));
             }
-            KeyCode::Char('n') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.mode = Mode::Jump;
                 app.clear_action_mode();
+                if app.delete_only {
+                    return Some(AppCommand::Close);
+                }
             }
             _ => {}
         }
@@ -2437,6 +2550,14 @@ fn daemon_mutation(
     socket_path: &Path,
     intent: &MutationIntent,
 ) -> Result<serde_json::Value, String> {
+    daemon_mutation_with_submission(socket_path, intent, || {})
+}
+
+fn daemon_mutation_with_submission(
+    socket_path: &Path,
+    intent: &MutationIntent,
+    on_submitted: impl FnOnce(),
+) -> Result<serde_json::Value, String> {
     let key = format!(
         "native-{}-{}",
         std::process::id(),
@@ -2455,6 +2576,11 @@ fn daemon_mutation(
         .and_then(|value| value.as_str())
         .ok_or("daemon omitted operation id")?
         .to_string();
+    if submitted.pointer("/operation/state").and_then(serde_json::Value::as_str) == Some("failed") {
+        return Err(submitted.pointer("/operation/error").and_then(serde_json::Value::as_str)
+            .unwrap_or("daemon operation failed").into());
+    }
+    on_submitted();
     for _ in 0..1200 {
         let operation = rpc_retry(
             socket_path,
@@ -2580,10 +2706,9 @@ fn coalesce_escape_prefix(first: KeyEvent, second: KeyEvent) -> (KeyEvent, Optio
 }
 
 fn handle_external_requests(app: &mut App) {
-    if app.mutation_progress.is_some() {
-        return;
-    }
-    if DELETE_REQUESTED.swap(false, Ordering::SeqCst) {
+    // Consume duplicate triggers while an action is running; do not surprise the
+    // user with a delayed destructive confirmation after it completes.
+    if DELETE_REQUESTED.swap(false, Ordering::SeqCst) && app.mutation.is_none() {
         let _ = handle_key(
             app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT),
@@ -2598,13 +2723,11 @@ fn run(
     socket_path: &Path,
 ) -> io::Result<AppCommand> {
     let mut pending_key = None;
-    let (mutation_sender, mutation_receiver) =
-        mpsc::channel::<Result<serde_json::Value, String>>();
+    let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
     loop {
-        while let Ok(result) = mutation_receiver.try_recv() {
-            app.mutation_progress = None;
-            if let Err(error) = result {
-                app.error = error;
+        while let Ok(update) = mutation_receiver.try_recv() {
+            if let Some(command) = apply_mutation_update(&mut app, update) {
+                return Ok(command);
             }
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
@@ -2615,9 +2738,7 @@ fn run(
         {
             key = Some(observed);
         }
-        if let Some(observed) = key
-            && app.mutation_progress.is_none()
-        {
+        if let Some(observed) = key {
             let mut effective = observed;
             if observed.code == KeyCode::Esc && observed.modifiers.is_empty()
                 && event::poll(Duration::from_millis(40))?
@@ -2626,16 +2747,19 @@ fn run(
                 (effective, pending_key) = coalesce_escape_prefix(observed, next);
             }
             if let Some(command) = handle_key(&mut app, effective) {
-                match command {
-                    AppCommand::Submit(intent) if !matches!(intent, MutationIntent::Open { .. }) => {
-                        app.mutation_progress = Some(mutation_progress_label(&intent).into());
+                match dispatch_command(&mut app, command) {
+                    CommandDispatch::Background(intent) => {
                         let sender = mutation_sender.clone();
                         let mutation_socket_path = socket_path.to_path_buf();
                         thread::spawn(move || {
-                            let _ = sender.send(daemon_mutation(&mutation_socket_path, &intent));
+                            let result = daemon_mutation_with_submission(&mutation_socket_path, &intent, || {
+                                let _ = sender.send(MutationUpdate::Submitted);
+                            });
+                            let _ = sender.send(MutationUpdate::Finished(result));
                         });
                     }
-                    command => return Ok(command),
+                    CommandDispatch::Exit(command) => return Ok(command),
+                    CommandDispatch::Continue => {}
                 }
             }
         }
@@ -2697,8 +2821,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_path = runtime.join("state.json");
     let dump_tree = arguments.iter().any(|argument| argument == "--dump-tree");
     let check = arguments.iter().any(|argument| argument == "--check");
+    let delete_current = arguments.iter().any(|argument| argument == "--delete-current");
     let authoritative_snapshot = socket_snapshot(&socket_path);
-    let repository_cache_error = if dump_tree || check || authoritative_snapshot.is_err() {
+    if delete_current && authoritative_snapshot.is_err() {
+        return Err(io::Error::other("Deletion confirmation requires a live daemon snapshot").into());
+    }
+    let repository_cache_error = if dump_tree || check || delete_current || authoritative_snapshot.is_err() {
         None
     } else {
         refresh_repository_cache_if_unavailable(&socket_path, &cache_path).err()
@@ -2756,7 +2884,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("spawn") {
+    if delete_current {
+        app.confirm_current_deletion().map_err(io::Error::other)?;
+    } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("spawn") {
         app.enter_repository_mode();
     }
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
@@ -2908,7 +3038,7 @@ mod tests {
         let app = App::from_snapshot(PathBuf::from("/tmp/unused"), String::new(), snapshot).unwrap();
 
         assert!(app.expanded_lineage.contains("failed-root"));
-        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(), vec!["neutral-child", "failed-child", "failed-root"]);
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(), vec!["failed-child", "neutral-child", "failed-root"]);
         let root = app.rows.iter().find(|row| row.session.name == "failed-root").unwrap();
         assert_eq!(row_glyph(root, "", 0), ("×", Color::Rgb(248, 113, 113)));
     }
@@ -3091,7 +3221,7 @@ mod tests {
     }
 
     #[test]
-    fn jump_rows_sort_only_by_last_seen_regardless_of_status() {
+    fn jump_rows_sort_status_bearing_rows_before_neutral_then_by_last_seen() {
         let app = app_with_sessions(
             r#"[
                 {"name":"working","path":"/working","recency":10,"target":{"type":"tmux_session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"working","windowId":"@1","pane":"%1"}}]},
@@ -3107,8 +3237,29 @@ mod tests {
                 .filter(|row| row.depth == 0)
                 .map(|row| row.session.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["neutral", "idle", "ready", "failed", "working"]
+            vec!["idle", "ready", "failed", "working", "neutral"]
         );
+    }
+
+    #[test]
+    fn blue_checkmark_lineages_precede_recent_grey_orbs_even_when_collapsed() {
+        let mut app = app_with_sessions(
+            r#"[
+                {"name":"directory","path":"/directory","recency":500,"target":{"type":"directory","path":"/directory"}},
+                {"name":"root","path":"/root","recency":1,"workshopId":"root","target":{"type":"tmux_session","session":"root"}},
+                {"name":"idle","path":"/idle","recency":10,"parentWorkshopId":"root","target":{"type":"tmux_session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"tmux_window","session":"idle","windowId":"@1","pane":"%1"}}]},
+                {"name":"shell","path":"/shell","recency":200,"parentWorkshopId":"root","target":{"type":"tmux_session","session":"shell"}}
+            ]"#,
+        );
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(),
+            vec!["idle", "shell", "root", "directory"]);
+        assert_eq!(row_glyph(&app.rows[0], "", 0), ("✓", Color::Rgb(96, 165, 250)));
+        assert_eq!(row_glyph(&app.rows[1], "", 0), ("○", Color::Rgb(148, 163, 184)));
+        app.expanded_lineage.clear();
+        app.rebuild(None);
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(),
+            vec!["root", "directory"]);
+        assert_eq!(row_glyph(&app.rows[0], "", 0), ("✓", Color::Rgb(96, 165, 250)));
     }
 
     #[test]
@@ -3289,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_clanker_lineage_keeps_its_glyph_without_influencing_order() {
+    fn unknown_clanker_lineage_keeps_its_glyph_and_precedes_neutral_rows() {
         let app = app_with_sessions(
             r#"[
                 {"name":"neutral","path":"/neutral","target":{"type":"tmux_session","session":"neutral"},"details":[{"kind":"window","state":"unknown","target":{"type":"tmux_window","session":"neutral","windowId":"@1","pane":"%1"}}]},
@@ -3303,7 +3454,7 @@ mod tests {
                 .filter(|row| row.detail.is_none())
                 .map(|row| row.session.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["neutral", "unknown", "parent"]
+            vec!["unknown", "parent", "neutral"]
         );
         let parent = app.rows.iter().find(|row| row.session.name == "parent").unwrap();
         assert_eq!(row_glyph(parent, "", 0), ("·", Color::LightMagenta));
@@ -3495,6 +3646,110 @@ mod tests {
                 path: Some("/repo/feature".into()),
             }))
         );
+    }
+
+    fn deletion_fixture() -> App {
+        app_with_sessions(r#"[
+            {"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-feature","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w1"}}},
+            {"name":"survivor","path":"/repo/survivor","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-survivor","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w2"}}}
+        ]"#)
+    }
+
+    fn confirm_fixture_delete(app: &mut App) -> AppCommand {
+        app.selected = app.rows.iter().position(|row| row.session.name == "feature").unwrap();
+        assert_eq!(handle_key(app, alt('d')), None);
+        handle_key(app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap()
+    }
+
+    #[test]
+    fn background_deletion_allows_search_navigation_and_open_after_acceptance() {
+        let mut app = deletion_fixture();
+        let command = confirm_fixture_delete(&mut app);
+        assert!(matches!(dispatch_command(&mut app, command), CommandDispatch::Background(_)));
+        assert_eq!(app.mode, Mode::Jump);
+        for character in "survivor".chars() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(app.selected().unwrap().session.name, "survivor");
+        assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Submitted), None);
+        let command = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert!(matches!(dispatch_command(&mut app, command), CommandDispatch::Exit(AppCommand::Submit(MutationIntent::Open { .. }))));
+        assert!(app.mutation.is_some(), "jump must not wait for deletion completion");
+    }
+
+    #[test]
+    fn exit_waits_only_for_durable_submission_not_deletion_completion() {
+        for command in [AppCommand::Close, AppCommand::Submit(MutationIntent::Open {
+            target: Target::Directory { path: "/repo/survivor".into() }, client: None,
+        })] {
+            let mut app = deletion_fixture();
+            let delete = confirm_fixture_delete(&mut app);
+            assert!(matches!(dispatch_command(&mut app, delete), CommandDispatch::Background(_)));
+            assert_eq!(dispatch_command(&mut app, command.clone()), CommandDispatch::Continue);
+            assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Submitted), Some(command));
+            assert!(app.mutation.is_some());
+        }
+    }
+
+    #[test]
+    fn background_deletion_preserves_selection_and_reports_failures() {
+        let mut app = deletion_fixture();
+        let command = confirm_fixture_delete(&mut app);
+        dispatch_command(&mut app, command.clone());
+        assert_eq!(dispatch_command(&mut app, command), CommandDispatch::Continue);
+        assert!(app.error.contains("already running"));
+        app.update_query("survivor".into());
+        let key = app.selected().unwrap().key.clone();
+        assert_eq!(dispatch_command(&mut app, AppCommand::Close), CommandDispatch::Continue);
+        assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Finished(Err("submission failed".into()))), None);
+        assert!(app.mutation.is_none());
+        assert_eq!(app.error, "submission failed");
+        assert_eq!(app.selected().unwrap().key, key);
+    }
+
+    #[test]
+    fn external_confirmation_pins_current_workspace_instead_of_selected_row() {
+        let mut app = deletion_fixture();
+        app.current_session = "w1".into();
+        app.selected = app.rows.iter().position(|row| row.session.name == "survivor").unwrap();
+        app.confirm_current_deletion().unwrap();
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        assert_eq!(app.delete_label, "Destroy worktree 'feature'?");
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), Some(AppCommand::Close));
+    }
+
+    #[test]
+    fn external_confirmation_refuses_missing_or_unknown_context() {
+        for current in ["", "w-missing"] {
+            let mut app = deletion_fixture();
+            app.current_session = current.into();
+            assert!(app.confirm_current_deletion().is_err());
+            assert!(app.delete_intent.is_none());
+        }
+    }
+
+    #[test]
+    fn external_confirmation_rejects_name_aliases_and_ambiguous_native_ids() {
+        let mut app = deletion_fixture();
+        app.current_session = "native-feature".into();
+        assert!(app.confirm_current_deletion().is_err(), "a native label is not the invoking workspace ID");
+        app.current_session = "w1".into();
+        let duplicate = app.rows.iter().find(|row| row.session.name == "feature").unwrap().clone();
+        app.rows.push(duplicate);
+        assert!(app.confirm_current_deletion().is_err());
+    }
+
+    #[test]
+    fn external_confirmation_only_submits_after_yes_and_closes_after_completion() {
+        let mut app = deletion_fixture();
+        app.current_session = "w1".into();
+        app.confirm_current_deletion().unwrap();
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), None);
+        assert!(app.mutation.is_none());
+        let command = handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap();
+        assert!(matches!(dispatch_command(&mut app, command), CommandDispatch::Background(MutationIntent::Delete { .. })));
+        assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Submitted), None);
+        assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Finished(Ok(serde_json::Value::Null))), Some(AppCommand::Close));
     }
 
     #[test]
@@ -3734,6 +3989,57 @@ mod tests {
         );
         explicit_instance.insert("CLANKERHOUSE_INSTANCE".into(), "../other".into());
         assert!(runtime_root_from(&explicit_instance, 42).is_err());
+    }
+
+    fn large_current_lineage_snapshot() -> Snapshot {
+        let mut sessions = vec![
+            serde_json::json!({"name":"root", "path":"/root", "workshopId":"root", "target":{"type":"tmux_session","session":"root"}}),
+            serde_json::json!({"name":"branch", "path":"/branch", "workshopId":"branch", "parentWorkshopId":"root", "target":{"type":"tmux_session","session":"branch"}}),
+            serde_json::json!({"name":"current", "path":"/current", "workshopId":"current", "parentWorkshopId":"branch", "target":{"type":"tmux_session","session":"native-current","resourceId":"current-id"}}),
+            serde_json::json!({"name":"other-branch", "path":"/other-branch", "workshopId":"other-branch", "parentWorkshopId":"root", "target":{"type":"tmux_session","session":"other-branch"}}),
+        ];
+        for parent in ["current", "other-branch"] {
+            for index in 0..12 {
+                let name = format!("{parent}-child-{index}");
+                sessions.push(serde_json::json!({"name":name, "path":format!("/{name}"), "parentWorkshopId":parent, "target":{"type":"tmux_session","session":name}}));
+            }
+        }
+        serde_json::from_value(serde_json::json!({"version":CACHE_VERSION,"sessions":sessions})).unwrap()
+    }
+
+    #[test]
+    fn current_workshop_is_visible_expanded_and_selected_in_large_lineages() {
+        let mut app = App::from_snapshot(PathBuf::from("/nonexistent/state.json"), "native-current".into(), large_current_lineage_snapshot()).unwrap();
+        assert_eq!(app.selected().unwrap().key, "session:current-id");
+        assert_eq!(app.selected().unwrap().depth, 2);
+        for name in ["root", "branch", "current"] {
+            assert!(app.expanded_lineage.contains(name), "{name} must stay expanded");
+            let row = app.rows.iter().position(|row| row.session.name == name).unwrap();
+            app.selected = row;
+            handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(app.expanded_lineage.contains(name));
+            assert!(app.rows.iter().any(|row| row.key == "session:current-id"));
+        }
+        assert!(!app.expanded_lineage.contains("other-branch"));
+        assert!(!app.rows.iter().any(|row| row.session.name == "other-branch-child-0"));
+        assert!(app.expanded_details.is_empty());
+    }
+
+    #[test]
+    fn current_lineage_stays_open_after_refresh_and_search_without_stealing_selection() {
+        let mut app = App::from_snapshot(PathBuf::from("/nonexistent/state.json"), "native-current".into(), large_current_lineage_snapshot()).unwrap();
+        app.update_query("other-branch".into());
+        app.update_query(String::new());
+        assert_eq!(app.selected().unwrap().key, "session:current-id");
+        let mut snapshot = large_current_lineage_snapshot();
+        snapshot.sessions.iter_mut().find(|row| row.name == "branch").unwrap().name = "renamed-branch".into();
+        app.apply_snapshot(snapshot, false).unwrap();
+        assert!(app.expanded_lineage.contains("renamed-branch"));
+        assert_eq!(app.selected().unwrap().key, "session:current-id");
+        app.selected = app.rows.iter().position(|row| row.session.name == "other-branch").unwrap();
+        let key = app.selected().unwrap().key.clone();
+        app.apply_snapshot(large_current_lineage_snapshot(), false).unwrap();
+        assert_eq!(app.selected().unwrap().key, key);
     }
 
     #[test]

@@ -59,7 +59,8 @@ if [[ -n "$recovery_attempt_id" ]]; then
     ch_mux_pane_claim recoveryAttemptId "$recovery_attempt_id"
 fi
 
-HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" ACTIVITY_DIR="$activity_dir" ACTIVITY_PATH="$activity_path" python3 - <<'PY'
+# Carry the effective report state back to Recovery attestation as well.
+state=$(HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" ACTIVITY_DIR="$activity_dir" ACTIVITY_PATH="$activity_path" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -101,6 +102,13 @@ if previous and (
     previous = {}
 
 hook_event = payload.get("hook_event_name") if isinstance(payload, dict) else None
+if harness == "claude" and state == "done" and hook_event == "Stop":
+    # Stop ends the foreground response, not necessarily the session's work.
+    # Claude supplies in-flight tasks; scheduled future wakeups aren't work in flight.
+    # https://code.claude.com/docs/en/hooks#stop-input
+    tasks = payload.get("background_tasks")
+    if isinstance(tasks, list) and any(isinstance(task, dict) and task.get("status") in ("running", "pending") for task in tasks):
+        state = "working"
 generation = int(previous.get("generation") or 0)
 settled_generation = int(previous.get("settledGeneration") or 0)
 if hook_event == "UserPromptSubmit" or (state == "working" and previous.get("state") not in ("working", "blocked")):
@@ -131,7 +139,9 @@ if activity_dir and activity_path:
     activity_tmp = activity_dir / f"{activity_target.name}.{os.getpid()}.tmp"
     activity_tmp.write_text(json.dumps({"path": str(activity_path), "source": "clanker", "updatedAt": record["updatedAt"]}), encoding="utf-8")
     activity_tmp.replace(activity_target)
+print(state)
 PY
+)
 
 if [[ -n "$harness_session_id" ]]; then
     if [[ -n "$expected_session_id" && "$expected_session_id" != "$harness_session_id" ]]; then

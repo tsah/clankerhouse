@@ -17,6 +17,7 @@
         "src/model.test.ts",
         "src/diagnostics.test.ts",
         "src/activity.test.ts",
+        "src/directory-discovery.test.ts",
         "src/incidents.test.ts",
         "src/repository-cache.test.ts",
         "src/server/process-discovery.test.ts",
@@ -31,7 +32,8 @@
       "manual": [
         "Inspect the full unfiltered tree",
         "Confirm each exact target and Workshop appears once",
-        "Confirm lineage and last-seen ordering, with the current session pinned nearest the prompt",
+        "Confirm status-bearing rows (including blue idle checkmarks) rank ahead of neutral grey-orb rows, with last-seen ordering within each group, contiguous lineage, and the current session pinned nearest the prompt",
+        "Give a directory or shell newer activity than an idle Clanker; confirm its grey orb remains farther from the prompt, including among siblings and when a status-bearing lineage is collapsed",
         "Confirm OpenCode panes reflect their exact selected service session, including active forms and permissions",
         "Confirm detected processes and rejected lifecycle reports remain visible without becoming managed Clankers"
       ]
@@ -52,6 +54,7 @@
         "Search exact, fuzzy, hyphenated, and absent terms",
         "Clear typed and pasted searches with Backspace or Escape; confirm the pre-search selection, expansion, and viewport return, including from a scrolled view and after no matches",
         "Navigate parent, child, and detail rows",
+        "Open the picker from a Workshop deep inside a large lineage; confirm it starts visible and selected, its ancestor chain stays expanded, and unrelated large branches remain collapsible",
         "Confirm selected row and footer refer to the same target"
       ]
     },
@@ -80,6 +83,8 @@
       "core": true,
       "unit": [
         "src/daemon-mutations.test.ts",
+        "src/worktree-delete.test.ts",
+        "src/herdr-delete-launcher.test.ts",
         "src/transport/protocol.test.ts",
         "src/cli.test.ts",
         "native-client/src/main.rs"
@@ -91,11 +96,14 @@
         "scripts/qa-recovery",
         "scripts/qa-herdr"
       ],
-      "automatedScope": "Attach candidate projection and native submission, delete (including default-branch preservation and middle-lineage child splicing), stop, Recovery desired-state transitions, protocol validation, and durable action stages are automated; rename, detach, create, and start require the manual standalone walkthrough until dedicated interaction scenarios are added.",
+      "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), stop, Recovery desired-state transitions, protocol validation, and durable action stages are automated; rename, detach, create, and start require the manual standalone walkthrough until dedicated interaction scenarios are added.",
       "manual": [
         "Exercise every advertised action in the laboratory",
         "Cancel each destructive confirmation once",
+        "Use Alt-D outside the TUI in tmux and Herdr; confirm the invoking session/worktree is selected, cancellation is harmless, and confirmation deletes only that target",
+        "Confirm a slow deletion inside the TUI, then search and jump to another Workshop before it finishes; confirm deletion completes after the picker exits and the jump destination survives",
         "Confirm worktree deletion preserves its branch, including the repository default branch",
+        "Delete a worktree with a runtime snapshot larger than 128 KiB; confirm its linked sessions close, unrelated sessions survive, and a malformed initial snapshot prevents removal",
         "Confirm action results survive a projection refresh"
       ]
     },
@@ -112,11 +120,13 @@
         "scripts/qa",
         "scripts/qa-current-session",
         "scripts/qa-lineage-actions",
-        "scripts/qa-herdr"
+        "scripts/qa-herdr",
+        "scripts/qa-spawn-model"
       ],
-      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create.",
+      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs under tmux and Herdr.",
       "manual": [
         "Create a Workshop and child",
+        "Confirm an agent Workshop has only its agent tab, with no extra main shell, and adding an agent preserves existing tabs",
         "Reparent and detach the child",
         "Delete a middle Workshop and confirm its children splice to the available parent",
         "Confirm stable IDs and manifests remain consistent"
@@ -140,11 +150,34 @@
       ]
     },
     {
+      "id": "spawn-model-override",
+      "title": "Explicit model selection for Clanker and Workshop spawning",
+      "core": true,
+      "unit": [
+        "src/cli.test.ts",
+        "src/workflow.test.ts",
+        "src/recovery/model.test.ts",
+        "src/recovery/harness.test.ts",
+        "src/recovery/store.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-spawn-model"
+      ],
+      "manual": [
+        "Spawn Pi, Claude, and Codex with --model in an isolated Workshop and confirm the exact model reaches each harness",
+        "Create a Workshop with --model and confirm the default prompt is unchanged",
+        "Combine a Pi profile with --model and confirm the explicit model wins while other profile settings remain",
+        "Resume a Pi or Claude Clanker and confirm its saved model override survives Recovery",
+        "Confirm OpenCode rejects --model before creating a Workshop"
+      ]
+    },
+    {
       "id": "clanker-api",
       "title": "Stable Clanker discovery, status, capabilities, sends, waits, and results",
       "core": true,
       "unit": [
         "src/clanker-api.test.ts",
+        "src/claude-background-tasks.test.ts",
         "src/multiplexer/herdr.test.ts",
         "integrations/opencode/clankerhouse-lifecycle.test.ts"
       ],
@@ -156,7 +189,9 @@
         "Send through every supported delivery mode",
         "Under Herdr, send an exact prompt to Claude and observe its lifecycle response",
         "Confirm generations, waits, and results correlate",
-        "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or create Recovery intent"
+        "Have Claude stop its foreground response while a background shell task runs or is pending; confirm working state and pending waits persist until a later Stop reports no tasks in flight",
+        "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or create Recovery intent",
+        "Run in-process Pi SDK workers while the visible parent is working; confirm worker start, settlement, and shutdown preserve the parent's identity, working state, native socket, and results"
       ]
     },
     {
@@ -210,10 +245,12 @@
         "src/recovery/model.test.ts"
       ],
       "standalone": [
-        "scripts/qa-recovery"
+        "scripts/qa-recovery",
+        "scripts/qa-spawn-model"
       ],
       "manual": [
         "Simulate clean loss, hard reboot, ambiguous interruption, and resource pressure",
+        "Confirm restoring a lost session starts with only the recovering agent tab",
         "Confirm only admitted candidates launch",
         "Confirm stopped and suspended Clankers remain stopped"
       ]

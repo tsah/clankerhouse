@@ -25,6 +25,7 @@ export type RecoveryResourceClass = "interactive" | "validation-heavy" | "untrus
 export type LaunchSpec =
   | { version: 1; profile: string | null }
   | { version: 2; profile: string | null; resourceClass: RecoveryResourceClass }
+  | { version: 3; profile: string | null; resourceClass: RecoveryResourceClass; model: string }
 
 export interface DesiredClankerInput {
   clankerId: string
@@ -104,6 +105,12 @@ function assertText(value: unknown, field: string, options: { absolute?: boolean
   if (options.absolute && !value.startsWith("/")) throw new Error(`${field} must be an absolute path`)
 }
 
+export const validateModelName = (value: unknown): string => {
+  assertText(value, "model", { max: 512 })
+  if (value.startsWith("-")) throw new Error("Invalid model")
+  return value
+}
+
 export const validateLaunchSpec = (value: unknown): LaunchSpec => {
   if (!plainObject(value)) throw new Error("Invalid launch spec")
   const keys = Object.keys(value).sort()
@@ -113,6 +120,9 @@ export const validateLaunchSpec = (value: unknown): LaunchSpec => {
   }
   if (value.version === 2 && keys.length === 3 && keys[0] === "profile" && keys[1] === "resourceClass" && keys[2] === "version" && ["interactive", "validation-heavy", "untrusted"].includes(String(value.resourceClass))) {
     return Object.freeze({ version: 2, profile: value.profile as string | null, resourceClass: value.resourceClass as RecoveryResourceClass })
+  }
+  if (value.version === 3 && keys.join(",") === "model,profile,resourceClass,version" && ["interactive", "validation-heavy", "untrusted"].includes(String(value.resourceClass))) {
+    return Object.freeze({ version: 3, profile: value.profile as string | null, resourceClass: value.resourceClass as RecoveryResourceClass, model: validateModelName(value.model) })
   }
   throw new Error("Invalid launch spec")
 }

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { advanceRecoveryCampaign, reconcileRecovery, startRecoveryCampaign } from "./controller"
 import { openRecoveryStore } from "./store"
+import type { ManagedMultiplexer } from "../multiplexer"
+import type { ClaimKey, MultiplexerSession, NativeLocation, SpawnRequest } from "../multiplexer/interface"
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -19,6 +21,44 @@ describe("recovery reconciliation", () => {
     const campaign = startRecoveryCampaign(2, "boot-b", ["healthy", "blocked"], 5)
     expect(advanceRecoveryCampaign(campaign, store.listDesired(), ["healthy"])).toEqual({ ...campaign, pending: [], blocked: [{ clankerId: "blocked", reason: "interrupted_unknown" }], status: "completed_with_blocks" })
     store.close()
+  })
+
+  test.each([false, true])("recovery launches only one agent tab and preserves an existing session (%s)", async (existing) => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-recovery-tab-")); roots.push(root)
+    const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })
+    const requests: SpawnRequest[] = []
+    const claims: Array<[NativeLocation, ClaimKey, string | null]> = []
+    const sessions: MultiplexerSession[] = existing ? [{
+      id: "existing-session", nativeName: "renamed-session", path: root, worktreePath: root, workshopId: "w", directoryPath: "", attached: false, recency: 1,
+      windows: [{ id: "existing-window", nativeName: "pi", index: "0", active: true, panes: [] }],
+    }] : []
+    const multiplexer = {
+      kind: "tmux",
+      observe: async () => ({ kind: "tmux", instanceId: "isolated", sessions }),
+      spawn: async (request: SpawnRequest) => {
+        expect(store.attemptsFor("clanker-tab").at(-1)?.status).toBe("running")
+        requests.push(request)
+        return { nativeSessionId: existing ? "existing-session" : "new-session", nativeWindowId: "agent-window", nativePaneId: "agent-pane" }
+      },
+      claim: async (location: NativeLocation, key: ClaimKey, value: string | null) => { claims.push([location, key, value]) },
+      ensureManagedSession: async () => {},
+    } as unknown as ManagedMultiplexer
+    try {
+      store.createDesired({ clankerId: "clanker-tab", harness: "pi", workshopId: "w", workshopPath: root, tmuxSessionName: "workshop", tmuxWindowName: "pi", cwd: root, harnessSessionId: "exact-session", launchSpec: { version: 1, profile: null }, originalTask: "task" }, { now: 1 })
+      const attempt = store.beginAttempt("clanker-tab", "initial", { now: 2 })
+      store.finishAttempt(attempt.id, "succeeded", { now: 3 })
+      const result = await reconcileRecovery(store, { now: 100, allowLaunch: true, bypassAdmission: true, multiplexer })
+      expect(result.launched).toEqual(["clanker-tab"])
+      expect(requests).toHaveLength(1)
+      expect(requests[0]).toMatchObject(existing
+        ? { scope: "window", nativeSessionId: "existing-session", name: "pi-2" }
+        : { scope: "session", name: "workshop", windowName: "pi" })
+      expect(requests[0]!.launch?.kind).toBe("argv")
+      const argv = requests[0]!.launch?.kind === "argv" ? requests[0]!.launch.argv : []
+      expect(argv).toContain("--session")
+      expect(argv).toContain("exact-session")
+      expect(claims).toContainEqual([{ nativeSessionId: existing ? "existing-session" : "new-session", nativeWindowId: "agent-window", nativePaneId: "agent-pane" }, "clankerId", "clanker-tab"])
+    } finally { store.close() }
   })
 
   test("simultaneous stale clankers become pending without launching on boot", async () => {

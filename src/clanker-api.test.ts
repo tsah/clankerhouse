@@ -200,7 +200,7 @@ const pi = {
 }
 extension(pi as never)
 let idle = true
-const context = { isIdle: () => idle, sessionManager: { getSessionId: () => "pi-test-session" } }
+const context = { mode: "tui", isIdle: () => idle, sessionManager: { getSessionId: () => "pi-test-session" } }
 await handlers.get("session_start")?.({}, context)
 const socketDirectory = \`${runtime}/clankerhouse-\${process.getuid?.() || 0}/clanker-sockets\`
 const socketPath = \`\${socketDirectory}/\${readdirSync(socketDirectory).find((entry) => entry.endsWith(".sock"))}\`
@@ -260,6 +260,88 @@ console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, ste
     ])
     expect(output.socketMode).toBe("600")
     expect(output.socketRemoved).toBe(true)
+  })
+
+  test("in-process SDK workers cannot overwrite their active parent pane", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-sdk-pi-"))
+    roots.push(root)
+    const bin = join(root, "bin")
+    const runtime = join(root, "runtime")
+    mkdirSync(bin)
+    mkdirSync(runtime)
+    writeFileSync(join(bin, "tmux"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$CLAIM_LOG"
+case "$*" in *"show-option"*"@clankerhouse_clanker_id"*) printf 'clanker-parent\\n' ;; esac
+`, { mode: 0o755 })
+    writeFileSync(join(bin, "clankers"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CLAIM_LOG"\n', { mode: 0o755 })
+    const script = join(root, "sdk-workers.ts")
+    writeFileSync(script, `
+import assert from "node:assert/strict"
+import { readFileSync, readdirSync } from "node:fs"
+import extension from ${JSON.stringify(join(import.meta.dir, "../integrations/pi/tmux-clanker-lifecycle.ts"))}
+const runtime = ${JSON.stringify(runtime)} + "/clankerhouse-" + process.getuid()
+const reportPath = runtime + "/clanker-state/%88.json"
+const claimLog = ${JSON.stringify(join(root, "claims.log"))}
+function instance(mode: string, sessionId: string) {
+  const handlers = new Map<string, Function>()
+  const events = new Map<string, Function>()
+  const api = {
+    events: { on: (name: string, handler: Function) => { events.set(name, handler); return () => events.delete(name) } },
+    on: (name: string, handler: Function) => { handlers.set(name, handler) },
+    sendUserMessage: () => {},
+  }
+  extension(api as never)
+  const context = { mode, isIdle: () => false, sessionManager: { getSessionId: () => sessionId } }
+  return { emit: async (name: string, data = {}) => handlers.get(name)?.(data, context), events }
+}
+const parent = instance("tui", "parent-session")
+await parent.emit("session_start")
+await parent.emit("agent_start")
+const readReport = () => JSON.parse(readFileSync(reportPath, "utf8"))
+assert.equal(readReport().state, "working")
+const beforeReport = readFileSync(reportPath, "utf8")
+const beforeClaims = readFileSync(claimLog, "utf8")
+const beforeSockets = readdirSync(runtime + "/clanker-sockets")
+// SDK workers share the parent's PID, argv, environment and loaded module.
+// Neither their factory, events nor shutdown may touch the Terminal owner.
+for (const mode of ["print", "json", "rpc"]) {
+  const child = instance(mode, "worker-" + mode)
+  await child.emit("session_start")
+  await child.emit("agent_start")
+  await child.emit("turn_start")
+  await child.emit("tool_execution_start")
+  child.events.get("subagents:created")?.({ id: "nested-worker" })
+  child.events.get("subagents:completed")?.({ id: "nested-worker" })
+  await child.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "worker result" }] }] })
+  await child.emit("agent_settled")
+  await child.emit("session_shutdown", { reason: "quit" })
+  assert.equal(readFileSync(reportPath, "utf8"), beforeReport, mode + " changed the parent report")
+  assert.equal(readFileSync(claimLog, "utf8"), beforeClaims, mode + " touched pane claims or Recovery")
+  assert.deepEqual(readdirSync(runtime + "/clanker-sockets"), beforeSockets)
+}
+// The owner, not a worker's extension instance, aggregates background work.
+parent.events.get("subagents:created")?.({ id: "background-worker" })
+await parent.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "parent result" }] }] })
+await parent.emit("agent_settled")
+assert.equal(readReport().state, "working")
+parent.events.get("subagents:completed")?.({ id: "background-worker" })
+assert.equal(readReport().state, "done")
+assert.equal(readReport().harnessSessionId, "parent-session")
+assert.equal(readReport().result.reply, "parent result")
+await parent.emit("session_shutdown", { reason: "quit" })
+console.log("parent ownership preserved")
+`)
+    const child = Bun.spawnSync([process.execPath, script], {
+      env: {
+        PATH: `${bin}:${process.env.PATH || ""}`, HOME: join(root, "home"),
+        XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"),
+        XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"),
+        TMUX_PANE: "%88", CLANKERHOUSE_MULTIPLEXER: "tmux", CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
+        CLAIM_LOG: join(root, "claims.log"),
+      }, stdout: "pipe", stderr: "pipe",
+    })
+    expect(child.exitCode, child.stderr.toString()).toBe(0)
+    expect(child.stdout.toString()).toContain("parent ownership preserved")
   })
 
   test("does not let a sessionless Pi subprocess claim its parent pane", () => {
@@ -350,7 +432,7 @@ const pi = {
   sendUserMessage: () => {},
 }
 extension(pi as never)
-const context = { isIdle: () => true, sessionManager: { getSessionId: () => "pi-herdr-session" } }
+const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "pi-herdr-session" } }
 await handlers.get("session_start")?.({}, context)
 await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
 `)

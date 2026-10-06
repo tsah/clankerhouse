@@ -24,6 +24,17 @@ describe("recovery model validation", () => {
     expect(() => validateLaunchSpec({ version: 2, profile: null })).toThrow(/launch spec/)
   })
 
+  test("accepts arbitrary model names in v3 while preserving strict declarative validation", () => {
+    const spec = { version: 3, profile: "worker", model: "provider/new-model:high", resourceClass: "interactive" } as const
+    expect(validateLaunchSpec(spec)).toEqual(spec)
+    for (const model of [null, undefined, 42, "", "  ", " model", "model\nother", "model\0other", "--flag", "x".repeat(513)]) {
+      expect(() => validateLaunchSpec({ ...spec, model })).toThrow(/model/)
+    }
+    expect(() => validateLaunchSpec({ ...spec, command: "shell" })).toThrow(/launch spec/)
+    expect(() => validateLaunchSpec({ ...spec, resourceClass: "unknown" })).toThrow(/launch spec/)
+    expect(() => validateLaunchSpec({ version: 1, profile: null, model: "new-model" })).toThrow(/launch spec/)
+  })
+
   test("validates durable identity, harness, paths, and original task", () => {
     expect(validateDesiredClankerInput(input()).desiredState).toBe("running")
     expect(() => validateDesiredClankerInput({ ...input(), harness: "codex" } as never)).toThrow(/harness/)

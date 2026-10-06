@@ -116,9 +116,17 @@ const neutralDetailKinds = new Set(["directory", "repository", "session", "windo
 export const isNeutralDetail = (detail: DetailRow) => neutralDetailKinds.has(detail.kind)
   || (detail.kind === "observation" && detail.observation?.source === "process" && detail.observation.confidence === "observed" && detail.observation.state === "present")
 
-/** Authoritative newest-first ordering before bottom-up lineage rendering. */
+export const isNeutralSession = (
+  session: SessionRow,
+  state = sessionState(session),
+  containsClanker = session.details.some((detail) => detail.kind === "clanker"),
+): boolean => state === "unknown" && !containsClanker
+  && (session.target.type === "directory" || session.details.every(isNeutralDetail))
+
+/** Status-bearing rows precede grey-orb rows; each group remains newest-first. */
 export const compareProjectedSessions = (a: SessionRow, b: SessionRow) =>
-  b.recency - a.recency
+  Number(isNeutralSession(a)) - Number(isNeutralSession(b))
+  || b.recency - a.recency
   || a.name.localeCompare(b.name)
 
 export const fuzzyResult = (text: string, query: string): FuzzyResult | undefined => {
@@ -204,16 +212,19 @@ const detailSearchText = (_session: SessionRow, detail: DetailRow) => [detail.ki
 const selectableDetails = (session: SessionRow) => session.details.filter((detail) => !["directory", "repository", "session"].includes(detail.kind))
 const sessionNodeContainsClanker = (node: SessionNode): boolean => node.session.details.some((detail) => detail.kind === "clanker") || node.children.some(sessionNodeContainsClanker)
 const subtreeRecency = (node: SessionNode): number => Math.max(node.session.recency, ...node.children.map(subtreeRecency))
-const containsPrioritySession = (node: VisibleTreeNode, prioritySessionKeys: ReadonlySet<string> | undefined): boolean =>
+const containsPrioritySession = (node: SessionNode | VisibleTreeNode, prioritySessionKeys: ReadonlySet<string> | undefined): boolean =>
   Boolean(prioritySessionKeys?.has(node.key) || node.children.some((child) => containsPrioritySession(child, prioritySessionKeys)))
+const neutralNode = (node: VisibleTreeNode) => Number(isNeutralSession(node.session, node.state, node.containsClanker))
 const visibleTreeTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
   Number(containsPrioritySession(b, prioritySessionKeys)) - Number(containsPrioritySession(a, prioritySessionKeys))
+  || neutralNode(a) - neutralNode(b)
   || b.recency - a.recency
   || a.session.name.localeCompare(b.session.name)
 // Root groups are reversed as units by the bottom-up picker. Descendants retain
-// their order, so sort children oldest-first and keep the current child last.
+// their order, so put neutral children first, then oldest-first, and keep the current child last.
 const visibleChildTieBreak = (a: VisibleTreeNode, b: VisibleTreeNode, prioritySessionKeys?: ReadonlySet<string>) =>
   Number(containsPrioritySession(a, prioritySessionKeys)) - Number(containsPrioritySession(b, prioritySessionKeys))
+  || neutralNode(b) - neutralNode(a)
   || a.recency - b.recency
   || a.session.name.localeCompare(b.session.name)
 const maxScore = (...scores: number[]) => {
@@ -320,7 +331,11 @@ const expandedNode = (
   prioritySessionKeys?: ReadonlySet<string>,
 ): VisibleTreeNode => {
   const details = selectableDetails(node.session)
-  const lineageExpanded = Boolean(node.children.length > 0 && (!expandedLineageSessions || expandedLineageSessions.has(node.session.name)))
+  // The current Workshop must never disappear behind a collapsed ancestor.
+  const lineageExpanded = node.children.length > 0 && (
+    containsPrioritySession(node, prioritySessionKeys)
+    || !expandedLineageSessions || expandedLineageSessions.has(node.session.name)
+  )
   const detailsExpanded = Boolean(details.length > 0 && expandedDetailSessions?.has(node.session.name))
   const children = node.children
     .map((child) => expandedNode(child, expandedLineageSessions, expandedDetailSessions, node.key, prioritySessionKeys))

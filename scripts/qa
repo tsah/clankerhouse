@@ -772,6 +772,10 @@ wait_for_text "qa-delete-final"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "final"
 wait_for_text "qa-delete-final"
 wait_for_selected_row "final"
+# The first Alt-D on a worktree Workshop only marks it done; the second offers destruction.
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "[done]"
+wait_for_absent_text "Marking Workshop done"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
 wait_for_text "Destroy worktree 'qa-delete-final'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" n
@@ -816,6 +820,10 @@ wait_for_text "qa-delete-parent"
 wait_for_selected_row "parent"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" Left
 wait_for_selected_row "qa-delete-parent"
+# The first Alt-D on a worktree Workshop only marks it done; the second offers destruction.
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "[done]"
+wait_for_absent_text "Marking Workshop done"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
 wait_for_text "Destroy worktree 'qa-delete-parent'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
@@ -876,6 +884,9 @@ wait_for_text "qa-delete-sessionless"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "sessionless"
 wait_for_selected_row "qa-delete-sessionless"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "[done]"
+wait_for_absent_text "Marking Workshop done"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
 wait_for_text "worktree 'qa-delete-sessionless'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y
 for _ in {1..100}; do
@@ -903,6 +914,9 @@ wait_for_text "qa-workshop-tree"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" -l "$async_session"
 wait_for_selected_row "$async_session"
 touch "$root/delete-paused"
+tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
+wait_for_text "[done]"
+wait_for_absent_text "Marking Workshop done"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" M-d
 wait_for_text "Destroy worktree 'qa-delete-async'?"
 tmux -S "$outer_socket" send-keys -t "$outer_pane" y

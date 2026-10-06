@@ -1,3 +1,4 @@
+import { validLabelKey, validLabelValue } from "../labels"
 import type { Target } from "../model"
 import type { ProjectionSnapshot } from "../projection"
 
@@ -16,6 +17,8 @@ export type MutationIntent =
   | { type: "start"; clankerId: string; force?: boolean }
   | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
   | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
+  | { type: "label"; path: string; key: string; value: string | null }
+  | { type: "done"; path: string }
   | { type: "repository.refresh" }
 
 export type ObservationState = "failed" | "blocked" | "working" | "done" | "idle" | "unknown"
@@ -136,6 +139,8 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
     case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
+    case "label": return validText(intent.path) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value)) ? { type: "label", path: intent.path, key: intent.key, value: intent.value } : undefined
+    case "done": return validText(intent.path) ? { type: "done", path: intent.path } : undefined
     case "repository.refresh": return { type: "repository.refresh" }
     default: return undefined
   }

@@ -382,6 +382,30 @@
         "Spawn a clanker, confirm it appears with attested state, then migrate one session while tmux clankerhouse keeps running",
         "Confirm the tmux adapter is unchanged when selection and managed Herdr pane markers are absent"
       ]
+    },
+    {
+      "id": "workshop-labels",
+      "title": "Workshop labels, repository hooks, the built-in done mark, and the done-Workshop reaper",
+      "core": true,
+      "unit": [
+        "src/labels.test.ts",
+        "src/workshop-hooks.test.ts",
+        "src/workshop.test.ts",
+        "src/transport/protocol.test.ts",
+        "src/daemon-mutations.test.ts",
+        "src/server/project.test.ts",
+        "native-client/src/main.rs"
+      ],
+      "standalone": [
+        "scripts/qa-workshop-labels"
+      ],
+      "manual": [
+        "Set, replace, and unset a label from a clanker's shell and confirm the dimmed tag follows on the Workshop row without changing its position",
+        "Press Alt-D on a worktree Workshop and confirm it gains a [done] tag with no confirmation while its clankers and session keep running",
+        "Press Alt-D on the done Workshop and confirm y destroys it and u clears the done tag",
+        "With a short CLANKERHOUSE_DONE_TTL_DAYS, confirm an idle clean done worktree is removed with its branch kept, while a dirty one and one with a working clanker survive",
+        "In a repository with a done hook, confirm the hook decides the outcome of Alt-D; confirm pane and plain-session rows are unchanged"
+      ]
     }
   ]
 }

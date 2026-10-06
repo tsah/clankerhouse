@@ -18,7 +18,7 @@ unit/static:
   feature-catalogue, TypeScript, Python, Rust
 standalone/end-to-end:
   native-hot, Neovim, Clanker API, spawn model, daemon, Recovery, Resource Guard, process owner,
-  stop popup, current session, lineage actions, absorption, client routing, installer, full TUI
+  stop popup, current session, lineage actions, workshop labels, absorption, client routing, installer, full TUI
 EOF
         exit 0
         ;;
@@ -56,6 +56,7 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "standalone stop popup scenario" scripts/qa-stop-popup
     run "current-session and lineage scenario" scripts/qa-current-session
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
+    run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
     run "whole-session absorption scenario" scripts/qa-absorption
     run "herdr multiplexer adapter scenario" env HERDR_OPTIONAL=1 scripts/qa-herdr
     run "requesting-client child navigation scenario" scripts/qa-client-routing

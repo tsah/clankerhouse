@@ -22,6 +22,21 @@ describe("mutation protocol target set", () => {
     expect(mutation({ ...intent, client: "" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
   })
 
+  test("accepts well-formed label and done intents and rejects malformed labels", () => {
+    for (const intent of [
+      { type: "label", path: "/repo/feature", key: "stage", value: "retro" },
+      { type: "label", path: "/repo/feature", key: "stage", value: null },
+      { type: "done", path: "/repo/feature" },
+    ]) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
+    for (const intent of [
+      { type: "label", path: "/repo/feature", key: "Stage", value: "retro" },
+      { type: "label", path: "/repo/feature", key: "stage", value: "two words" },
+      { type: "label", path: "/repo/feature", key: "stage" },
+      { type: "label", key: "stage", value: "retro" },
+      { type: "done" },
+    ]) expect(mutation(intent)).toMatchObject({ ok: false, error: { code: "bad_request" } })
+  })
+
   test("requires destructive stop confirmation and a known recovery action", () => {
     expect(mutation({ type: "stop", clankerId: "clanker-1" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
     expect(mutation({ type: "recovery", clankerId: "clanker-1", action: "guess" })).toMatchObject({ ok: false, error: { code: "bad_request" } })

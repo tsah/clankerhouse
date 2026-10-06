@@ -25,6 +25,11 @@ const settled = async (journal: OperationJournal, id: string) => {
 }
 
 describe("staged daemon mutation durability", () => {
+  test("a label change is persisted before its hook is dispatched, and the done key refreshes the projection it may have labelled", () => {
+    expect(mutationStages({ type: "label", path: "/repo/feature", key: "stage", value: "retro" })).toEqual(["identity.validated", "labels.updated", "hook.dispatched", "projection.refreshed"])
+    expect(mutationStages({ type: "done", path: "/repo/feature" })).toEqual(["identity.validated", "hook.completed", "projection.refreshed"])
+  })
+
   test("splices deleted Workshop lineage before closing its tmux session", () => {
     expect(mutationStages({ type: "delete", kind: "worktree", session: "middle", path: "/repo/middle", confirmed: true })).toEqual([
       "identity.validated",

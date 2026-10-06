@@ -16,6 +16,8 @@ export const mutationStages = (intent: MutationIntent): readonly string[] => {
     case "start": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]
     case "stop": return ["identity.validated", "desired-state.updated", "harness.stopped", "projection.refreshed"]
     case "recovery": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]
+    case "label": return ["identity.validated", "labels.updated", "hook.dispatched", "projection.refreshed"]
+    case "done": return ["identity.validated", "hook.completed", "projection.refreshed"]
     case "repository.refresh": return ["repository-cache.checked", "repository-cache.updated"]
   }
 }

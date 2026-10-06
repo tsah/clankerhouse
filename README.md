@@ -174,6 +174,34 @@ clankerhouse-resource-guard --once --dry-run
 
 Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTERVAL`, `RESOURCE_GUARD_COOLDOWN`, `RESOURCE_GUARD_WORKLOAD_MIN_RSS_MIB`, `RESOURCE_GUARD_WORKLOAD_MIN_IO_MIB_PER_SEC`, `RESOURCE_GUARD_EC2_FLOOR_MIB`, `RESOURCE_GUARD_EC2_PERCENT`, `RESOURCE_GUARD_GENERIC_PERCENT`, `RESOURCE_GUARD_PSI_SOME`, `RESOURCE_GUARD_PSI_FULL`, `RESOURCE_GUARD_IO_PSI_SOME`, `RESOURCE_GUARD_IO_PSI_FULL`, `RESOURCE_GUARD_CPU_PSI_SOME`, `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC`, and `RESOURCE_GUARD_TERM_GRACE`. Set `RESOURCE_GUARD_DRY_RUN=1` to audit selections without signaling processes. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
 
+## Workshop labels and repository hooks
+
+A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as dimmed `[tags]` after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`.
+
+`Alt-D` on a worktree Workshop marks it done instead of deleting it. Nothing else changes: its clankers, session, and worktree stay. `Alt-D` on a done Workshop asks whether to destroy it (`y`) or reopen it (`u`, which clears the label). A done Workshop that is then left alone for seven days is deleted automatically; using it again restarts the seven days. The reaper never deletes a worktree with uncommitted changes or with a clanker that is working, waiting, or finished but unseen, and it keeps the branch. Set `CLANKERHOUSE_DONE_TTL_DAYS` for the daemon to change the retention, or to `0` to turn automatic deletion off.
+
+```bash
+clankers workshop label set stage=implementing   # current Workshop; --cwd PATH for another
+clankers workshop label unset stage
+clankers workshop label list
+```
+
+A repository gives labels meaning with two optional tracked executables, run with the Workshop as working directory:
+
+- `.clankerhouse/hooks/labels-changed` runs detached after a label really changes. It cannot fail the change.
+- `.clankerhouse/hooks/done` replaces the built-in `Alt-D` rule for that repository. Exit `0` means the repository handled the key. Exit `1` falls through to the destroy confirmation. Any other exit, or a run longer than 30 seconds, is shown as an error and nothing is destroyed.
+
+Both receive `CLANKERHOUSE_HOOK_EVENT`, `CLANKERHOUSE_WORKSHOP_ID`, `CLANKERHOUSE_WORKSHOP_PATH`, `CLANKERHOUSE_WORKSHOP_BRANCH`, `CLANKERHOUSE_LABELS` (JSON), and one `CLANKERHOUSE_LABEL_<KEY>` per label; `labels-changed` also receives `CLANKERHOUSE_PREVIOUS_LABELS` and `CLANKERHOUSE_PREVIOUS_LABEL_<KEY>`. `clankers` is on their `PATH`. A repository usually needs only `labels-changed`. For example, to start a retro when a Workshop is marked done:
+
+```sh
+#!/bin/sh
+if [ "${CLANKERHOUSE_LABEL_STATUS:-}" = done ] && [ "${CLANKERHOUSE_PREVIOUS_LABEL_STATUS:-}" != done ]; then
+    clankers spawn --workshop "$CLANKERHOUSE_WORKSHOP_ID" --name retro --harness claude --prompt "Run the retro for this workshop."
+fi
+```
+
+Hooks are repository-supplied code that runs without a prompt, so use them only in repositories you trust.
+
 Useful CLI inspection/repair commands:
 - `clankers workshop show --cwd PATH`
 - `clankers workshop tree --cwd PATH`
@@ -192,7 +220,7 @@ Controls:
 - Type or paste: structured fuzzy-filter rows and fill the branch/base form; current selection is preserved when it still matches
 - `Alt-K` while Clankerhouse is open: choose a repository, then open an existing worktree/branch or type a new branch name to create it
 - `Ctrl-R`: refresh remotes while in the branch picker
-- `Alt-D`: confirm deletion of the selected target. Deletion runs on the daemon while the picker remains usable: search, select, expand, and press Enter to jump to another Workshop without waiting. Leaving waits only for durable submission; an accepted deletion continues after the picker closes. Only one mutation is started at a time from a picker. Worktree deletion also closes its linked sessions and splices any children to the former parent. Outside Clankerhouse, Alt-D opens confirmation for the invoking session/worktree in tmux or Herdr; cancellation leaves it untouched.
+- `Alt-D`: on a worktree Workshop, mark it done; on a done Workshop, confirm destruction or reopen it (see Workshop labels). On a pane or plain session, confirm deletion of the selected target. Deletion runs on the daemon while the picker remains usable: search, select, expand, and press Enter to jump to another Workshop without waiting. Leaving waits only for durable submission; an accepted deletion continues after the picker closes. Only one mutation is started at a time from a picker. Worktree deletion also closes its linked sessions and splices any children to the former parent. Outside Clankerhouse, Alt-D follows the same rule for the invoking session/worktree in tmux or Herdr; cancellation leaves it untouched.
 - `Esc`: clear search, move back one flow step, or close
 - `Ctrl-C`: close
 

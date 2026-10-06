@@ -143,6 +143,8 @@ struct SessionRow {
     #[serde(default)]
     markers: Vec<String>,
     #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
     age: String,
     #[serde(default)]
     recency: u64,
@@ -273,6 +275,14 @@ enum MutationIntent {
         #[serde(rename = "remoteRef")]
         remote_ref: Option<String>,
     },
+    Done {
+        path: String,
+    },
+    Label {
+        path: String,
+        key: String,
+        value: Option<String>,
+    },
     #[serde(rename = "repository.refresh")]
     RepositoryRefresh,
 }
@@ -323,6 +333,9 @@ struct App {
     attach_candidates: Vec<SessionRow>,
     delete_intent: Option<MutationIntent>,
     delete_label: String,
+    done_pending: bool,
+    delete_requested: bool,
+    reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
 }
 
@@ -389,9 +402,25 @@ fn apply_mutation_update(app: &mut App, update: MutationUpdate) -> Option<AppCom
         }
         MutationUpdate::Finished(result) => {
             let pending = app.mutation.take()?;
+            let done_pending = std::mem::take(&mut app.done_pending);
             match result {
-                Ok(_) => pending.exit_after_submit.or_else(|| app.delete_only.then_some(AppCommand::Close)),
+                Ok(outcome) => {
+                    if done_pending {
+                        let handled =
+                            outcome.get("handled").and_then(|value| value.as_bool()) == Some(true);
+                        if !handled && app.delete_intent.is_some() {
+                            // Nothing took the done key, so offer the destruction it stands for.
+                            app.mode = Mode::DeleteConfirm;
+                            return pending.exit_after_submit;
+                        }
+                        app.clear_action_mode();
+                    }
+                    pending.exit_after_submit.or_else(|| app.delete_only.then_some(AppCommand::Close))
+                }
                 Err(error) => {
+                    if done_pending {
+                        app.clear_action_mode();
+                    }
                     // Keep a failed submission visible rather than silently closing.
                     app.error = error;
                     None
@@ -595,12 +624,14 @@ fn fuzzy_score(text: &str, query: &str) -> Option<i64> {
 
 fn search_score(session: &SessionRow, query: &str) -> Option<i64> {
     let markers = session.markers.join(" ");
+    let labels = session.labels.join(" ");
     let fields = [
         (&session.name, 180),
         (&session.branch, 140),
         (&session.path, 80),
         (&session.flags, 40),
         (&markers, 50),
+        (&labels, 50),
         (&session.directory_source, 20),
     ];
     let mut total = 0;
@@ -868,6 +899,9 @@ impl App {
             attach_candidates: Vec::new(),
             delete_intent: None,
             delete_label: String::new(),
+            done_pending: false,
+            delete_requested: false,
+            reopen_path: None,
             repository_identities: HashMap::new(),
         };
         app.repository_identities = repository_identities(&app.cache_path);
@@ -919,6 +953,9 @@ impl App {
             attach_candidates: Vec::new(),
             delete_intent: None,
             delete_label: String::new(),
+            done_pending: false,
+            delete_requested: false,
+            reopen_path: None,
             repository_identities,
         }
     }
@@ -938,10 +975,15 @@ impl App {
         let index = candidates[0];
         let row = &self.rows[index];
         let intent = delete_intent(row).ok_or("The invoking Workshop is not deletable")?;
-        self.delete_label = delete_label(row, &intent);
-        self.delete_intent = Some(intent);
         self.delete_only = true;
         self.selected = index;
+        if matches!(intent, MutationIntent::Delete { kind: DeleteKind::Worktree, .. }) {
+            // A worktree Workshop takes the ordinary Alt-D path, which marks it done first.
+            self.delete_requested = true;
+            return Ok(());
+        }
+        self.delete_label = delete_label(row, &intent);
+        self.delete_intent = Some(intent);
         self.mode = Mode::DeleteConfirm;
         Ok(())
     }
@@ -1387,6 +1429,8 @@ impl App {
         self.attach_candidates.clear();
         self.delete_intent = None;
         self.delete_label.clear();
+        self.done_pending = false;
+        self.reopen_path = None;
     }
 
     fn enter_attach_mode(&mut self, source: SessionRow) {
@@ -1603,6 +1647,8 @@ fn mutation_progress_label(intent: &MutationIntent) -> &'static str {
         MutationIntent::Attach { .. } => "Attaching Workshop…",
         MutationIntent::Detach { .. } => "Detaching Workshop…",
         MutationIntent::Delete { .. } => "Deleting target…",
+        MutationIntent::Done { .. } => "Marking Workshop done…",
+        MutationIntent::Label { .. } => "Updating Workshop label…",
         MutationIntent::Create { .. } => "Creating Workshop…",
         MutationIntent::Open { .. } => "Opening target…",
         MutationIntent::RepositoryRefresh => "Refreshing repositories…",
@@ -1856,7 +1902,11 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                         Style::default().fg(Color::LightRed),
                     )),
                     Line::from(""),
-                    Line::from("  Press y to confirm or n/Esc to cancel."),
+                    Line::from(if app.reopen_path.is_some() {
+                        "  Press y to confirm, u to reopen (clear done), or n/Esc to cancel."
+                    } else {
+                        "  Press y to confirm or n/Esc to cancel."
+                    }),
                 ])
                 .block(Block::default().borders(Borders::ALL)),
                 areas[1],
@@ -2074,16 +2124,23 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
                 .join("  ");
+            let tags = if row.detail.is_none() && !row.session.labels.is_empty() {
+                format!(" [{}]", row.session.labels.join(" "))
+            } else {
+                String::new()
+            };
             let content_width = areas[1].width.saturating_sub(5) as usize;
             let fixed_width = 3
                 + prefix.width()
+                + tags.width()
                 + if right.is_empty() {
                     0
                 } else {
                     right.width() + 2
                 };
             let rendered_name = ellipsize(name, content_width.saturating_sub(fixed_width).max(4));
-            let occupied = 3 + prefix.width() + rendered_name.width() + right.width();
+            let occupied =
+                3 + prefix.width() + rendered_name.width() + tags.width() + right.width();
             let spacing = if right.is_empty() {
                 0
             } else {
@@ -2098,6 +2155,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             };
             spans.extend([
                 Span::raw(rendered_name),
+                Span::styled(tags, Style::default().fg(Color::DarkGray)),
                 Span::raw(" ".repeat(spacing)),
                 Span::styled(right, Style::default().fg(Color::DarkGray)),
             ]);
@@ -2158,6 +2216,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                 app.mode = Mode::Jump;
                 app.clear_action_mode();
                 return Some(AppCommand::Submit(intent));
+            }
+            KeyCode::Char('u' | 'U') if app.reopen_path.is_some() => {
+                let path = app.reopen_path.take()?;
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+                return Some(AppCommand::Submit(MutationIntent::Label {
+                    path,
+                    key: "status".into(),
+                    value: None,
+                }));
             }
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.mode = Mode::Jump;
@@ -2359,7 +2427,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                     return None;
                 };
                 app.delete_label = delete_label(&row, &intent);
+                // A worktree Workshop first offers Alt-D to its repository's done hook;
+                // the destroy confirmation follows only when the hook leaves it unhandled.
+                let done = match &intent {
+                    MutationIntent::Delete {
+                        kind: DeleteKind::Worktree,
+                        path: Some(path),
+                        ..
+                    } => Some(MutationIntent::Done { path: path.clone() }),
+                    _ => None,
+                };
                 app.delete_intent = Some(intent);
+                if let Some(MutationIntent::Done { path }) = &done
+                    && row.session.labels.iter().any(|label| label == "done")
+                {
+                    app.reopen_path = Some(path.clone());
+                }
+                if let Some(done) = done {
+                    app.done_pending = true;
+                    return Some(AppCommand::Submit(done));
+                }
                 app.mode = Mode::DeleteConfirm;
                 return None;
             }
@@ -2705,15 +2792,17 @@ fn coalesce_escape_prefix(first: KeyEvent, second: KeyEvent) -> (KeyEvent, Optio
     (first, Some(second))
 }
 
-fn handle_external_requests(app: &mut App) {
+fn handle_external_requests(app: &mut App) -> Option<AppCommand> {
     // Consume duplicate triggers while an action is running; do not surprise the
     // user with a delayed destructive confirmation after it completes.
-    if DELETE_REQUESTED.swap(false, Ordering::SeqCst) && app.mutation.is_none() {
-        let _ = handle_key(
+    let requested = DELETE_REQUESTED.swap(false, Ordering::SeqCst) | std::mem::take(&mut app.delete_requested);
+    if requested && app.mutation.is_none() {
+        return handle_key(
             app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT),
         );
     }
+    None
 }
 
 fn run(
@@ -2731,14 +2820,16 @@ fn run(
             }
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
-        handle_external_requests(&mut app);
+        let mut command = handle_external_requests(&mut app);
         let mut key = pending_key.take();
         if key.is_none() && event::poll(Duration::from_millis(100))?
             && let Event::Key(observed) = event::read()?
         {
             key = Some(observed);
         }
-        if let Some(observed) = key {
+        if let Some(observed) = key
+            && command.is_none()
+        {
             let mut effective = observed;
             if observed.code == KeyCode::Esc && observed.modifiers.is_empty()
                 && event::poll(Duration::from_millis(40))?
@@ -2746,21 +2837,22 @@ fn run(
             {
                 (effective, pending_key) = coalesce_escape_prefix(observed, next);
             }
-            if let Some(command) = handle_key(&mut app, effective) {
-                match dispatch_command(&mut app, command) {
-                    CommandDispatch::Background(intent) => {
-                        let sender = mutation_sender.clone();
-                        let mutation_socket_path = socket_path.to_path_buf();
-                        thread::spawn(move || {
-                            let result = daemon_mutation_with_submission(&mutation_socket_path, &intent, || {
-                                let _ = sender.send(MutationUpdate::Submitted);
-                            });
-                            let _ = sender.send(MutationUpdate::Finished(result));
+            command = handle_key(&mut app, effective);
+        }
+        if let Some(command) = command {
+            match dispatch_command(&mut app, command) {
+                CommandDispatch::Background(intent) => {
+                    let sender = mutation_sender.clone();
+                    let mutation_socket_path = socket_path.to_path_buf();
+                    thread::spawn(move || {
+                        let result = daemon_mutation_with_submission(&mutation_socket_path, &intent, || {
+                            let _ = sender.send(MutationUpdate::Submitted);
                         });
-                    }
-                    CommandDispatch::Exit(command) => return Ok(command),
-                    CommandDispatch::Continue => {}
+                        let _ = sender.send(MutationUpdate::Finished(result));
+                    });
                 }
+                CommandDispatch::Exit(command) => return Ok(command),
+                CommandDispatch::Continue => {}
             }
         }
         while let Ok(snapshot) = snapshots.try_recv() {
@@ -3472,6 +3564,18 @@ mod tests {
         .unwrap()
     }
 
+    fn apply_mutation_result(
+        app: &mut App,
+        result: Result<serde_json::Value, String>,
+    ) -> Option<AppCommand> {
+        app.mutation.get_or_insert(PendingMutation {
+            progress: String::new(),
+            submitted: true,
+            exit_after_submit: None,
+        });
+        apply_mutation_update(app, MutationUpdate::Finished(result))
+    }
+
     fn alt(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
     }
@@ -3630,7 +3734,14 @@ mod tests {
             r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
         );
 
-        assert_eq!(handle_key(&mut app, alt('d')), None);
+        assert_eq!(
+            handle_key(&mut app, alt('d')),
+            Some(AppCommand::Submit(MutationIntent::Done {
+                path: "/repo/feature".into(),
+            }))
+        );
+        assert_eq!(app.mode, Mode::Jump);
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false})));
         assert_eq!(app.mode, Mode::DeleteConfirm);
         assert_eq!(app.delete_label, "Destroy worktree 'feature'?");
         assert_eq!(
@@ -3657,8 +3768,26 @@ mod tests {
 
     fn confirm_fixture_delete(app: &mut App) -> AppCommand {
         app.selected = app.rows.iter().position(|row| row.session.name == "feature").unwrap();
-        assert_eq!(handle_key(app, alt('d')), None);
+        let done = handle_key(app, alt('d')).unwrap();
+        decline_done(app, done);
         handle_key(app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap()
+    }
+
+    // The done key was offered and nothing handled it, which is how a Workshop
+    // that is already done reaches its destroy confirmation.
+    fn decline_done(app: &mut App, done: AppCommand) {
+        assert!(matches!(
+            dispatch_command(app, done),
+            CommandDispatch::Background(MutationIntent::Done { .. })
+        ));
+        assert_eq!(
+            apply_mutation_update(
+                app,
+                MutationUpdate::Finished(Ok(serde_json::json!({"handled": false})))
+            ),
+            None
+        );
+        assert_eq!(app.mode, Mode::DeleteConfirm);
     }
 
     #[test]
@@ -3713,7 +3842,9 @@ mod tests {
         app.current_session = "w1".into();
         app.selected = app.rows.iter().position(|row| row.session.name == "survivor").unwrap();
         app.confirm_current_deletion().unwrap();
-        assert_eq!(app.mode, Mode::DeleteConfirm);
+        let done = handle_external_requests(&mut app).unwrap();
+        assert_eq!(done, AppCommand::Submit(MutationIntent::Done { path: "/repo/feature".into() }));
+        decline_done(&mut app, done);
         assert_eq!(app.delete_label, "Destroy worktree 'feature'?");
         assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), Some(AppCommand::Close));
     }
@@ -3744,12 +3875,29 @@ mod tests {
         let mut app = deletion_fixture();
         app.current_session = "w1".into();
         app.confirm_current_deletion().unwrap();
+        let done = handle_external_requests(&mut app).unwrap();
+        decline_done(&mut app, done);
         assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), None);
         assert!(app.mutation.is_none());
         let command = handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap();
         assert!(matches!(dispatch_command(&mut app, command), CommandDispatch::Background(MutationIntent::Delete { .. })));
         assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Submitted), None);
         assert_eq!(apply_mutation_update(&mut app, MutationUpdate::Finished(Ok(serde_json::Value::Null))), Some(AppCommand::Close));
+    }
+
+    #[test]
+    fn external_done_marks_the_current_workshop_and_closes_without_confirmation() {
+        let mut app = deletion_fixture();
+        app.current_session = "w1".into();
+        app.confirm_current_deletion().unwrap();
+        assert_eq!(app.mode, Mode::Jump);
+        let done = handle_external_requests(&mut app).unwrap();
+        assert!(matches!(dispatch_command(&mut app, done), CommandDispatch::Background(MutationIntent::Done { .. })));
+        assert_eq!(
+            apply_mutation_update(&mut app, MutationUpdate::Finished(Ok(serde_json::json!({"handled": true})))),
+            Some(AppCommand::Close)
+        );
+        assert_eq!(app.delete_intent, None);
     }
 
     #[test]
@@ -3793,10 +3941,78 @@ mod tests {
         );
 
         DELETE_REQUESTED.store(true, Ordering::SeqCst);
-        handle_external_requests(&mut app);
+        assert_eq!(
+            handle_external_requests(&mut app),
+            Some(AppCommand::Submit(MutationIntent::Done {
+                path: "/repo/feature".into(),
+            }))
+        );
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false})));
 
         assert_eq!(app.mode, Mode::DeleteConfirm);
         assert_eq!(app.delete_label, "Destroy worktree 'feature'?");
+    }
+
+    #[test]
+    fn done_hook_that_handles_alt_d_skips_the_destroy_confirmation() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["retro"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+        );
+
+        assert!(handle_key(&mut app, alt('d')).is_some());
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": true})));
+
+        assert_eq!(app.mode, Mode::Jump);
+        assert_eq!(app.delete_intent, None);
+        assert_eq!(app.rows[0].session.labels, vec!["retro".to_string()]);
+        assert_eq!(
+            serde_json::to_value(MutationIntent::Done { path: "/repo/feature".into() }).unwrap(),
+            serde_json::json!({"type": "done", "path": "/repo/feature"})
+        );
+    }
+
+    #[test]
+    fn a_done_workshop_can_be_reopened_from_the_destroy_confirmation() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["done"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+        );
+
+        assert!(handle_key(&mut app, alt('d')).is_some());
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false})));
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        let reopen = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            reopen,
+            Some(AppCommand::Submit(MutationIntent::Label {
+                path: "/repo/feature".into(),
+                key: "status".into(),
+                value: None,
+            }))
+        );
+        assert_eq!(app.mode, Mode::Jump);
+        assert_eq!(app.delete_intent, None);
+        let Some(AppCommand::Submit(intent)) = reopen else { unreachable!() };
+        assert_eq!(
+            serde_json::to_value(intent).unwrap(),
+            serde_json::json!({"type": "label", "path": "/repo/feature", "key": "status", "value": null})
+        );
+    }
+
+    #[test]
+    fn done_hook_failure_reports_the_error_without_offering_destruction() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+        );
+
+        assert!(handle_key(&mut app, alt('d')).is_some());
+        apply_mutation_result(&mut app, Err("Workshop done hook failed with exit 2".into()));
+
+        assert_eq!(app.mode, Mode::Jump);
+        assert_eq!(app.delete_intent, None);
+        assert_eq!(app.error, "Workshop done hook failed with exit 2");
     }
 
     #[test]
@@ -3819,7 +4035,8 @@ mod tests {
             r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","create"],"target":{"type":"directory","path":"/repo/feature"}}]"#,
         );
 
-        assert_eq!(handle_key(&mut app, alt('d')), None);
+        assert!(handle_key(&mut app, alt('d')).is_some());
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false})));
         assert_eq!(app.mode, Mode::DeleteConfirm);
         assert_eq!(app.delete_label, "Destroy worktree 'feature'?");
         assert_eq!(

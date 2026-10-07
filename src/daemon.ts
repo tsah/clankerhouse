@@ -690,6 +690,7 @@ const dumpState = collectSessions.pipe(
       childWorkshopCount: session.childWorkshopCount,
       labels: session.labels,
       title: session.title,
+      project: session.project,
       lineageLabel: session.lineageLabel,
       clankers: session.details
         .filter((detail) => detail.kind === "clanker")

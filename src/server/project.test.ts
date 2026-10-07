@@ -94,6 +94,8 @@ describe("session resource projection", () => {
     expect(liveRow?.labels).toEqual(["tsah", "retro"])
     expect(liveRow?.searchText).toContain("retro")
     expect(liveRow?.title).toBe("Rework the parser")
+    expect(liveRow?.project).toBe("repo")
+    expect(idleRow?.project).toBe("repo")
     expect(liveRow?.searchText).toContain("rework the parser")
     expect(idleRow?.title).toBeUndefined()
     // A sessionless Workshop can still be titled.

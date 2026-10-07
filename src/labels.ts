@@ -86,6 +86,15 @@ export const hookEnvironment = (context: HookContext): Record<string, string> =>
 /** Done-hook contract: exit 0 = handled, exit 1 = fall through to the default action, anything else = failure. */
 export const doneHookHandled = (exitCode: number | null) => exitCode === 0
 
+/** The project a Workshop belongs to: its repository's directory name, from the Git common directory. */
+export const projectName = (commonDir: string | undefined) => {
+  if (!commonDir) return undefined
+  const parts = commonDir.replace(/\/+$/, "").split("/")
+  const last = parts.at(-1) ?? ""
+  const name = last === ".git" ? parts.at(-2) ?? "" : last.replace(/\.git$/, "")
+  return name || undefined
+}
+
 /** The one label Clankerhouse itself understands: finished work that the reaper may later remove. */
 export const DONE_LABEL = { key: "status", value: "done" } as const
 export const isDone = (labels: WorkshopLabels | undefined) => labels?.[DONE_LABEL.key] === DONE_LABEL.value

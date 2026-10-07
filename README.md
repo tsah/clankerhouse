@@ -174,6 +174,14 @@ clankerhouse-resource-guard --once --dry-run
 
 Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTERVAL`, `RESOURCE_GUARD_COOLDOWN`, `RESOURCE_GUARD_WORKLOAD_MIN_RSS_MIB`, `RESOURCE_GUARD_WORKLOAD_MIN_IO_MIB_PER_SEC`, `RESOURCE_GUARD_EC2_FLOOR_MIB`, `RESOURCE_GUARD_EC2_PERCENT`, `RESOURCE_GUARD_GENERIC_PERCENT`, `RESOURCE_GUARD_PSI_SOME`, `RESOURCE_GUARD_PSI_FULL`, `RESOURCE_GUARD_IO_PSI_SOME`, `RESOURCE_GUARD_IO_PSI_FULL`, `RESOURCE_GUARD_CPU_PSI_SOME`, `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC`, and `RESOURCE_GUARD_TERM_GRACE`. Set `RESOURCE_GUARD_DRY_RUN=1` to audit selections without signaling processes. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
 
+## Titles, fading, and the preview pane
+
+A Workshop can have a title: a human name such as "Migrate OpenCode adapter to v2". It is shown as the row's name with the branch dimmed on the right, it is searchable, and the multiplexer session or Herdr workspace is renamed to match. Set it when creating a Workshop (see the branch flow below, or `clankers workshop spawn --title "…"`, which derives the branch when `--name` is omitted), and edit it with `Alt-R` on a Workshop row; an empty title clears it. Editing a title never renames the branch. A title is stored as the `title` label, so `clankers workshop label set "title=…"` works too and repository hooks see it.
+
+Row names fade with age without moving: seen within a day is normal, one to three days is dimmed, older is dimmer. State glyphs keep full colour, and the current Workshop never fades. The working glyph is the only one that animates.
+
+When the terminal is at least 120 columns wide the picker shows a preview of the selected Workshop beside the list (beneath it in a narrower terminal at least 30 rows tall): title, branch, labels, the size of its diff against the base branch, and the last few lines a clanker said there. The preview is fetched from the daemon only for the row the selection rests on. It reads the harness's own session store (Claude and Pi) and Git; it never captures a terminal pane. Set `CLANKERHOUSE_PREVIEW=0` to keep the list at full width.
+
 ## Workshop labels and repository hooks
 
 A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as dimmed `[tags]` after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`.
@@ -214,7 +222,7 @@ Controls:
 - `Right`: first expand hidden lineage children for the selected session, then expand its exact detail rows
 - `Left`: jump from a detail to its session, collapse exact detail rows first, then collapse lineage children, then jump to the lineage parent
 - `Enter`: switch to the exact selected workshop/window/clanker target or advance the current flow; Enter on zero matches does nothing
-- `Alt-R`: rename the selected tmux session without changing its worktree identity
+- `Alt-R`: edit the selected Workshop's title; on a row that is not a Workshop, rename the multiplexer session without changing its identity
 - `Alt-A`: search valid projected parent workshops and attach the selected workshop beneath one; candidates come from the authoritative lineage projection rather than the optional repository-picker cache
 - `Alt-L`: detach the selected workshop from its parent, making its existing subtree top-level
 - Type or paste: structured fuzzy-filter rows and fill the branch/base form; current selection is preserved when it still matches
@@ -246,7 +254,7 @@ CLANKERHOUSE_QA_ROOT=/tmp/qa-clankerhouse-lineage CLANKERHOUSE_QA_KEEP=1 CLANKER
 
 Then either inspect `/tmp/qa-clankerhouse-lineage/lineage-render.txt` or attach live with `tmux -S /tmp/qa-clankerhouse-lineage/outer.sock attach -t harness`. The capture should show session-only lineage connectors, inline `main`/clanker summaries, and subdued bullet detail rows for an explicitly expanded child session.
 
-The branch flow always begins with the repository picker; it never infers a repository from the current pane or selected jump target. Selecting a repository immediately shows cached refs and starts `git fetch --all --prune` in the background; remote rows are ordered by most recent commit and refresh when the fetch settles. In the branch picker, a query without an exact branch match adds a `create new branch` row. Selecting it asks for the base before creating the worktree and session. Alt-B opens the same TUI directly at the repository picker.
+The branch flow always begins with the repository picker; it never infers a repository from the current pane or selected jump target. Selecting a repository immediately shows cached refs and starts `git fetch --all --prune` in the background; remote rows are ordered by most recent commit and refresh when the fetch settles. In the branch picker, a query without an exact branch match adds a `create new workshop with this title` row. What you typed becomes the Workshop's title and its branch is derived from it (lowercase, dash-separated, at most 50 characters, suffixed if taken); something already shaped like a branch name is used as the branch verbatim. Selecting the row shows the derived branch and asks for the base before creating the worktree and session. Alt-B opens the same TUI directly at the repository picker.
 
 Not implemented yet:
 - `Ctrl-Y` copy PR URL

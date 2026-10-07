@@ -20,7 +20,7 @@ import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWor
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
-import { parseLabelAssignment, validLabelKey } from "./labels"
+import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue } from "./labels"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
 
 const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
@@ -231,7 +231,7 @@ const adoptLivePiSessions = async (store: RecoveryStore) => {
 
 const usage = `Usage:
   clankerhouse
-  clankers workshop spawn --name NAME --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--model MODEL] [--prompt TEXT]
+  clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--model MODEL] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]
@@ -512,8 +512,10 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const subcommand = parsed.shift()
     if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") return console.log(usage)
     if (subcommand === "spawn") {
-      const name = parsed.take("--name")
-      if (!name) throw new Error("--name is required")
+      const title = parsed.take("--title")
+      if (title !== undefined && !validLabelValue(title, TITLE_KEY)) throw new Error("--title must be 1-80 characters without control characters")
+      const name = parsed.take("--name") ?? (title ? branchFromTitle(title) : undefined)
+      if (!name) throw new Error("--name or --title is required")
       const selectedHarness = harness(parsed.take("--harness"))
       const model = parsed.take("--model")
       const base = parsed.take("--base"); const copy = parsed.take("--copy"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
@@ -529,6 +531,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         wait,
         parentWorkshopId,
         noParent,
+        title,
       })
       return console.log(JSON.stringify(result))
     }

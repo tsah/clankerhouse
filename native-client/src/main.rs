@@ -10,7 +10,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -144,6 +144,8 @@ struct SessionRow {
     markers: Vec<String>,
     #[serde(default)]
     labels: Vec<String>,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     age: String,
     #[serde(default)]
@@ -274,6 +276,8 @@ enum MutationIntent {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "remoteRef")]
         remote_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Done {
         path: String,
@@ -307,6 +311,154 @@ struct TreeBuildContext<'a> {
     query: &'a str,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct DiffSize {
+    files: u64,
+    insertions: u64,
+    deletions: u64,
+    base: String,
+}
+
+/// On-demand detail for the selected Workshop, served by the daemon's `preview.get`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct Preview {
+    path: String,
+    #[serde(default)]
+    branch: String,
+    #[serde(default, rename = "lastMessage")]
+    last_message: Vec<String>,
+    #[serde(default, rename = "lastMessageAt")]
+    last_message_at: Option<u64>,
+    #[serde(default)]
+    harness: Option<String>,
+    #[serde(default)]
+    diff: Option<DiffSize>,
+}
+
+const PREVIEW_SETTLE: Duration = Duration::from_millis(150);
+const PREVIEW_REFRESH: Duration = Duration::from_secs(20);
+
+#[derive(Default)]
+struct PreviewState {
+    shown: Option<Preview>,
+    /// The path the selection currently rests on, and since when.
+    resting: Option<(String, Instant)>,
+    /// The path last asked of the daemon, and when.
+    requested: Option<(String, Instant)>,
+}
+
+impl PreviewState {
+    /// Called every tick with the selected Workshop path. Returns a path to fetch once the
+    /// selection has rested briefly, so scrolling past rows costs nothing.
+    fn tick(&mut self, selected: Option<&str>, now: Instant) -> Option<String> {
+        let Some(selected) = selected else {
+            self.resting = None;
+            self.shown = None;
+            return None;
+        };
+        if self.resting.as_ref().is_none_or(|(path, _)| path != selected) {
+            self.resting = Some((selected.to_string(), now));
+            if self.shown.as_ref().is_some_and(|preview| preview.path != selected) {
+                self.shown = None;
+            }
+        }
+        let (_, since) = self.resting.as_ref()?;
+        if now.duration_since(*since) < PREVIEW_SETTLE {
+            return None;
+        }
+        let stale = match &self.requested {
+            Some((path, at)) => path != selected || now.duration_since(*at) >= PREVIEW_REFRESH,
+            None => true,
+        };
+        if !stale {
+            return None;
+        }
+        self.requested = Some((selected.to_string(), now));
+        Some(selected.to_string())
+    }
+
+    /// A reply for a row the selection has since left is dropped.
+    fn receive(&mut self, preview: Preview) {
+        if self.resting.as_ref().is_some_and(|(path, _)| *path == preview.path) {
+            self.shown = Some(preview);
+        }
+    }
+}
+
+fn relative_age(then_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(then_ms) / 1000;
+    match seconds {
+        0..=59 => "just now".into(),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
+fn preview_lines(session: &SessionRow, preview: Option<&Preview>, now_ms: u64) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![Line::from(Span::styled(
+        session.title.clone().unwrap_or_else(|| session.name.clone()),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    let branch = preview.map(|preview| preview.branch.as_str()).filter(|branch| !branch.is_empty()).unwrap_or(&session.branch);
+    let labels = session.labels.join(" ");
+    let facts = [branch, session.age.as_str(), labels.as_str()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !facts.is_empty() {
+        lines.push(Line::from(Span::styled(facts, dim)));
+    }
+    let Some(preview) = preview else {
+        lines.push(Line::from(Span::styled("…", dim)));
+        return lines;
+    };
+    if let Some(diff) = &preview.diff {
+        lines.push(Line::from(if diff.files == 0 {
+            vec![Span::styled(format!("no changes against {}", diff.base), dim)]
+        } else {
+            vec![
+                Span::raw(format!("{} file{} ", diff.files, if diff.files == 1 { "" } else { "s" })),
+                Span::styled(format!("+{}", diff.insertions), Style::default().fg(Color::Rgb(74, 222, 128))),
+                Span::raw(" "),
+                Span::styled(format!("−{}", diff.deletions), Style::default().fg(Color::Rgb(248, 113, 113))),
+                Span::styled(format!(" against {}", diff.base), dim),
+            ]
+        }));
+    }
+    lines.push(Line::from(""));
+    if preview.last_message.is_empty() {
+        lines.push(Line::from(Span::styled("No clanker has spoken here yet", dim)));
+    } else {
+        let source = [
+            preview.harness.clone().unwrap_or_default(),
+            preview.last_message_at.map(|at| relative_age(at, now_ms)).unwrap_or_default(),
+        ]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+        lines.push(Line::from(Span::styled(format!("last said · {source}"), dim)));
+        lines.extend(preview.last_message.iter().cloned().map(Line::from));
+    }
+    lines
+}
+
+/// Beside the list when the terminal is wide, beneath it when it is merely tall, absent otherwise.
+fn preview_layout(area: ratatui::layout::Rect) -> (ratatui::layout::Rect, Option<ratatui::layout::Rect>) {
+    if area.width >= 120 {
+        let parts = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area);
+        (parts[0], Some(parts[1]))
+    } else if area.height >= 30 {
+        let parts = Layout::vertical([Constraint::Min(10), Constraint::Length(12)]).split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    }
+}
+
 struct App {
     cache_path: PathBuf,
     sessions: Vec<SessionRow>,
@@ -335,6 +487,10 @@ struct App {
     delete_label: String,
     done_pending: bool,
     delete_requested: bool,
+    workshop_title: Option<String>,
+    rename_title_path: Option<String>,
+    preview: PreviewState,
+    preview_enabled: bool,
     worktree_delete: Option<(MutationIntent, String)>,
     reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
@@ -633,7 +789,9 @@ fn fuzzy_score(text: &str, query: &str) -> Option<i64> {
 fn search_score(session: &SessionRow, query: &str) -> Option<i64> {
     let markers = session.markers.join(" ");
     let labels = session.labels.join(" ");
+    let title = session.title.clone().unwrap_or_default();
     let fields = [
+        (&title, 180),
         (&session.name, 180),
         (&session.branch, 140),
         (&session.path, 80),
@@ -909,6 +1067,10 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
+            workshop_title: None,
+            rename_title_path: None,
+            preview: PreviewState::default(),
+            preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities: HashMap::new(),
@@ -964,6 +1126,10 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
+            workshop_title: None,
+            rename_title_path: None,
+            preview: PreviewState::default(),
+            preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities,
@@ -1442,6 +1608,7 @@ impl App {
         self.done_pending = false;
         self.reopen_path = None;
         self.worktree_delete = None;
+        self.rename_title_path = None;
     }
 
     fn enter_attach_mode(&mut self, source: SessionRow) {
@@ -1641,11 +1808,57 @@ fn delete_label(row: &TreeRow, intent: &MutationIntent) -> String {
     }
 }
 
-fn state_glyph(state: ClankerState, _frame: usize) -> (&'static str, Color) {
+/// Mirrors `branchFromTitle` in src/labels.ts: branch-shaped input is kept verbatim, free text
+/// becomes a lowercase dash-separated slug cut at a word boundary.
+fn branch_from_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    let mut characters = trimmed.chars();
+    if characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && characters.all(|character| character.is_ascii_alphanumeric() || "._/-".contains(character))
+    {
+        return Some(trimmed.to_string());
+    }
+    let mut slug = String::new();
+    for character in trimmed.to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        return None;
+    }
+    if slug.len() <= 50 {
+        return Some(slug);
+    }
+    let cut = &slug[..50];
+    let cut = match cut.rfind('-') {
+        Some(boundary) if boundary >= 20 => &cut[..boundary],
+        _ => cut,
+    };
+    Some(cut.trim_end_matches('-').to_string())
+}
+
+/// Rows left alone for days recede without moving: under a day is normal, then two steps of dimming.
+fn fade_color(last_seen: u64, now: u64) -> Option<Color> {
+    if last_seen == 0 {
+        return None;
+    }
+    match now.saturating_sub(last_seen) / 86_400 {
+        0 => None,
+        1..=2 => Some(Color::Rgb(160, 166, 178)),
+        _ => Some(Color::Rgb(108, 114, 128)),
+    }
+}
+
+fn state_glyph(state: ClankerState, frame: usize) -> (&'static str, Color) {
     match state {
         ClankerState::Failed => ("×", Color::Rgb(248, 113, 113)),
         ClankerState::Blocked => ("▲", Color::Rgb(248, 113, 113)),
-        ClankerState::Working => ("▸", Color::Rgb(251, 146, 60)),
+        // The only glyph that moves: motion means something is running.
+        ClankerState::Working => (["◐", "◓", "◑", "◒"][(frame / 2) % 4], Color::Rgb(251, 146, 60)),
         ClankerState::Done => ("✓", Color::Rgb(74, 222, 128)),
         ClankerState::Idle => ("✓", Color::Rgb(96, 165, 250)),
         ClankerState::Unknown => ("·", Color::LightMagenta),
@@ -1817,7 +2030,7 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                         BranchKind::Worktree => format!("worktree · {}", branch.path),
                         BranchKind::Local => "local".into(),
                         BranchKind::Remote => "remote".into(),
-                        BranchKind::Create => "create new branch".into(),
+                        BranchKind::Create => "create new workshop with this title".into(),
                     };
                     (branch.name, meta)
                 })
@@ -1877,12 +2090,19 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled("  Session: ", Style::default().fg(Color::LightCyan)),
+                        Span::styled(
+                            if app.rename_title_path.is_some() { "  Title: " } else { "  Session: " },
+                            Style::default().fg(Color::LightCyan),
+                        ),
                         Span::raw(format!("{}_", app.rename_name)),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "  Canonical Workshop and Clanker identities are unchanged",
+                        if app.rename_title_path.is_some() {
+                            "  Shown here and as the workspace name; the branch is unchanged. Empty clears it"
+                        } else {
+                            "  Canonical Workshop and Clanker identities are unchanged"
+                        },
                         Style::default().fg(Color::DarkGray),
                     )),
                 ])
@@ -1948,6 +2168,10 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(vec![
+                        Span::styled("  Title:  ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(app.workshop_title.as_deref().unwrap_or("(same as branch)")),
+                    ]),
+                    Line::from(vec![
                         Span::styled("  Branch: ", Style::default().fg(Color::DarkGray)),
                         Span::raw(&app.branch_name),
                     ]),
@@ -1984,7 +2208,7 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
         ]),
         areas[0],
     );
-    let height = areas[1].height.saturating_sub(2) as usize;
+    let height = usize::from(areas[1].height.saturating_sub(2));
     let start = app
         .selected
         .saturating_sub(height / 2)
@@ -2063,12 +2287,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ]),
         areas[0],
     );
-    let height = areas[1].height.saturating_sub(2) as usize;
+    // CLANKERHOUSE_PREVIEW=0 keeps the list at full width.
+    let (list_area, preview_area) = if app.preview_enabled {
+        preview_layout(areas[1])
+    } else {
+        (areas[1], None)
+    };
+    let height = list_area.height.saturating_sub(2) as usize;
     let start = app
         .selected
         .saturating_sub(height / 2)
         .min(app.rows.len().saturating_sub(height));
     let end = (start + height).min(app.rows.len());
+    let now = std::time::UNIX_EPOCH.elapsed().map_or(0, |elapsed| elapsed.as_secs());
     let items = app.rows[start..end]
         .iter()
         .rev()
@@ -2106,7 +2337,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         detail.kind.as_str()
                     }
                 })
-                .unwrap_or(&row.session.name);
+                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or(&row.session.name));
             let detail_meta = row
                 .detail
                 .as_ref()
@@ -2130,7 +2361,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 String::new()
             };
-            let right = [summary.as_str(), meta.as_str()]
+            let titled_branch = if row.detail.is_none() && row.session.title.is_some() {
+                row.session.branch.as_str()
+            } else {
+                ""
+            };
+            let right = [summary.as_str(), titled_branch, meta.as_str()]
                 .into_iter()
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
@@ -2140,7 +2376,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 String::new()
             };
-            let content_width = areas[1].width.saturating_sub(5) as usize;
+            let content_width = list_area.width.saturating_sub(5) as usize;
             let fixed_width = 3
                 + prefix.width()
                 + tags.width()
@@ -2164,8 +2400,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 vec![lineage, status]
             };
+            let name_style = if current || row.detail.is_some() {
+                Style::default()
+            } else {
+                fade_color(row.session.recency, now).map_or_else(Style::default, |color| Style::default().fg(color))
+            };
             spans.extend([
-                Span::raw(rendered_name),
+                Span::styled(rendered_name, name_style),
                 Span::styled(tags, Style::default().fg(Color::DarkGray)),
                 Span::raw(" ".repeat(spacing)),
                 Span::styled(right, Style::default().fg(Color::DarkGray)),
@@ -2179,9 +2420,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL))
             .highlight_style(Style::default().bg(Color::Rgb(30, 58, 95)).fg(Color::White))
             .highlight_symbol("›"),
-        areas[1],
+        list_area,
         &mut state,
     );
+    if let Some(area) = preview_area
+        && let Some(row) = app.selected()
+    {
+        let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0, |elapsed| elapsed.as_millis() as u64);
+        let preview = app.preview.shown.as_ref().filter(|preview| preview.path == row.session.path);
+        frame.render_widget(
+            Paragraph::new(preview_lines(&row.session, preview, now_ms))
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray))),
+            area,
+        );
+    }
     let (footer, footer_color) = if !app.error.is_empty() {
         (app.error.clone(), Color::LightYellow)
     } else if let Some(pending) = &app.mutation {
@@ -2259,6 +2512,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             KeyCode::Backspace => {
                 app.rename_name.pop();
             }
+            KeyCode::Enter if app.rename_title_path.is_some() => {
+                let title = app.rename_name.trim().to_string();
+                if title.chars().count() > 80 {
+                    app.error = "A title is at most 80 characters".into();
+                    return None;
+                }
+                let path = app.rename_title_path.take()?;
+                app.mode = Mode::Jump;
+                app.clear_action_mode();
+                // An empty title clears it, returning the row to its branch name.
+                return Some(AppCommand::Submit(MutationIntent::Label {
+                    path,
+                    key: "title".into(),
+                    value: (!title.is_empty()).then_some(title),
+                }));
+            }
             KeyCode::Enter => {
                 let intent = rename_intent(app.action_session.as_ref()?, &app.rename_name)?;
                 app.mode = Mode::Jump;
@@ -2294,6 +2563,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                     create: true,
                     base: (!app.base.is_empty()).then(|| app.base.clone()),
                     remote_ref: None,
+                    title: app.workshop_title.clone(),
                 }));
             }
             KeyCode::Char(character)
@@ -2376,7 +2646,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             KeyCode::Enter => {
                 let branch = app.filtered_branches().get(app.selected).cloned()?;
                 if branch.kind == BranchKind::Create {
-                    app.branch_name = branch.value;
+                    // What was typed is the Workshop's title; its branch is derived from it.
+                    let Some(derived) = branch_from_title(&branch.value) else {
+                        app.error = "Type a title with at least one letter or digit".into();
+                        return None;
+                    };
+                    let taken = app.branches.iter().map(|known| known.value.as_str()).collect::<HashSet<_>>();
+                    let mut name = derived.clone();
+                    let mut suffix = 2;
+                    while taken.contains(name.as_str()) {
+                        name = format!("{derived}-{suffix}");
+                        suffix += 1;
+                    }
+                    app.workshop_title = (branch.value.trim() != name).then(|| branch.value.trim().to_string());
+                    app.branch_name = name;
                     app.base = "^".into();
                     app.mode = Mode::NewBase;
                 } else {
@@ -2386,6 +2669,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                         create: false,
                         base: None,
                         remote_ref: (branch.kind == BranchKind::Remote).then_some(branch.name),
+                        title: None,
                     }));
                 }
             }
@@ -2407,6 +2691,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         match key.code {
             KeyCode::Char('r') => {
                 let row = app.selected()?.clone();
+                if row.detail.is_none()
+                    && row.allows(AvailableAction::Rename)
+                    && row.session.workshop_id.is_some()
+                    && !row.session.path.is_empty()
+                {
+                    // A Workshop is renamed by its title; the branch and identity stay put.
+                    app.rename_name = row.session.title.clone().unwrap_or_default();
+                    app.rename_title_path = Some(row.session.path.clone());
+                    app.action_session = Some(row.session);
+                    app.mode = Mode::Rename;
+                    return None;
+                }
                 if !row.allows(AvailableAction::Rename)
                     || !matches!(row.session.target, Target::TmuxSession { .. })
                 {
@@ -2828,7 +3124,27 @@ fn run(
 ) -> io::Result<AppCommand> {
     let mut pending_key = None;
     let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
+    let (preview_sender, preview_receiver) = mpsc::channel::<Preview>();
     loop {
+        while let Ok(preview) = preview_receiver.try_recv() {
+            app.preview.receive(preview);
+        }
+        let selected_path = (app.preview_enabled && app.mode == Mode::Jump)
+            .then(|| app.selected().map(|row| row.session.path.clone()))
+            .flatten()
+            .filter(|path| !path.is_empty());
+        if let Some(path) = app.preview.tick(selected_path.as_deref(), Instant::now()) {
+            let sender = preview_sender.clone();
+            let preview_socket_path = socket_path.to_path_buf();
+            thread::spawn(move || {
+                // A failed preview is simply absent; it must never disturb the picker.
+                if let Ok(value) = rpc(&preview_socket_path, "preview.get", Some(serde_json::json!({ "path": path })))
+                    && let Ok(preview) = serde_json::from_value::<Preview>(value)
+                {
+                    let _ = sender.send(preview);
+                }
+            });
+        }
         while let Ok(update) = mutation_receiver.try_recv() {
             if let Some(command) = apply_mutation_update(&mut app, update) {
                 return Ok(command);
@@ -3052,8 +3368,10 @@ mod tests {
     #[test]
     fn state_glyphs_match_herdr_symbols() {
         assert_eq!(state_glyph(ClankerState::Blocked, 0).0, "▲");
-        assert_eq!(state_glyph(ClankerState::Working, 0).0, "▸");
-        assert_eq!(state_glyph(ClankerState::Working, 7).0, "▸");
+        assert_eq!(state_glyph(ClankerState::Working, 0).0, "◐");
+        assert_eq!(state_glyph(ClankerState::Working, 2).0, "◓");
+        assert_eq!(state_glyph(ClankerState::Working, 8).0, "◐");
+        assert_eq!(state_glyph(ClankerState::Done, 0).0, state_glyph(ClankerState::Done, 5).0);
         assert_eq!(state_glyph(ClankerState::Done, 0).0, "✓");
         assert_eq!(state_glyph(ClankerState::Idle, 0).0, "✓");
         assert_eq!(state_glyph(ClankerState::Unknown, 0).0, "·");
@@ -4172,6 +4490,7 @@ mod tests {
                 create: false,
                 base: None,
                 remote_ref: None,
+                title: None,
             }))
         );
 
@@ -4184,8 +4503,144 @@ mod tests {
                 create: false,
                 base: None,
                 remote_ref: Some("origin/feature".into()),
+                title: None,
             }))
         );
+    }
+
+    #[test]
+    fn a_new_workshop_is_named_by_title_and_its_branch_is_derived() {
+        assert_eq!(branch_from_title("Migrate OpenCode adapter to v2").as_deref(), Some("migrate-opencode-adapter-to-v2"));
+        assert_eq!(branch_from_title("fix/TWE-12_thing.v2").as_deref(), Some("fix/TWE-12_thing.v2"));
+        assert_eq!(branch_from_title("  ¡¿  ").as_deref(), None);
+        assert_eq!(
+            branch_from_title("Rework the extraction pipeline so that retirement is durable across restarts").as_deref(),
+            Some("rework-the-extraction-pipeline-so-that-retirement")
+        );
+
+        let mut app = app_with_sessions("[]");
+        app.mode = Mode::Branch;
+        app.repository = Some(RepositoryRow { name: "repo".into(), path: "/repo".into() });
+        app.branches = vec![BranchRow {
+            name: "migrate-opencode-adapter".into(),
+            value: "migrate-opencode-adapter".into(),
+            kind: BranchKind::Local,
+            path: String::new(),
+            recency: 0,
+        }];
+        app.update_query("Migrate OpenCode adapter".into());
+        app.selected = 0;
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), None);
+        assert_eq!(app.mode, Mode::NewBase);
+        // The derived name is taken, so the new branch is suffixed rather than reusing it.
+        assert_eq!(app.branch_name, "migrate-opencode-adapter-2");
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::CreateAndOpen(MutationIntent::Create {
+                repository: "/repo".into(),
+                branch: "migrate-opencode-adapter-2".into(),
+                create: true,
+                base: Some("^".into()),
+                remote_ref: None,
+                title: Some("Migrate OpenCode adapter".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn alt_r_edits_a_workshop_title_and_an_empty_title_clears_it() {
+        let mut app = app_with_sessions(
+            r#"[{"name":"repo@feature","path":"/repo/feature","branch":"feature","title":"Old title","workshopId":"w1","availableActions":["open","rename"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+        );
+        assert_eq!(handle_key(&mut app, alt('r')), None);
+        assert_eq!(app.mode, Mode::Rename);
+        assert_eq!(app.rename_name, "Old title");
+        for _ in 0.."Old title".len() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for character in "New title".chars() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Label {
+                path: "/repo/feature".into(),
+                key: "title".into(),
+                value: Some("New title".into()),
+            }))
+        );
+
+        assert_eq!(handle_key(&mut app, alt('r')), None);
+        for _ in 0.."Old title".len() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Label {
+                path: "/repo/feature".into(),
+                key: "title".into(),
+                value: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn preview_waits_for_the_selection_to_rest_and_ignores_stale_replies() {
+        let start = Instant::now();
+        let mut state = PreviewState::default();
+        assert_eq!(state.tick(Some("/a"), start), None);
+        // Moving on before the pause elapses fetches nothing for the row passed over.
+        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(100)), None);
+        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(300)), Some("/b".into()));
+        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(400)), None);
+
+        state.receive(Preview { path: "/a".into(), ..Preview::default() });
+        assert_eq!(state.shown, None);
+        state.receive(Preview { path: "/b".into(), last_message: vec!["done".into()], ..Preview::default() });
+        assert_eq!(state.shown.as_ref().map(|preview| preview.path.as_str()), Some("/b"));
+
+        // Resting on the same row refreshes it occasionally; leaving clears what was shown.
+        assert_eq!(state.tick(Some("/b"), start + Duration::from_secs(25)), Some("/b".into()));
+        assert_eq!(state.tick(Some("/c"), start + Duration::from_secs(26)), None);
+        assert_eq!(state.shown, None);
+        assert_eq!(state.tick(None, start + Duration::from_secs(27)), None);
+    }
+
+    #[test]
+    fn preview_shows_title_diff_and_the_last_thing_said() {
+        let session: SessionRow = serde_json::from_str(
+            r#"{"name":"repo@feature","path":"/repo/feature","branch":"feature","title":"Migrate the adapter","age":"3h","labels":["done"],"target":{"type":"tmux_session","session":"s"}}"#,
+        ).unwrap();
+        let preview: Preview = serde_json::from_str(
+            r#"{"path":"/repo/feature","branch":"feature","lastMessage":["All tests pass.","Ready for review."],"lastMessageAt":1000000,"harness":"claude","diff":{"files":3,"insertions":40,"deletions":2,"base":"origin/main"}}"#,
+        ).unwrap();
+        let text = |lines: Vec<Line>| lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect::<Vec<_>>();
+
+        assert_eq!(
+            text(preview_lines(&session, Some(&preview), 1_000_000 + 5 * 60_000)),
+            vec![
+                "Migrate the adapter",
+                "feature · 3h · done",
+                "3 files +40 −2 against origin/main",
+                "",
+                "last said · claude · 5m ago",
+                "All tests pass.",
+                "Ready for review.",
+            ]
+        );
+        assert_eq!(text(preview_lines(&session, None, 0)), vec!["Migrate the adapter", "feature · 3h · done", "…"]);
+        assert_eq!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 20)).1, None);
+        assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 140, 20)).1.is_some());
+        assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 40)).1.is_some());
+    }
+
+    #[test]
+    fn rows_fade_with_age_but_never_reorder() {
+        let now = 1_000_000;
+        assert_eq!(fade_color(now - 3_600, now), None);
+        assert!(fade_color(now - 2 * 86_400, now).is_some());
+        assert_ne!(fade_color(now - 2 * 86_400, now), fade_color(now - 9 * 86_400, now));
+        assert_eq!(fade_color(0, now), None);
     }
 
     #[test]

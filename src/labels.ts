@@ -10,14 +10,34 @@ export interface LabelChange {
 const labelKeyPattern = /^[a-z][a-z0-9_-]{0,31}$/
 const labelValuePattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/
 
+/** The human name of a Workshop. Unlike other labels its value is free text, and it is shown as the row's name, not as a tag. */
+export const TITLE_KEY = "title"
+const titlePattern = /^[^\s\p{Cc}](?:[^\p{Cc}]{0,78}[^\s\p{Cc}])?$/u
+
 export const validLabelKey = (key: unknown): key is string => typeof key === "string" && labelKeyPattern.test(key)
-export const validLabelValue = (value: unknown): value is string => typeof value === "string" && labelValuePattern.test(value)
+export const validLabelValue = (value: unknown, key?: string): value is string =>
+  typeof value === "string" && (key === TITLE_KEY ? titlePattern.test(value) : labelValuePattern.test(value))
+
+/**
+ * The branch a new Workshop gets for a title. Something already shaped like a branch name is
+ * kept verbatim; free text becomes a lowercase dash-separated slug cut at a word boundary.
+ */
+export const branchFromTitle = (title: string) => {
+  const trimmed = title.trim()
+  if (/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(trimmed)) return trimmed
+  const slug = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+  if (!slug) throw new Error(`Cannot derive a branch name from '${title}'`)
+  if (slug.length <= 50) return slug
+  const cut = slug.slice(0, 50)
+  const boundary = cut.lastIndexOf("-")
+  return (boundary >= 20 ? cut.slice(0, boundary) : cut).replace(/-+$/g, "")
+}
 
 export const parseLabelAssignment = (text: string) => {
   const separator = text.indexOf("=")
   const key = separator < 0 ? "" : text.slice(0, separator)
   const value = separator < 0 ? "" : text.slice(separator + 1)
-  if (!validLabelKey(key) || !validLabelValue(value)) throw new Error(`Invalid label '${text}'; expected KEY=VALUE with a lowercase key and a value without whitespace`)
+  if (!validLabelKey(key) || !validLabelValue(value, key)) throw new Error(`Invalid label '${text}'; expected KEY=VALUE with a lowercase key and a value without whitespace (only title may contain spaces)`)
   return { key, value }
 }
 
@@ -26,7 +46,7 @@ const sorted = (labels: WorkshopLabels): WorkshopLabels => Object.fromEntries(Ob
 /** A null value removes the key. Setting a key replaces its previous value, so one key holds one value. */
 export const applyLabelChange = (current: WorkshopLabels, key: string, value: string | null): LabelChange => {
   if (!validLabelKey(key)) throw new Error(`Invalid label key '${key}'`)
-  if (value !== null && !validLabelValue(value)) throw new Error(`Invalid label value '${value}'`)
+  if (value !== null && !validLabelValue(value, key)) throw new Error(`Invalid label value '${value}'`)
   const previous = sorted(current)
   if ((previous[key] ?? null) === value) return { previous, labels: previous, changed: false }
   const next: Record<string, string> = { ...previous }
@@ -35,8 +55,8 @@ export const applyLabelChange = (current: WorkshopLabels, key: string, value: st
   return { previous, labels: sorted(next), changed: true }
 }
 
-/** Presentation tags: values only, ordered by key. */
-export const labelTags = (labels: WorkshopLabels | undefined) => Object.entries(labels ?? {}).toSorted(([left], [right]) => left.localeCompare(right)).map(([, value]) => value)
+/** Presentation tags: values only, ordered by key. The title is the row's name, never a tag. */
+export const labelTags = (labels: WorkshopLabels | undefined) => Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY).toSorted(([left], [right]) => left.localeCompare(right)).map(([, value]) => value)
 
 const environmentName = (prefix: string, key: string) => `${prefix}${key.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
 

@@ -62,6 +62,10 @@ An internal record intentionally maintained by Clankerhouse: stable correlation 
 
 A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering, identity, or Recovery. Clankerhouse itself understands exactly one Label, Done.
 
+## Title
+
+The Label `title`: a Workshop's human name, set by the operator when creating it and editable afterwards. It is free text, is presented as the Workshop's name, and is mirrored to the Multiplexer session name. A new Workshop's branch is derived from its Title; the Title can change later, the branch does not. Like every Display Name it never establishes identity.
+
 ## Done
 
 The built-in Label `status=done`: the operator's statement that active work in a Workshop is finished. It changes nothing external; clankers, sessions, and the worktree stay as they are. The delete key sets it on a worktree Workshop, and pressing the key again on a Done Workshop offers destruction or reopening.

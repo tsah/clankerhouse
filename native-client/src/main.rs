@@ -2148,7 +2148,7 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
         }
         Mode::Projects => (
             "Clankerhouse · Projects",
-            "Enter show · Esc back",
+            "Enter show · Tab/Esc back",
             app.project_rows().into_iter().map(|(_, name, meta)| (name, meta)).collect(),
             "Choose a project, or all of them".into(),
         ),
@@ -2388,7 +2388,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-P projects · Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
+                "  Tab projects · Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2692,8 +2692,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         app.enter_repository_mode();
         return None;
     }
-    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
-        app.enter_projects_mode();
+    // Tab, not an Alt chord: harnesses bind Alt-letter keys of their own.
+    if key.code == KeyCode::Tab && (app.mode == Mode::Jump || app.mode == Mode::Projects) {
+        if app.mode == Mode::Projects {
+            app.mode = Mode::Jump;
+            app.query.clear();
+            app.selected = 0;
+            app.rebuild(None);
+        } else {
+            app.enter_projects_mode();
+        }
         return None;
     }
 
@@ -4765,7 +4773,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_opens_narrowed_to_the_current_project_and_alt_p_widens_it() {
+    fn the_list_opens_narrowed_to_the_current_project_and_tab_widens_it() {
         let sessions = r#"[
             {"name":"tweezr@feature","path":"/t/feature","project":"tweezr","recency":30,"target":{"type":"tmux_session","session":"tweezr@feature"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"tweezr@feature","windowId":"@1","pane":"%1"}}]},
             {"name":"tweezr@other","path":"/t/other","project":"tweezr","recency":20,"title":"Other work","target":{"type":"tmux_session","session":"tweezr@other"},"details":[{"kind":"clanker","state":"done","target":{"type":"tmux_window","session":"tweezr@other","windowId":"@2","pane":"%2"}}]},
@@ -4788,6 +4796,8 @@ mod tests {
         app.update_query(String::new());
 
         assert_eq!(handle_key(&mut app, alt('p')), None);
+        assert_eq!(app.mode, Mode::Jump, "Alt-P belongs to the harness, not the picker");
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), None);
         assert_eq!(app.mode, Mode::Projects);
         assert_eq!(
             app.project_rows(),

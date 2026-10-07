@@ -341,6 +341,8 @@ const PREVIEW_REFRESH: Duration = Duration::from_secs(20);
 #[derive(Default)]
 struct PreviewState {
     shown: Option<Preview>,
+    /// Why the resting row has no preview, shown in its place.
+    failure: Option<(String, String)>,
     /// The path the selection currently rests on, and since when.
     resting: Option<(String, Instant)>,
     /// The path last asked of the daemon, and when.
@@ -361,6 +363,7 @@ impl PreviewState {
             if self.shown.as_ref().is_some_and(|preview| preview.path != selected) {
                 self.shown = None;
             }
+            self.failure = None;
         }
         let (_, since) = self.resting.as_ref()?;
         if now.duration_since(*since) < PREVIEW_SETTLE {
@@ -378,9 +381,16 @@ impl PreviewState {
     }
 
     /// A reply for a row the selection has since left is dropped.
-    fn receive(&mut self, preview: Preview) {
-        if self.resting.as_ref().is_some_and(|(path, _)| *path == preview.path) {
-            self.shown = Some(preview);
+    fn receive(&mut self, path: String, result: Result<Preview, String>) {
+        if self.resting.as_ref().is_none_or(|(resting, _)| *resting != path) {
+            return;
+        }
+        match result {
+            Ok(preview) => {
+                self.failure = None;
+                self.shown = Some(Preview { path, ..preview });
+            }
+            Err(error) => self.failure = Some((path, error)),
         }
     }
 }
@@ -395,7 +405,12 @@ fn relative_age(then_ms: u64, now_ms: u64) -> String {
     }
 }
 
-fn preview_lines(session: &SessionRow, preview: Option<&Preview>, now_ms: u64) -> Vec<Line<'static>> {
+fn preview_lines(
+    session: &SessionRow,
+    preview: Option<&Preview>,
+    failure: Option<&str>,
+    now_ms: u64,
+) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let mut lines = vec![Line::from(Span::styled(
         session.title.clone().unwrap_or_else(|| session.name.clone()),
@@ -412,7 +427,10 @@ fn preview_lines(session: &SessionRow, preview: Option<&Preview>, now_ms: u64) -
         lines.push(Line::from(Span::styled(facts, dim)));
     }
     let Some(preview) = preview else {
-        lines.push(Line::from(Span::styled("…", dim)));
+        lines.push(Line::from(Span::styled(
+            failure.map_or_else(|| "…".to_string(), |reason| format!("No preview: {reason}")),
+            dim,
+        )));
         return lines;
     };
     if let Some(diff) = &preview.diff {
@@ -2428,8 +2446,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
     {
         let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0, |elapsed| elapsed.as_millis() as u64);
         let preview = app.preview.shown.as_ref().filter(|preview| preview.path == row.session.path);
+        let failure = app.preview.failure.as_ref().filter(|(path, _)| *path == row.session.path).map(|(_, reason)| reason.as_str());
         frame.render_widget(
-            Paragraph::new(preview_lines(&row.session, preview, now_ms))
+            Paragraph::new(preview_lines(&row.session, preview, failure, now_ms))
                 .wrap(Wrap { trim: false })
                 .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray))),
             area,
@@ -3124,10 +3143,10 @@ fn run(
 ) -> io::Result<AppCommand> {
     let mut pending_key = None;
     let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
-    let (preview_sender, preview_receiver) = mpsc::channel::<Preview>();
+    let (preview_sender, preview_receiver) = mpsc::channel::<(String, Result<Preview, String>)>();
     loop {
-        while let Ok(preview) = preview_receiver.try_recv() {
-            app.preview.receive(preview);
+        while let Ok((path, result)) = preview_receiver.try_recv() {
+            app.preview.receive(path, result);
         }
         let selected_path = (app.preview_enabled && app.mode == Mode::Jump)
             .then(|| app.selected().map(|row| row.session.path.clone()))
@@ -3137,12 +3156,17 @@ fn run(
             let sender = preview_sender.clone();
             let preview_socket_path = socket_path.to_path_buf();
             thread::spawn(move || {
-                // A failed preview is simply absent; it must never disturb the picker.
-                if let Ok(value) = rpc(&preview_socket_path, "preview.get", Some(serde_json::json!({ "path": path })))
-                    && let Ok(preview) = serde_json::from_value::<Preview>(value)
-                {
-                    let _ = sender.send(preview);
-                }
+                // A failed preview explains itself in the pane; it never disturbs the picker.
+                let result = rpc(&preview_socket_path, "preview.get", Some(serde_json::json!({ "path": path })))
+                    .map_err(|error| {
+                        if error.contains("unknown or unavailable method") {
+                            "the running daemon is older than this picker; restart it".to_string()
+                        } else {
+                            error
+                        }
+                    })
+                    .and_then(|value| serde_json::from_value::<Preview>(value).map_err(|error| error.to_string()));
+                let _ = sender.send((path, result));
             });
         }
         while let Ok(update) = mutation_receiver.try_recv() {
@@ -4594,10 +4618,13 @@ mod tests {
         assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(300)), Some("/b".into()));
         assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(400)), None);
 
-        state.receive(Preview { path: "/a".into(), ..Preview::default() });
+        state.receive("/a".into(), Ok(Preview::default()));
         assert_eq!(state.shown, None);
-        state.receive(Preview { path: "/b".into(), last_message: vec!["done".into()], ..Preview::default() });
+        state.receive("/b".into(), Err("daemon said no".into()));
+        assert_eq!(state.failure, Some(("/b".into(), "daemon said no".into())));
+        state.receive("/b".into(), Ok(Preview { last_message: vec!["done".into()], ..Preview::default() }));
         assert_eq!(state.shown.as_ref().map(|preview| preview.path.as_str()), Some("/b"));
+        assert_eq!(state.failure, None);
 
         // Resting on the same row refreshes it occasionally; leaving clears what was shown.
         assert_eq!(state.tick(Some("/b"), start + Duration::from_secs(25)), Some("/b".into()));
@@ -4617,7 +4644,7 @@ mod tests {
         let text = |lines: Vec<Line>| lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect::<Vec<_>>();
 
         assert_eq!(
-            text(preview_lines(&session, Some(&preview), 1_000_000 + 5 * 60_000)),
+            text(preview_lines(&session, Some(&preview), None, 1_000_000 + 5 * 60_000)),
             vec![
                 "Migrate the adapter",
                 "feature · 3h · done",
@@ -4628,7 +4655,11 @@ mod tests {
                 "Ready for review.",
             ]
         );
-        assert_eq!(text(preview_lines(&session, None, 0)), vec!["Migrate the adapter", "feature · 3h · done", "…"]);
+        assert_eq!(text(preview_lines(&session, None, None, 0)), vec!["Migrate the adapter", "feature · 3h · done", "…"]);
+        assert_eq!(
+            text(preview_lines(&session, None, Some("restart the daemon"), 0)),
+            vec!["Migrate the adapter", "feature · 3h · done", "No preview: restart the daemon"]
+        );
         assert_eq!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 20)).1, None);
         assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 140, 20)).1.is_some());
         assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 40)).1.is_some());

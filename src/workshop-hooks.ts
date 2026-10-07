@@ -51,7 +51,20 @@ export const applyWorkshopLabel = (path: string, key: string, value: string | nu
   return { workshop, ...change }
 }
 
-export interface DoneHookResult { handled: boolean; hook: boolean; exitCode?: number }
+export interface DoneHookResult {
+  handled: boolean
+  hook: boolean
+  exitCode?: number
+  /** Whether the path is a linked worktree, so the caller can offer worktree rather than session destruction. */
+  worktree?: boolean
+}
+
+const isLinkedWorktree = (path: string) => {
+  const result = Bun.spawnSync(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { stdout: "pipe", stderr: "ignore" })
+  if (result.exitCode !== 0) return false
+  const [gitDir, commonDir] = result.stdout.toString().trim().split("\n")
+  return Boolean(gitDir && commonDir && gitDir !== commonDir)
+}
 
 /** Runs the repository's done hook to completion. Without a hook the default action stays with the caller. */
 export const runDoneHook = async (path: string, dbPath = workshopStatePath): Promise<DoneHookResult> => {
@@ -73,17 +86,19 @@ export const runDoneHook = async (path: string, dbPath = workshopStatePath): Pro
 
 /**
  * The done key. A repository done hook owns it outright; without one the built-in rule applies:
- * the first press marks the Workshop done, and a press on a done Workshop is left unhandled so
+ * the first press marks a linked-worktree Workshop done, and a press on a done Workshop is left unhandled so
  * the caller offers the destroy confirmation.
  */
 export const completeDone = async (path: string, dbPath = workshopStatePath): Promise<DoneHookResult> => {
-  const hooked = await runDoneHook(path, dbPath)
-  if (hooked.hook) return hooked
+  const worktree = isLinkedWorktree(path)
+  const hooked = { ...await runDoneHook(path, dbPath), worktree }
+  // Only a linked worktree can be reaped or destroyed as one, so only it takes the built-in mark.
+  if (hooked.hook || !worktree) return hooked
   let workshop: WorkshopRecord
   try { workshop = ensureWorkshopForLabels(path, dbPath) }
   catch { return hooked }
   if (isDone(workshopLabels(workshop.workshopId, dbPath))) return hooked
   const change = changeWorkshopLabel(workshop.workshopId, DONE_LABEL.key, DONE_LABEL.value, dbPath)
   if (change.changed) dispatchLabelsChangedHook(workshop, change.previous, change.labels)
-  return { handled: true, hook: false }
+  return { handled: true, hook: false, worktree }
 }

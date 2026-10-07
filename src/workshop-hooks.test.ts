@@ -20,7 +20,9 @@ const fixture = () => {
   }
   run("git", "init", "-q", "-b", "main", repo)
   run("git", "-C", repo, "-c", "user.name=QA", "-c", "user.email=qa@example.invalid", "commit", "-q", "--allow-empty", "-m", "Initial")
-  return { root, repo, dbPath: join(root, "state", "workshops.sqlite3") }
+  const worktree = join(root, "feature")
+  run("git", "-C", repo, "worktree", "add", "-q", "-b", "feature", worktree)
+  return { root, repo, worktree, dbPath: join(root, "state", "workshops.sqlite3") }
 }
 
 const writeHook = (repo: string, event: "done" | "labels-changed", body: string, mode = 0o755) => {
@@ -72,27 +74,32 @@ describe("workshop repository hooks", () => {
     expect(runDoneHook(repo, dbPath)).rejects.toThrow("Workshop done hook failed with exit 7: broken")
   })
 
-  test("without a done hook the first press marks the workshop done and the next is left for destruction", async () => {
-    const { root, repo, dbPath } = fixture()
+  test("without a done hook the first press marks a linked worktree done and the next is left for destruction", async () => {
+    const { root, worktree, dbPath } = fixture()
     const output = join(root, "hook.out")
-    writeHook(repo, "labels-changed", `printf '%s' "$CLANKERHOUSE_LABEL_STATUS" > '${output}'`)
+    writeHook(worktree, "labels-changed", `printf '%s' "$CLANKERHOUSE_LABEL_STATUS" > '${output}'`)
 
     const before = Date.now()
-    expect(await completeDone(repo, dbPath)).toEqual({ handled: true, hook: false })
+    expect(await completeDone(worktree, dbPath)).toEqual({ handled: true, hook: false, worktree: true })
     expect(await waitForFile(output)).toBe("done")
     const marked = workshopsWithLabel("status", "done", dbPath)
     expect(marked).toHaveLength(1)
-    expect(marked[0]).toMatchObject({ branch: "main" })
+    expect(marked[0]).toMatchObject({ branch: "feature" })
     expect(marked[0]!.labelledAt).toBeGreaterThanOrEqual(before)
-    expect(await completeDone(repo, dbPath)).toEqual({ handled: false, hook: false })
+    expect(await completeDone(worktree, dbPath)).toEqual({ handled: false, hook: false, worktree: true })
     expect(workshopsWithLabel("status", "archived", dbPath)).toEqual([])
   })
 
-  test("a repository done hook replaces the built-in rule entirely", async () => {
+  test("a primary checkout is never marked done by the built-in rule", async () => {
     const { repo, dbPath } = fixture()
-    writeHook(repo, "done", "exit 0")
-    const result = await completeDone(repo, dbPath)
-    expect(result).toEqual({ handled: true, hook: true, exitCode: 0 })
+    expect(await completeDone(repo, dbPath)).toEqual({ handled: false, hook: false, worktree: false })
+    expect(workshopsWithLabel("status", "done", dbPath)).toEqual([])
+  })
+
+  test("a repository done hook replaces the built-in rule entirely", async () => {
+    const { worktree, dbPath } = fixture()
+    writeHook(worktree, "done", "exit 0")
+    expect(await completeDone(worktree, dbPath)).toEqual({ handled: true, hook: true, exitCode: 0, worktree: true })
     expect(workshopsWithLabel("status", "done", dbPath)).toEqual([])
   })
 
@@ -101,7 +108,7 @@ describe("workshop repository hooks", () => {
     const plain = join(root, "plain")
     mkdirSync(plain)
     expect(await runDoneHook(plain, dbPath)).toEqual({ handled: false, hook: false })
-    expect(await completeDone(plain, dbPath)).toEqual({ handled: false, hook: false })
+    expect(await completeDone(plain, dbPath)).toEqual({ handled: false, hook: false, worktree: false })
     expect(() => applyWorkshopLabel(plain, "stage", "x", dbPath)).toThrow()
   })
 })

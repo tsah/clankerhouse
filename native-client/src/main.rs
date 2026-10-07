@@ -335,6 +335,7 @@ struct App {
     delete_label: String,
     done_pending: bool,
     delete_requested: bool,
+    worktree_delete: Option<(MutationIntent, String)>,
     reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
 }
@@ -410,6 +411,13 @@ fn apply_mutation_update(app: &mut App, update: MutationUpdate) -> Option<AppCom
                             outcome.get("handled").and_then(|value| value.as_bool()) == Some(true);
                         if !handled && app.delete_intent.is_some() {
                             // Nothing took the done key, so offer the destruction it stands for.
+                            // The daemon, not the projected directory source, says whether that is a worktree.
+                            let worktree =
+                                outcome.get("worktree").and_then(|value| value.as_bool()) == Some(true);
+                            if worktree && let Some((intent, label)) = app.worktree_delete.take() {
+                                app.delete_intent = Some(intent);
+                                app.delete_label = label;
+                            }
                             app.mode = Mode::DeleteConfirm;
                             return pending.exit_after_submit;
                         }
@@ -901,6 +909,7 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
+            worktree_delete: None,
             reopen_path: None,
             repository_identities: HashMap::new(),
         };
@@ -955,6 +964,7 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
+            worktree_delete: None,
             reopen_path: None,
             repository_identities,
         }
@@ -977,8 +987,8 @@ impl App {
         let intent = delete_intent(row).ok_or("The invoking Workshop is not deletable")?;
         self.delete_only = true;
         self.selected = index;
-        if matches!(intent, MutationIntent::Delete { kind: DeleteKind::Worktree, .. }) {
-            // A worktree Workshop takes the ordinary Alt-D path, which marks it done first.
+        if !row.session.path.is_empty() {
+            // The ordinary Alt-D path asks the daemon's done rule before offering destruction.
             self.delete_requested = true;
             return Ok(());
         }
@@ -1431,6 +1441,7 @@ impl App {
         self.delete_label.clear();
         self.done_pending = false;
         self.reopen_path = None;
+        self.worktree_delete = None;
     }
 
     fn enter_attach_mode(&mut self, source: SessionRow) {
@@ -2427,21 +2438,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                     return None;
                 };
                 app.delete_label = delete_label(&row, &intent);
-                // A worktree Workshop first offers Alt-D to its repository's done hook;
-                // the destroy confirmation follows only when the hook leaves it unhandled.
-                let done = match &intent {
-                    MutationIntent::Delete {
-                        kind: DeleteKind::Worktree,
-                        path: Some(path),
-                        ..
-                    } => Some(MutationIntent::Done { path: path.clone() }),
-                    _ => None,
-                };
-                app.delete_intent = Some(intent);
-                if let Some(MutationIntent::Done { path }) = &done
-                    && row.session.labels.iter().any(|label| label == "done")
+                // A Workshop row first offers Alt-D to the daemon's done rule; the destroy
+                // confirmation follows only when that leaves the key unhandled.
+                let done = (row.detail.is_none() && !row.session.path.is_empty())
+                    .then(|| MutationIntent::Done { path: row.session.path.clone() });
+                if done.is_some()
+                    && let MutationIntent::Delete { kind: DeleteKind::Session, session, .. } = &intent
                 {
-                    app.reopen_path = Some(path.clone());
+                    let worktree = MutationIntent::Delete {
+                        kind: DeleteKind::Worktree,
+                        session: session.clone(),
+                        confirmed: true,
+                        pane: None,
+                        path: Some(row.session.path.clone()),
+                    };
+                    app.worktree_delete = Some((worktree.clone(), delete_label(&row, &worktree)));
+                }
+                app.delete_intent = Some(intent);
+                if done.is_some() && row.session.labels.iter().any(|label| label == "done") {
+                    app.reopen_path = Some(row.session.path.clone());
                 }
                 if let Some(done) = done {
                     app.done_pending = true;
@@ -3712,7 +3727,13 @@ mod tests {
             .iter()
             .position(|row| row.detail.is_none())
             .unwrap();
-        assert_eq!(handle_key(&mut app, alt('d')), None);
+        // A session row asks the daemon first; a path that is not a worktree keeps session scope.
+        assert_eq!(
+            handle_key(&mut app, alt('d')),
+            Some(AppCommand::Submit(MutationIntent::Done { path: "/repo".into() }))
+        );
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false, "worktree": false})));
+        assert_eq!(app.delete_label, "Destroy exact session 'native-session'?");
         assert_eq!(
             handle_key(
                 &mut app,
@@ -3724,6 +3745,40 @@ mod tests {
                 confirmed: true,
                 pane: None,
                 path: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_outside_the_projected_worktree_set_is_still_a_worktree() {
+        // The projection only tags dev-root directories; the daemon's answer is authoritative.
+        let mut app = app_with_sessions(
+            r#"[{"name":"side","path":"/elsewhere/side","branch":"side","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+        );
+
+        assert_eq!(
+            handle_key(&mut app, alt('d')),
+            Some(AppCommand::Submit(MutationIntent::Done { path: "/elsewhere/side".into() }))
+        );
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": true, "worktree": true})));
+        assert_eq!(app.mode, Mode::Jump);
+        assert_eq!(app.delete_intent, None);
+
+        assert!(handle_key(&mut app, alt('d')).is_some());
+        apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false, "worktree": true})));
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        assert_eq!(app.delete_label, "Destroy worktree 'side'?");
+        assert_eq!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+            ),
+            Some(AppCommand::Submit(MutationIntent::Delete {
+                kind: DeleteKind::Worktree,
+                session: "native-session".into(),
+                confirmed: true,
+                pane: None,
+                path: Some("/elsewhere/side".into()),
             }))
         );
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { applyLabelChange, branchFromTitle, doneHookHandled, doneTtlMs, hookEnvironment, isDone, labelTags, parseLabelAssignment, reapDecision, validLabelKey, validLabelValue, type ReapCandidate } from "./labels"
+import { applyLabelChange, branchFromTitle, projectName, doneHookHandled, doneTtlMs, hookEnvironment, isDone, labelTags, parseLabelAssignment, reapDecision, validLabelKey, validLabelValue, type ReapCandidate } from "./labels"
 
 describe("workshop labels", () => {
   test("parses KEY=VALUE and rejects keys or values that cannot be a tag or an environment name", () => {
@@ -38,6 +38,13 @@ describe("workshop labels", () => {
     expect(branchFromTitle("fix/TWE-12_thing.v2")).toBe("fix/TWE-12_thing.v2")
     expect(branchFromTitle("Rework the extraction pipeline so that retirement is durable across restarts")).toBe("rework-the-extraction-pipeline-so-that-retirement")
     expect(() => branchFromTitle("  ¡¿  ")).toThrow("Cannot derive a branch name")
+  })
+
+  test("a project is named after its repository directory", () => {
+    expect(projectName("/home/me/dev/work/tweezr/.git")).toBe("tweezr")
+    expect(projectName("/srv/git/clankerhouse.git")).toBe("clankerhouse")
+    expect(projectName("/home/me/clankerhouse/.git/")).toBe("clankerhouse")
+    expect(projectName(undefined)).toBeUndefined()
   })
 
   test("tags are the values ordered by key", () => {

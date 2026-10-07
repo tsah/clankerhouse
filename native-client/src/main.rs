@@ -147,6 +147,8 @@ struct SessionRow {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
     age: String,
     #[serde(default)]
     recency: u64,
@@ -219,6 +221,7 @@ enum Mode {
     Rename,
     Attach,
     DeleteConfirm,
+    Projects,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -509,6 +512,9 @@ struct App {
     rename_title_path: Option<String>,
     preview: PreviewState,
     preview_enabled: bool,
+    /// The project the jump list is narrowed to; None shows every project.
+    scope: Option<String>,
+    scope_initialized: bool,
     worktree_delete: Option<(MutationIntent, String)>,
     reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
@@ -1089,6 +1095,8 @@ impl App {
             rename_title_path: None,
             preview: PreviewState::default(),
             preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
+            scope: None,
+            scope_initialized: env::var("CLANKERHOUSE_SCOPE").as_deref() == Ok("all"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities: HashMap::new(),
@@ -1148,6 +1156,8 @@ impl App {
             rename_title_path: None,
             preview: PreviewState::default(),
             preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
+            scope: None,
+            scope_initialized: env::var("CLANKERHOUSE_SCOPE").as_deref() == Ok("all"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities,
@@ -1191,6 +1201,15 @@ impl App {
         }
         let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
         self.sessions = snapshot.sessions;
+        if !self.scope_initialized && !self.sessions.is_empty() {
+            // Opened from inside a project, the list starts narrowed to that project.
+            self.scope_initialized = true;
+            self.scope = self
+                .sessions
+                .iter()
+                .find(|session| target_is_session(&session.target, &self.current_session))
+                .and_then(|session| session.project.clone());
+        }
         if initial {
             self.initialize_expansion();
         }
@@ -1224,6 +1243,9 @@ impl App {
         let mut included = HashSet::new();
         let mut scores = HashMap::new();
         for session in &self.sessions {
+            if self.scope.as_ref().is_some_and(|scope| session.project.as_ref() != Some(scope)) {
+                continue;
+            }
             if query.is_empty() {
                 included.insert(target_key(&session.target));
                 continue;
@@ -1604,8 +1626,60 @@ impl App {
             Mode::Repository => self.filtered_repositories().len(),
             Mode::Branch => self.filtered_branches().len(),
             Mode::Attach => self.filtered_attach_candidates().len(),
+            Mode::Projects => self.project_rows().len(),
             Mode::NewBase | Mode::Rename | Mode::DeleteConfirm => 0,
         }
+    }
+
+    /// "All projects" first, then each project nearest-seen first with what needs attention in it.
+    fn project_rows(&self) -> Vec<(Option<String>, String, String)> {
+        let mut projects: HashMap<String, (u64, [usize; 4])> = HashMap::new();
+        for session in &self.sessions {
+            let Some(project) = &session.project else { continue };
+            let entry = projects.entry(project.clone()).or_default();
+            entry.0 = entry.0.max(session.recency);
+            entry.1[0] += 1;
+            match session_state(session) {
+                ClankerState::Blocked | ClankerState::Failed => entry.1[1] += 1,
+                ClankerState::Done => entry.1[2] += 1,
+                ClankerState::Working => entry.1[3] += 1,
+                _ => {}
+            }
+        }
+        let mut ordered = projects.into_iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
+        let query = self.query.trim().to_lowercase();
+        let mut rows = vec![(None, "All projects".to_string(), format!("{} workshops", self.sessions.len()))];
+        rows.extend(ordered.into_iter().map(|(name, (_, [total, waiting, ready, working]))| {
+            let meta = [(waiting, "waiting"), (ready, "ready"), (working, "working")]
+                .into_iter()
+                .filter(|(count, _)| *count > 0)
+                .map(|(count, label)| format!("{count} {label}"))
+                .chain([format!("{total} workshops")])
+                .collect::<Vec<_>>()
+                .join(" · ");
+            (Some(name.clone()), name, meta)
+        }));
+        rows.retain(|(_, name, _)| query.is_empty() || fuzzy_score(name, &query).is_some());
+        rows
+    }
+
+    fn enter_projects_mode(&mut self) {
+        self.mode = Mode::Projects;
+        self.query.clear();
+        self.unfiltered_selection = None;
+        self.selected = 0;
+        self.error.clear();
+        self.clear_action_mode();
+    }
+
+    fn set_scope(&mut self, scope: Option<String>) {
+        self.scope = scope;
+        self.scope_initialized = true;
+        self.mode = Mode::Jump;
+        self.query.clear();
+        self.selected = 0;
+        self.rebuild(None);
     }
 
     fn enter_repository_mode(&mut self) {
@@ -1859,6 +1933,15 @@ fn branch_from_title(title: &str) -> Option<String> {
     Some(cut.trim_end_matches('-').to_string())
 }
 
+/// Inside one project the "project@" prefix on every untitled row is noise.
+fn scoped_name<'a>(session: &'a SessionRow, scope: Option<&str>) -> &'a str {
+    scope
+        .and_then(|scope| session.name.strip_prefix(scope))
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(&session.name)
+}
+
 /// Rows left alone for days recede without moving: under a day is normal, then two steps of dimming.
 fn fade_color(last_seen: u64, now: u64) -> Option<Color> {
     if last_seen == 0 {
@@ -2063,6 +2146,12 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                     .unwrap_or_default(),
             )
         }
+        Mode::Projects => (
+            "Clankerhouse · Projects",
+            "Enter show · Esc back",
+            app.project_rows().into_iter().map(|(_, name, meta)| (name, meta)).collect(),
+            "Choose a project, or all of them".into(),
+        ),
         Mode::Attach => {
             let rows = app
                 .filtered_attach_candidates()
@@ -2293,13 +2382,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
         Line::from(vec![
             Span::styled(
-                "Clankerhouse · Jump",
+                format!("Clankerhouse · {}", app.scope.as_deref().unwrap_or("All projects")),
                 Style::default()
                     .fg(Color::LightCyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
+                "  Alt-P projects · Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2355,7 +2444,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         detail.kind.as_str()
                     }
                 })
-                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or(&row.session.name));
+                .unwrap_or_else(|| {
+                    row.session.title.as_deref().unwrap_or_else(|| scoped_name(&row.session, app.scope.as_deref()))
+                });
             let detail_meta = row
                 .detail
                 .as_ref()
@@ -2601,9 +2692,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         app.enter_repository_mode();
         return None;
     }
+    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.enter_projects_mode();
+        return None;
+    }
 
-    if app.mode == Mode::Repository || app.mode == Mode::Branch || app.mode == Mode::Attach {
+    if app.mode == Mode::Repository || app.mode == Mode::Branch || app.mode == Mode::Attach || app.mode == Mode::Projects {
         match key.code {
+            KeyCode::Enter if app.mode == Mode::Projects => {
+                let scope = app.project_rows().get(app.selected)?.0.clone();
+                app.set_scope(scope);
+            }
             KeyCode::Esc => {
                 if !app.query.is_empty() {
                     app.query.clear();
@@ -4663,6 +4762,51 @@ mod tests {
         assert_eq!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 20)).1, None);
         assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 140, 20)).1.is_some());
         assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 40)).1.is_some());
+    }
+
+    #[test]
+    fn the_list_opens_narrowed_to_the_current_project_and_alt_p_widens_it() {
+        let sessions = r#"[
+            {"name":"tweezr@feature","path":"/t/feature","project":"tweezr","recency":30,"target":{"type":"tmux_session","session":"tweezr@feature"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"tweezr@feature","windowId":"@1","pane":"%1"}}]},
+            {"name":"tweezr@other","path":"/t/other","project":"tweezr","recency":20,"title":"Other work","target":{"type":"tmux_session","session":"tweezr@other"},"details":[{"kind":"clanker","state":"done","target":{"type":"tmux_window","session":"tweezr@other","windowId":"@2","pane":"%2"}}]},
+            {"name":"clankerhouse@retro","path":"/c/retro","project":"clankerhouse","recency":40,"target":{"type":"tmux_session","session":"clankerhouse@retro"}},
+            {"name":"home","path":"/home/me","recency":10,"target":{"type":"tmux_session","session":"home"}}
+        ]"#;
+        let snapshot = |text: &str| -> Snapshot { serde_json::from_str(&format!(r#"{{"version":{CACHE_VERSION},"sessions":{text}}}"#)).unwrap() };
+        let mut app = app_with_sessions("[]");
+        app.current_session = "tweezr@feature".into();
+        app.scope_initialized = false;
+        app.apply_snapshot(snapshot(sessions), true).unwrap();
+        let names = |app: &App| app.rows.iter().filter(|row| row.detail.is_none()).map(|row| row.session.name.clone()).collect::<Vec<_>>();
+
+        assert_eq!(app.scope.as_deref(), Some("tweezr"));
+        assert_eq!(names(&app), vec!["tweezr@feature", "tweezr@other"]);
+        assert_eq!(scoped_name(&app.rows[0].session, app.scope.as_deref()), "feature");
+        // Search stays inside the scope.
+        app.update_query("retro".into());
+        assert!(names(&app).is_empty());
+        app.update_query(String::new());
+
+        assert_eq!(handle_key(&mut app, alt('p')), None);
+        assert_eq!(app.mode, Mode::Projects);
+        assert_eq!(
+            app.project_rows(),
+            vec![
+                (None, "All projects".to_string(), "4 workshops".to_string()),
+                (Some("clankerhouse".to_string()), "clankerhouse".to_string(), "1 workshops".to_string()),
+                (Some("tweezr".to_string()), "tweezr".to_string(), "1 ready · 1 working · 2 workshops".to_string()),
+            ]
+        );
+        app.selected = 0;
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), None);
+        assert_eq!(app.mode, Mode::Jump);
+        assert_eq!(app.scope, None);
+        assert_eq!(names(&app).len(), 4);
+        assert_eq!(scoped_name(&app.rows[0].session, app.scope.as_deref()), app.rows[0].session.name);
+
+        // A later snapshot never re-narrows a view the operator widened.
+        app.apply_snapshot(snapshot(sessions), false).unwrap();
+        assert_eq!(app.scope, None);
     }
 
     #[test]

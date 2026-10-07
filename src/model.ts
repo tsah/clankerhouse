@@ -26,7 +26,7 @@ export interface RuntimeObservation {
 
 export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
-export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string; labels?: string[]; title?: string }
+export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string; labels?: string[]; title?: string; project?: string }
 export interface TreeRow {
   key: string
   depth: number

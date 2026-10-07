@@ -14,7 +14,7 @@ set -g @plugin 'tsah/clankerhouse'
 
 TPM loads `clankerhouse.tmux`, which prefers the stable installation at `~/.local/lib/clankerhouse` and owns `M-k` (native jump), `M-b` (native spawn flow), `M-d` (safe deletion), and `M-x` (stop current session). Set `@clankerhouse-home` to another installed application root, `@clankerhouse-bindings off` to disable all defaults, or override `@clankerhouse-key`, `@clankerhouse-spawn-key`, `@clankerhouse-delete-key`, and `@clankerhouse-stop-key` before loading it.
 
-Under Herdr, `clankerhouse-install-herdr` installs Alt-K, Alt-B, and Alt-D popup bindings. Alt-D confirms deletion of the invoking session/worktree using the native client; it never guesses the target from whichever workspace becomes focused later. Reload Herdr's configuration after updating these bindings.
+Under Herdr, `clankerhouse-install-herdr` installs Alt-K, Alt-B, and Alt-D popup bindings. To use other keys, edit the `key` lines in the managed block of Herdr's `config.toml`, or set `CLANKERHOUSE_HERDR_KEY`, `CLANKERHOUSE_HERDR_SPAWN_KEY`, or `CLANKERHOUSE_HERDR_DELETE_KEY` when running the installer; the chosen keys are kept on reruns and upgrades. Alt-D confirms deletion of the invoking session/worktree using the native client; it never guesses the target from whichever workspace becomes focused later. Reload Herdr's configuration after updating these bindings.
 
 For stable commands, integrations, and optional user services:
 

@@ -173,6 +173,32 @@ describe("Herdr popup installer", () => {
       { key: "alt+d", type: "popup", command: `${join(repository, "bin", "clankerhouse-herdr")} --delete`, width: "90%", height: "80%" },
     ])
   })
+
+  test("keeps a key edited in the managed block across reruns and launcher changes", () => {
+    const f = fixture()
+    expect(f.install().exitCode).toBe(0)
+    writeFileSync(f.config, readFileSync(f.config, "utf8").replace('key = "alt+b"', 'key = "prefix+b"'))
+    const launcher = join(f.prefix, "bin", "moved-launcher")
+    f.env.CLANKERHOUSE_HERDR_LAUNCHER = launcher
+    expect(f.install().exitCode).toBe(0)
+    expect(readConfig(f.config).keys.command.map(({ key, command }) => ({ key, command }))).toEqual([
+      { key: "alt+k", command: launcher },
+      { key: "prefix+b", command: `${launcher} --repo` },
+      { key: "alt+d", command: `${launcher} --delete` },
+    ])
+  })
+
+  test("environment keys override both the defaults and the installed keys", () => {
+    const f = fixture()
+    f.env.CLANKERHOUSE_HERDR_DELETE_KEY = "prefix+shift+d"
+    expect(f.install().exitCode).toBe(0)
+    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+k", "alt+b", "prefix+shift+d"])
+    Object.assign(f.env, { CLANKERHOUSE_HERDR_KEY: "alt+u", CLANKERHOUSE_HERDR_SPAWN_KEY: "alt+n", CLANKERHOUSE_HERDR_DELETE_KEY: "alt+e" })
+    expect(f.install().exitCode).toBe(0)
+    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+u", "alt+n", "alt+e"])
+    for (const variable of ["CLANKERHOUSE_HERDR_KEY", "CLANKERHOUSE_HERDR_SPAWN_KEY", "CLANKERHOUSE_HERDR_DELETE_KEY"]) delete f.env[variable]
+    expect(f.install().stdout.toString()).toContain("already current")
+  })
 })
 
 describe("Herdr delete launcher", () => {

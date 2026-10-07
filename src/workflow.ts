@@ -9,8 +9,10 @@ import { harnessModelArgs, initialHarnessCommand } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
-import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, workshopForId, workshopForPath } from "./workshop"
+import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { workshopBase } from "./workshop-base"
+import { TITLE_KEY } from "./labels"
+import { ensureWorkshopForLabels } from "./workshop-hooks"
 
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
@@ -60,7 +62,10 @@ export async function sessionForPath(path: string, multiplexer: ManagedMultiplex
 const sessionBySelector = (sessions: MultiplexerSession[], selector: string) => sessions.find((session) => session.id === selector || session.nativeName === selector)
 
 export async function sessionName(id: WorktreeIdentity, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
-  const human = safeName(`${id.repo}@${id.branch}`)
+  // A titled Workshop's session carries the title; the multiplexer keeps its spaces where it can.
+  const record = workshopForPath(id.path)
+  const title = record ? workshopLabels(record.workshopId)[TITLE_KEY] : undefined
+  const human = title ? (multiplexer.kind === "tmux" ? title.replace(/[.:]/g, "-") : title) : safeName(`${id.repo}@${id.branch}`)
   const existing = sessionBySelector((await multiplexer.observe()).sessions, human)
   if (!existing) return human
   if (sessionPathOf(existing) === id.path) return human
@@ -263,11 +268,13 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 
-export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: SpawnClankerOptions & { base?: string; copy?: string; window?: string; parentWorkshopId?: string; noParent?: boolean } = {}) {
+export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: SpawnClankerOptions & { base?: string; copy?: string; window?: string; parentWorkshopId?: string; noParent?: boolean; title?: string } = {}) {
   harnessModelArgs(harness, options.model)
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const parent = await resolveWorkshopParent(options, undefined, multiplexer)
   const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy, deferSession: true, multiplexer })
+  // Titled before the first Clanker creates the session, so the session is named by the title.
+  if (options.title) changeWorkshopLabel(ensureWorkshopForLabels(created.identity.path).workshopId, TITLE_KEY, options.title)
   return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, { ...options, name: options.window, multiplexer }), (workshop) => rollbackCreatedWorkshop(workshop, { multiplexer }))
 }
 

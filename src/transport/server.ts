@@ -17,6 +17,8 @@ export interface SnapshotServerOptions<T> {
   refresh?: () => Promise<ProjectionSnapshot<T>>
   reportObservation?: (report: ObservationReport) => boolean | Promise<boolean>
   executeMutation?: MutationExecutor
+  /** Read-only detail for one Workshop path, fetched on demand rather than carried in every snapshot. */
+  preview?: (path: string) => unknown | Promise<unknown>
   /** Omit only for explicitly test-injected in-memory operation mode. */
   operationRegistry?: DurableRegistry
 }
@@ -130,6 +132,9 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
           const operation = operations?.get(request.params.operationId)
           if (!operation) send(socket, protocolError(request.id, "not_found", "operation was not found"))
           else succeed(operation)
+        } else if (request.method === "preview.get") {
+          if (!options.preview) { send(socket, protocolError(request.id, "method_not_found", "previews are unavailable")); continue }
+          void Promise.resolve(options.preview(request.params.path)).then(succeed).catch((error) => send(socket, protocolError(request.id, "bad_request", error instanceof Error ? error.message : String(error))))
         } else if (request.method === "observation.report") {
           if (!options.reportObservation) { send(socket, protocolError(request.id, "method_not_found", "observation reporting is unavailable")); continue }
           void Promise.resolve(options.reportObservation(request.params)).then((accepted) => succeed({ accepted })).catch((error) => send(socket, protocolError(request.id, "bad_request", error instanceof Error ? error.message : String(error))))

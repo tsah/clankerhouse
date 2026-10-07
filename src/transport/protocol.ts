@@ -13,7 +13,7 @@ export type MutationIntent =
   | { type: "attach" | "reparent"; workshopId: string; parentWorkshopId: string; session?: string }
   | { type: "detach"; workshopId: string; session?: string }
   | { type: "delete"; kind: "pane" | "session" | "worktree"; session: string; confirmed: true; pane?: string; path?: string }
-  | { type: "create"; repository: string; branch: string; create: boolean; base?: string; remoteRef?: string }
+  | { type: "create"; repository: string; branch: string; create: boolean; base?: string; remoteRef?: string; title?: string }
   | { type: "start"; clankerId: string; force?: boolean }
   | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
   | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
@@ -39,7 +39,7 @@ export interface ObservationReport {
   results?: unknown[]
 }
 
-export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status"
+export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status" | "preview.get"
 
 interface RequestBase { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string }
 export type SnapshotRequest =
@@ -47,6 +47,7 @@ export type SnapshotRequest =
   | (RequestBase & { method: "observation.report"; params: ObservationReport })
   | (RequestBase & { method: "mutation.submit"; params: { idempotencyKey: string; intent: MutationIntent } })
   | (RequestBase & { method: "operation.status"; params: { operationId: string } })
+  | (RequestBase & { method: "preview.get"; params: { path: string } })
 
 export interface ServerStatus {
   protocolVersion: typeof SNAPSHOT_PROTOCOL_VERSION
@@ -135,11 +136,11 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "reparent": return validText(intent.workshopId) && validText(intent.parentWorkshopId) ? { type: intent.type, workshopId: intent.workshopId, parentWorkshopId: intent.parentWorkshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "detach": return validText(intent.workshopId) ? { type: "detach", workshopId: intent.workshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "delete": return ["pane", "session", "worktree"].includes(String(intent.kind)) && validText(intent.session) && intent.confirmed === true ? { type: "delete", kind: intent.kind as "pane" | "session" | "worktree", session: intent.session, confirmed: true, pane: validText(intent.pane) ? intent.pane : undefined, path: validText(intent.path) ? intent.path : undefined } : undefined
-    case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined, remoteRef: validText(intent.remoteRef) ? intent.remoteRef : undefined } : undefined
+    case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined, remoteRef: validText(intent.remoteRef) ? intent.remoteRef : undefined, ...(validLabelValue(intent.title, "title") ? { title: intent.title } : {}) } : undefined
     case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
     case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
-    case "label": return validText(intent.path) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value)) ? { type: "label", path: intent.path, key: intent.key, value: intent.value } : undefined
+    case "label": return validText(intent.path) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value, intent.key)) ? { type: "label", path: intent.path, key: intent.key, value: intent.value } : undefined
     case "done": return validText(intent.path) ? { type: "done", path: intent.path } : undefined
     case "repository.refresh": return { type: "repository.refresh" }
     default: return undefined
@@ -169,6 +170,11 @@ export const parseRequest = (value: unknown): SnapshotRequest | ErrorResponse =>
     const operationId = (request.params as Record<string, unknown> | undefined)?.operationId
     if (!validText(operationId, 128)) return protocolError(id, "bad_request", "operation.status requires operationId")
     return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: "operation.status", params: { operationId } }
+  }
+  if (request.method === "preview.get") {
+    const path = (request.params as Record<string, unknown> | undefined)?.path
+    if (!validText(path)) return protocolError(id, "bad_request", "preview.get requires path")
+    return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: "preview.get", params: { path } }
   }
   return protocolError(id, "method_not_found", "unknown or unavailable method")
 }

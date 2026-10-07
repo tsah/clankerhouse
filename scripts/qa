@@ -464,7 +464,7 @@ tmux -S "$inner_socket" bind-key -n M-d run-shell \
     "'$repo/bin/clankerhouse-delete' '#{pane_id}' '#{session_id}' #{q:client_name}"
 sleep 0.2
 
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
 focus_inner_window picker
 animation_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
@@ -473,7 +473,7 @@ wait_for_text "edited"
 wait_for_text "opened"
 sleep 0.1
 working_frame=$(tmux -S "$outer_socket" capture-pane -p -J -t "$outer_pane" -S -200)
-[[ "$working_frame" == *"▸"* ]] || { printf 'Expected the static Herdr working glyph\n' >&2; exit 1; }
+[[ "$working_frame" == *[◐◓◑◒]* ]] || { printf 'Expected the animated working orb\n' >&2; exit 1; }
 tmux -S "$inner_socket" kill-pane -t "$animation_picker_pane"
 sleep 0.2
 
@@ -535,7 +535,7 @@ cache_file="$fixture_runtime/clankerhouse-$uid/state.json"
 mkdir -p "$(dirname "$cache_file")"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
 # They never poll JSON and never compete with the authoritative test daemon.
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
 lineage_visual_pane=$(open_picker_window lineage-visual)
 wait_for_text "$lineage_root_session"
 # The newest child is initially selected. Searching and clearing must return
@@ -688,7 +688,7 @@ tmux -S "$inner_socket" kill-pane -t "$large_current_picker_pane"
 sleep 0.2
 rm -f "$cache_file"
 cache_file="$runtime/clankerhouse-$uid/state.json"
-picker_command="env PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 
 now=$(date +%s%3N)
 jq --argjson now "$now" '.state = "done" | .updatedAt = $now | .hookEvent = "agent_settled"' "$state_file" > "$state_file.tmp"
@@ -944,5 +944,11 @@ done
 if tmux -S "$inner_socket" has-session -t "=$async_session" 2>/dev/null; then printf 'Background deletion left its session alive\n' >&2; exit 1; fi
 tmux -S "$inner_socket" has-session -t "=$jump_session" || { printf 'Background deletion closed the jump destination\n' >&2; exit 1; }
 git -C "$origin" show-ref --verify --quiet refs/heads/qa-delete-async || { printf 'Background deletion removed branch history\n' >&2; exit 1; }
+
+# With the preview enabled, a wide picker shows the selected Workshop's detail beside the list.
+picker_command=${picker_command/CLANKERHOUSE_PREVIEW=0 /}
+preview_pane=$(open_picker_window picker-preview)
+wait_for_text "No clanker has spoken here yet"
+tmux -S "$inner_socket" kill-pane -t "$preview_pane"
 
 printf 'Clankerhouse QA passed: neutral-last bottom-up ordering with last-seen priority within each group, durable recovery ordering, nested fixture repository exclusion, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static Herdr status symbols, focus acknowledgement, persistent picker state, confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction, and jumping away during daemon-owned deletion behave correctly.\n'

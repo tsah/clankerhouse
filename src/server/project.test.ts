@@ -79,7 +79,7 @@ const incident = (): ResourceIncident => ({
 describe("session resource projection", () => {
   test("projects workshop labels as searchable tags on live and sessionless rows", () => {
     const workshop = (workshopId: string, canonicalPath: string, labels?: Record<string, string>) => ({ version: 1 as const, workshopId, repoId: "repo", canonicalPath, commonDir: "/tmp/repo/.git", branch: workshopId, parentWorkshopId: null, revision: 1, createdAt: 1, updatedAt: 1, childWorkshopCount: 0, labels })
-    const live = workshop("live", "/tmp/work", { stage: "retro", owner: "tsah" })
+    const live = workshop("live", "/tmp/work", { stage: "retro", owner: "tsah", title: "Rework the parser" })
     const idle = workshop("idle", "/tmp/idle", { stage: "merged" })
     const lineage: LineageSnapshot = { byPath: new Map([[live.canonicalPath, live], [idle.canonicalPath, idle]]), byId: new Map([[live.workshopId, live], [idle.workshopId, idle]]) }
 
@@ -93,6 +93,11 @@ describe("session resource projection", () => {
     const idleRow = projected.find((row) => row.path === "/tmp/idle")
     expect(liveRow?.labels).toEqual(["tsah", "retro"])
     expect(liveRow?.searchText).toContain("retro")
+    expect(liveRow?.title).toBe("Rework the parser")
+    expect(liveRow?.searchText).toContain("rework the parser")
+    expect(idleRow?.title).toBeUndefined()
+    // A sessionless Workshop can still be titled.
+    expect(idleRow?.availableActions).toContain("rename")
     expect(idleRow?.labels).toEqual(["merged"])
     expect(idleRow?.searchText).toContain("merged")
     expect(projectResources(inputs({ sessions: [tmuxSession()], windows: [tmuxWindow()] })).sessions[0]?.labels).toEqual([])

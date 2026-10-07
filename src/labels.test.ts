@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { applyLabelChange, doneHookHandled, doneTtlMs, hookEnvironment, isDone, labelTags, parseLabelAssignment, reapDecision, validLabelKey, validLabelValue, type ReapCandidate } from "./labels"
+import { applyLabelChange, branchFromTitle, doneHookHandled, doneTtlMs, hookEnvironment, isDone, labelTags, parseLabelAssignment, reapDecision, validLabelKey, validLabelValue, type ReapCandidate } from "./labels"
 
 describe("workshop labels", () => {
   test("parses KEY=VALUE and rejects keys or values that cannot be a tag or an environment name", () => {
@@ -21,6 +21,23 @@ describe("workshop labels", () => {
     expect(applyLabelChange(replaced.labels, "stage", null)).toEqual({ previous: { stage: "merged" }, labels: {}, changed: true })
     expect(applyLabelChange({}, "stage", null).changed).toBe(false)
     expect(() => applyLabelChange({}, "Bad Key", "x")).toThrow("Invalid label key")
+  })
+
+  test("a title is free text, replaces the row name, and is never a tag", () => {
+    expect(parseLabelAssignment("title=Migrate OpenCode adapter to v2")).toEqual({ key: "title", value: "Migrate OpenCode adapter to v2" })
+    expect(validLabelValue("two words", "title")).toBe(true)
+    expect(validLabelValue("two words", "stage")).toBe(false)
+    for (const invalid of ["", " leading", "trailing ", "tab\tinside", "x".repeat(81)]) expect(validLabelValue(invalid, "title")).toBe(false)
+    expect(applyLabelChange({}, "title", "A new title").labels).toEqual({ title: "A new title" })
+    expect(labelTags({ title: "A new title", status: "done" })).toEqual(["done"])
+  })
+
+  test("a branch is derived from a title, and branch-shaped input is kept verbatim", () => {
+    // The native client implements the same rule; these cases are asserted there too.
+    expect(branchFromTitle("Migrate OpenCode adapter to v2")).toBe("migrate-opencode-adapter-to-v2")
+    expect(branchFromTitle("fix/TWE-12_thing.v2")).toBe("fix/TWE-12_thing.v2")
+    expect(branchFromTitle("Rework the extraction pipeline so that retirement is durable across restarts")).toBe("rework-the-extraction-pipeline-so-that-retirement")
+    expect(() => branchFromTitle("  ¡¿  ")).toThrow("Cannot derive a branch name")
   })
 
   test("tags are the values ordered by key", () => {

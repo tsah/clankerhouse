@@ -25,7 +25,8 @@ import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
-import { DONE_LABEL, doneTtlMs, reapDecision } from "./labels"
+import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
+import { workshopPreview, type WorkshopPreview } from "./preview"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
 import { createProcessDiscoveryProvider } from "./server/process-discovery"
@@ -596,6 +597,7 @@ const serverProgram = Effect.gen(function* () {
             refresh: refreshProjectionSnapshot,
             reportObservation: ingestLifecycleObservation,
             executeMutation: executeDaemonMutation,
+            preview: previewForPath,
             operationRegistry: durableRegistry!,
           }),
           catch: (error) => error instanceof Error ? error : new Error(String(error)),
@@ -687,6 +689,7 @@ const dumpState = collectSessions.pipe(
       parentWorkshopId: session.parentWorkshopId,
       childWorkshopCount: session.childWorkshopCount,
       labels: session.labels,
+      title: session.title,
       lineageLabel: session.lineageLabel,
       clankers: session.details
         .filter((detail) => detail.kind === "clanker")
@@ -1112,6 +1115,10 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const change = changeWorkshopLabel(workshop.workshopId, intent.key, intent.value)
       return { checkpoint: { ...checkpoint, ...change, outcome: { workshopId: workshop.workshopId, labels: change.labels, changed: change.changed } } }
     }
+    if (stage === "title.mirrored") {
+      if (intent.key === TITLE_KEY && intent.value) await mirrorWorkshopTitle(workshop.canonicalPath, intent.value)
+      return { checkpoint }
+    }
     if (stage === "hook.dispatched") {
       if (checkpoint.changed === true) dispatchLabelsChangedHook(workshop, checkpoint.previous as Record<string, string>, checkpoint.labels as Record<string, string>)
       return { checkpoint }
@@ -1152,6 +1159,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "tmux.ready") {
       const path = realpathSync(String(checkpoint.path))
+      // Titled before its session exists, so the session is born with the human name.
+      if (intent.title) changeWorkshopLabel(ensureWorkshopForLabels(path).workshopId, TITLE_KEY, intent.title)
       const session = await ensureWorktreeSession(path)
       rememberDirectory({ path, source: "worktree", branch: intent.branch, activityAt: Date.now(), activitySource: "opened" })
       return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "tmux_session", session } } } }
@@ -1202,6 +1211,32 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
   }
 
   throw new Error(`Unsupported mutation stage ${intent.type}/${stage}`)
+}
+
+/** The multiplexer shows the Workshop under its title too; a failed rename never fails the title change. */
+const mirrorWorkshopTitle = async (path: string, title: string) => {
+  for (const row of (await multiplexerSessionRows()).rows) {
+    const candidate = row[3] || row[4] || row[5]
+    let matches = false
+    try { matches = Boolean(candidate) && realpathSync(candidate!) === path } catch {}
+    if (!matches || row[1] === title) continue
+    // tmux reserves "." and ":" in session names.
+    try { await daemonMultiplexer().rename(sessionLocation(row[0]!), daemonMultiplexer().kind === "tmux" ? title.replace(/[.:]/g, "-") : title) }
+    catch (error) { console.error(`Unable to rename ${daemonMultiplexer().kind} session for ${path}: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+}
+
+const previewTtlMs = 20_000
+const previewCache = new Map<string, { at: number; preview: Promise<WorkshopPreview> }>()
+const previewForPath = (path: string) => {
+  const canonical = realpathSync(expandHome(path))
+  const cached = previewCache.get(canonical)
+  if (cached && Date.now() - cached.at < previewTtlMs) return cached.preview
+  if (previewCache.size > 256) previewCache.clear()
+  const preview = workshopPreview(canonical)
+  previewCache.set(canonical, { at: Date.now(), preview })
+  preview.catch(() => previewCache.delete(canonical))
+  return preview
 }
 
 const reapIntervalMs = 10 * 60_000

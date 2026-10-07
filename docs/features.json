@@ -386,7 +386,7 @@
     },
     {
       "id": "workshop-labels",
-      "title": "Workshop labels, repository hooks, the built-in done mark, and the done-Workshop reaper",
+      "title": "Workshop labels and titles, repository hooks, the built-in done mark and reaper, and the picker preview",
       "core": true,
       "unit": [
         "src/labels.test.ts",
@@ -395,7 +395,8 @@
         "src/transport/protocol.test.ts",
         "src/daemon-mutations.test.ts",
         "src/server/project.test.ts",
-        "native-client/src/main.rs"
+        "native-client/src/main.rs",
+        "src/preview.test.ts"
       ],
       "standalone": [
         "scripts/qa-workshop-labels"
@@ -405,7 +406,11 @@
         "Press Alt-D on a worktree Workshop and confirm it gains a [done] tag with no confirmation while its clankers and session keep running",
         "Press Alt-D on the done Workshop and confirm y destroys it and u clears the done tag",
         "With a short CLANKERHOUSE_DONE_TTL_DAYS, confirm an idle clean done worktree is removed with its branch kept, while a dirty one and one with a working clanker survive",
-        "In a repository with a done hook, confirm the hook decides the outcome of Alt-D; confirm pane and plain-session rows are unchanged"
+        "In a repository with a done hook, confirm the hook decides the outcome of Alt-D; confirm pane and plain-session rows are unchanged",
+        "Create a Workshop by typing a title, confirm the derived branch shown before creation, and confirm the row and the multiplexer session carry the title",
+        "Edit a title with Alt-R, clear it with an empty title, and confirm the branch never changes",
+        "In a wide terminal rest on several rows and judge that the preview's last message and diff size are correct and that scrolling stays smooth",
+        "Judge that rows untouched for days are visibly dimmer, that state glyphs keep full colour, and that only the working glyph animates"
       ]
     }
   ]

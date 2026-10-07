@@ -1942,6 +1942,27 @@ fn scoped_name<'a>(session: &'a SessionRow, scope: Option<&str>) -> &'a str {
         .unwrap_or(&session.name)
 }
 
+const DONE_GRAY: Color = Color::Rgb(108, 114, 128);
+
+fn is_done(session: &SessionRow) -> bool {
+    session.labels.iter().any(|label| label == "done")
+}
+
+/// A done Workshop is grayed out whatever its age; otherwise a row fades as it goes unvisited.
+/// Detail rows and the state glyph keep their own colours, so a live clanker still stands out.
+fn row_name_style(row: &TreeRow, current: bool, now: u64) -> Style {
+    if row.detail.is_some() {
+        return Style::default();
+    }
+    if is_done(&row.session) {
+        return Style::default().fg(DONE_GRAY);
+    }
+    if current {
+        return Style::default();
+    }
+    fade_color(row.session.recency, now).map_or_else(Style::default, |color| Style::default().fg(color))
+}
+
 /// Rows left alone for days recede without moving: under a day is normal, then two steps of dimming.
 fn fade_color(last_seen: u64, now: u64) -> Option<Color> {
     if last_seen == 0 {
@@ -1950,7 +1971,7 @@ fn fade_color(last_seen: u64, now: u64) -> Option<Color> {
     match now.saturating_sub(last_seen) / 86_400 {
         0 => None,
         1..=2 => Some(Color::Rgb(160, 166, 178)),
-        _ => Some(Color::Rgb(108, 114, 128)),
+        _ => Some(DONE_GRAY),
     }
 }
 
@@ -2509,11 +2530,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 vec![lineage, status]
             };
-            let name_style = if current || row.detail.is_some() {
-                Style::default()
-            } else {
-                fade_color(row.session.recency, now).map_or_else(Style::default, |color| Style::default().fg(color))
-            };
+            let name_style = row_name_style(row, current, now);
             spans.extend([
                 Span::styled(rendered_name, name_style),
                 Span::styled(tags, Style::default().fg(Color::DarkGray)),
@@ -4817,6 +4834,20 @@ mod tests {
         // A later snapshot never re-narrows a view the operator widened.
         app.apply_snapshot(snapshot(sessions), false).unwrap();
         assert_eq!(app.scope, None);
+    }
+
+    #[test]
+    fn done_workshops_are_grayed_out_even_when_fresh_or_current() {
+        let app = app_with_sessions(
+            r#"[
+                {"name":"finished","path":"/finished","recency":1000000,"labels":["done"],"target":{"type":"tmux_session","session":"finished"}},
+                {"name":"active","path":"/active","recency":1000000,"target":{"type":"tmux_session","session":"active"}}
+            ]"#,
+        );
+        let row = |name: &str| app.rows.iter().find(|row| row.session.name == name).unwrap();
+        assert_eq!(row_name_style(row("finished"), false, 1_000_000), Style::default().fg(DONE_GRAY));
+        assert_eq!(row_name_style(row("finished"), true, 1_000_000), Style::default().fg(DONE_GRAY));
+        assert_eq!(row_name_style(row("active"), false, 1_000_000), Style::default());
     }
 
     #[test]

@@ -39,7 +39,7 @@ export interface ObservationReport {
   results?: unknown[]
 }
 
-export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status" | "preview.get"
+export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status"
 
 interface RequestBase { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string }
 export type SnapshotRequest =
@@ -47,7 +47,6 @@ export type SnapshotRequest =
   | (RequestBase & { method: "observation.report"; params: ObservationReport })
   | (RequestBase & { method: "mutation.submit"; params: { idempotencyKey: string; intent: MutationIntent } })
   | (RequestBase & { method: "operation.status"; params: { operationId: string } })
-  | (RequestBase & { method: "preview.get"; params: { path: string } })
 
 export interface ServerStatus {
   protocolVersion: typeof SNAPSHOT_PROTOCOL_VERSION
@@ -170,11 +169,6 @@ export const parseRequest = (value: unknown): SnapshotRequest | ErrorResponse =>
     const operationId = (request.params as Record<string, unknown> | undefined)?.operationId
     if (!validText(operationId, 128)) return protocolError(id, "bad_request", "operation.status requires operationId")
     return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: "operation.status", params: { operationId } }
-  }
-  if (request.method === "preview.get") {
-    const path = (request.params as Record<string, unknown> | undefined)?.path
-    if (!validText(path)) return protocolError(id, "bad_request", "preview.get requires path")
-    return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: "preview.get", params: { path } }
   }
   return protocolError(id, "method_not_found", "unknown or unavailable method")
 }

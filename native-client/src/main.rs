@@ -10,7 +10,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -313,171 +313,6 @@ struct TreeBuildContext<'a> {
     query: &'a str,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-struct DiffSize {
-    files: u64,
-    insertions: u64,
-    deletions: u64,
-    base: String,
-}
-
-/// On-demand detail for the selected Workshop, served by the daemon's `preview.get`.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-struct Preview {
-    path: String,
-    #[serde(default)]
-    branch: String,
-    #[serde(default, rename = "lastMessage")]
-    last_message: Vec<String>,
-    #[serde(default, rename = "lastMessageAt")]
-    last_message_at: Option<u64>,
-    #[serde(default)]
-    harness: Option<String>,
-    #[serde(default)]
-    diff: Option<DiffSize>,
-}
-
-const PREVIEW_SETTLE: Duration = Duration::from_millis(150);
-const PREVIEW_REFRESH: Duration = Duration::from_secs(20);
-
-#[derive(Default)]
-struct PreviewState {
-    shown: Option<Preview>,
-    /// Why the resting row has no preview, shown in its place.
-    failure: Option<(String, String)>,
-    /// The path the selection currently rests on, and since when.
-    resting: Option<(String, Instant)>,
-    /// The path last asked of the daemon, and when.
-    requested: Option<(String, Instant)>,
-}
-
-impl PreviewState {
-    /// Called every tick with the selected Workshop path. Returns a path to fetch once the
-    /// selection has rested briefly, so scrolling past rows costs nothing.
-    fn tick(&mut self, selected: Option<&str>, now: Instant) -> Option<String> {
-        let Some(selected) = selected else {
-            self.resting = None;
-            self.shown = None;
-            return None;
-        };
-        if self.resting.as_ref().is_none_or(|(path, _)| path != selected) {
-            self.resting = Some((selected.to_string(), now));
-            if self.shown.as_ref().is_some_and(|preview| preview.path != selected) {
-                self.shown = None;
-            }
-            self.failure = None;
-        }
-        let (_, since) = self.resting.as_ref()?;
-        if now.duration_since(*since) < PREVIEW_SETTLE {
-            return None;
-        }
-        let stale = match &self.requested {
-            Some((path, at)) => path != selected || now.duration_since(*at) >= PREVIEW_REFRESH,
-            None => true,
-        };
-        if !stale {
-            return None;
-        }
-        self.requested = Some((selected.to_string(), now));
-        Some(selected.to_string())
-    }
-
-    /// A reply for a row the selection has since left is dropped.
-    fn receive(&mut self, path: String, result: Result<Preview, String>) {
-        if self.resting.as_ref().is_none_or(|(resting, _)| *resting != path) {
-            return;
-        }
-        match result {
-            Ok(preview) => {
-                self.failure = None;
-                self.shown = Some(Preview { path, ..preview });
-            }
-            Err(error) => self.failure = Some((path, error)),
-        }
-    }
-}
-
-fn relative_age(then_ms: u64, now_ms: u64) -> String {
-    let seconds = now_ms.saturating_sub(then_ms) / 1000;
-    match seconds {
-        0..=59 => "just now".into(),
-        60..=3_599 => format!("{}m ago", seconds / 60),
-        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
-}
-
-fn preview_lines(
-    session: &SessionRow,
-    preview: Option<&Preview>,
-    failure: Option<&str>,
-    now_ms: u64,
-) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let mut lines = vec![Line::from(Span::styled(
-        session.title.clone().unwrap_or_else(|| session.name.clone()),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    let branch = preview.map(|preview| preview.branch.as_str()).filter(|branch| !branch.is_empty()).unwrap_or(&session.branch);
-    let labels = session.labels.join(" ");
-    let facts = [branch, session.age.as_str(), labels.as_str()]
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if !facts.is_empty() {
-        lines.push(Line::from(Span::styled(facts, dim)));
-    }
-    let Some(preview) = preview else {
-        lines.push(Line::from(Span::styled(
-            failure.map_or_else(|| "…".to_string(), |reason| format!("No preview: {reason}")),
-            dim,
-        )));
-        return lines;
-    };
-    if let Some(diff) = &preview.diff {
-        lines.push(Line::from(if diff.files == 0 {
-            vec![Span::styled(format!("no changes against {}", diff.base), dim)]
-        } else {
-            vec![
-                Span::raw(format!("{} file{} ", diff.files, if diff.files == 1 { "" } else { "s" })),
-                Span::styled(format!("+{}", diff.insertions), Style::default().fg(Color::Rgb(74, 222, 128))),
-                Span::raw(" "),
-                Span::styled(format!("−{}", diff.deletions), Style::default().fg(Color::Rgb(248, 113, 113))),
-                Span::styled(format!(" against {}", diff.base), dim),
-            ]
-        }));
-    }
-    lines.push(Line::from(""));
-    if preview.last_message.is_empty() {
-        lines.push(Line::from(Span::styled("No clanker has spoken here yet", dim)));
-    } else {
-        let source = [
-            preview.harness.clone().unwrap_or_default(),
-            preview.last_message_at.map(|at| relative_age(at, now_ms)).unwrap_or_default(),
-        ]
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-        lines.push(Line::from(Span::styled(format!("last said · {source}"), dim)));
-        lines.extend(preview.last_message.iter().cloned().map(Line::from));
-    }
-    lines
-}
-
-/// Beside the list when the terminal is wide, beneath it when it is merely tall, absent otherwise.
-fn preview_layout(area: ratatui::layout::Rect) -> (ratatui::layout::Rect, Option<ratatui::layout::Rect>) {
-    if area.width >= 120 {
-        let parts = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area);
-        (parts[0], Some(parts[1]))
-    } else if area.height >= 30 {
-        let parts = Layout::vertical([Constraint::Min(10), Constraint::Length(12)]).split(area);
-        (parts[0], Some(parts[1]))
-    } else {
-        (area, None)
-    }
-}
 
 struct App {
     cache_path: PathBuf,
@@ -509,8 +344,6 @@ struct App {
     delete_requested: bool,
     workshop_title: Option<String>,
     rename_title_path: Option<String>,
-    preview: PreviewState,
-    preview_enabled: bool,
     worktree_delete: Option<(MutationIntent, String)>,
     reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
@@ -1094,8 +927,6 @@ impl App {
             delete_requested: false,
             workshop_title: None,
             rename_title_path: None,
-            preview: PreviewState::default(),
-            preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities: HashMap::new(),
@@ -1153,8 +984,6 @@ impl App {
             delete_requested: false,
             workshop_title: None,
             rename_title_path: None,
-            preview: PreviewState::default(),
-            preview_enabled: env::var("CLANKERHOUSE_PREVIEW").as_deref() != Ok("0"),
             worktree_delete: None,
             reopen_path: None,
             repository_identities,
@@ -2385,12 +2214,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ]),
         areas[0],
     );
-    // CLANKERHOUSE_PREVIEW=0 keeps the list at full width.
-    let (list_area, preview_area) = if app.preview_enabled {
-        preview_layout(areas[1])
-    } else {
-        (areas[1], None)
-    };
+    let list_area = areas[1];
     let height = list_area.height.saturating_sub(2) as usize;
     let start = app
         .selected
@@ -2523,19 +2347,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
         list_area,
         &mut state,
     );
-    if let Some(area) = preview_area
-        && let Some(row) = app.selected()
-    {
-        let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0, |elapsed| elapsed.as_millis() as u64);
-        let preview = app.preview.shown.as_ref().filter(|preview| preview.path == row.session.path);
-        let failure = app.preview.failure.as_ref().filter(|(path, _)| *path == row.session.path).map(|(_, reason)| reason.as_str());
-        frame.render_widget(
-            Paragraph::new(preview_lines(&row.session, preview, failure, now_ms))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray))),
-            area,
-        );
-    }
     let (footer, footer_color) = if !app.error.is_empty() {
         (app.error.clone(), Color::LightYellow)
     } else if let Some(pending) = &app.mutation {
@@ -3224,32 +3035,7 @@ fn run(
 ) -> io::Result<AppCommand> {
     let mut pending_key = None;
     let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
-    let (preview_sender, preview_receiver) = mpsc::channel::<(String, Result<Preview, String>)>();
     loop {
-        while let Ok((path, result)) = preview_receiver.try_recv() {
-            app.preview.receive(path, result);
-        }
-        let selected_path = (app.preview_enabled && app.mode == Mode::Jump)
-            .then(|| app.selected().map(|row| row.session.path.clone()))
-            .flatten()
-            .filter(|path| !path.is_empty());
-        if let Some(path) = app.preview.tick(selected_path.as_deref(), Instant::now()) {
-            let sender = preview_sender.clone();
-            let preview_socket_path = socket_path.to_path_buf();
-            thread::spawn(move || {
-                // A failed preview explains itself in the pane; it never disturbs the picker.
-                let result = rpc(&preview_socket_path, "preview.get", Some(serde_json::json!({ "path": path })))
-                    .map_err(|error| {
-                        if error.contains("unknown or unavailable method") {
-                            "the running daemon is older than this picker; restart it".to_string()
-                        } else {
-                            error
-                        }
-                    })
-                    .and_then(|value| serde_json::from_value::<Preview>(value).map_err(|error| error.to_string()));
-                let _ = sender.send((path, result));
-            });
-        }
         while let Ok(update) = mutation_receiver.try_recv() {
             if let Some(command) = apply_mutation_update(&mut app, update) {
                 return Ok(command);
@@ -4687,63 +4473,6 @@ mod tests {
                 value: None,
             }))
         );
-    }
-
-    #[test]
-    fn preview_waits_for_the_selection_to_rest_and_ignores_stale_replies() {
-        let start = Instant::now();
-        let mut state = PreviewState::default();
-        assert_eq!(state.tick(Some("/a"), start), None);
-        // Moving on before the pause elapses fetches nothing for the row passed over.
-        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(100)), None);
-        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(300)), Some("/b".into()));
-        assert_eq!(state.tick(Some("/b"), start + Duration::from_millis(400)), None);
-
-        state.receive("/a".into(), Ok(Preview::default()));
-        assert_eq!(state.shown, None);
-        state.receive("/b".into(), Err("daemon said no".into()));
-        assert_eq!(state.failure, Some(("/b".into(), "daemon said no".into())));
-        state.receive("/b".into(), Ok(Preview { last_message: vec!["done".into()], ..Preview::default() }));
-        assert_eq!(state.shown.as_ref().map(|preview| preview.path.as_str()), Some("/b"));
-        assert_eq!(state.failure, None);
-
-        // Resting on the same row refreshes it occasionally; leaving clears what was shown.
-        assert_eq!(state.tick(Some("/b"), start + Duration::from_secs(25)), Some("/b".into()));
-        assert_eq!(state.tick(Some("/c"), start + Duration::from_secs(26)), None);
-        assert_eq!(state.shown, None);
-        assert_eq!(state.tick(None, start + Duration::from_secs(27)), None);
-    }
-
-    #[test]
-    fn preview_shows_title_diff_and_the_last_thing_said() {
-        let session: SessionRow = serde_json::from_str(
-            r#"{"name":"repo@feature","path":"/repo/feature","branch":"feature","title":"Migrate the adapter","age":"3h","labels":["done"],"target":{"type":"tmux_session","session":"s"}}"#,
-        ).unwrap();
-        let preview: Preview = serde_json::from_str(
-            r#"{"path":"/repo/feature","branch":"feature","lastMessage":["All tests pass.","Ready for review."],"lastMessageAt":1000000,"harness":"claude","diff":{"files":3,"insertions":40,"deletions":2,"base":"origin/main"}}"#,
-        ).unwrap();
-        let text = |lines: Vec<Line>| lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect::<Vec<_>>();
-
-        assert_eq!(
-            text(preview_lines(&session, Some(&preview), None, 1_000_000 + 5 * 60_000)),
-            vec![
-                "Migrate the adapter",
-                "feature · 3h · done",
-                "3 files +40 −2 against origin/main",
-                "",
-                "last said · claude · 5m ago",
-                "All tests pass.",
-                "Ready for review.",
-            ]
-        );
-        assert_eq!(text(preview_lines(&session, None, None, 0)), vec!["Migrate the adapter", "feature · 3h · done", "…"]);
-        assert_eq!(
-            text(preview_lines(&session, None, Some("restart the daemon"), 0)),
-            vec!["Migrate the adapter", "feature · 3h · done", "No preview: restart the daemon"]
-        );
-        assert_eq!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 20)).1, None);
-        assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 140, 20)).1.is_some());
-        assert!(preview_layout(ratatui::layout::Rect::new(0, 0, 100, 40)).1.is_some());
     }
 
     #[test]

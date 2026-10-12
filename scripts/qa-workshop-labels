@@ -181,17 +181,6 @@ projected_title=$(SOCKET_PATH="$daemon_socket" FEATURE_PATH="$feature_path" bun 
 [[ "$projected_title" == '["Rework the parser",["retro"]]' ]] || fail "Expected the title to be projected apart from the tags, got $projected_title"
 tmux -S "$tmux_socket" has-session -t '=Rework the parser' || fail "Expected the session to be renamed to the title"
 
-# The preview is served on demand from Git and the harness session stores.
-printf 'more\n' >> "$feature_path/fixture"
-preview=$(printf '%s\n' "{\"version\":1,\"id\":\"qa-preview\",\"method\":\"preview.get\",\"params\":{\"path\":\"$feature_path\"}}" | python3 -c '
-import json, socket, sys
-sock = socket.socket(socket.AF_UNIX); sock.settimeout(15); sock.connect(sys.argv[1]); sock.sendall(sys.stdin.read().encode())
-data = b""
-while b"\n" not in data: data += sock.recv(65536)
-print(json.dumps(json.loads(data.split(b"\n", 1)[0])["result"]))' "$daemon_socket")
-[[ "$(jq -c '[.branch, .diff.files, .diff.insertions, .diff.base, .lastMessage]' <<<"$preview")" == '["feature",1,1,"main",[]]' ]] || fail "Unexpected preview: $preview"
-git -C "$feature_path" checkout -q -- fixture
-
 unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(jq -c '[.changed, .labels]' <<<"$unset_result")" == '[true,{"title":"Rework the parser"}]' ]] || fail "Unexpected label unset result: $unset_result"
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"

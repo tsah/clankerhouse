@@ -26,7 +26,6 @@ import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
-import { workshopPreview, type WorkshopPreview } from "./preview"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
 import { createProcessDiscoveryProvider } from "./server/process-discovery"
@@ -597,7 +596,6 @@ const serverProgram = Effect.gen(function* () {
             refresh: refreshProjectionSnapshot,
             reportObservation: ingestLifecycleObservation,
             executeMutation: executeDaemonMutation,
-            preview: previewForPath,
             operationRegistry: durableRegistry!,
           }),
           catch: (error) => error instanceof Error ? error : new Error(String(error)),
@@ -1225,19 +1223,6 @@ const mirrorWorkshopTitle = async (path: string, title: string) => {
     try { await daemonMultiplexer().rename(sessionLocation(row[0]!), daemonMultiplexer().kind === "tmux" ? title.replace(/[.:]/g, "-") : title) }
     catch (error) { console.error(`Unable to rename ${daemonMultiplexer().kind} session for ${path}: ${error instanceof Error ? error.message : String(error)}`) }
   }
-}
-
-const previewTtlMs = 20_000
-const previewCache = new Map<string, { at: number; preview: Promise<WorkshopPreview> }>()
-const previewForPath = (path: string) => {
-  const canonical = realpathSync(expandHome(path))
-  const cached = previewCache.get(canonical)
-  if (cached && Date.now() - cached.at < previewTtlMs) return cached.preview
-  if (previewCache.size > 256) previewCache.clear()
-  const preview = workshopPreview(canonical)
-  previewCache.set(canonical, { at: Date.now(), preview })
-  preview.catch(() => previewCache.delete(canonical))
-  return preview
 }
 
 const reapIntervalMs = 10 * 60_000

@@ -32,8 +32,6 @@ describe("mutation protocol target set", () => {
     ]) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
     expect(mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" })).toMatchObject({ params: { intent: { type: "create", branch: "b" } } })
     expect((mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" }) as { params: { intent: object } }).params.intent).not.toHaveProperty("title")
-    expect(parseRequest({ version: 1, id: "r", method: "preview.get", params: { path: "/repo/feature" } })).toMatchObject({ method: "preview.get", params: { path: "/repo/feature" } })
-    expect(parseRequest({ version: 1, id: "r", method: "preview.get", params: {} })).toMatchObject({ ok: false, error: { code: "bad_request" } })
     for (const intent of [
       { type: "label", path: "/repo/feature", key: "Stage", value: "retro" },
       { type: "label", path: "/repo/feature", key: "stage", value: "two words" },

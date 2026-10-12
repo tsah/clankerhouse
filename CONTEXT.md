@@ -76,7 +76,7 @@ The daemon process that deletes a Done Workshop once it has been left alone for 
 
 ## Workshop Hook
 
-A tracked executable the target repository supplies at `.clankerhouse/hooks/<event>` and Clankerhouse runs inside the Workshop. `labels-changed` runs detached after a Label actually changes and cannot fail that change. `done` replaces the built-in delete-key rule for that repository: exit `0` means the repository handled the key, exit `1` leaves Clankerhouse's destroy confirmation, and any other exit is reported as a failure. Repository-specific workflow lives in these scripts, never in Clankerhouse.
+An executable Clankerhouse runs inside the Workshop: either tracked in the target repository at `.clankerhouse/hooks/<event>`, or kept by the operator per project at `~/.config/clankerhouse/hooks/<project>/<event>`. The repository's hook wins when both exist. `labels-changed` runs detached after a Label actually changes and cannot fail that change. `done` replaces the built-in delete-key rule for that repository: exit `0` means the repository handled the key, exit `1` leaves Clankerhouse's destroy confirmation, and any other exit is reported as a failure. Repository-specific workflow lives in these scripts, never in Clankerhouse.
 
 ## Observation
 

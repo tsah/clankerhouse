@@ -210,7 +210,9 @@ if [ "${CLANKERHOUSE_LABEL_STATUS:-}" = done ] && [ "${CLANKERHOUSE_PREVIOUS_LAB
 fi
 ```
 
-Hooks are repository-supplied code that runs without a prompt, so use them only in repositories you trust.
+The same two hooks can also live outside the repository, at `~/.config/clankerhouse/hooks/<project>/<event>` (or under `$XDG_CONFIG_HOME`), where `<project>` is the repository's directory name. Such a hook applies to every Workshop of that project, including branches created before it existed, and adds nothing to a shared repository. A hook inside the Workshop wins over it. Both kinds also receive `CLANKERHOUSE_PROJECT`.
+
+Hooks in a repository are repository-supplied code that runs without a prompt, so rely on them only in repositories you trust.
 
 Useful CLI inspection/repair commands:
 - `clankers workshop show --cwd PATH`

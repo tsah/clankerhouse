@@ -1,7 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs"
 import { dirname } from "node:path"
 import { binPath } from "./installation"
-import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
+import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, projectName, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
 import { changeWorkshopLabel, identifyWorkshopSync, registerWorkshop, workshopForPath, workshopLabels, workshopStatePath, type WorkshopRecord } from "./workshop"
 
 const doneHookTimeoutMs = 30_000
@@ -9,13 +9,26 @@ const doneHookTimeoutMs = 30_000
 /** Repository hooks are tracked executables at .clankerhouse/hooks/<event> in the workshop itself. */
 export const workshopHookPath = (workshopPath: string, event: WorkshopHookEvent) => `${workshopPath}/.clankerhouse/hooks/${event}`
 
-const executableHook = (workshopPath: string, event: WorkshopHookEvent) => {
-  const path = workshopHookPath(workshopPath, event)
+/**
+ * The operator's own hooks for a project, outside the repository: they apply to every Workshop
+ * of that project at once, including branches cut before the hook existed, and add nothing to a
+ * shared repository.
+ */
+export const userHookPath = (project: string, event: WorkshopHookEvent, env: Record<string, string | undefined> = Bun.env) =>
+  `${env.XDG_CONFIG_HOME || `${env.HOME ?? ""}/.config`}/clankerhouse/hooks/${project}/${event}`
+
+const executable = (path: string) => {
   try {
     if (!statSync(path).isFile()) return undefined
     accessSync(path, constants.X_OK)
     return path
   } catch { return undefined }
+}
+
+/** A hook in the Workshop wins; otherwise the operator's hook for the Workshop's project. */
+const executableHook = (workshopPath: string, commonDir: string, event: WorkshopHookEvent) => {
+  const project = projectName(commonDir)
+  return executable(workshopHookPath(workshopPath, event)) ?? (project ? executable(userHookPath(project, event)) : undefined)
 }
 
 const processEnvironment = (context: HookContext) => {
@@ -32,12 +45,12 @@ export const ensureWorkshopForLabels = (path: string, dbPath = workshopStatePath
 }
 
 const contextFor = (workshop: WorkshopRecord, event: WorkshopHookEvent, labels: WorkshopLabels, previousLabels?: WorkshopLabels): HookContext => ({
-  event, workshopId: workshop.workshopId, path: workshop.canonicalPath, branch: workshop.branch, labels, previousLabels,
+  event, workshopId: workshop.workshopId, path: workshop.canonicalPath, branch: workshop.branch, project: projectName(workshop.commonDir), labels, previousLabels,
 })
 
 /** Fire-and-forget: the hook outlives the caller and can never fail the label change that triggered it. */
 export const dispatchLabelsChangedHook = (workshop: WorkshopRecord, previousLabels: WorkshopLabels, labels: WorkshopLabels) => {
-  const hook = executableHook(workshop.canonicalPath, "labels-changed")
+  const hook = executableHook(workshop.canonicalPath, workshop.commonDir, "labels-changed")
   if (!hook) return false
   try {
     Bun.spawn([hook], { cwd: workshop.canonicalPath, env: processEnvironment(contextFor(workshop, "labels-changed", labels, previousLabels)), stdin: "ignore", stdout: "ignore", stderr: "ignore" }).unref()
@@ -69,10 +82,11 @@ const isLinkedWorktree = (path: string) => {
 /** Runs the repository's done hook to completion. Without a hook the default action stays with the caller. */
 export const runDoneHook = async (path: string, dbPath = workshopStatePath): Promise<DoneHookResult> => {
   let worktreePath: string
-  try { worktreePath = identifyWorkshopSync(path).path }
+  let commonDir: string
+  try { ({ path: worktreePath, commonDir } = identifyWorkshopSync(path)) }
   catch { return { handled: false, hook: false } }
   // Checked before touching the store, so a repository without a hook gains no Workshop record from a key press.
-  const hook = executableHook(worktreePath, "done")
+  const hook = executableHook(worktreePath, commonDir, "done")
   if (!hook) return { handled: false, hook: false }
   const workshop = ensureWorkshopForLabels(worktreePath, dbPath)
   const proc = Bun.spawn([hook], { cwd: workshop.canonicalPath, env: processEnvironment(contextFor(workshop, "done", workshopLabels(workshop.workshopId, dbPath))), stdin: "ignore", stdout: "ignore", stderr: "pipe" })

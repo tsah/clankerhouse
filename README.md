@@ -178,7 +178,7 @@ Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTE
 
 A Workshop can have a title: a human name such as "Migrate OpenCode adapter to v2". It is shown as the row's name with the branch dimmed on the right, it is searchable, and the multiplexer session or Herdr workspace is renamed to match. Set it when creating a Workshop (see the branch flow below, or `clankers workshop spawn --title "…"`, which derives the branch when `--name` is omitted), and edit it with `Alt-R` on a Workshop row; an empty title clears it. Editing a title never renames the branch. A title is stored as the `title` label, so `clankers workshop label set "title=…"` works too and repository hooks see it.
 
-The picker lists the Workshops of every project. Each row's name is shown in a colour derived from its project (repository) name, so one project is always the same colour. Search matches the title, branch, labels, and project.
+The picker lists the Workshops of every project. Each row's name is shown in a colour derived from its project (repository) name, so one project is always the same colour. Labels follow the name, each in a colour derived from the label, with `done` in gray. Search matches the title, branch, labels, and project.
 
 Row names fade with age without moving: seen within a day is normal, one to three days is dimmed, older is dimmer. A faded row keeps its project's hue. State glyphs keep full colour, and the current Workshop never fades. The working glyph is the only one that animates.
 
@@ -186,7 +186,7 @@ When the terminal is at least 120 columns wide the picker shows a preview of the
 
 ## Workshop labels and repository hooks
 
-A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as dimmed `[tags]` after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`.
+A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as coloured tags after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`.
 
 `Alt-D` on a worktree Workshop marks it done instead of deleting it. Nothing else changes: its clankers, session, and worktree stay. `Alt-D` on a done Workshop asks whether to destroy it (`y`) or reopen it (`u`, which clears the label). A done Workshop that is then left alone for seven days is deleted automatically; using it again restarts the seven days. The reaper never deletes a worktree with uncommitted changes or with a clanker that is working, waiting, or finished but unseen, and it keeps the branch. Set `CLANKERHOUSE_DONE_TTL_DAYS` for the daemon to change the retention, or to `0` to turn automatic deletion off.
 

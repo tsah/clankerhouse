@@ -1880,10 +1880,28 @@ const PROJECT_COLORS: [Color; 8] = [
     Color::Rgb(200, 160, 130),
 ];
 
+/// Deeper than the project hues, so a label never reads as part of the name beside it.
+const LABEL_COLORS: [Color; 6] = [
+    Color::Rgb(56, 148, 160),
+    Color::Rgb(128, 108, 200),
+    Color::Rgb(186, 96, 140),
+    Color::Rgb(170, 140, 60),
+    Color::Rgb(110, 150, 70),
+    Color::Rgb(168, 112, 78),
+];
+
+fn name_hash(name: &str) -> usize {
+    name.bytes().fold(0x811c9dc5u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(0x01000193)) as usize
+}
+
 /// A project keeps one colour everywhere: it is derived from the name alone.
 fn project_color(project: &str) -> Color {
-    let hash = project.bytes().fold(0x811c9dc5u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(0x01000193));
-    PROJECT_COLORS[hash as usize % PROJECT_COLORS.len()]
+    PROJECT_COLORS[name_hash(project) % PROJECT_COLORS.len()]
+}
+
+/// A label keeps one colour everywhere too; "done" is gray like the row it grays out.
+fn label_color(label: &str) -> Color {
+    if label == "done" { DONE_GRAY } else { LABEL_COLORS[name_hash(label) % LABEL_COLORS.len()] }
 }
 
 /// A faded row keeps its project's hue: the colour is darkened, not replaced.
@@ -2452,7 +2470,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .collect::<Vec<_>>()
                 .join("  ");
             let tags = if row.detail.is_none() && !row.session.labels.is_empty() {
-                format!(" [{}]", row.session.labels.join(" "))
+                format!(" {}", row.session.labels.join(" "))
             } else {
                 String::new()
             };
@@ -2481,9 +2499,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 vec![lineage, status]
             };
             let name_style = row_name_style(row, current, now);
+            spans.push(Span::styled(rendered_name, name_style));
+            if !tags.is_empty() {
+                let done = is_done(&row.session);
+                spans.extend(row.session.labels.iter().map(|label| {
+                    let color = label_color(label);
+                    Span::styled(format!(" {label}"), Style::default().fg(if done { dimmed(color, 70) } else { color }))
+                }));
+            }
             spans.extend([
-                Span::styled(rendered_name, name_style),
-                Span::styled(tags, Style::default().fg(Color::DarkGray)),
                 Span::raw(" ".repeat(spacing)),
                 Span::styled(right, Style::default().fg(Color::DarkGray)),
             ]);
@@ -4736,6 +4760,9 @@ mod tests {
         assert_eq!(style("tweezr@feature").fg, Some(project_color("tweezr")));
         assert_eq!(style("home").fg, None);
         assert_eq!(dimmed(Color::Rgb(200, 100, 0), 75), Color::Rgb(150, 75, 0));
+        assert_eq!(label_color("done"), DONE_GRAY);
+        assert_eq!(label_color("retro"), label_color("retro"));
+        assert!(LABEL_COLORS.contains(&label_color("retro")));
         // The project is searchable even when a title has replaced the "project@" name.
         let titled: SessionRow = serde_json::from_str(r#"{"name":"Fix login","title":"Fix login","path":"/t/x","branch":"fix-login","project":"tweezr","labels":["urgent"],"target":{"type":"tmux_session","session":"Fix login"}}"#).unwrap();
         for query in ["tweezr", "login", "fix-login", "urgent", "tweezr urgent"] {

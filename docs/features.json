@@ -403,7 +403,7 @@
       ],
       "manual": [
         "Set, replace, and unset a label from a clanker's shell and confirm the dimmed tag follows on the Workshop row without changing its position",
-        "Press Alt-D on a worktree Workshop and confirm it gains a [done] tag with no confirmation while its clankers and session keep running",
+        "Press Alt-D on a worktree Workshop and confirm it gains a done tag with no confirmation while its clankers and session keep running",
         "Press Alt-D on the done Workshop and confirm y destroys it and u clears the done tag",
         "With a short CLANKERHOUSE_DONE_TTL_DAYS, confirm an idle clean done worktree is removed with its branch kept, while a dirty one and one with a working clanker survive",
         "In a repository with a done hook, confirm the hook decides the outcome of Alt-D; confirm pane and plain-session rows are unchanged",

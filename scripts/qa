@@ -464,7 +464,7 @@ tmux -S "$inner_socket" bind-key -n M-d run-shell \
     "'$repo/bin/clankerhouse-delete' '#{pane_id}' '#{session_id}' #{q:client_name}"
 sleep 0.2
 
-picker_command="env CLANKERHOUSE_PREVIEW=0 CLANKERHOUSE_SCOPE=all PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 tmux -S "$inner_socket" new-window -t "=$session" -n picker -c "$repo" "$picker_command"
 focus_inner_window picker
 animation_picker_pane=$(tmux -S "$inner_socket" display-message -p -t "=$session:picker" '#{pane_id}')
@@ -535,7 +535,7 @@ cache_file="$fixture_runtime/clankerhouse-$uid/state.json"
 mkdir -p "$(dirname "$cache_file")"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
 # They never poll JSON and never compete with the authoritative test daemon.
-picker_command="env CLANKERHOUSE_PREVIEW=0 CLANKERHOUSE_SCOPE=all PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/native-client/target/release/clankerhouse-native'"
 lineage_visual_pane=$(open_picker_window lineage-visual)
 wait_for_text "$lineage_root_session"
 # The newest child is initially selected. Searching and clearing must return
@@ -688,7 +688,7 @@ tmux -S "$inner_socket" kill-pane -t "$large_current_picker_pane"
 sleep 0.2
 rm -f "$cache_file"
 cache_file="$runtime/clankerhouse-$uid/state.json"
-picker_command="env CLANKERHOUSE_PREVIEW=0 CLANKERHOUSE_SCOPE=all PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
+picker_command="env CLANKERHOUSE_PREVIEW=0 PATH='$root/bin:$PATH' XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true '$repo/bin/clankerhouse-picker'"
 
 now=$(date +%s%3N)
 jq --argjson now "$now" '.state = "done" | .updatedAt = $now | .hookEvent = "agent_settled"' "$state_file" > "$state_file.tmp"

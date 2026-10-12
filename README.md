@@ -178,9 +178,9 @@ Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTE
 
 A Workshop can have a title: a human name such as "Migrate OpenCode adapter to v2". It is shown as the row's name with the branch dimmed on the right, it is searchable, and the multiplexer session or Herdr workspace is renamed to match. Set it when creating a Workshop (see the branch flow below, or `clankers workshop spawn --title "…"`, which derives the branch when `--name` is omitted), and edit it with `Alt-R` on a Workshop row; an empty title clears it. Editing a title never renames the branch. A title is stored as the `title` label, so `clankers workshop label set "title=…"` works too and repository hooks see it.
 
-The picker lists the Workshops of every project. Each row starts with its project (repository) name as a tag in a colour derived from that name, so one project is always the same colour, and untitled rows drop the repeated `project@` prefix. Search matches the title, branch, labels, and project.
+The picker lists the Workshops of every project. Each row's name is shown in a colour derived from its project (repository) name, so one project is always the same colour. Search matches the title, branch, labels, and project.
 
-Row names fade with age without moving: seen within a day is normal, one to three days is dimmed, older is dimmer. State glyphs keep full colour, and the current Workshop never fades. The working glyph is the only one that animates.
+Row names fade with age without moving: seen within a day is normal, one to three days is dimmed, older is dimmer. A faded row keeps its project's hue. State glyphs keep full colour, and the current Workshop never fades. The working glyph is the only one that animates.
 
 When the terminal is at least 120 columns wide the picker shows a preview of the selected Workshop beside the list (beneath it in a narrower terminal at least 30 rows tall): title, branch, labels, the size of its diff against the base branch, and the last few lines a clanker said there. The preview is fetched from the daemon only for the row the selection rests on. It reads the harness's own session store (Claude and Pi) and Git; it never captures a terminal pane. Set `CLANKERHOUSE_PREVIEW=0` to keep the list at full width.
 

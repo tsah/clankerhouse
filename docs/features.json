@@ -411,7 +411,7 @@
         "Edit a title with Alt-R, clear it with an empty title, and confirm the branch never changes",
         "In a wide terminal rest on several rows and judge that the preview's last message and diff size are correct and that scrolling stays smooth",
         "Judge that rows untouched for days are visibly dimmer, that state glyphs keep full colour, and that only the working glyph animates",
-        "With Workshops from several projects listed, judge that the coloured project tags tell them apart at a glance and never read as a state"
+        "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state"
       ]
     }
   ]

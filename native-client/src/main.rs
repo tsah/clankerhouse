@@ -1886,22 +1886,23 @@ fn project_color(project: &str) -> Color {
     PROJECT_COLORS[hash as usize % PROJECT_COLORS.len()]
 }
 
-/// The project is shown as a tag, so an untitled row drops the repeated "project@" prefix.
-fn name_without_project(session: &SessionRow) -> &str {
-    session
-        .project
-        .as_deref()
-        .and_then(|project| session.name.strip_prefix(project))
-        .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(&session.name)
+/// A faded row keeps its project's hue: the colour is darkened, not replaced.
+fn dimmed(color: Color, percent: u16) -> Color {
+    match color {
+        Color::Rgb(red, green, blue) => {
+            let scale = |value: u8| (u16::from(value) * percent / 100) as u8;
+            Color::Rgb(scale(red), scale(green), scale(blue))
+        }
+        other => other,
+    }
 }
 
 fn is_done(session: &SessionRow) -> bool {
     session.labels.iter().any(|label| label == "done")
 }
 
-/// A done Workshop is grayed out whatever its age; otherwise a row fades as it goes unvisited.
+/// A Workshop's name carries its project's colour. A done Workshop is grayed out whatever its
+/// age; otherwise a row fades as it goes unvisited.
 /// Detail rows and the state glyph keep their own colours, so a live clanker still stands out.
 fn row_name_style(row: &TreeRow, current: bool, now: u64) -> Style {
     if row.detail.is_some() {
@@ -1910,10 +1911,14 @@ fn row_name_style(row: &TreeRow, current: bool, now: u64) -> Style {
     if is_done(&row.session) {
         return Style::default().fg(DONE_GRAY);
     }
-    if current {
-        return Style::default();
+    let project = row.session.project.as_deref().map(project_color);
+    let fade = if current { None } else { fade_color(row.session.recency, now) };
+    match (project, fade) {
+        (Some(color), None) => Style::default().fg(color),
+        (Some(color), Some(fade)) => Style::default().fg(dimmed(color, if fade == DONE_GRAY { 55 } else { 75 })),
+        (None, Some(fade)) => Style::default().fg(fade),
+        (None, None) => Style::default(),
     }
-    fade_color(row.session.recency, now).map_or_else(Style::default, |color| Style::default().fg(color))
 }
 
 /// Rows left alone for days recede without moving: under a day is normal, then two steps of dimming.
@@ -2412,9 +2417,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         detail.kind.as_str()
                     }
                 })
-                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or_else(|| name_without_project(&row.session)));
-            let project = row.session.project.as_deref().filter(|_| row.detail.is_none());
-            let project_tag = project.map(|project| format!("{} ", ellipsize(project, 12))).unwrap_or_default();
+                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or(&row.session.name));
             let detail_meta = row
                 .detail
                 .as_ref()
@@ -2456,7 +2459,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let content_width = list_area.width.saturating_sub(5) as usize;
             let fixed_width = 3
                 + prefix.width()
-                + project_tag.width()
                 + tags.width()
                 + if right.is_empty() {
                     0
@@ -2465,7 +2467,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 };
             let rendered_name = ellipsize(name, content_width.saturating_sub(fixed_width).max(4));
             let occupied =
-                3 + prefix.width() + project_tag.width() + rendered_name.width() + tags.width() + right.width();
+                3 + prefix.width() + rendered_name.width() + tags.width() + right.width();
             let spacing = if right.is_empty() {
                 0
             } else {
@@ -2479,13 +2481,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 vec![lineage, status]
             };
             let name_style = row_name_style(row, current, now);
-            let project_style = match project {
-                Some(_) if is_done(&row.session) => Style::default().fg(DONE_GRAY),
-                Some(project) => Style::default().fg(project_color(project)),
-                None => Style::default(),
-            };
             spans.extend([
-                Span::styled(project_tag, project_style),
                 Span::styled(rendered_name, name_style),
                 Span::styled(tags, Style::default().fg(Color::DarkGray)),
                 Span::raw(" ".repeat(spacing)),
@@ -4736,10 +4732,10 @@ mod tests {
         app.current_session = "tweezr@feature".into();
         app.rebuild(None);
         assert_eq!(app.rows.iter().filter(|row| row.detail.is_none()).count(), 3);
-        let named = |name: &str| app.sessions.iter().find(|session| session.name == name).unwrap();
-        assert_eq!(name_without_project(named("tweezr@feature")), "feature");
-        assert_eq!(name_without_project(named("home")), "home");
-        assert_eq!(project_color("tweezr"), project_color("tweezr"));
+        let style = |name: &str| row_name_style(app.rows.iter().find(|row| row.session.name == name).unwrap(), false, 0);
+        assert_eq!(style("tweezr@feature").fg, Some(project_color("tweezr")));
+        assert_eq!(style("home").fg, None);
+        assert_eq!(dimmed(Color::Rgb(200, 100, 0), 75), Color::Rgb(150, 75, 0));
         // The project is searchable even when a title has replaced the "project@" name.
         let titled: SessionRow = serde_json::from_str(r#"{"name":"Fix login","title":"Fix login","path":"/t/x","branch":"fix-login","project":"tweezr","labels":["urgent"],"target":{"type":"tmux_session","session":"Fix login"}}"#).unwrap();
         for query in ["tweezr", "login", "fix-login", "urgent", "tweezr urgent"] {

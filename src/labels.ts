@@ -7,7 +7,9 @@ export interface LabelChange {
   changed: boolean
 }
 
-const labelKeyPattern = /^[a-z][a-z0-9_-]{0,31}$/
+/** A key starting with "_" is hidden: stored and passed to hooks, never shown as a tag. Bookkeeping belongs there. */
+const labelKeyPattern = /^_?[a-z][a-z0-9_-]{0,31}$/
+const hiddenLabelKey = (key: string) => key.startsWith("_")
 const labelValuePattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/
 
 /** The human name of a Workshop. Unlike other labels its value is free text, and it is shown as the row's name, not as a tag. */
@@ -55,8 +57,8 @@ export const applyLabelChange = (current: WorkshopLabels, key: string, value: st
   return { previous, labels: sorted(next), changed: true }
 }
 
-/** Presentation tags: values only, ordered by key. The title is the row's name, never a tag. */
-export const labelTags = (labels: WorkshopLabels | undefined) => Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY).toSorted(([left], [right]) => left.localeCompare(right)).map(([, value]) => value)
+/** Presentation tags: values only, ordered by key. The title is the row's name, never a tag, and hidden keys are left out. */
+export const labelTags = (labels: WorkshopLabels | undefined) => Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY && !hiddenLabelKey(key)).toSorted(([left], [right]) => left.localeCompare(right)).map(([, value]) => value)
 
 const environmentName = (prefix: string, key: string) => `${prefix}${key.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
 

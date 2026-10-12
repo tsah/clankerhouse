@@ -50,6 +50,10 @@ describe("workshop labels", () => {
   test("tags are the values ordered by key", () => {
     expect(labelTags({ stage: "retro", owner: "tsah" })).toEqual(["tsah", "retro"])
     expect(labelTags(undefined)).toEqual([])
+    expect(validLabelKey("_retro")).toBe(true)
+    expect(validLabelKey("__retro")).toBe(false)
+    expect(labelTags({ _retro: "clanker-1", stage: "retro" })).toEqual(["retro"])
+    expect(hookEnvironment({ event: "labels-changed", workshopId: "w", path: "/p", branch: "b", labels: { _retro: "clanker-1" } }).CLANKERHOUSE_LABEL__RETRO).toBe("clanker-1")
   })
 
   test("hooks receive every label as JSON and as a plain variable", () => {

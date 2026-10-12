@@ -184,7 +184,7 @@ Row names fade with age without moving: seen within a day is normal, one to thre
 
 ## Workshop labels and repository hooks
 
-A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as coloured tags after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`.
+A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their values as coloured tags after the Workshop name, and makes them searchable; they never affect ordering. The only label Clankerhouse itself acts on is `status=done`. A key that starts with `_`, such as `_retro=…`, is hidden: it is stored and passed to hooks (as `CLANKERHOUSE_LABEL__RETRO`) but never shown or searched, which is where a hook's own bookkeeping belongs.
 
 `Alt-D` on a worktree Workshop marks it done instead of deleting it. Nothing else changes: its clankers, session, and worktree stay. `Alt-D` on a done Workshop asks whether to destroy it (`y`) or reopen it (`u`, which clears the label). A done Workshop that is then left alone for seven days is deleted automatically; using it again restarts the seven days. The reaper never deletes a worktree with uncommitted changes or with a clanker that is working, waiting, or finished but unseen, and it keeps the branch. Set `CLANKERHOUSE_DONE_TTL_DAYS` for the daemon to change the retention, or to `0` to turn automatic deletion off.
 

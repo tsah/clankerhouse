@@ -1735,7 +1735,9 @@ fn label_color(label: &str) -> Color {
 
 /// The root of a lineage names its project as a tag; the rows beneath it only carry the colour.
 fn root_project(row: &TreeRow) -> Option<&str> {
-    row.session.project.as_deref().filter(|_| row.detail.is_none() && row.depth == 0)
+    // A row already named after its project, such as the main checkout, needs no tag.
+    let shown = row.session.title.as_deref().unwrap_or(&row.session.name);
+    row.session.project.as_deref().filter(|project| row.detail.is_none() && row.depth == 0 && *project != shown)
 }
 
 /// The project tag already names the project, so an untitled root drops the "project@" prefix.

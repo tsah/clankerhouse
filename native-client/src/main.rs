@@ -1733,6 +1733,22 @@ fn label_color(label: &str) -> Color {
     if label == "done" { DONE_GRAY } else { LABEL_COLORS[name_hash(label) % LABEL_COLORS.len()] }
 }
 
+/// The root of a lineage names its project as a tag; the rows beneath it only carry the colour.
+fn root_project(row: &TreeRow) -> Option<&str> {
+    row.session.project.as_deref().filter(|_| row.detail.is_none() && row.depth == 0)
+}
+
+/// The project tag already names the project, so an untitled root drops the "project@" prefix.
+fn name_without_project(session: &SessionRow) -> &str {
+    session
+        .project
+        .as_deref()
+        .and_then(|project| session.name.strip_prefix(project))
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(&session.name)
+}
+
 /// A faded row keeps its project's hue: the colour is darkened, not replaced.
 fn dimmed(color: Color, percent: u16) -> Color {
     match color {
@@ -2259,7 +2275,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         detail.kind.as_str()
                     }
                 })
-                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or(&row.session.name));
+                .unwrap_or_else(|| {
+                    row.session.title.as_deref().unwrap_or_else(|| if root_project(row).is_some() { name_without_project(&row.session) } else { &row.session.name })
+                });
             let detail_meta = row
                 .detail
                 .as_ref()
@@ -2293,15 +2311,22 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
                 .join("  ");
-            let tags = if row.detail.is_none() && !row.session.labels.is_empty() {
-                format!(" {}", row.session.labels.join(" "))
-            } else {
-                String::new()
-            };
+            let done = is_done(&row.session);
+            let mut tag_spans = Vec::new();
+            if let Some(project) = root_project(row) {
+                tag_spans.push(Span::styled(format!(" {project}"), Style::default().fg(if done { DONE_GRAY } else { project_color(project) })));
+            }
+            if row.detail.is_none() {
+                tag_spans.extend(row.session.labels.iter().map(|label| {
+                    let color = label_color(label);
+                    Span::styled(format!(" {label}"), Style::default().fg(if done { dimmed(color, 70) } else { color }))
+                }));
+            }
+            let tags_width = tag_spans.iter().map(Span::width).sum::<usize>();
             let content_width = list_area.width.saturating_sub(5) as usize;
             let fixed_width = 3
                 + prefix.width()
-                + tags.width()
+                + tags_width
                 + if right.is_empty() {
                     0
                 } else {
@@ -2309,7 +2334,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 };
             let rendered_name = ellipsize(name, content_width.saturating_sub(fixed_width).max(4));
             let occupied =
-                3 + prefix.width() + rendered_name.width() + tags.width() + right.width();
+                3 + prefix.width() + rendered_name.width() + tags_width + right.width();
             let spacing = if right.is_empty() {
                 0
             } else {
@@ -2324,13 +2349,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             };
             let name_style = row_name_style(row, current, now);
             spans.push(Span::styled(rendered_name, name_style));
-            if !tags.is_empty() {
-                let done = is_done(&row.session);
-                spans.extend(row.session.labels.iter().map(|label| {
-                    let color = label_color(label);
-                    Span::styled(format!(" {label}"), Style::default().fg(if done { dimmed(color, 70) } else { color }))
-                }));
-            }
+            spans.extend(tag_spans);
             spans.extend([
                 Span::raw(" ".repeat(spacing)),
                 Span::styled(right, Style::default().fg(Color::DarkGray)),
@@ -4490,6 +4509,11 @@ mod tests {
         assert_eq!(style("home").fg, None);
         assert_eq!(dimmed(Color::Rgb(200, 100, 0), 75), Color::Rgb(150, 75, 0));
         assert_eq!(label_color("done"), DONE_GRAY);
+        let root = app.rows.iter().find(|row| row.session.name == "tweezr@feature").unwrap();
+        assert_eq!(root_project(root), Some("tweezr"));
+        assert_eq!(name_without_project(&root.session), "feature");
+        assert_eq!(root_project(&TreeRow { depth: 1, ..root.clone() }), None);
+        assert_eq!(root_project(app.rows.iter().find(|row| row.session.name == "home").unwrap()), None);
         assert_eq!(label_color("retro"), label_color("retro"));
         assert!(LABEL_COLORS.contains(&label_color("retro")));
         // The project is searchable even when a title has replaced the "project@" name.

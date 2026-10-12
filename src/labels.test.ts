@@ -53,11 +53,12 @@ describe("workshop labels", () => {
   })
 
   test("hooks receive every label as JSON and as a plain variable", () => {
-    expect(hookEnvironment({ event: "labels-changed", workshopId: "w1", path: "/repo/feature", branch: "feature", labels: { stage: "retro", "review-state": "open" }, previousLabels: { stage: "merged" } })).toEqual({
+    expect(hookEnvironment({ event: "labels-changed", workshopId: "w1", path: "/repo/feature", branch: "feature", project: "repo", labels: { stage: "retro", "review-state": "open" }, previousLabels: { stage: "merged" } })).toEqual({
       CLANKERHOUSE_HOOK_EVENT: "labels-changed",
       CLANKERHOUSE_WORKSHOP_ID: "w1",
       CLANKERHOUSE_WORKSHOP_PATH: "/repo/feature",
       CLANKERHOUSE_WORKSHOP_BRANCH: "feature",
+      CLANKERHOUSE_PROJECT: "repo",
       CLANKERHOUSE_LABELS: '{"review-state":"open","stage":"retro"}',
       CLANKERHOUSE_LABEL_STAGE: "retro",
       CLANKERHOUSE_LABEL_REVIEW_STATE: "open",

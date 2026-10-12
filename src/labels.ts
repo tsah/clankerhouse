@@ -65,6 +65,7 @@ export interface HookContext {
   workshopId: string
   path: string
   branch: string
+  project?: string
   labels: WorkshopLabels
   previousLabels?: WorkshopLabels
 }
@@ -75,6 +76,7 @@ export const hookEnvironment = (context: HookContext): Record<string, string> =>
   CLANKERHOUSE_WORKSHOP_ID: context.workshopId,
   CLANKERHOUSE_WORKSHOP_PATH: context.path,
   CLANKERHOUSE_WORKSHOP_BRANCH: context.branch,
+  ...(context.project ? { CLANKERHOUSE_PROJECT: context.project } : {}),
   CLANKERHOUSE_LABELS: JSON.stringify(sorted(context.labels)),
   ...Object.fromEntries(Object.entries(context.labels).map(([key, value]) => [environmentName("CLANKERHOUSE_LABEL_", key), value])),
   ...(context.previousLabels ? {

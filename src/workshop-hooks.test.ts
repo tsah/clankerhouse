@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { workshopLabels, workshopsWithLabel } from "./workshop"
-import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, runDoneHook, workshopHookPath } from "./workshop-hooks"
+import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, runDoneHook, userHookPath, workshopHookPath } from "./workshop-hooks"
 
 const roots: string[] = []
 afterEach(() => {
@@ -101,6 +101,36 @@ describe("workshop repository hooks", () => {
     writeHook(worktree, "done", "exit 0")
     expect(await completeDone(worktree, dbPath)).toEqual({ handled: true, hook: true, exitCode: 0, worktree: true })
     expect(workshopsWithLabel("status", "done", dbPath)).toEqual([])
+  })
+
+  test("the operator's project hook applies to every workshop of the project, and a hook in the workshop wins", async () => {
+    const { root, worktree, dbPath } = fixture()
+    const previousConfig = Bun.env.XDG_CONFIG_HOME
+    Bun.env.XDG_CONFIG_HOME = join(root, "config")
+    try {
+      const output = join(root, "user-hook.out")
+      // The fixture repository's directory is "repo", so that is its project.
+      const userHook = userHookPath("repo", "labels-changed")
+      expect(userHook).toBe(join(root, "config", "clankerhouse", "hooks", "repo", "labels-changed"))
+      mkdirSync(join(root, "config", "clankerhouse", "hooks", "repo"), { recursive: true })
+      writeFileSync(userHook, `#!/bin/sh\nprintf 'user|%s|%s' "$CLANKERHOUSE_PROJECT" "$PWD" > '${output}'\n`)
+      chmodSync(userHook, 0o755)
+
+      const applied = applyWorkshopLabel(worktree, "stage", "merged", dbPath)
+      expect(dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)).toBe(true)
+      expect(await waitForFile(output)).toBe(`user|repo|${applied.workshop.canonicalPath}`)
+
+      const inRepo = join(root, "repo-hook.out")
+      writeHook(worktree, "labels-changed", `printf 'repo' > '${inRepo}'`)
+      rmSync(output)
+      expect(dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)).toBe(true)
+      expect(await waitForFile(inRepo)).toBe("repo")
+      await Bun.sleep(100)
+      expect(existsSync(output)).toBe(false)
+    } finally {
+      if (previousConfig === undefined) delete Bun.env.XDG_CONFIG_HOME
+      else Bun.env.XDG_CONFIG_HOME = previousConfig
+    }
   })
 
   test("a directory outside Git has no workshop to label and falls through", async () => {

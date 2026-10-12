@@ -147,6 +147,8 @@ struct SessionRow {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
     age: String,
     #[serde(default)]
     recency: u64,
@@ -808,8 +810,10 @@ fn search_score(session: &SessionRow, query: &str) -> Option<i64> {
     let markers = session.markers.join(" ");
     let labels = session.labels.join(" ");
     let title = session.title.clone().unwrap_or_default();
+    let project = session.project.clone().unwrap_or_default();
     let fields = [
         (&title, 180),
+        (&project, 120),
         (&session.name, 180),
         (&session.branch, 140),
         (&session.path, 80),
@@ -844,7 +848,10 @@ fn search_score(session: &SessionRow, query: &str) -> Option<i64> {
 }
 
 fn session_direct_search_score(session: &SessionRow, query: &str) -> Option<i64> {
-    let fields = [(&session.name, 180), (&session.branch, 140), (&session.path, 80)];
+    let title = session.title.clone().unwrap_or_default();
+    let project = session.project.clone().unwrap_or_default();
+    let labels = session.labels.join(" ");
+    let fields = [(&title, 180), (&session.name, 180), (&session.branch, 140), (&project, 120), (&session.path, 80), (&labels, 50)];
     let mut total = 0;
     for term in query.to_lowercase().split_whitespace() {
         let mut best = None;
@@ -1861,6 +1868,35 @@ fn branch_from_title(title: &str) -> Option<String> {
 
 const DONE_GRAY: Color = Color::Rgb(108, 114, 128);
 
+/// Muted hues kept apart from the state glyph colours, so a tag never reads as a state.
+const PROJECT_COLORS: [Color; 8] = [
+    Color::Rgb(94, 180, 170),
+    Color::Rgb(167, 139, 250),
+    Color::Rgb(232, 130, 180),
+    Color::Rgb(214, 188, 104),
+    Color::Rgb(103, 200, 230),
+    Color::Rgb(160, 190, 110),
+    Color::Rgb(190, 150, 200),
+    Color::Rgb(200, 160, 130),
+];
+
+/// A project keeps one colour everywhere: it is derived from the name alone.
+fn project_color(project: &str) -> Color {
+    let hash = project.bytes().fold(0x811c9dc5u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(0x01000193));
+    PROJECT_COLORS[hash as usize % PROJECT_COLORS.len()]
+}
+
+/// The project is shown as a tag, so an untitled row drops the repeated "project@" prefix.
+fn name_without_project(session: &SessionRow) -> &str {
+    session
+        .project
+        .as_deref()
+        .and_then(|project| session.name.strip_prefix(project))
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(&session.name)
+}
+
 fn is_done(session: &SessionRow) -> bool {
     session.labels.iter().any(|label| label == "done")
 }
@@ -2376,7 +2412,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         detail.kind.as_str()
                     }
                 })
-                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or(&row.session.name));
+                .unwrap_or_else(|| row.session.title.as_deref().unwrap_or_else(|| name_without_project(&row.session)));
+            let project = row.session.project.as_deref().filter(|_| row.detail.is_none());
+            let project_tag = project.map(|project| format!("{} ", ellipsize(project, 12))).unwrap_or_default();
             let detail_meta = row
                 .detail
                 .as_ref()
@@ -2418,6 +2456,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let content_width = list_area.width.saturating_sub(5) as usize;
             let fixed_width = 3
                 + prefix.width()
+                + project_tag.width()
                 + tags.width()
                 + if right.is_empty() {
                     0
@@ -2426,7 +2465,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 };
             let rendered_name = ellipsize(name, content_width.saturating_sub(fixed_width).max(4));
             let occupied =
-                3 + prefix.width() + rendered_name.width() + tags.width() + right.width();
+                3 + prefix.width() + project_tag.width() + rendered_name.width() + tags.width() + right.width();
             let spacing = if right.is_empty() {
                 0
             } else {
@@ -2440,7 +2479,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 vec![lineage, status]
             };
             let name_style = row_name_style(row, current, now);
+            let project_style = match project {
+                Some(_) if is_done(&row.session) => Style::default().fg(DONE_GRAY),
+                Some(project) => Style::default().fg(project_color(project)),
+                None => Style::default(),
+            };
             spans.extend([
+                Span::styled(project_tag, project_style),
                 Span::styled(rendered_name, name_style),
                 Span::styled(tags, Style::default().fg(Color::DarkGray)),
                 Span::raw(" ".repeat(spacing)),
@@ -4691,6 +4736,19 @@ mod tests {
         app.current_session = "tweezr@feature".into();
         app.rebuild(None);
         assert_eq!(app.rows.iter().filter(|row| row.detail.is_none()).count(), 3);
+        let named = |name: &str| app.sessions.iter().find(|session| session.name == name).unwrap();
+        assert_eq!(name_without_project(named("tweezr@feature")), "feature");
+        assert_eq!(name_without_project(named("home")), "home");
+        assert_eq!(project_color("tweezr"), project_color("tweezr"));
+        // The project is searchable even when a title has replaced the "project@" name.
+        let titled: SessionRow = serde_json::from_str(r#"{"name":"Fix login","title":"Fix login","path":"/t/x","branch":"fix-login","project":"tweezr","labels":["urgent"],"target":{"type":"tmux_session","session":"Fix login"}}"#).unwrap();
+        for query in ["tweezr", "login", "fix-login", "urgent", "tweezr urgent"] {
+            assert!(search_score(&titled, query).is_some(), "{query}");
+        }
+        assert!(search_score(&titled, "clankerhouse").is_none());
+        for query in ["tweezr", "login", "fix-login", "urgent"] {
+            assert!(session_direct_search_score(&titled, query).is_some(), "{query}");
+        }
         assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), None);
         assert_eq!(app.mode, Mode::Jump);
     }

@@ -252,6 +252,7 @@ client = subprocess.Popen(
     stdout=slave,
     stderr=slave,
     close_fds=True,
+    env={**os.environ, "TERM": "xterm-256color"},
 )
 os.close(slave)
 time.sleep(0.3)

@@ -14,6 +14,17 @@ jobs:
           bun-version: "1.3.14"
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y tmux python3 jq zoxide util-linux
+      - name: Install Worktrunk
+        env:
+          WORKTRUNK_VERSION: "0.79.0"
+          WORKTRUNK_SHA256: b8c190b1d652370ef9f6b8f4694a2d6831b5b22f4b789f047612aad32764c6cf
+        run: |
+          archive=worktrunk-x86_64-unknown-linux-musl.tar.xz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/max-sixty/worktrunk/releases/download/v$WORKTRUNK_VERSION/$archive"
+          echo "$WORKTRUNK_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/worktrunk-x86_64-unknown-linux-musl/wt" /usr/local/bin/wt
+          wt --version
       - run: bun install --frozen-lockfile
       - run: ./test --unit
       - run: bun run qa:native-hot

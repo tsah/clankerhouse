@@ -25,6 +25,17 @@ jobs:
           tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
           sudo install -m 0755 "$RUNNER_TEMP/worktrunk-x86_64-unknown-linux-musl/wt" /usr/local/bin/wt
           wt --version
+      - name: Install Neovim
+        env:
+          NEOVIM_VERSION: "0.12.5"
+          NEOVIM_SHA256: bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875
+        run: |
+          archive=nvim-linux-x86_64.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/neovim/neovim/releases/download/v$NEOVIM_VERSION/$archive"
+          echo "$NEOVIM_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/$archive" -C /opt
+          sudo ln -s /opt/nvim-linux-x86_64/bin/nvim /usr/local/bin/nvim
+          nvim --version | head -n 1
       - run: bun install --frozen-lockfile
       - run: ./test --unit
       - run: bun run qa:native-hot

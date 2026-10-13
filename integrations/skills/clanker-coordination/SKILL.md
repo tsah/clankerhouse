@@ -3,7 +3,8 @@ name: clanker-coordination
 description: >-
   Coordinate existing visible clankers through the Clanker API. Use when the
   user asks to find clankers, inspect status, monitor or wait, send instructions,
-  steer, or retrieve results. Never communicate through tmux input or capture.
+  steer, or retrieve results, or when told to mark yourself or this Workshop
+  done. Never communicate through tmux input or capture.
 ---
 
 # Clanker coordination
@@ -44,3 +45,15 @@ Rules:
 
 API errors use exit 3 for unknown/ambiguous IDs, 4 for unsupported capabilities,
 5 for unavailable endpoints, and 124 for a nondestructive timeout.
+
+## Marking this Workshop Done
+
+When told to mark yourself or this Workshop done, set the built-in Label from
+the Workshop directory, after the work you were asked to finish first has
+finished:
+
+```bash
+clankers workshop label set status=done
+```
+
+It changes nothing external: clankers, sessions, and the worktree stay.

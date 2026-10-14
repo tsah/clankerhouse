@@ -9,7 +9,7 @@ const savedEnv = { ...Bun.env }
 let root = ""
 
 const git = (cwd: string, ...args: string[]) => {
-  const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" })
+  const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env } })
   if (result.exitCode !== 0) throw new Error(result.stderr.toString())
   return result.stdout.toString().trim()
 }
@@ -91,7 +91,7 @@ describe("workshop base", () => {
   test.skipIf(!hasWorktrunk)("creates the Worktrunk branch at the fetched tip without tracking the default branch", () => {
     const { clone, tip } = staleClone()
     const base = workshopBase(clone)!
-    const created = Bun.spawnSync(["wt", "-C", clone, "switch", "--create", "fresh", "--no-cd", "--no-hooks", "--format", "json", "--base", base], { stdout: "pipe", stderr: "pipe" })
+    const created = Bun.spawnSync(["wt", "-C", clone, "switch", "--create", "fresh", "--no-cd", "--no-hooks", "--format", "json", "--base", base], { stdout: "pipe", stderr: "pipe", env: { ...process.env } })
     expect(created.exitCode).toBe(0)
     const { path } = JSON.parse(created.stdout.toString()) as { path: string }
     expect(git(path, "rev-parse", "HEAD")).toBe(tip)

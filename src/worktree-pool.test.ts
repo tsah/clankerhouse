@@ -9,7 +9,7 @@ const savedEnv = { ...Bun.env }
 let root = ""
 
 const git = (cwd: string, ...args: string[]) => {
-  const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" })
+  const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env } })
   if (result.exitCode !== 0) throw new Error(result.stderr.toString())
   return result.stdout.toString().trim()
 }

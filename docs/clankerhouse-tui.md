@@ -50,6 +50,13 @@ connectors; explicitly expanded window and clanker details use subdued bullet
 rows beneath their workshop. Collapsed workshops summarize their windows and
 harnesses inline.
 
+A subtree whose every Workshop carries the done label folds into one gray
+`✓ N done` row under its parent, or above every root when the done Workshops are
+roots. A done Workshop stays visible while anything beneath it is not done, while
+it or a descendant has a working, blocked, failed, or unseen-done clanker, and
+while it is on the current Workshop's lineage. Search shows done Workshops
+without folding them.
+
 Rows are ordered only by last-seen recency, oldest at the top and newest nearest
 the prompt. A lineage subtree uses the newest last-seen value among all of its
 descendants, and the current session remains pinned nearest the prompt. Runtime
@@ -63,6 +70,8 @@ matches by concatenating unrelated fields.
 
 - `Up/Down`: move through visible workshop and detail rows
 - `Left/Right`: collapse or expand workshop lineage and exact details
+- `Right`/`Enter` on a `✓ N done` row: show that group in place; `Left` folds it again
+- `Alt-.`: show or fold every done Workshop
 - `Enter`: open the exact workshop, clanker, window, worktree, or directory
 - `Alt-K`: open the repository/branch flow when already inside Clankerhouse
 - `Alt-B`: open directly at repository selection

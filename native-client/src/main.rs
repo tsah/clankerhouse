@@ -303,12 +303,22 @@ struct TreeRow {
     contains_clanker: bool,
     has_children: bool,
     is_last: bool,
+    done_group: Option<DoneGroup>,
+}
+
+/// Done Workshops folded into one summary row beneath their parent (None: among the roots).
+#[derive(Clone, Debug, PartialEq)]
+struct DoneGroup {
+    parent: Option<String>,
+    count: usize,
+    expanded: bool,
 }
 
 struct TreeBuildContext<'a> {
     by_parent: &'a HashMap<Option<String>, Vec<usize>>,
     states: &'a [ClankerState],
     has_clankers: &'a [bool],
+    foldable: &'a [bool],
     included: &'a HashSet<String>,
     query: &'a str,
 }
@@ -320,6 +330,8 @@ struct App {
     rows: Vec<TreeRow>,
     expanded_lineage: HashSet<String>,
     expanded_details: HashSet<String>,
+    expanded_done_groups: HashSet<Option<String>>,
+    show_done: bool,
     selected: usize,
     query: String,
     unfiltered_selection: Option<String>,
@@ -505,6 +517,92 @@ fn subtree_state(
     let state = aggregate(std::iter::once(session_state(session)).chain(children));
     visiting.remove(&index);
     state
+}
+
+/// A subtree folds only when every Workshop in it is done, none is on the current lineage,
+/// and nothing in it still wants attention (a live, blocked, failed or unseen-done clanker).
+fn subtree_foldable(
+    index: usize,
+    sessions: &[SessionRow],
+    by_parent: &HashMap<Option<String>, Vec<usize>>,
+    states: &[ClankerState],
+    current_lineage: &HashSet<usize>,
+    visiting: &mut HashSet<usize>,
+) -> bool {
+    if !visiting.insert(index) {
+        return false;
+    }
+    let session = &sessions[index];
+    let foldable = is_done(session)
+        && !current_lineage.contains(&index)
+        && !matches!(
+            states[index],
+            ClankerState::Working | ClankerState::Blocked | ClankerState::Failed | ClankerState::Done
+        )
+        && session
+            .workshop_id
+            .as_ref()
+            .and_then(|id| by_parent.get(&Some(id.clone())))
+            .into_iter()
+            .flatten()
+            .all(|child| subtree_foldable(*child, sessions, by_parent, states, current_lineage, visiting));
+    visiting.remove(&index);
+    foldable
+}
+
+fn subtree_size(
+    index: usize,
+    sessions: &[SessionRow],
+    by_parent: &HashMap<Option<String>, Vec<usize>>,
+    visiting: &mut HashSet<usize>,
+) -> usize {
+    if !visiting.insert(index) {
+        return 0;
+    }
+    1 + sessions[index]
+        .workshop_id
+        .as_ref()
+        .and_then(|id| by_parent.get(&Some(id.clone())))
+        .into_iter()
+        .flatten()
+        .map(|child| subtree_size(*child, sessions, by_parent, visiting))
+        .sum::<usize>()
+}
+
+/// The summary row stands on a placeholder session with no target and no actions, so no
+/// Workshop action can reach a real Workshop through it.
+fn done_group_row(group: DoneGroup, depth: usize, is_last: bool) -> TreeRow {
+    TreeRow {
+        key: format!("done-group:{}", group.parent.as_deref().unwrap_or("")),
+        depth,
+        session: SessionRow {
+            name: format!("{} done", group.count),
+            path: String::new(),
+            branch: String::new(),
+            flags: String::new(),
+            markers: Vec::new(),
+            labels: Vec::new(),
+            title: None,
+            project: None,
+            age: String::new(),
+            recency: 0,
+            target: Target::Directory { path: String::new() },
+            details: Vec::new(),
+            directory_source: String::new(),
+            activity_source: String::new(),
+            workshop_id: None,
+            management: String::new(),
+            available_actions: Vec::new(),
+            parent_workshop_id: None,
+            attachment_candidate_workshop_ids: None,
+        },
+        detail: None,
+        state: ClankerState::Unknown,
+        contains_clanker: false,
+        has_children: false,
+        is_last,
+        done_group: Some(group),
+    }
 }
 
 fn subtree_recency(
@@ -902,6 +1000,8 @@ impl App {
             sessions: Vec::new(),
             rows: Vec::new(),
             expanded_lineage: HashSet::new(),
+            expanded_done_groups: HashSet::new(),
+            show_done: false,
             expanded_details: HashSet::new(),
             selected: 0,
             query: String::new(),
@@ -959,6 +1059,8 @@ impl App {
             sessions: Vec::new(),
             rows: Vec::new(),
             expanded_lineage: HashSet::new(),
+            expanded_done_groups: HashSet::new(),
+            show_done: false,
             expanded_details: HashSet::new(),
             selected: 0,
             query: String::new(),
@@ -1183,11 +1285,19 @@ impl App {
                     .then_with(|| left.name.cmp(&right.name))
             });
         }
+        // Search and Alt-. show every done Workshop; otherwise wholly done subtrees fold away.
+        let fold = query.is_empty() && !self.show_done;
+        let foldable = (0..self.sessions.len())
+            .map(|index| {
+                fold && subtree_foldable(index, &self.sessions, &by_parent, &states, &current_lineage, &mut HashSet::new())
+            })
+            .collect::<Vec<_>>();
         let mut rows = Vec::new();
         let context = TreeBuildContext {
             by_parent: &by_parent,
             states: &states,
             has_clankers: &has_clankers,
+            foldable: &foldable,
             included: &included,
             query: &query,
         };
@@ -1205,8 +1315,23 @@ impl App {
                 rows[*start..end].iter().rev().cloned()
             })
             .collect();
+        // A selected Workshop that just folded away hands the selection to its done group.
+        let absorbing_group = selected_key.and_then(|key| {
+            let mut index = self.sessions.iter().position(|session| target_key(&session.target) == key)?;
+            if !foldable[index] {
+                return None;
+            }
+            loop {
+                let parent = self.sessions[index].parent_workshop_id.clone().filter(|id| known_ids.contains(id));
+                match parent.as_ref().and_then(|id| self.sessions.iter().position(|session| session.workshop_id.as_ref() == Some(id))) {
+                    Some(parent_index) if foldable[parent_index] => index = parent_index,
+                    _ => return Some(format!("done-group:{}", parent.as_deref().unwrap_or(""))),
+                }
+            }
+        });
         self.selected = selected_key
             .and_then(|key| self.rows.iter().position(|row| row.key == key))
+            .or_else(|| absorbing_group.and_then(|key| self.rows.iter().position(|row| row.key == key)))
             .or_else(|| {
                 self.rows.iter().position(|row| {
                     row.detail.is_none()
@@ -1236,6 +1361,24 @@ impl App {
             })
             .copied()
             .collect::<Vec<_>>();
+        let folded = visible.iter().copied().filter(|index| context.foldable[*index]).collect::<Vec<_>>();
+        let group = (!folded.is_empty()).then(|| DoneGroup {
+            parent: parent.clone(),
+            count: folded
+                .iter()
+                .map(|index| subtree_size(*index, &self.sessions, context.by_parent, &mut HashSet::new()))
+                .sum(),
+            expanded: self.expanded_done_groups.contains(&parent),
+        });
+        let visible = match &group {
+            Some(group) if !group.expanded => visible.into_iter().filter(|index| !context.foldable[*index]).collect(),
+            _ => visible,
+        };
+        // A summary sits where the oldest sibling would: first beneath a parent, last among roots.
+        let roots = parent.is_none();
+        if let Some(group) = group.clone().filter(|_| !roots) {
+            rows.push(done_group_row(group, depth, visible.is_empty()));
+        }
         for (position, index) in visible.iter().enumerate() {
             let session = self.sessions[*index].clone();
             let id = session.workshop_id.clone();
@@ -1243,7 +1386,7 @@ impl App {
                 .as_ref()
                 .and_then(|id| context.by_parent.get(&Some(id.clone())))
                 .map_or(0, Vec::len);
-            let is_last = position + 1 == visible.len();
+            let is_last = position + 1 == visible.len() && !(roots && group.is_some());
             rows.push(TreeRow {
                 key: target_key(&session.target),
                 depth,
@@ -1253,6 +1396,7 @@ impl App {
                 detail: None,
                 has_children: children > 0,
                 is_last,
+                done_group: None,
             });
             if self.expanded_details.contains(&session.name) || !context.query.is_empty() {
                 for detail in session.details.iter().filter(|detail| {
@@ -1282,6 +1426,7 @@ impl App {
                             detail: Some(detail.clone()),
                             has_children: false,
                             is_last: true,
+                            done_group: None,
                         });
                     }
                 }
@@ -1291,6 +1436,9 @@ impl App {
             {
                 self.append_children(Some(id), depth + 1, context, rows);
             }
+        }
+        if let Some(group) = group.filter(|_| roots) {
+            rows.push(done_group_row(group, depth, true));
         }
     }
 
@@ -2226,7 +2374,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Enter open · Esc close",
+                "  Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Alt-. done · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2252,6 +2400,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 "├─"
             };
+            if let Some(group) = &row.done_group {
+                let prefix = format!("{}{}{} ", "  ".repeat(row.depth), branch, if group.expanded { "▾" } else { "▸" });
+                let status = Span::styled(" ✓ ", Style::default().fg(DONE_GRAY));
+                let lineage = Span::styled(prefix, Style::default().fg(Color::DarkGray));
+                let mut spans = if row.depth == 0 { vec![status, lineage] } else { vec![lineage, status] };
+                spans.push(Span::styled(
+                    row.session.name.clone(),
+                    Style::default().fg(DONE_GRAY).add_modifier(Modifier::ITALIC),
+                ));
+                return ListItem::new(Line::from(spans));
+            }
             let expand = if row.detail.is_some() {
                 "·"
             } else if row.has_children {
@@ -2376,7 +2535,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         (
             app.selected()
-                .map(|row| row.session.path.clone())
+                .map(|row| match &row.done_group {
+                    Some(group) if group.expanded => format!("{} done Workshops shown · ← fold · Alt-. all done", group.count),
+                    Some(group) => format!("{} done Workshops folded · → show · Alt-. all done", group.count),
+                    None => row.session.path.clone(),
+                })
                 .unwrap_or_else(|| "No matches".into()),
             Color::DarkGray,
         )
@@ -2390,7 +2553,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Span::styled("> ", Style::default().fg(Color::LightCyan)),
             Span::raw(&app.query),
             Span::raw("_"),
-            Span::raw(format!("  {} targets", app.rows.len())),
+            Span::raw(format!("  {} targets", app.rows.iter().filter(|row| row.done_group.is_none()).count())),
         ]),
         areas[3],
     );
@@ -2620,6 +2783,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     }
 
     if key.modifiers.contains(KeyModifiers::ALT) {
+        if key.code == KeyCode::Char('.') {
+            app.show_done = !app.show_done;
+            let key = app.selected().map(|row| row.key.clone());
+            app.rebuild(key.as_deref());
+            return None;
+        }
+        // A done group stands for many Workshops; no single-Workshop action applies to it.
+        if app.selected().is_some_and(|row| row.done_group.is_some()) {
+            return None;
+        }
         match key.code {
             KeyCode::Char('r') => {
                 let row = app.selected()?.clone();
@@ -2706,6 +2879,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             let mut query = app.query.clone();
             query.pop();
             app.update_query(query);
+        }
+        KeyCode::Right | KeyCode::Enter
+            if let Some(group) = app.selected().and_then(|row| row.done_group.clone()) =>
+        {
+            app.expanded_done_groups.insert(group.parent);
+            let key = app.selected().map(|row| row.key.clone());
+            app.rebuild(key.as_deref());
+        }
+        KeyCode::Left if let Some(group) = app.selected().and_then(|row| row.done_group.clone()) => {
+            app.expanded_done_groups.remove(&group.parent);
+            let key = app.selected().map(|row| row.key.clone());
+            app.rebuild(key.as_deref());
         }
         KeyCode::Right => {
             if let Some(row) = app.selected().cloned().filter(|row| row.detail.is_none()) {
@@ -4261,6 +4446,9 @@ mod tests {
         let mut app = app_with_sessions(
             r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["done"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
         );
+        select_done_group(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.selected = app.rows.iter().position(|row| row.session.name == "feature").unwrap();
 
         assert!(handle_key(&mut app, alt('d')).is_some());
         apply_mutation_result(&mut app, Ok(serde_json::json!({"handled": false})));
@@ -4533,16 +4721,196 @@ mod tests {
 
     #[test]
     fn done_workshops_are_grayed_out_even_when_fresh_or_current() {
-        let app = app_with_sessions(
+        let mut app = app_with_sessions(
             r#"[
                 {"name":"finished","path":"/finished","recency":1000000,"labels":["done"],"target":{"type":"tmux_session","session":"finished"}},
                 {"name":"active","path":"/active","recency":1000000,"target":{"type":"tmux_session","session":"active"}}
             ]"#,
         );
+        handle_key(&mut app, alt('.'));
         let row = |name: &str| app.rows.iter().find(|row| row.session.name == name).unwrap();
         assert_eq!(row_name_style(row("finished"), false, 1_000_000), Style::default().fg(DONE_GRAY));
         assert_eq!(row_name_style(row("finished"), true, 1_000_000), Style::default().fg(DONE_GRAY));
         assert_eq!(row_name_style(row("active"), false, 1_000_000), Style::default());
+    }
+
+    const DONE_LINEAGE: &str = r#"[
+        {"name":"main","path":"/main","recency":50,"workshopId":"main","target":{"type":"tmux_session","session":"main"}},
+        {"name":"feat","path":"/feat","recency":40,"workshopId":"feat","parentWorkshopId":"main","target":{"type":"tmux_session","session":"feat"}},
+        {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"workshopId":"old-a","parentWorkshopId":"main","target":{"type":"tmux_session","session":"old-a"}},
+        {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"workshopId":"old-b","parentWorkshopId":"main","target":{"type":"tmux_session","session":"old-b"}},
+        {"name":"old-b-child","path":"/old-b-child","recency":10,"labels":["done"],"workshopId":"old-b-child","parentWorkshopId":"old-b","target":{"type":"tmux_session","session":"old-b-child"}}
+    ]"#;
+
+    fn row_named<'a>(app: &'a App, name: &str) -> Option<&'a TreeRow> {
+        app.rows.iter().find(|row| row.done_group.is_none() && row.detail.is_none() && row.session.name == name)
+    }
+
+    fn done_groups(app: &App) -> Vec<&TreeRow> {
+        app.rows.iter().filter(|row| row.done_group.is_some()).collect()
+    }
+
+    fn select_done_group(app: &mut App) {
+        app.selected = app.rows.iter().position(|row| row.done_group.is_some()).unwrap();
+    }
+
+    #[test]
+    fn done_subtrees_fold_into_one_summary_row_under_their_parent() {
+        let app = app_with_sessions(DONE_LINEAGE);
+
+        for name in ["old-a", "old-b", "old-b-child"] {
+            assert!(row_named(&app, name).is_none(), "{name} must be folded");
+        }
+        let groups = done_groups(&app);
+        assert_eq!(groups.len(), 1);
+        let group = groups[0];
+        assert_eq!(group.done_group.as_ref().unwrap().count, 3);
+        assert_eq!(group.depth, 1);
+        // Rows render bottom-up: the summary sits just under its parent, above live siblings.
+        let index = |key: &str| app.rows.iter().position(|row| row.key == key).unwrap();
+        assert!(index(&group.key) < index(&row_named(&app, "main").unwrap().key));
+        assert!(index(&group.key) > index(&row_named(&app, "feat").unwrap().key));
+    }
+
+    #[test]
+    fn done_roots_fold_into_a_summary_above_every_other_root() {
+        let app = app_with_sessions(
+            r#"[
+                {"name":"live","path":"/live","recency":10,"target":{"type":"tmux_session","session":"live"}},
+                {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"target":{"type":"tmux_session","session":"old-a"}},
+                {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"target":{"type":"tmux_session","session":"old-b"}}
+            ]"#,
+        );
+
+        assert!(row_named(&app, "old-a").is_none());
+        let group = done_groups(&app)[0];
+        assert_eq!(group.done_group.as_ref().unwrap().count, 2);
+        assert_eq!(group.depth, 0);
+        assert_eq!(app.rows.last().unwrap().key, group.key);
+    }
+
+    #[test]
+    fn a_done_workshop_stays_visible_while_anything_below_it_is_live() {
+        let app = app_with_sessions(
+            r#"[
+                {"name":"old","path":"/old","labels":["done"],"workshopId":"old","target":{"type":"tmux_session","session":"old"}},
+                {"name":"live-child","path":"/live-child","workshopId":"live-child","parentWorkshopId":"old","target":{"type":"tmux_session","session":"live-child"}}
+            ]"#,
+        );
+
+        assert!(row_named(&app, "old").is_some());
+        assert!(row_named(&app, "live-child").is_some());
+        assert!(done_groups(&app).is_empty());
+    }
+
+    #[test]
+    fn a_done_workshop_with_an_active_or_unseen_clanker_is_not_folded() {
+        for state in ["working", "blocked", "failed", "done"] {
+            let app = app_with_sessions(&format!(
+                r#"[{{"name":"old","path":"/old","labels":["done"],"target":{{"type":"tmux_session","session":"old"}},"details":[{{"kind":"clanker","state":"{state}","target":{{"type":"tmux_window","session":"old","windowId":"@1","pane":"%1"}}}}]}}]"#
+            ));
+            assert!(row_named(&app, "old").is_some(), "{state} clanker must stay visible");
+        }
+    }
+
+    #[test]
+    fn the_current_workshop_is_never_folded() {
+        let app = App::from_snapshot(
+            PathBuf::from("/nonexistent/state.json"),
+            "old-b-child".into(),
+            Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str(DONE_LINEAGE).unwrap() },
+        )
+        .unwrap();
+
+        assert!(row_named(&app, "old-b").is_some());
+        assert!(row_named(&app, "old-b-child").is_some());
+        assert!(row_named(&app, "old-a").is_none());
+        assert_eq!(done_groups(&app)[0].done_group.as_ref().unwrap().count, 1);
+    }
+
+    #[test]
+    fn right_or_enter_expands_a_done_group_and_left_folds_it_again() {
+        for open in [KeyCode::Right, KeyCode::Enter] {
+            let mut app = app_with_sessions(DONE_LINEAGE);
+            select_done_group(&mut app);
+
+            assert_eq!(handle_key(&mut app, KeyEvent::new(open, KeyModifiers::NONE)), None);
+            for name in ["old-a", "old-b"] {
+                assert!(row_named(&app, name).is_some(), "{name} must be shown");
+            }
+            // The summary stays, now open, so Left can fold the group again.
+            let group = app.selected().unwrap();
+            assert!(group.done_group.as_ref().unwrap().expanded);
+
+            handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(row_named(&app, "old-a").is_none());
+            assert!(app.selected().unwrap().done_group.is_some());
+        }
+    }
+
+    #[test]
+    fn a_done_group_renders_as_one_gray_row_beneath_its_parent() {
+        let mut app = app_with_sessions(DONE_LINEAGE);
+        select_done_group(&mut app);
+        let buffer = rendered_view(&mut app);
+        let lines = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        println!("{}", lines.join("\n"));
+
+        let main = lines.iter().position(|line| line.contains(" main")).unwrap();
+        assert!(lines[main + 1].contains("├─▸  ✓ 3 done"), "{}", lines[main + 1]);
+        assert!(lines.iter().any(|line| line.contains("3 done Workshops folded · → show")));
+        assert!(!lines.iter().any(|line| line.contains("old-a")));
+        assert!(lines.iter().any(|line| line.contains("> _  2 targets")));
+    }
+
+    #[test]
+    fn a_workshop_marked_done_hands_the_selection_to_the_group_that_absorbs_it() {
+        let live = DONE_LINEAGE.replace(r#""name":"old-a","path":"/old-a","recency":30,"labels":["done"]"#, r#""name":"old-a","path":"/old-a","recency":30"#);
+        let mut app = app_with_sessions(&live);
+        app.selected = app.rows.iter().position(|row| row.session.name == "old-a").unwrap();
+
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str(DONE_LINEAGE).unwrap() }, false).unwrap();
+
+        let group = app.selected().unwrap().done_group.clone().unwrap();
+        assert_eq!(group.parent.as_deref(), Some("main"));
+        assert_eq!(group.count, 3);
+    }
+
+    #[test]
+    fn search_reveals_done_workshops_without_a_summary() {
+        let mut app = app_with_sessions(DONE_LINEAGE);
+        app.update_query("old-b-child".into());
+
+        assert!(row_named(&app, "old-b-child").is_some());
+        assert!(done_groups(&app).is_empty());
+    }
+
+    #[test]
+    fn alt_dot_shows_and_hides_every_done_workshop() {
+        let mut app = app_with_sessions(DONE_LINEAGE);
+
+        handle_key(&mut app, alt('.'));
+        for name in ["old-a", "old-b", "old-b-child"] {
+            assert!(row_named(&app, name).is_some(), "{name} must be shown");
+        }
+        assert!(done_groups(&app).is_empty());
+
+        handle_key(&mut app, alt('.'));
+        assert!(row_named(&app, "old-a").is_none());
+        assert_eq!(done_groups(&app).len(), 1);
+    }
+
+    #[test]
+    fn workshop_actions_never_apply_to_a_done_group() {
+        for key in ['d', 'r', 'a', 'l'] {
+            let mut app = app_with_sessions(DONE_LINEAGE);
+            select_done_group(&mut app);
+            assert_eq!(handle_key(&mut app, alt(key)), None, "Alt-{key}");
+            assert_eq!(app.mode, Mode::Jump);
+            assert!(app.delete_intent.is_none());
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite"
 import { instanceSlug } from "./paths"
+import { isSpareWorktreePath } from "./worktree-pool"
 import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
@@ -307,7 +308,7 @@ const worktreePathsForRepo = (cwd: string) => {
   if (listed.exitCode !== 0) throw new Error(listed.stderr.toString().trim() || `Unable to list worktrees for ${current.path}`)
   const paths: string[] = []
   for (const line of listed.stdout.toString().split("\n")) {
-    if (line.startsWith("worktree ")) paths.push(canonicalPath(line.slice("worktree ".length)))
+    if (line.startsWith("worktree ") && !isSpareWorktreePath(line.slice("worktree ".length))) paths.push(canonicalPath(line.slice("worktree ".length)))
   }
   return { current, paths }
 }

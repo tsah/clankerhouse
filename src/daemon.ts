@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path"
 import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestActivity, readDirectoryActivities } from "./activity"
 import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
+import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
 import { listClankers } from "./clanker-api"
 import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
@@ -179,7 +180,7 @@ const parseWorktrees = (output: string): DirectoryRow[] => output.trim().split("
     if (line.startsWith("branch refs/heads/")) branch = line.slice("branch refs/heads/".length)
     if (line === "detached") branch = "detached"
   }
-  return path && existsSync(path) ? [{ path, source: "worktree" as const, branch }] : []
+  return path && existsSync(path) && !isSpareWorktreePath(path) ? [{ path, source: "worktree" as const, branch }] : []
 })
 
 const gitRecoveryCache = new Map<string, { checkedAt: number; activity?: ActivityRecord }>()
@@ -807,7 +808,14 @@ const worktreeForBranch = (repository: string, branch: string) => {
 const createWorktreeSync = (repository: string, branch: string, create: boolean, base?: string, switchRef = branch) => {
   const existing = worktreeForBranch(repository, branch)
   if (existing) return existing
+  // Resolve the fresh base first so a claimed spare never starts from a stale local default.
   const start = create ? workshopBase(repository, base) : undefined
+  if (create && worktreePoolEnabled()) {
+    // Replace the spare (or seed the first one) once the caller has its reply.
+    setTimeout(() => { void refillSpareWorktree(repository).catch((error) => console.error(`Warm worktree refill failed: ${error instanceof Error ? error.message : String(error)}`)) }, 0)
+    const claimed = switchRef === branch ? claimSpareWorktree(repository, branch, start) : undefined
+    if (claimed) return claimed
+  }
   const args = ["wt", "-C", repository, "switch", ...(create ? ["--create"] : []), switchRef, "--no-cd", "--format", "json", ...(start ? ["--base", start] : [])]
   const switched = Bun.spawnSync(args, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" })
   if (switched.exitCode !== 0) throw new Error(switched.stderr.toString().trim() || `wt exited ${switched.exitCode}`)

@@ -10,6 +10,7 @@ import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, workshopForId, workshopForPath } from "./workshop"
+import { workshopBase } from "./workshop-base"
 
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
@@ -170,7 +171,8 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
 }
 
 export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string; multiplexer?: ManagedMultiplexer } = {}) {
-  const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(base ? ["--base", base] : []), ...(options.copy ? ["--copy", options.copy] : [])])
+  const start = workshopBase(process.cwd(), base)
+  const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(start ? ["--base", start] : []), ...(options.copy ? ["--copy", options.copy] : [])])
   let worktree: { path?: string }
   try { worktree = JSON.parse(result.stdout) }
   catch { throw new Error(`Worktrunk returned invalid JSON while creating '${branch}'`) }

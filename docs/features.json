@@ -105,7 +105,8 @@
       "core": true,
       "unit": [
         "src/workshop.test.ts",
-        "src/workflow.test.ts"
+        "src/workflow.test.ts",
+        "src/workshop-base.test.ts"
       ],
       "standalone": [
         "scripts/qa",
@@ -113,7 +114,7 @@
         "scripts/qa-lineage-actions",
         "scripts/qa-herdr"
       ],
-      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims.",
+      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create.",
       "manual": [
         "Create a Workshop and child",
         "Reparent and detach the child",

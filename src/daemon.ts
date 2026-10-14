@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path"
 import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestActivity, readDirectoryActivities } from "./activity"
 import type { ActivityRecord } from "./activity"
 import { listClankers } from "./clanker-api"
+import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
 import { attachWorkshopToParent, attachmentCandidatesForWorkshop, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopStatePath } from "./workshop"
@@ -772,7 +773,8 @@ const worktreeForBranch = (repository: string, branch: string) => {
 const createWorktreeSync = (repository: string, branch: string, create: boolean, base?: string, switchRef = branch) => {
   const existing = worktreeForBranch(repository, branch)
   if (existing) return existing
-  const args = ["wt", "-C", repository, "switch", ...(create ? ["--create"] : []), switchRef, "--no-cd", "--format", "json", ...(create && base ? ["--base", base] : [])]
+  const start = create ? workshopBase(repository, base) : undefined
+  const args = ["wt", "-C", repository, "switch", ...(create ? ["--create"] : []), switchRef, "--no-cd", "--format", "json", ...(start ? ["--base", start] : [])]
   const switched = Bun.spawnSync(args, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" })
   if (switched.exitCode !== 0) throw new Error(switched.stderr.toString().trim() || `wt exited ${switched.exitCode}`)
   const parsed = JSON.parse(switched.stdout.toString()) as { path?: string }

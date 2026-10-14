@@ -1,0 +1,47 @@
+#!/bin/bash
+# Restart the Herdr Clankerhouse daemon on the active installation.
+#
+# The Herdr launcher never replaces a healthy daemon, so a freshly installed version only
+# runs once the old daemon stops. This stops the old daemon and starts the active version
+# through the launcher's --ensure-server path, in its own systemd user scope, so the new
+# daemon outlives the shell or clanker that ran this script.
+set -euo pipefail
+
+launcher=${CLANKERHOUSE_HERDR_LAUNCHER:-$HOME/.local/bin/clankerhouse-herdr}
+runtime_dir=${CLANKERHOUSE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/clankerhouse-$(id -u)-herdr}
+pid_file="$runtime_dir/server.pid"
+
+[[ -x "$launcher" ]] || { echo "No Herdr launcher at $launcher" >&2; exit 1; }
+
+stop_daemon() {
+    [[ -r "$pid_file" ]] || { echo "No running daemon recorded in $pid_file"; return 0; }
+    local pid
+    pid=$(<"$pid_file")
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || { echo "Recorded daemon $pid is not running"; return 0; }
+    # Only ever signal the Herdr daemon itself, never whatever reused the pid.
+    if [[ "$(tr '\0' ' ' <"/proc/$pid/cmdline")" != *"src/daemon.ts --server"* ]] \
+        || ! tr '\0' '\n' <"/proc/$pid/environ" | grep -qx 'CLANKERHOUSE_MULTIPLEXER=herdr'; then
+        echo "Refusing to stop pid $pid: it is not the Herdr Clankerhouse daemon" >&2
+        exit 1
+    fi
+    echo "Stopping daemon $pid ($(readlink -f "/proc/$pid/cwd"))"
+    kill "$pid" 2>/dev/null || return 0
+    for _ in {1..100}; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.05
+    done
+    echo "Daemon $pid ignored SIGTERM for 5s; killing it" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+stop_daemon
+
+# The launcher resolves the active installation itself; inherited pins would select an old one.
+start=(env -u CLANKERHOUSE_HOME -u CLANKERHOUSE_BIN_DIR -u CLANKERHOUSE_LIBEXEC -u CLANKERHOUSE_CURRENT_SESSION)
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+    start+=(systemd-run --user --scope --quiet --collect --unit "clankerhouse-herdr-daemon-$(date +%s)")
+fi
+"${start[@]}" setsid "$launcher" --ensure-server </dev/null
+
+pid=$(<"$pid_file")
+echo "Daemon $pid running $(readlink -f "/proc/$pid/cwd")"

@@ -535,10 +535,8 @@ fn subtree_foldable(
     let session = &sessions[index];
     let foldable = is_done(session)
         && !current_lineage.contains(&index)
-        && !matches!(
-            states[index],
-            ClankerState::Working | ClankerState::Blocked | ClankerState::Failed | ClankerState::Done
-        )
+        // An unseen completion is not activity: finishing is exactly how a Workshop becomes done.
+        && !matches!(states[index], ClankerState::Working | ClankerState::Blocked | ClankerState::Failed)
         && session
             .workshop_id
             .as_ref()
@@ -4804,13 +4802,23 @@ mod tests {
     }
 
     #[test]
-    fn a_done_workshop_with_an_active_or_unseen_clanker_is_not_folded() {
-        for state in ["working", "blocked", "failed", "done"] {
+    fn a_done_workshop_with_an_active_clanker_is_not_folded() {
+        for state in ["working", "blocked", "failed"] {
             let app = app_with_sessions(&format!(
                 r#"[{{"name":"old","path":"/old","labels":["done"],"target":{{"type":"tmux_session","session":"old"}},"details":[{{"kind":"clanker","state":"{state}","target":{{"type":"tmux_window","session":"old","windowId":"@1","pane":"%1"}}}}]}}]"#
             ));
             assert!(row_named(&app, "old").is_some(), "{state} clanker must stay visible");
         }
+    }
+
+    #[test]
+    fn a_done_workshop_with_an_unseen_finished_clanker_still_folds() {
+        let app = app_with_sessions(
+            r#"[{"name":"old","path":"/old","labels":["done"],"target":{"type":"tmux_session","session":"old"},"details":[{"kind":"clanker","state":"done","target":{"type":"tmux_window","session":"old","windowId":"@1","pane":"%1"}}]}]"#,
+        );
+
+        assert!(row_named(&app, "old").is_none());
+        assert_eq!(done_groups(&app)[0].done_group.as_ref().unwrap().count, 1);
     }
 
     #[test]

@@ -53,8 +53,8 @@ harnesses inline.
 A subtree whose every Workshop carries the done label folds into one gray
 `✓ N done` row under its parent, or above every root when the done Workshops are
 roots. A done Workshop stays visible while anything beneath it is not done, while
-it or a descendant has a working, blocked, failed, or unseen-done clanker, and
-while it is on the current Workshop's lineage. Search shows done Workshops
+it or a descendant has a working, blocked, or failed clanker, and while it is on
+the current Workshop's lineage. An unseen finished clanker does not keep it open. Search shows done Workshops
 without folding them.
 
 Rows are ordered only by last-seen recency, oldest at the top and newest nearest

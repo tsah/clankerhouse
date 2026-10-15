@@ -86,6 +86,18 @@ describe("Claude hook installation", () => {
     expect(commands(installed, "PreToolUse")[0]).toContain(`${f.bin}/clankerhouse-clanker-state-report`)
   })
 
+  test("installs reporters with a 10s budget and raises older short budgets, leaving custom hooks alone", () => {
+    const f = fixture()
+    expect(f.install().hooks.Stop![0]!.hooks[0]!.timeout).toBe(10)
+    const settings = JSON.parse(readFileSync(f.settings, "utf8")) as Settings
+    for (const entries of Object.values(settings.hooks)) entries[0]!.hooks[0]!.timeout = 2
+    settings.hooks.Stop![0]!.hooks.push({ type: "command", command: "echo custom-stop", timeout: 2 })
+    writeFileSync(f.settings, JSON.stringify(settings))
+    const upgraded = f.install()
+    for (const event of Object.keys(upgraded.hooks)) expect(upgraded.hooks[event]![0]!.hooks[0]!.timeout).toBe(10)
+    expect(upgraded.hooks.Stop![0]!.hooks[1]).toEqual({ type: "command", command: "echo custom-stop", timeout: 2 })
+  })
+
   test("global hooks are silent no-ops outside a Multiplexer, even when the reporter exists", () => {
     const f = fixture()
     const reporter = join(f.bin, "clankerhouse-clanker-state-report")

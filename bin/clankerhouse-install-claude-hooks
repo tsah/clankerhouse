@@ -28,6 +28,10 @@ states = {
     "SessionEnd": "unknown",
 }
 
+# Herdr claims cost a Bun start each, so a loaded machine can overrun a short budget, and
+# Claude then cancels the hook and the clanker keeps its previous state.
+HOOK_TIMEOUT = 10
+
 def reporter_command(state):
     quoted = shlex.quote(reporter)
     # Claude settings are global, including shells/containers without Clankerhouse.
@@ -80,6 +84,8 @@ for event, entries in hooks.items():
             ):
                 hook["command"] = reporter_command(argv[3])
                 migrated = True
+            if hook.get("command") == reporter_command(states.get(event, "")) and hook.get("timeout", 0) < HOOK_TIMEOUT:
+                hook["timeout"] = HOOK_TIMEOUT
             kept.append(hook)
         entry["hooks"] = kept
         if kept or not commands:
@@ -98,11 +104,11 @@ for event, (matcher, command) in desired.items():
         if any(hook.get("type") == "command" and hook.get("command") == command for hook in entry_hooks):
             found = True
             break
-        entry_hooks.append({"type": "command", "command": command, "timeout": 2})
+        entry_hooks.append({"type": "command", "command": command, "timeout": HOOK_TIMEOUT})
         found = True
         break
     if not found:
-        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": 2}]})
+        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]})
 
 updated = json.dumps(data, indent=2) + "\n"
 if updated != original:

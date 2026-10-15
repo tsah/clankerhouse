@@ -13,12 +13,13 @@ function fixture() {
   roots.push(root)
   for (const dir of ["bin", "home", "runtime", "state", "config", "data"]) mkdirSync(join(root, dir))
   const tmux = join(root, "bin/tmux")
-  writeFileSync(tmux, '#!/bin/sh\ncase "$1" in show-option) exit 1 ;; set-option) exit 0 ;; display-message) printf "%s\\n" "$FIXTURE_CWD" ;; *) exit 1 ;; esac\n')
+  writeFileSync(tmux, '#!/bin/sh\ncase "$1" in show-option) exit 1 ;; set-option) printf "%s %s\\n" "$5" "$(grep -o "\\"state\\": \\"[a-z]*\\"" "$REPORT_FILE" 2>/dev/null)" >> "$CLAIM_LOG"; exit 0 ;; display-message) printf "%s\\n" "$FIXTURE_CWD" ;; *) exit 1 ;; esac\n')
   chmodSync(tmux, 0o755)
   const clankers = join(root, "bin/clankers")
   writeFileSync(clankers, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$ATTESTATION_LOG"\n')
   chmodSync(clankers, 0o755)
   const attestations = join(root, "attestations")
+  const claims = join(root, "claims")
   const report = join(root, "runtime", `clankerhouse-${process.getuid?.() || 0}`, "clanker-state/%99.json")
   const env = {
     ...process.env,
@@ -41,9 +42,12 @@ function fixture() {
     TMUX_PANE: "%99",
     FIXTURE_CWD: root,
     ATTESTATION_LOG: attestations,
+    CLAIM_LOG: claims,
+    REPORT_FILE: report,
   }
   return {
     attestations: () => readFileSync(attestations, "utf8").trim().split("\n"),
+    claims: () => readFileSync(claims, "utf8").trim().split("\n"),
     emit: async (state: string, payload: Record<string, unknown>, harness = "claude") => {
       const child = Bun.spawn([join(import.meta.dir, "../bin/clankerhouse-clanker-state-report"), harness, state], {
         env, stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -62,6 +66,17 @@ const shell = { id: "background-shell", type: "shell", status: "running", comman
 const subagent = { id: "background-agent", type: "subagent", status: "running" }
 
 describe("Claude background-task lifecycle", () => {
+  test("the state record is durable before any slower harness or session claim", async () => {
+    const f = fixture()
+    await f.emit("working", { hook_event_name: "UserPromptSubmit" })
+    await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })
+    const claims = f.claims().filter(line => !line.startsWith("@clankerhouse_clanker_id"))
+    expect(claims).toContain('@dotfiles_harness "state": "working"')
+    expect(claims).toContain('@dotfiles_harness "state": "done"')
+    expect(claims).toContain('@clankerhouse_harness_session_id "state": "done"')
+    expect(claims.filter(line => !line.includes('"state": '))).toEqual([])
+  })
+
   test("Stop defers completion and Recovery settlement until background work has finished", async () => {
     const f = fixture()
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })

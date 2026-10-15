@@ -29,13 +29,10 @@ if [[ -z "$clanker_id" ]]; then
     clanker_id="${CLANKER_ID:-clanker-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
     ch_mux_pane_claim clankerId "$clanker_id"
 fi
-ch_mux_pane_claim harness "$harness"
 
 state_dir="$(ch_runtime_dir)/clanker-state"
 mkdir -p "$state_dir"
 chmod 700 "$state_dir"
-activity_dir="$(ch_state_dir)/activity"
-activity_path=$(ch_mux_pane_path)
 
 # Consume hook stdin so callers that provide JSON never block on a full pipe.
 hook_input=$(cat 2>/dev/null || true)
@@ -52,16 +49,9 @@ PY
 )
 expected_session_id="${CLANKER_SESSION_ID:-}"
 recovery_attempt_id="${CLANKER_RECOVERY_ATTEMPT:-}"
-if [[ -n "$harness_session_id" ]]; then
-    ch_mux_pane_claim harnessSessionId "$harness_session_id"
-fi
-if [[ -n "$recovery_attempt_id" ]]; then
-    ch_mux_pane_claim recoveryAttemptId "$recovery_attempt_id"
-fi
 
 # Carry the effective report state back to Recovery attestation as well.
-state=$(HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" ACTIVITY_DIR="$activity_dir" ACTIVITY_PATH="$activity_path" python3 - <<'PY'
-import hashlib
+state=$(HARNESS="$harness" CLANKER_ID="$clanker_id" STATE="$state" PANE="$pane" HOOK_INPUT="$hook_input" HARNESS_SESSION_ID="$harness_session_id" RECOVERY_ATTEMPT_ID="$recovery_attempt_id" STATE_DIR="$state_dir" python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -74,8 +64,6 @@ state = os.environ.get("STATE", "")
 pane = os.environ.get("PANE", "")
 state_dir = pathlib.Path(os.environ.get("STATE_DIR", ""))
 hook_input = os.environ.get("HOOK_INPUT", "")
-activity_dir = pathlib.Path(os.environ.get("ACTIVITY_DIR", ""))
-activity_path = pathlib.Path(os.environ.get("ACTIVITY_PATH", "")).resolve()
 
 if not harness or not state or not pane or not state_dir:
     raise SystemExit(0)
@@ -132,16 +120,35 @@ record = {
 tmp.write_text(json.dumps(record), encoding="utf-8")
 tmp.chmod(0o600)
 tmp.replace(target)
-
-if activity_dir and activity_path:
-    activity_dir.mkdir(parents=True, exist_ok=True)
-    activity_target = activity_dir / f"{hashlib.sha256(str(activity_path).encode()).hexdigest()}-clanker.json"
-    activity_tmp = activity_dir / f"{activity_target.name}.{os.getpid()}.tmp"
-    activity_tmp.write_text(json.dumps({"path": str(activity_path), "source": "clanker", "updatedAt": record["updatedAt"]}), encoding="utf-8")
-    activity_tmp.replace(activity_target)
 print(state)
 PY
 )
+
+# Everything below is a slower Multiplexer round trip. Claude cancels hooks that overrun
+# their timeout, so they run only once the state record above is already durable.
+ch_mux_pane_claim harness "$harness"
+if [[ -n "$harness_session_id" ]]; then
+    ch_mux_pane_claim harnessSessionId "$harness_session_id"
+fi
+if [[ -n "$recovery_attempt_id" ]]; then
+    ch_mux_pane_claim recoveryAttemptId "$recovery_attempt_id"
+fi
+
+ACTIVITY_DIR="$(ch_state_dir)/activity" ACTIVITY_PATH="$(ch_mux_pane_path)" python3 - <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import time
+
+activity_dir = pathlib.Path(os.environ["ACTIVITY_DIR"])
+activity_path = pathlib.Path(os.environ["ACTIVITY_PATH"]).resolve()
+activity_dir.mkdir(parents=True, exist_ok=True)
+activity_target = activity_dir / f"{hashlib.sha256(str(activity_path).encode()).hexdigest()}-clanker.json"
+activity_tmp = activity_dir / f"{activity_target.name}.{os.getpid()}.tmp"
+activity_tmp.write_text(json.dumps({"path": str(activity_path), "source": "clanker", "updatedAt": int(time.time() * 1000)}), encoding="utf-8")
+activity_tmp.replace(activity_target)
+PY
 
 if [[ -n "$harness_session_id" ]]; then
     if [[ -n "$expected_session_id" && "$expected_session_id" != "$harness_session_id" ]]; then

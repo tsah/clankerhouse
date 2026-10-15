@@ -20,7 +20,7 @@ function fixture(customConfig = false, binName = "bin") {
   const legacy = join(config, "hooks/herdr-agent-state.sh")
   const bin = join(root, binName)
   const env = {
-    PATH: Bun.env.PATH!, HOME: home, CLAUDE_CONFIG_DIR: config, CLANKERHOUSE_BIN_DIR: bin,
+    PATH: Bun.env.PATH!, HOME: home, CLAUDE_CONFIG_DIR: config, CLANKERHOUSE_BIN_DIR: bin, CLANKERHOUSE_HOOK: join(bin, "clankerhouse-hook"),
     XDG_CONFIG_HOME: join(home, ".config"), XDG_STATE_HOME: join(root, "state"),
     XDG_CACHE_HOME: join(root, "cache"), XDG_DATA_HOME: join(root, "data"), XDG_RUNTIME_DIR: join(root, "runtime"),
   }
@@ -47,7 +47,7 @@ describe("Claude hook installation", () => {
     expect(installed.model).toBe("keep-this")
     expect(commands(installed, "SessionStart")).toHaveLength(2)
     expect(commands(installed, "SessionStart")[0]).toBe("echo custom-start")
-    expect(commands(installed, "SessionStart")[1]).toContain(`${f.bin}/clankerhouse-clanker-state-report`)
+    expect(commands(installed, "SessionStart")[1]).toContain(`${f.bin}/clankerhouse-hook`)
     expect(commands(installed, "Stop")).toContain("echo custom-stop")
     expect(readFileSync(`${f.settings}.pre-clankerhouse-migration`, "utf8")).toBe(before)
     expect(statSync(`${f.settings}.pre-clankerhouse-migration`).mode & 0o777).toBe(0o600)
@@ -83,26 +83,32 @@ describe("Claude hook installation", () => {
     expect(installed.hooks.SessionStart).toHaveLength(1)
     expect(installed.hooks.SessionStart![0]!.matcher).toBe("*")
     expect(commands(installed, "PreToolUse")).toHaveLength(1)
-    expect(commands(installed, "PreToolUse")[0]).toContain(`${f.bin}/clankerhouse-clanker-state-report`)
+    expect(commands(installed, "PreToolUse")[0]).toContain(`${f.bin}/clankerhouse-hook`)
   })
 
-  test("installs reporters with a 10s budget and raises older short budgets, leaving custom hooks alone", () => {
+  test("moves earlier guarded reporter hooks onto the native hook with its 2s budget, leaving custom hooks alone", () => {
     const f = fixture()
-    expect(f.install().hooks.Stop![0]!.hooks[0]!.timeout).toBe(10)
-    const settings = JSON.parse(readFileSync(f.settings, "utf8")) as Settings
-    for (const entries of Object.values(settings.hooks)) entries[0]!.hooks[0]!.timeout = 2
-    settings.hooks.Stop![0]!.hooks.push({ type: "command", command: "echo custom-stop", timeout: 2 })
-    writeFileSync(f.settings, JSON.stringify(settings))
+    const states = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", SessionEnd: "unknown" }
+    const reporter = `${f.root}/old prefix/bin/clankerhouse-clanker-state-report`
+    const guarded = (state: string) => `if { [ -n "\${TMUX_PANE:-}" ] || [ -n "\${HERDR_PANE_ID:-}" ]; } && [ -r '${reporter}' ]; then bash '${reporter}' claude ${state}; fi`
+    writeFileSync(f.settings, JSON.stringify({ hooks: Object.fromEntries(Object.entries(states).map(([event, state]) => [event, [{ matcher: "*", hooks: [
+      { type: "command", command: guarded(state), timeout: 10 },
+      ...(event === "Stop" ? [{ type: "command", command: "echo custom-stop", timeout: 10 }] : []),
+    ] }]])) }))
     const upgraded = f.install()
-    for (const event of Object.keys(upgraded.hooks)) expect(upgraded.hooks[event]![0]!.hooks[0]!.timeout).toBe(10)
-    expect(upgraded.hooks.Stop![0]!.hooks[1]).toEqual({ type: "command", command: "echo custom-stop", timeout: 2 })
+    for (const [event, state] of Object.entries(states)) {
+      expect(upgraded.hooks[event]![0]!.hooks[0]).toEqual({ type: "command", timeout: 2,
+        command: `if { [ -n "\${TMUX_PANE:-}" ] || [ -n "\${HERDR_PANE_ID:-}" ]; } && [ -x ${f.bin}/clankerhouse-hook ]; then exec ${f.bin}/clankerhouse-hook claude ${state}; fi` })
+    }
+    expect(upgraded.hooks.Stop![0]!.hooks).toHaveLength(2)
+    expect(upgraded.hooks.Stop![0]!.hooks[1]).toEqual({ type: "command", command: "echo custom-stop", timeout: 10 })
   })
 
   test("global hooks are silent no-ops outside a Multiplexer, even when the reporter exists", () => {
     const f = fixture()
-    const reporter = join(f.bin, "clankerhouse-clanker-state-report")
+    const reporter = join(f.bin, "clankerhouse-hook")
     mkdirSync(f.bin)
-    writeFileSync(reporter, "echo 'reporter must not run outside a pane' >&2\nexit 73\n")
+    writeFileSync(reporter, "#!/bin/sh\necho 'hook must not run outside a pane' >&2\nexit 73\n", { mode: 0o755 })
     const installed = f.install()
     for (const event of Object.keys(installed.hooks)) {
       const hook = commands(installed, event)[0]!
@@ -128,10 +134,10 @@ describe("Claude hook installation", () => {
 
   test("pane hooks forward lifecycle arguments and stdin through safely quoted reporter paths", () => {
     const f = fixture(false, "bin with 'quotes'")
-    const reporter = join(f.bin, "clankerhouse-clanker-state-report")
+    const reporter = join(f.bin, "clankerhouse-hook")
     const output = join(f.root, "report.json")
     mkdirSync(f.bin)
-    writeFileSync(reporter, 'printf "%s\\n%s\\n" "$1" "$2" > "$HOOK_RESULT"\ncat >> "$HOOK_RESULT"\n')
+    writeFileSync(reporter, '#!/bin/sh\nprintf "%s\\n%s\\n" "$1" "$2" > "$HOOK_RESULT"\ncat >> "$HOOK_RESULT"\n', { mode: 0o755 })
     const installed = f.install()
     const states = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", SessionEnd: "unknown" }
     for (const paneEnv of [{ TMUX_PANE: "%1" }, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }]) {
@@ -157,7 +163,7 @@ describe("Claude hook installation", () => {
     expect(hooks).toHaveLength(keep.length + 1)
     expect(hooks).not.toContain(old)
     for (const custom of keep) expect(hooks).toContain(custom)
-    expect(hooks[0]).toContain(`${f.bin}/clankerhouse-clanker-state-report`)
+    expect(hooks[0]).toContain(`${f.bin}/clankerhouse-hook`)
     expect(readFileSync(`${f.settings}.pre-clankerhouse-migration`, "utf8")).toBe(before)
     expect(statSync(`${f.settings}.pre-clankerhouse-migration`).mode & 0o777).toBe(0o600)
     const first = statSync(f.settings).mtimeMs

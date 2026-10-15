@@ -2,6 +2,7 @@
 name = "clankerhouse-native"
 version = "0.1.0"
 edition = "2024"
+default-run = "clankerhouse-native"
 license = "MIT"
 
 [dependencies]

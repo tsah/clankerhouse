@@ -3,18 +3,21 @@
 set -euo pipefail
 
 settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-reporter="${CLANKERHOUSE_BIN_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}/clankerhouse-clanker-state-report"
+# Address the hook through the active-installation link (logical pwd keeps it unresolved),
+# so activating another version needs no settings change and no wrapper on the hot path.
+hook="${CLANKERHOUSE_HOOK:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -L)/native-client/target/release/clankerhouse-hook}"
 
 mkdir -p "$(dirname "$settings_file")"
 
-SETTINGS_FILE="$settings_file" REPORTER="$reporter" python3 - <<'PY'
+SETTINGS_FILE="$settings_file" HOOK="$hook" python3 - <<'PY'
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 
 settings_path = Path(os.environ["SETTINGS_FILE"])
-reporter = os.environ["REPORTER"]
+hook_binary = os.environ["HOOK"]
 
 original = settings_path.read_text(encoding="utf-8") if settings_path.exists() else ""
 data = json.loads(original or "{}")
@@ -28,19 +31,34 @@ states = {
     "SessionEnd": "unknown",
 }
 
-# Herdr claims cost a Bun start each, so a loaded machine can overrun a short budget, and
-# Claude then cancels the hook and the clanker keeps its previous state.
-HOOK_TIMEOUT = 10
+# The native hook finishes in about a millisecond; the budget only bounds a stalled
+# Multiplexer claim, which it already caps well below this.
+HOOK_TIMEOUT = 2
 
 def reporter_command(state):
-    quoted = shlex.quote(reporter)
+    quoted = shlex.quote(hook_binary)
     # Claude settings are global, including shells/containers without Clankerhouse.
-    # Only invoke an available reporter from a possible pane; the reporter remains
+    # Only invoke an available hook from a possible pane; the hook remains
     # responsible for selecting and validating the Multiplexer context.
     return (
         'if { [ -n "${TMUX_PANE:-}" ] || [ -n "${HERDR_PANE_ID:-}" ]; } '
-        f'&& [ -r {quoted} ]; then bash {quoted} claude {state}; fi'
+        f'&& [ -x {quoted} ]; then exec {quoted} claude {state}; fi'
     )
+
+# Commands this installer generated in earlier versions, around any reporter path.
+generated_reporter = re.compile(
+    r'if \{ \[ -n "\$\{TMUX_PANE:-\}" \] \|\| \[ -n "\$\{HERDR_PANE_ID:-\}" \]; \} '
+    r'&& \[ -[rx] (?P<path>.+) \]; then (?:bash|exec) (?P=path) claude (?P<state>[a-z]+); fi'
+)
+def generated_state(hook):
+    match = generated_reporter.fullmatch(str(hook.get("command", ""))) if isinstance(hook, dict) else None
+    if not match:
+        return None
+    try:
+        name = Path(shlex.split(match["path"])[0]).name
+    except (ValueError, IndexError):
+        return None
+    return match["state"] if name in {"clankerhouse-clanker-state-report", "clankerhouse-hook"} else None
 
 def command_args(hook):
     if not isinstance(hook, dict) or hook.get("type") != "command":
@@ -84,7 +102,9 @@ for event, entries in hooks.items():
             ):
                 hook["command"] = reporter_command(argv[3])
                 migrated = True
-            if hook.get("command") == reporter_command(states.get(event, "")) and hook.get("timeout", 0) < HOOK_TIMEOUT:
+            state = generated_state(hook)
+            if state in states.values():
+                hook["command"] = reporter_command(state)
                 hook["timeout"] = HOOK_TIMEOUT
             kept.append(hook)
         entry["hooks"] = kept

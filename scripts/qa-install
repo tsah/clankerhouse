@@ -167,8 +167,9 @@ new_target=$(readlink -f "$active")
 [[ "$(stat -c %i "$opencode_skill")" == "$skill_inode" ]]
 [[ "$(stat -c %Y "$opencode_skill")" == "$skill_mtime" ]]
 
-grep -F "$prefix/bin/clankerhouse-clanker-state-report" "$home/.claude/settings.json" >/dev/null
-python3 - "$home/.claude/settings.json" "$prefix/bin/clankerhouse-clanker-state-report" "$socket" <<'PY'
+hook="$active/native-client/target/release/clankerhouse-hook"
+grep -F "$hook" "$home/.claude/settings.json" >/dev/null
+python3 - "$home/.claude/settings.json" "$hook" "$socket" <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
 settings = Path(sys.argv[1])
@@ -228,6 +229,6 @@ printf 'preserve\n' > "$state/preserved-state"
 "$repo/scripts/uninstall" --prefix "$prefix" >/dev/null
 [[ ! -e "$active" && ! -L "$active" && ! -e "$versions" ]]
 [[ -f "$state/preserved-state" && -d "$runtime" ]]
-! grep -q clankerhouse-clanker-state-report "$home/.claude/settings.json"
+! grep -q 'clankerhouse-clanker-state-report\|clankerhouse-hook' "$home/.claude/settings.json"
 grep -q qa-custom-start "$home/.claude/settings.json"
 printf 'Clankerhouse install QA passed: same-filesystem staging, atomic active resolution, isolated daemon handoff, preflight/activation rollback, optional integrations/systemd, ownership, and state preservation behave correctly.\n'

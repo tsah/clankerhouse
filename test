@@ -38,6 +38,8 @@ run() {
 if [[ "$mode" == all || "$mode" == unit ]]; then
     run "feature coverage" scripts/check-feature-coverage
     run "TypeScript static check" bun run check
+    # Lifecycle tests execute the native hook, so build it first.
+    run "native hook build" cargo build --manifest-path native-client/Cargo.toml --release --locked --bin clankerhouse-hook
     run "TypeScript unit and component tests" bun test
     run "Python unit and component tests" env PYTHONPATH=.. python3 -m unittest \
         tests.test_resource_guard tests.test_spot_watch tests.test_opencode_status

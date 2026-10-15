@@ -27,7 +27,7 @@ for event in list(hooks):
             entry["hooks"] = [hook for hook in commands if not (
                 isinstance(hook, dict)
                 and hook.get("type") == "command"
-                and "clankerhouse-clanker-state-report" in str(hook.get("command", ""))
+                and any(name in str(hook.get("command", "")) for name in ("clankerhouse-clanker-state-report", "clankerhouse-hook"))
             )]
         if entry.get("hooks"):
             kept_entries.append(entry)

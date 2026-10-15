@@ -179,6 +179,7 @@
       "unit": [
         "src/clanker-api.test.ts",
         "src/claude-background-tasks.test.ts",
+        "src/hook-events.test.ts",
         "src/multiplexer/herdr.test.ts",
         "integrations/opencode/clankerhouse-lifecycle.test.ts"
       ],
@@ -192,7 +193,8 @@
         "Confirm generations, waits, and results correlate",
         "Have Claude stop its foreground response while a background shell task runs or is pending; confirm working state and pending waits persist until a later Stop reports no tasks in flight",
         "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or create Recovery intent",
-        "Run in-process Pi SDK workers while the visible parent is working; confirm worker start, settlement, and shutdown preserve the parent's identity, working state, native socket, and results"
+        "Run in-process Pi SDK workers while the visible parent is working; confirm worker start, settlement, and shutdown preserve the parent's identity, working state, native socket, and results",
+        "Under load from several busy clankers, confirm each Claude tool call's lifecycle hook still finishes in milliseconds and a finished clanker always settles to done"
       ]
     },
     {
@@ -332,7 +334,8 @@
         "Verify active target and service templates",
         "Upgrade settings with a missing Herdr startup hook; confirm Claude startup uses the Clankerhouse reporter, custom hooks survive, a private rollback copy exists, and reinstall is idempotent",
         "Upgrade old unguarded Claude hooks; confirm ordinary terminals and missing-reporter environments produce no hook errors, while lifecycle reporting still works inside Multiplexer panes",
-        "Inject preflight and activation failures and confirm rollback"
+        "Inject preflight and activation failures and confirm rollback",
+        "Upgrade settings holding the earlier shell-reporter hooks; confirm every Clankerhouse hook now execs the native clankerhouse-hook through the active installation link with a 2s budget"
       ]
     },
     {

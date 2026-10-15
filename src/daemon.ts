@@ -22,6 +22,8 @@ import { paneLocation, sessionLocation } from "./multiplexer/interface"
 import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
 import { openDurableRegistry, type DurableRegistry } from "./registry"
 import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
+import { attestHarnessSession } from "./recovery/attest"
+import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
@@ -471,6 +473,24 @@ const scheduleProjectionRefresh = () => {
   })
 }
 
+// Failures repeat every turn (an unmanaged harness, say), so each distinct one is logged once per pane.
+const hookAttestFailures = new Map<string, string>()
+let stopHookAttestRequests: (() => void) | undefined
+
+const applyHookAttestRequest = async (request: HookAttestRequest) => {
+  // A request means the clanker's state changed; show it now rather than on the next poll.
+  scheduleProjectionRefresh()
+  const store = openRecoveryStore()
+  try {
+    await attestHarnessSession(store, request)
+    hookAttestFailures.delete(request.pane)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (hookAttestFailures.get(request.pane) !== message) console.error(`Recovery attestation for ${request.clankerId} failed: ${message}`)
+    hookAttestFailures.set(request.pane, message)
+  } finally { store.close() }
+}
+
 const ingestLifecycleObservation = (report: import("./transport").ObservationReport) => {
   const sequenceKey = `${report.source}\0${report.pane}`
   const previousSequence = lifecycleSequences.get(sequenceKey)
@@ -507,6 +527,7 @@ const serverProgram = Effect.gen(function* () {
   const shutdown = () => {
     cleanup()
     recoveryController?.stop()
+    stopHookAttestRequests?.()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
     void closing.finally(() => producerLease?.release()).finally(() => durableRegistry?.close()).finally(() => process.exit(0))
@@ -556,6 +577,7 @@ const serverProgram = Effect.gen(function* () {
   void recoveryController.run().catch((error) => {
     console.error(`Recovery controller stopped: ${error instanceof Error ? error.message : String(error)}`)
   }).finally(() => recoveryController?.close())
+  stopHookAttestRequests = watchHookAttestRequests(`${runtimeDir}/hook-events`, applyHookAttestRequest)
   if (daemonMultiplexer().capabilities().nativeChanges) {
     // Runtimes with a native Change Stream drive refreshes by event; polled runtimes rely on the refresh loop below.
     const changeSignal = new AbortController()

@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
-import { recordRecoveryIncident, resolveRecoveredClankerIncidents } from "./incidents"
+import { recordRecoveryIncident } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { harnessModelArgs } from "./recovery/harness"
@@ -14,8 +14,9 @@ import { paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
+import { adoptDesired, attestHarnessSession } from "./recovery/attest"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
-import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForPath, workshopLabels, workshopTree } from "./workshop"
+import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
@@ -152,29 +153,6 @@ const resolveWorkshopPath = (selector: string, cwd = process.cwd()) => {
   return matches[0]!.canonicalPath
 }
 
-const adoptDesired = async (store: RecoveryStore, id: string, sessionId: string) => {
-  const matches = (await listClankers()).filter((row) => row.id === id)
-  if (matches.length !== 1) throw new Error(matches.length > 1 ? `Ambiguous live panes for ${id}` : `Unknown clanker ${id}`)
-  const live = matches[0]!
-  if (live.harness !== "pi" && live.harness !== "claude" && live.harness !== "opencode") throw new Error(`Harness ${live.harness} does not support durable recovery`)
-  const path = live.worktreePath || live.cwd
-  const workshop = workshopForPath(path)
-  const desired = store.createDesired({
-    clankerId: id,
-    harness: live.harness,
-    workshopId: workshop?.workshopId || `path-${createHash("sha256").update(path).digest("hex").slice(0, 24)}`,
-    workshopPath: path,
-    tmuxSessionName: live.session,
-    tmuxWindowName: live.name || live.harness,
-    cwd: live.cwd || path,
-    harnessSessionId: sessionId,
-    launchSpec: { version: 1, profile: null },
-    originalTask: "Autonomously continue the most recent unfinished user request.",
-  })
-  const adoption = store.beginAttempt(id, "adopted-live-session")
-  store.finishAttempt(adoption.id, "succeeded")
-  return desired
-}
 
 const adoptLivePiSessions = async (store: RecoveryStore) => {
   const runtime = `${runtimeDirFor()}/clanker-state`
@@ -442,22 +420,9 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         const id = requiredClankerId(parsed)
         const sessionId = parsed.take("--session-id")
         if (!sessionId) throw new Error("--session-id is required")
-        let desired = store.getDesired(id)
-        if (!desired) {
-          desired = await adoptDesired(store, id, sessionId)
-        } else {
-          desired = store.bindHarnessSession(id, sessionId)
-        }
-        const reportState = parsed.take("--state")
+        const state = parsed.take("--state")
         const attemptId = nonNegativeNumber(parsed.take("--attempt"), "--attempt")
-        if (attemptId !== undefined) {
-          const attempt = store.getAttempt(attemptId)
-          if (!attempt || attempt.clankerId !== id) throw new Error(`Recovery attempt ${attemptId} does not belong to ${id}`)
-          store.finishAttempt(attemptId, "succeeded")
-          if (reportState) store.markRecoverySettled(id, attemptId, reportState)
-          if (store.getDesired(id)?.recoveryCondition === "healthy") resolveRecoveredClankerIncidents(id)
-        }
-        return console.log(JSON.stringify({ clankerId: id, harnessSessionId: desired.harnessSessionId, attested: true }))
+        return console.log(JSON.stringify(await attestHarnessSession(store, { clankerId: id, harnessSessionId: sessionId, state, attemptId })))
       }
       if (subcommand === "attest-exit") {
         const id = requiredClankerId(parsed)

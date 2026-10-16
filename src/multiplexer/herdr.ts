@@ -183,6 +183,7 @@ export class HerdrAdapter implements Multiplexer {
             currentPath: pane.foreground_cwd || pane.cwd || path,
             activity,
             active: pane.focused || (tabPanes.length === 1),
+            focused: pane.focused,
             claims: paneClaims,
             terminalId: paneClaims.terminalId,
             displayName: pane.label || undefined,

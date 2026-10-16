@@ -48,7 +48,7 @@ export const takeHookAttestRequests = (directory: string): HookAttestRequest[] =
  * Apply spooled requests one batch at a time, on change notification plus a slow sweep that
  * covers missed notifications. Returns a stop function.
  */
-export const watchHookAttestRequests = (directory: string, apply: (request: HookAttestRequest) => Promise<void>, sweepMs = 30_000) => {
+export const watchHookAttestRequests = (directory: string, apply: (request: HookAttestRequest) => Promise<void>, sweepMs = 30_000, fallbackSweepMs = 1_000, watchDirectory: typeof watch = watch) => {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   let running = false
   let pending = false
@@ -63,8 +63,11 @@ export const watchHookAttestRequests = (directory: string, apply: (request: Hook
     } finally { running = false }
   }
   const schedule = () => { void drain().catch((error) => console.error(`Hook request processing failed: ${error instanceof Error ? error.message : String(error)}`)) }
-  const watcher = watch(directory, (_event, name) => { if (!name || String(name).endsWith(".json")) schedule() })
-  const sweep = setInterval(schedule, sweepMs)
+  // Without change notification (the host's inotify instances exhausted, say) a fast sweep stands in.
+  let watcher: ReturnType<typeof watch> | undefined
+  try { watcher = watchDirectory(directory, (_event, name) => { if (!name || String(name).endsWith(".json")) schedule() }) }
+  catch (error) { console.error(`Hook request notifications unavailable, polling instead: ${error instanceof Error ? error.message : String(error)}`) }
+  const sweep = setInterval(schedule, watcher ? sweepMs : Math.min(sweepMs, fallbackSweepMs))
   schedule()
-  return () => { watcher.close(); clearInterval(sweep) }
+  return () => { watcher?.close(); clearInterval(sweep) }
 }

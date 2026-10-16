@@ -5,7 +5,7 @@ import { markDirectoryActivity } from "./activity"
 import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
-import { harnessModelArgs, initialHarnessCommand } from "./recovery/harness"
+import { harnessModelArgs, initialHarnessCommand, workshopEnvironment, type WorkshopLaunchIdentity } from "./recovery/harness"
 import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
 import { recoveryUnitName } from "./recovery/process-owner"
 import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
@@ -97,8 +97,9 @@ export async function ensureSession(id: WorktreeIdentity, options: { parentWorks
   return name
 }
 
-const codexCommand = (prompt: string, clankerId: string, model?: string) => [
+const codexCommand = (prompt: string, clankerId: string, workshop: WorkshopLaunchIdentity, model?: string) => [
   "env",
+  ...Object.entries(workshopEnvironment(workshop)).map(([key, value]) => `${key}=${value}`),
   `BROWSER=${Bun.env.BROWSER || "xdg-open"}`,
   `PLANNOTATOR_BROWSER=${Bun.env.PLANNOTATOR_BROWSER || `${Bun.env.HOME}/.local/bin/xdg-open`}`,
   `PLANNOTATOR_REMOTE=${Bun.env.PLANNOTATOR_REMOTE || "1"}`,
@@ -137,10 +138,12 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   const clankerId = generatedClankerId()
   const recoverable = harness !== "codex"
   const harnessSessionId = harness === "pi" || harness === "claude" ? randomUUID() : null
-  let argv = codexCommand(prompt, clankerId, model)
+  const recoveryWorkshop = workshop ?? workshopForPath(id.path)
+  const recoveryWorkshopId = recoveryWorkshop?.workshopId || `path-${createHash("sha256").update(id.path).digest("hex").slice(0, 24)}`
+  const launchWorkshop: WorkshopLaunchIdentity = { workshopId: recoveryWorkshopId, parentWorkshopId: recoveryWorkshop?.parentWorkshopId ?? null }
+  let argv = codexCommand(prompt, clankerId, launchWorkshop, model)
   if (recoverable) {
     const recoverableHarness = harness as Exclude<Harness, "codex">
-    const recoveryWorkshop = workshop ?? workshopForPath(id.path)
     let store: RecoveryStore | undefined
     try {
       store = openRecoveryStore()
@@ -150,7 +153,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       store.createDesired({
         clankerId,
         harness: recoverableHarness,
-        workshopId: recoveryWorkshop?.workshopId || `path-${createHash("sha256").update(id.path).digest("hex").slice(0, 24)}`,
+        workshopId: recoveryWorkshopId,
         workshopPath: id.path,
         tmuxSessionName: session,
         tmuxWindowName: name,
@@ -162,7 +165,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       const attempt = store.beginAttempt(clankerId, "initial")
       const attemptId = String(attempt.id)
       store.setRecoveryOwner(clankerId, recoveryUnitName(clankerId, attemptId))
-      argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId })
+      argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId, workshop: launchWorkshop })
     } catch (error) {
       try {
         const registered = store?.getDesired(clankerId)
@@ -171,7 +174,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { store?.close() }
   }
-  const launch = { cwd: id.path, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv" as const, argv } }
+  const launch = { cwd: id.path, env: { ...spawnedRuntimeEnv(multiplexer), ...workshopEnvironment(launchWorkshop) }, launch: { kind: "argv" as const, argv } }
   const spawnedLocation = await multiplexer.spawn(live
     ? { ...launch, scope: "window", nativeSessionId: live.id, name }
     : { ...launch, scope: "session", name: session, windowName: name })

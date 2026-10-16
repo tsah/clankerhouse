@@ -161,3 +161,33 @@ describe("Claude background-task lifecycle", () => {
     expect(await f.emit(state, { hook_event_name, background_tasks: [shell] })).toMatchObject({ state })
   })
 })
+
+describe("Claude prompt acknowledgement and event recency", () => {
+  test("records each submitted prompt's hash with the generation it started, across later hooks", async () => {
+    const f = fixture()
+    const { promptSha256 } = await import("./orchestration")
+    await f.emit("idle", { hook_event_name: "SessionStart" })
+    const submitted = await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt: "first answer\r\n" })
+    expect(submitted).toMatchObject({ generation: 1, promptSha256: promptSha256("first answer"), promptGeneration: 1, prompts: [{ sha256: promptSha256("first answer"), generation: 1 }] })
+    const tool = await f.emit("working", { hook_event_name: "PreToolUse" })
+    expect(tool.prompts).toEqual(submitted.prompts)
+    await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })
+    for (let index = 0; index < 9; index += 1) await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt: `prompt ${index}` })
+    const latest = await f.emit("working", { hook_event_name: "PreToolUse" })
+    expect(latest.prompts).toHaveLength(8)
+    expect(latest.prompts.at(-1)).toEqual({ sha256: promptSha256("prompt 8"), generation: 10 })
+    expect(latest).toMatchObject({ promptSha256: promptSha256("prompt 8"), promptGeneration: 10 })
+  })
+
+  test("every hook event, including each tool call, advances the event time", async () => {
+    const f = fixture()
+    const times: number[] = []
+    times.push((await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt: "go" })).updatedAt)
+    for (let index = 0; index < 3; index += 1) {
+      await Bun.sleep(3)
+      times.push((await f.emit("working", { hook_event_name: "PreToolUse" })).updatedAt)
+    }
+    expect([...times].sort((a, b) => a - b)).toEqual(times)
+    expect(new Set(times).size).toBe(times.length)
+  })
+})

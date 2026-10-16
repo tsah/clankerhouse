@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { generatedClankerId, listClankers, parsePaneMetadata, requestUnixSocket, sendClanker } from "./clanker-api"
+import { deliverQueuedMessages, generatedClankerId, listClankers, parsePaneMetadata, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
+import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 
 const roots: string[] = []
@@ -137,10 +138,23 @@ describe("report generations", () => {
 })
 
 describe("Herdr semantic prompt transport", () => {
-  test("advertises and dispatches Claude sends to the exact claimed pane", async () => {
-    const prompts: Array<{ pane: string; text: string }> = []
-    const clankerId = `clanker-claude-herdr-${Date.now()}`
-    const paneId = `w1:p${Date.now()}`
+  // The orchestration store and pane reports follow XDG paths; keep them in a private root.
+  const isolate = () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herdr-send-"))
+    roots.push(root)
+    const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE }
+    process.env.XDG_STATE_HOME = join(root, "state")
+    process.env.XDG_RUNTIME_DIR = join(root, "runtime")
+    process.env.CLANKERHOUSE_INSTANCE = "unit"
+    const reports = join(root, "runtime", `clankerhouse-${process.getuid?.() ?? "user"}-unit`, "clanker-state")
+    mkdirSync(reports, { recursive: true })
+    restores.push(() => { for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value })
+    return reports
+  }
+  const restores: Array<() => void> = []
+  afterEach(() => { for (const restore of restores.splice(0)) restore() })
+
+  const fakeHerdr = (clankerId: string, paneId: string, prompts: Array<{ pane: string; text: string }>, pane: { focused: boolean; present: boolean } = { focused: false, present: true }) => {
     const adapter = {
       kind: "herdr",
       capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, clientRouting: false, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
@@ -149,28 +163,85 @@ describe("Herdr semantic prompt transport", () => {
         instanceId: "herdr:/tmp/test.sock",
         sessions: [{
           id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
-            id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
-              id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true,
+            id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: pane.present ? [{
+              id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true, focused: pane.focused,
               claims: { clankerId, harness: "claude" },
-            }],
+            }] : [],
           }],
         }],
       }),
       readClaim: async (_location: unknown, key: string) => key === "clankerId" ? clankerId : undefined,
       promptAgent: async (location: { nativePaneId?: string | null }, text: string) => { prompts.push({ pane: location.nativePaneId || "", text }) },
     } as unknown as Multiplexer
-    const multiplexer = new ManagedMultiplexer(adapter)
+    return new ManagedMultiplexer(adapter)
+  }
+
+  test("advertises and dispatches Claude sends to the exact claimed pane", async () => {
+    isolate()
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = `clanker-claude-herdr-${Date.now()}`
+    const paneId = `w1:p${Date.now()}`
+    const multiplexer = fakeHerdr(clankerId, paneId, prompts)
 
     const listed = await listClankers({ multiplexer })
     expect(listed).toHaveLength(1)
-    expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: false, deliveryModes: [] } })
+    expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: false, report: true, deliveryModes: ["queued"] } })
 
     const receipt = await sendClanker(clankerId, "review this exact change", {}, multiplexer)
     expect(prompts).toEqual([{ pane: paneId, text: "review this exact change" }])
+    expect(receipt.messageId).toMatch(/^msg-/)
     expect(receipt).toMatchObject({ clankerId, afterGeneration: 0, observedGeneration: 0, delivery: "immediate" })
     expect(receipt.acceptedAt).toBeGreaterThan(0)
+    expect(await sendStatus(receipt.messageId, multiplexer)).toEqual({ messageId: receipt.messageId, clankerId, state: "delivered", startedGeneration: null })
 
     await expect(sendClanker(clankerId, "queue this", { delivery: "followUp" }, multiplexer)).rejects.toMatchObject({ code: "UNSUPPORTED", exitCode: 4 })
+  })
+
+  test("queues for a busy or focused Claude, delivers in order after it settles, and acknowledges by hook hash", async () => {
+    const reports = isolate()
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = "clanker-claude-queue"
+    const paneId = "w1:p9"
+    const pane = { focused: false, present: true }
+    const multiplexer = fakeHerdr(clankerId, paneId, prompts, pane)
+    const report = (state: string, generation: number, settledGeneration: number, submitted: string[] = []) => writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: paneId, state, generation, settledGeneration, updatedAt: Date.now(), hookEvent: state === "done" ? "Stop" : "UserPromptSubmit",
+      prompts: submitted.map((text, index) => ({ sha256: promptSha256(text), generation: generation - submitted.length + index + 1 })),
+    }))
+
+    report("working", 1, 0)
+    const first = await sendClanker(clankerId, "first answer", {}, multiplexer)
+    const second = await sendClanker(clankerId, "second answer", {}, multiplexer)
+    expect([first.delivery, second.delivery]).toEqual(["queued", "queued"])
+    expect(prompts).toEqual([])
+    expect((await sendStatus(first.messageId, multiplexer)).state).toBe("queued")
+
+    // Settled but the operator is in the pane: still held.
+    report("done", 1, 1)
+    pane.focused = true
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts).toEqual([])
+
+    pane.focused = false
+    await deliverQueuedMessages(multiplexer)
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts.map((prompt) => prompt.text)).toEqual(["first answer"])
+    expect(await sendStatus(first.messageId, multiplexer)).toMatchObject({ state: "delivered", startedGeneration: null })
+
+    report("working", 2, 1, ["first answer"])
+    expect(await sendStatus(first.messageId, multiplexer)).toEqual({ messageId: first.messageId, clankerId, state: "acked", startedGeneration: 2 })
+    expect(prompts).toHaveLength(1)
+    await expect(waitForMessage(clankerId, first.messageId, { timeoutMs: 0 }, multiplexer)).rejects.toMatchObject({ code: "TIMEOUT", exitCode: 124 })
+
+    report("done", 2, 2, ["first answer"])
+    const settled = await waitForMessage(clankerId, first.messageId, { timeoutMs: 1_000 }, multiplexer)
+    expect(settled).toMatchObject({ id: clankerId, settledGeneration: 2, lastReport: null, message: { state: "acked", startedGeneration: 2 } })
+    expect(prompts.map((prompt) => prompt.text)).toEqual(["first answer", "second answer"])
+
+    // The clanker disappears before acknowledging the second message: it is kept, never redirected.
+    pane.present = false
+    expect((await sendStatus(second.messageId, multiplexer)).state).toBe("orphaned")
+    await expect(waitForMessage(clankerId, second.messageId, { timeoutMs: 0 }, multiplexer)).rejects.toMatchObject({ code: "NOT_FOUND", exitCode: 3 })
   })
 })
 

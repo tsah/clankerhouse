@@ -6,7 +6,7 @@ import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestAct
 import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
-import { listClankers } from "./clanker-api"
+import { deliverQueuedMessages, listClankers } from "./clanker-api"
 import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
@@ -477,9 +477,37 @@ const scheduleProjectionRefresh = () => {
 const hookAttestFailures = new Map<string, string>()
 let stopHookAttestRequests: (() => void) | undefined
 
+// Queued Claude messages: a cheap store check every tick, and a delivery pass when a clanker's
+// state changes. Each failure is logged once until it changes.
+const QUEUED_DELIVERY_MS = 2_000
+let queuedDeliveryRunning = false
+let queuedDeliveryFailure = ""
+let stopQueuedDelivery: (() => void) | undefined
+const runQueuedDelivery = () => {
+  if (queuedDeliveryRunning) return
+  queuedDeliveryRunning = true
+  void deliverQueuedMessages(daemonMultiplexer())
+    .then((result) => {
+      const failure = result.failed.map((entry) => `${entry.messageId}: ${entry.error}`).join("; ")
+      if (failure && failure !== queuedDeliveryFailure) console.error(`Queued message delivery failed: ${failure}`)
+      queuedDeliveryFailure = failure
+    })
+    .catch((error) => {
+      const failure = error instanceof Error ? error.message : String(error)
+      if (failure !== queuedDeliveryFailure) console.error(`Queued message delivery failed: ${failure}`)
+      queuedDeliveryFailure = failure
+    })
+    .finally(() => { queuedDeliveryRunning = false })
+}
+const startQueuedDelivery = () => {
+  const timer = setInterval(runQueuedDelivery, QUEUED_DELIVERY_MS)
+  return () => clearInterval(timer)
+}
+
 const applyHookAttestRequest = async (request: HookAttestRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
+  runQueuedDelivery()
   const store = openRecoveryStore()
   try {
     await attestHarnessSession(store, request)
@@ -528,6 +556,7 @@ const serverProgram = Effect.gen(function* () {
     cleanup()
     recoveryController?.stop()
     stopHookAttestRequests?.()
+    stopQueuedDelivery?.()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
     void closing.finally(() => producerLease?.release()).finally(() => durableRegistry?.close()).finally(() => process.exit(0))
@@ -578,6 +607,7 @@ const serverProgram = Effect.gen(function* () {
     console.error(`Recovery controller stopped: ${error instanceof Error ? error.message : String(error)}`)
   }).finally(() => recoveryController?.close())
   stopHookAttestRequests = watchHookAttestRequests(`${runtimeDir}/hook-events`, applyHookAttestRequest)
+  stopQueuedDelivery = startQueuedDelivery()
   if (daemonMultiplexer().capabilities().nativeChanges) {
     // Runtimes with a native Change Stream drive refreshes by event; polled runtimes rely on the refresh loop below.
     const changeSignal = new AbortController()

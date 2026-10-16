@@ -80,6 +80,8 @@ export interface MultiplexerPane {
   /** Last activity, seconds since the epoch; 0 when the runtime does not report it. */
   activity: number
   active: boolean
+  /** The runtime's input focus is on this pane; present only when the runtime reports it. */
+  focused?: boolean
   claims?: ClaimMap
   terminalId?: string
   displayName?: string

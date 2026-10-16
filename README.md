@@ -110,14 +110,33 @@ Every clanker has a stable generated ID stored as a Multiplexer pane claim. Tmux
 clankers list [--cwd PATH]
 clankers status CLANKER_ID
 clankers capabilities CLANKER_ID
-clankers wait CLANKER_ID [--after GENERATION] [--timeout SECONDS]
+clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
 printf '%s' 'Continue with the tests' | clankers send CLANKER_ID [--delivery steer|follow-up] [--wait]
+clankers send-status MESSAGE_ID
 clankers result CLANKER_ID [--generation GENERATION]
+clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
+clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
 ```
 
-Successful responses are JSON. Errors are versioned JSON on stderr; unsupported capabilities exit `4`, unavailable native endpoints exit `5`, and nondestructive wait timeouts exit `124`.
+Successful responses are JSON. Errors are versioned JSON on stderr; unknown or ambiguous ids exit `3`, unsupported capabilities exit `4`, unavailable native endpoints exit `5`, and nondestructive wait timeouts exit `124`.
 
-Pi supports the complete API through its native socket and lifecycle reports. Busy sends default to a native follow-up, and Clankerhouse admits only one unsettled external message at a time so waits remain correlated. Pi processes that were already running when this update was installed need `/reload` or a restart to advertise the endpoint. Claude under Herdr supports immediate send through Herdr's semantic prompt operation and waits through Claude lifecycle reports; explicit `steer`/`followUp` modes and results remain unsupported. Under tmux, Claude remains list/wait-only. Codex can be listed and can wait on lifecycle reports, but send/result operations fail explicitly. OpenCode is currently monitor-only: mutation and lifecycle waiting remain disabled until its local contract is verified.
+`status` includes `lastEventAt`, the time of the clanker's newest lifecycle hook event, and `lastReport`, its newest Report. Every clanker Clankerhouse launches, including a Recovery relaunch, gets `CLANKER_ID`, `CLANKERHOUSE_WORKSHOP_ID`, and `CLANKERHOUSE_PARENT_WORKSHOP_ID` (empty for a root Workshop) in its environment.
+
+### Orchestration: reports and watches
+
+A worker clanker declares its state upward with `clankers report`, run from inside the clanker (`CLANKER_ID`, else the pane's Clanker claim, identifies it). The Report is addressed to the reporting Workshop's parent unless `--to` names a Workshop or clanker id or `--no-parent` records it unaddressed; a root Workshop's Reports are recorded with `to: null`. The payload must be one JSON object of at most 64 KiB. Reports are durable, ordered by `seq`, and kept in `$XDG_STATE_HOME/clankerhouse/orchestration.sqlite3`; a Report is the clanker's Declaration and never changes its lifecycle `state`.
+
+An orchestrator wakes on any child event with one background command:
+
+```bash
+clankers watch --children-of . --descendants --cursor-file temp/watch.cursor --once --timeout 3600
+```
+
+`watch` prints one JSON event per line: `reported` (a Report from a watched clanker, or addressed to the watched Workshop), `settled` (a turn finished), `stale` (still `working` with no hook event for `--stale-after` seconds, default 1800, once per turn), `exited`, and `spawned` (a new clanker in a watched Workshop, including new descendant Workshops under `--descendants`). Watched clankers and Workshops are resolved again on every poll (every two seconds). `--children-of` resolves a Workshop like `clankers spawn --workshop`, with `.` or no value meaning the current Workshop. Without `--cursor-file` a watch starts from now. With one, the watch persists its starting point at once and records each event after printing it, so re-running `watch --once` with the same cursor resumes exactly where the last run stopped; a run killed between printing and recording repeats that one event rather than losing it. `--once` exits `0` after the first batch of events; `--timeout` exits `124` and leaves the cursor as it was.
+
+Claude under Herdr receives sends through a durable queue. A send to a Claude clanker that is `working` or `blocked`, whose pane has the Herdr input focus, or that already has messages waiting returns `"delivery": "queued"`; otherwise it is delivered at once. Every send returns a `messageId`. Queued messages are delivered one at a time, in order, once the clanker is `done` or `idle` and unfocused, and only after the previous one is acknowledged: the Claude `UserPromptSubmit` hook records each submitted prompt's SHA-256, and a message is `acked` when that hash appears in a newer turn, which becomes its `startedGeneration`. The daemon delivers continuously; `send --wait`, `wait --message`, `send-status`, and `watch` also run a delivery pass, so queues drain without a daemon. `send-status` reports `queued`, `delivered`, `acked`, or `orphaned` (the clanker disappeared; its messages are kept and never delivered elsewhere). A message delivered but never acknowledged (the prompt was not submitted) holds its clanker's queue; it is visible as `delivered`. `send --wait` and `wait --message` wait for the acknowledgement and then for that turn to settle, returning the clanker status and `lastReport`; Pi `send --wait` still returns its result.
+
+Pi supports the complete API through its native socket and lifecycle reports. Busy sends default to a native follow-up, and Clankerhouse admits only one unsettled external message at a time so waits remain correlated. Pi processes that were already running when this update was installed need `/reload` or a restart to advertise the endpoint. Claude under Herdr supports queued and immediate send through Herdr's semantic prompt operation and waits through Claude lifecycle reports; explicit `steer`/`followUp` modes and results remain unsupported, and `lastReport` stands in for a result. Under tmux, Claude remains list/wait-only. Codex can be listed and can wait on lifecycle reports, but send/result operations fail explicitly. Every harness can run `clankers report`. Claude and Pi rewrite their lifecycle report on every tool call, so `lastEventAt` and `stale` follow tool activity; Codex reports only at the events its own hooks are configured to send, so a long Codex turn may appear stale while it works. OpenCode is currently monitor-only: mutation and lifecycle waiting remain disabled until its local contract is verified.
 
 Run the native TUI or Bun daemon directly:
 

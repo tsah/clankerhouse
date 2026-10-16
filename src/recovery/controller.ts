@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { realpathSync } from "node:fs"
 import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from "./model"
-import { initialHarnessCommand, recoveryHarnessCommand } from "./harness"
+import { initialHarnessCommand, recoveryHarnessCommand, workshopEnvironment } from "./harness"
+import { workshopLaunchIdentity } from "../workshop"
 import { openRecoveryStore, type RecoveryStore } from "./store"
 import { recordRecoveryIncident } from "../incidents"
 import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "../multiplexer"
@@ -171,10 +172,11 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       try {
         const session = await resolveWorkshop(desired, multiplexer)
         const windowName = nextWindowName(session.windowNames, desired.tmuxWindowName)
+        const workshop = workshopLaunchIdentity(desired.workshopId, desired.workshopPath)
         const argv = previousSucceeded
-          ? recoveryHarnessCommand(desired, attemptId)
-          : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId })
-        const launch = { cwd: desired.cwd, env: spawnedRuntimeEnv(multiplexer), launch: { kind: "argv" as const, argv } }
+          ? recoveryHarnessCommand(desired, attemptId, workshop)
+          : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId, workshop })
+        const launch = { cwd: desired.cwd, env: { ...spawnedRuntimeEnv(multiplexer), ...workshopEnvironment(workshop) }, launch: { kind: "argv" as const, argv } }
         const launched = await multiplexer.spawn(session.id
           ? { ...launch, scope: "window", nativeSessionId: session.id, name: windowName }
           : { ...launch, scope: "session", name: session.name, windowName })

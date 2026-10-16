@@ -5,11 +5,13 @@ import { resolve } from "node:path"
 import type { ClankerState } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation } from "./multiplexer/interface"
+import { OrchestrationStore, clankerBusy, generatedMessageId, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type PromptObservation, type SendStatus } from "./orchestration"
 import { runtimeDirFor } from "./paths"
 import { parseTmuxFields } from "./tmux-fields"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
 export type ClankerDelivery = "steer" | "followUp"
+export type ClankerDeliveryMode = ClankerDelivery | "queued"
 
 export class ClankerApiError extends Error {
   constructor(public code: "NOT_FOUND" | "AMBIGUOUS" | "UNSUPPORTED" | "UNAVAILABLE" | "TIMEOUT", message: string, public exitCode: number) {
@@ -32,7 +34,9 @@ export interface ClankerCapabilities {
   wait: "reports" | false
   send: "unix-socket" | "multiplexer-prompt" | false
   result: "reports" | false
-  deliveryModes: ClankerDelivery[]
+  /** `clankers report` runs from any harness that can run a shell. */
+  report: true
+  deliveryModes: ClankerDeliveryMode[]
 }
 
 export interface ClankerInfo {
@@ -49,6 +53,8 @@ export interface ClankerInfo {
   generation: number
   settledGeneration: number
   updatedAt: number
+  /** Time of the newest lifecycle hook event, or null before the first report. */
+  lastEventAt: number | null
   socketOnline: boolean
   capabilities: ClankerCapabilities
 }
@@ -64,10 +70,12 @@ interface ClankerReport {
   hookEvent?: unknown
   result?: unknown
   results?: unknown
+  prompts?: unknown
 }
 
 interface ClankerRecord extends ClankerInfo {
   socketPath: string
+  focused: boolean
   report?: ClankerReport
 }
 
@@ -76,7 +84,8 @@ export interface SendReceipt {
   acceptedAt: number
   afterGeneration: number
   observedGeneration: number
-  delivery: "immediate" | ClankerDelivery
+  delivery: "immediate" | "queued" | ClankerDelivery
+  messageId: string
 }
 
 const runtimeRoot = () => runtimeDirFor()
@@ -117,7 +126,8 @@ const capabilitiesFor = (harness: ClankerHarness, online: boolean, agentPrompt: 
   wait: harness === "opencode" ? false : "reports",
   send: harness === "pi" && online ? "unix-socket" : harness === "claude" && agentPrompt ? "multiplexer-prompt" : false,
   result: harness === "pi" ? "reports" : false,
-  deliveryModes: harness === "pi" ? ["steer", "followUp"] : [],
+  report: true,
+  deliveryModes: harness === "pi" ? ["steer", "followUp"] : harness === "claude" && agentPrompt ? ["queued"] : [],
 })
 
 export interface PaneMetadata {
@@ -131,6 +141,7 @@ export interface PaneMetadata {
   pane: string
   cwd: string
   worktreePath: string
+  focused?: boolean
 }
 
 export const parsePaneMetadata = (output: string): PaneMetadata[] => output.split("\n").filter(Boolean).map((line) => {
@@ -183,14 +194,18 @@ export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Pro
       pane: pane.id,
       cwd: pane.currentPath,
       worktreePath: claims.worktreePath || session.worktreePath || "",
+      focused: pane.focused === true,
     }]
   })))
 }
 
-const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ClankerRecord[]> => {
+const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer(), strict = false): Promise<ClankerRecord[]> => {
   let rows: PaneMetadata[]
   try { rows = await discoverPaneMetadata(multiplexer) }
-  catch { return [] }
+  catch (error) {
+    if (strict) throw error
+    return []
+  }
   const agentPrompt = multiplexer.capabilities().agentPrompt
   return Promise.all(rows.map(async (row) => {
     const candidateReport = readReportSync(row.pane)
@@ -221,23 +236,26 @@ const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMult
       generation,
       settledGeneration,
       updatedAt,
+      lastEventAt: updatedAt || null,
       socketOnline: online,
       capabilities: capabilitiesFor(row.harness, online, agentPrompt),
       socketPath: row.socketPath,
+      focused: row.focused === true,
       report,
     }
   }))
 }
 
-const publicInfo = ({ socketPath: _socketPath, report: _report, ...clanker }: ClankerRecord): ClankerInfo => clanker
+const publicInfo = ({ socketPath: _socketPath, focused: _focused, report: _report, ...clanker }: ClankerRecord): ClankerInfo => clanker
 
 const canonicalFilterPath = (cwd: string) => {
   const git = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd, stdout: "pipe", stderr: "ignore" })
   return realpathSafe(git.exitCode === 0 ? git.stdout.toString().trim() : cwd)
 }
 
-export async function listClankers(options: { cwd?: string; multiplexer?: ManagedMultiplexer } = {}) {
-  const records = await discoverRecords(options.multiplexer)
+/** `strict` reports an unreachable Multiplexer instead of an empty herd. */
+export async function listClankers(options: { cwd?: string; multiplexer?: ManagedMultiplexer; strict?: boolean } = {}) {
+  const records = await discoverRecords(options.multiplexer, options.strict)
   if (!options.cwd) return records.map(publicInfo)
   const cwd = canonicalFilterPath(options.cwd)
   return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd).map(publicInfo)
@@ -256,8 +274,14 @@ export async function clankerForPane(pane: string) {
   return publicInfo(clanker)
 }
 
-export async function clankerStatus(id: string) {
-  return publicInfo(await findRecord(id))
+export async function clankerStatus(id: string, multiplexer?: ManagedMultiplexer) {
+  return publicInfo(await findRecord(id, multiplexer))
+}
+
+/** Lifecycle status plus the clanker's newest Report, a Declaration that never replaces `state`. */
+export async function clankerStatusWithReport(id: string, multiplexer?: ManagedMultiplexer): Promise<ClankerInfo & { lastReport: ClankerReportRecord | null }> {
+  const status = await clankerStatus(id, multiplexer)
+  return { ...status, lastReport: withOrchestrationStore((store) => store.lastReportFor(id)) }
 }
 
 export async function clankerCapabilities(id: string) {
@@ -306,51 +330,148 @@ export function requestUnixSocket(path: string, request: Record<string, unknown>
   })
 }
 
+const promptObservations = (report: ClankerReport | undefined): PromptObservation[] =>
+  Array.isArray(report?.prompts)
+    ? report.prompts.flatMap((entry) => entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).sha256 === "string"
+      ? [{ sha256: String((entry as Record<string, unknown>).sha256), generation: number((entry as Record<string, unknown>).generation) }]
+      : [])
+    : []
+
+/** Submit through the Multiplexer prompt transport after revalidating the pane's Clanker claim (ADR-0007). */
+const promptClaimedPane = async (multiplexer: ManagedMultiplexer, clanker: ClankerRecord, text: string) => {
+  const location = paneLocation(clanker.sessionId, clanker.window || null, clanker.pane)
+  try {
+    const claimedId = await multiplexer.readClaim(location, "clankerId")
+    if (claimedId !== clanker.id) throw new Error(`pane claim changed to ${claimedId || "none"}`)
+    await multiplexer.promptAgent(location, text)
+  } catch (error) {
+    throw new ClankerApiError("UNAVAILABLE", `Clanker ${clanker.id} rejected the Multiplexer prompt: ${error instanceof Error ? error.message : String(error)}`, 5)
+  }
+}
+
 export async function sendClanker(id: string, text: string, options: { delivery?: ClankerDelivery } = {}, multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<SendReceipt> {
   const clanker = await findRecord(id, multiplexer)
   if (!text.trim()) throw new Error("Clanker message must not be empty")
   if (clanker.capabilities.send === "multiplexer-prompt") {
     if (options.delivery) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support ${options.delivery} delivery through the Multiplexer prompt transport`, 4)
-    const location = paneLocation(clanker.sessionId, clanker.window || null, clanker.pane)
+    const acceptedAt = Date.now()
+    const store = OrchestrationStore.open()
     try {
-      const claimedId = await multiplexer.readClaim(location, "clankerId")
-      if (claimedId !== id) throw new Error(`pane claim changed to ${claimedId || "none"}`)
-      const acceptedAt = Date.now()
-      await multiplexer.promptAgent(location, text)
-      return { clankerId: id, acceptedAt, afterGeneration: clanker.generation, observedGeneration: clanker.generation, delivery: "immediate" }
-    } catch (error) {
-      throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} rejected the Multiplexer prompt: ${error instanceof Error ? error.message : String(error)}`, 5)
-    }
+      store.acknowledge(id, promptObservations(clanker.report))
+      const message = store.admitMessage({ clankerId: id, text, busy: clankerBusy(clanker), afterGeneration: clanker.generation, now: acceptedAt })
+      const receipt = { clankerId: id, acceptedAt, afterGeneration: clanker.generation, observedGeneration: clanker.generation, messageId: message.messageId }
+      if (message.state === "queued") return { ...receipt, delivery: "queued" }
+      try { await promptClaimedPane(multiplexer, clanker, text) }
+      catch (error) { store.deleteMessage(message.messageId); throw error }
+      return { ...receipt, delivery: "immediate" }
+    } finally { store.close() }
   }
   if (clanker.capabilities.send !== "unix-socket" || !clanker.socketPath) unsupported(clanker, "send")
   const payload = await requestUnixSocket(clanker.socketPath, { version: 1, action: "send", clankerId: id, text, delivery: options.delivery })
   const responseId = payload.clankerId
   if (responseId !== id) throw new ClankerApiError("UNAVAILABLE", `Clanker socket identity mismatch: expected ${id}, received ${String(responseId || "none")}`, 5)
+  const delivery = payload.delivery === "steer" || payload.delivery === "followUp" ? payload.delivery : "immediate"
+  const afterGeneration = number(payload.afterGeneration)
+  // Pi's socket reply is the harness's own acknowledgement; it names no turn, so waits use afterGeneration.
+  let messageId = generatedMessageId()
+  try { messageId = withOrchestrationStore((store) => store.insertMessage({ messageId, clankerId: id, text, delivery, state: "acked", afterGeneration })).messageId }
+  catch {}
   return {
     clankerId: id,
     acceptedAt: number(payload.acceptedAt),
-    afterGeneration: number(payload.afterGeneration),
+    afterGeneration,
     observedGeneration: number(payload.observedGeneration),
-    delivery: payload.delivery === "steer" || payload.delivery === "followUp" ? payload.delivery : "immediate",
+    delivery,
+    messageId,
   }
 }
 
-export async function waitForClanker(id: string, options: { afterGeneration?: number; timeoutMs?: number; pollMs?: number } = {}) {
+/**
+ * Acknowledge delivered prompts from hook reports and hand the next queued message to each
+ * settled, unfocused clanker. The daemon runs this continuously; waiting CLI commands run it
+ * too, so queues drain without a daemon. The store's claim keeps deliveries one at a time.
+ */
+export async function deliverQueuedMessages(multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+  const delivered: string[] = []
+  const acked: string[] = []
+  const failed: Array<{ messageId: string; error: string }> = []
+  const store = OrchestrationStore.open()
+  try {
+    if (!store.hasPendingMessages()) return { delivered, acked, failed }
+    const records = await discoverRecords(multiplexer, true)
+    for (const clankerId of new Set(store.pendingMessages().map((message) => message.clankerId))) {
+      const matches = records.filter((record) => record.id === clankerId)
+      if (matches.length !== 1) continue
+      const clanker = matches[0]!
+      acked.push(...store.acknowledge(clankerId, promptObservations(clanker.report)).map((message) => message.messageId))
+      if (clanker.capabilities.send !== "multiplexer-prompt" || !readyForDelivery(clanker)) continue
+      const claimed = store.claimNextDelivery(clankerId, clanker.generation)
+      if (!claimed) continue
+      try {
+        await promptClaimedPane(multiplexer, clanker, claimed.text)
+        delivered.push(claimed.messageId)
+      } catch (error) {
+        store.requeue(claimed.messageId)
+        failed.push({ messageId: claimed.messageId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { delivered, acked, failed }
+  } finally { store.close() }
+}
+
+const messageStatus = async (messageId: string, multiplexer: ManagedMultiplexer): Promise<{ status: SendStatus; record?: ClankerRecord; afterGeneration: number }> => {
+  await deliverQueuedMessages(multiplexer).catch(() => undefined)
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  if (!message) throw new ClankerApiError("NOT_FOUND", `Unknown message id: ${messageId}`, 3)
+  const matches = (await discoverRecords(multiplexer, true)).filter((record) => record.id === message.clankerId)
+  return { status: sendStatusOf(message, matches.length > 0), record: matches.length === 1 ? matches[0] : undefined, afterGeneration: message.afterGeneration }
+}
+
+export async function sendStatus(messageId: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<SendStatus> {
+  return (await messageStatus(messageId, multiplexer)).status
+}
+
+export async function waitForClanker(id: string, options: { afterGeneration?: number; timeoutMs?: number; pollMs?: number } = {}, multiplexer?: ManagedMultiplexer) {
   const timeoutMs = options.timeoutMs ?? 600_000
   const pollMs = options.pollMs ?? 200
   const started = Date.now()
-  const initial = await clankerStatus(id)
+  const initial = await clankerStatus(id, multiplexer)
   if (!initial.capabilities.wait) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support wait: ${initial.harness} has no lifecycle report producer`, 4)
   const targetGeneration = options.afterGeneration === undefined
     ? Math.max(initial.generation, initial.settledGeneration)
     : undefined
   while (true) {
-    const status = await clankerStatus(id)
+    const status = await clankerStatus(id, multiplexer)
     const settled = options.afterGeneration === undefined
       ? status.settledGeneration >= targetGeneration! && status.generation <= status.settledGeneration
       : status.settledGeneration > options.afterGeneration
     if (settled) return status
     if (Date.now() - started >= timeoutMs) throw new ClankerApiError("TIMEOUT", `Timed out waiting for clanker ${id}; clanker remains available`, 124)
+    await Bun.sleep(pollMs)
+  }
+}
+
+/**
+ * Wait for the turn a message started to settle. A prompt-transport message first waits for
+ * its hook acknowledgement, which names the generation it started; a Pi message, acknowledged
+ * by its socket, settles past the generation it was sent after.
+ */
+export async function waitForMessage(id: string, messageId: string, options: { timeoutMs?: number; pollMs?: number } = {}, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+  const timeoutMs = options.timeoutMs ?? 600_000
+  // Each poll may observe the herd twice (delivery pass and status), so it polls less often than `wait`.
+  const pollMs = options.pollMs ?? 500
+  const started = Date.now()
+  while (true) {
+    const { status, record, afterGeneration } = await messageStatus(messageId, multiplexer)
+    if (status.clankerId !== id) throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was sent to ${status.clankerId}, not ${id}`, 3)
+    if (status.state === "orphaned") throw new ClankerApiError("NOT_FOUND", `Clanker ${id} disappeared; message ${messageId} is orphaned and will not be delivered elsewhere`, 3)
+    if (record && status.state === "acked") {
+      const settled = status.startedGeneration === null ? record.settledGeneration > afterGeneration : record.settledGeneration >= status.startedGeneration
+      if (settled) {
+        return { ...publicInfo(record), lastReport: withOrchestrationStore((store) => store.lastReportFor(id)), message: status }
+      }
+    }
+    if (Date.now() - started >= timeoutMs) throw new ClankerApiError("TIMEOUT", `Timed out waiting for message ${messageId} (${status.state}); clanker remains available`, 124)
     await Bun.sleep(pollMs)
   }
 }

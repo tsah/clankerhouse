@@ -119,3 +119,20 @@ describe("harness recovery commands", () => {
     expect(recoveryPrompt("attempt-42")).toContain("attempt-42")
   })
 })
+
+describe("Workshop launch environment", () => {
+  const workshopEnv = (argv: string[]) => argv.filter((arg) => arg.startsWith("CLANKERHOUSE_WORKSHOP_ID=") || arg.startsWith("CLANKERHOUSE_PARENT_WORKSHOP_ID="))
+
+  test("initial and Recovery launches carry the Workshop and its parent, empty for a root", () => {
+    for (const harness of ["pi", "claude", "opencode"] as const) {
+      const record = desired(harness)
+      const child = { workshopId: "workshop-child", parentWorkshopId: "workshop-parent" }
+      const root = { workshopId: "workshop-root", parentWorkshopId: null }
+      expect(workshopEnv(initialHarnessCommand({ ...record, prompt: "task", workshop: child }))).toEqual(["CLANKERHOUSE_WORKSHOP_ID=workshop-child", "CLANKERHOUSE_PARENT_WORKSHOP_ID=workshop-parent"])
+      expect(workshopEnv(recoveryHarnessCommand(record, "attempt-env", child))).toEqual(["CLANKERHOUSE_WORKSHOP_ID=workshop-child", "CLANKERHOUSE_PARENT_WORKSHOP_ID=workshop-parent"])
+      expect(workshopEnv(recoveryHarnessCommand(record, "attempt-env", root))).toEqual(["CLANKERHOUSE_WORKSHOP_ID=workshop-root", "CLANKERHOUSE_PARENT_WORKSHOP_ID="])
+      // Without a resolved record, Recovery still names the desired Workshop.
+      expect(workshopEnv(recoveryHarnessCommand(record, "attempt-env"))).toEqual(["CLANKERHOUSE_WORKSHOP_ID=workshop-test", "CLANKERHOUSE_PARENT_WORKSHOP_ID="])
+    }
+  })
+})

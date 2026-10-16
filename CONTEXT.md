@@ -2,7 +2,7 @@
 
 ## Workshop
 
-A durable Clankerhouse-owned environment bound to a canonical worktree or directory. A Workshop has a stable Clankerhouse ID and owns Terminals and Clankers. Its identity does not depend on tmux names or tmux IDs.
+A durable Clankerhouse-owned environment bound to a canonical worktree or directory. A Workshop has a stable Clankerhouse ID and owns Terminals and Clankers. Its identity does not depend on multiplexer names or native IDs.
 
 ## Terminal
 
@@ -14,19 +14,19 @@ An externally running harness session correlated to a Workshop and Terminal. Cla
 
 ## Display Name
 
-Mutable Clankerhouse-owned presentation metadata. Native tmux names may seed Display Names during Absorption and may mirror them afterward, but names never establish identity, ownership, correlation, parentage, deduplication, or recovery.
+Mutable Clankerhouse-owned presentation metadata. Native multiplexer labels may seed Display Names during Absorption and may mirror them afterward, but names never establish identity, ownership, correlation, parentage, deduplication, or recovery.
 
 ## Multiplexer
 
 A replaceable runtime that hosts terminal session, window, and pane topology. Clankerhouse owns semantic identity, Display Names, Workshop ownership, and recovery intent; the Multiplexer owns live terminal processes, layout, attachment, and focus.
 
-The Multiplexer interface is expressed in Clankerhouse operations and capabilities rather than as a generic command passthrough. The tmux adapter is the only current adapter. Supporting another Multiplexer does not require Clankerhouse to own terminal multiplexing itself.
+The Multiplexer interface is expressed in Clankerhouse operations and capabilities rather than as a generic command passthrough. Herdr is the only current adapter (ADR-0008). Supporting another Multiplexer does not require Clankerhouse to own terminal multiplexing itself.
 
 ## Multiplexer Location
 
 The current ephemeral location of a managed entity, expressed as a Multiplexer kind, Multiplexer instance identity, and opaque native session, window, and pane IDs. Multiplexer Locations can change or disappear without changing Workshop, Terminal, or Clanker identity.
 
-A Tmux Location is a Multiplexer Location whose instance identity includes the tmux server identity or epoch and whose native IDs are tmux session, window, and pane IDs.
+A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart.
 
 ## Managed Resource
 
@@ -36,7 +36,7 @@ The Clankerhouse resource registry is authoritative about internal correlation, 
 
 ## Unmanaged Resource
 
-A visible tmux session, window, pane, or process without explicit Clankerhouse identity. Clankerhouse may display native labels for unmanaged resources but does not infer semantic identity from names, titles, commands, paths, or timing.
+A visible multiplexer session, window, pane, or process without explicit Clankerhouse identity. Clankerhouse may display native labels for unmanaged resources but does not infer semantic identity from names, titles, commands, paths, or timing.
 
 ## Absorption
 
@@ -44,7 +44,7 @@ The explicit transaction performed when a user enters an unmanaged target throug
 
 Switching outside Clankerhouse does not trigger Absorption. After Absorption, new and removed windows, panes, and supported harness processes are continuously reconciled into or out of the Workshop's internal representation regardless of whether Clankerhouse launched them.
 
-The active pane determines the Workshop that owns an absorbed tmux session. Different working directories in sibling panes do not imply different ownership.
+The active pane determines the Workshop that owns an absorbed multiplexer session. Different working directories in sibling panes do not imply different ownership.
 
 ## Recovery
 
@@ -52,7 +52,7 @@ Recovery reconciles recoverable intent with current external Observations. A sup
 
 ## Herd Reconciliation
 
-The continuous process that consumes Multiplexer topology, foreground process, harness lifecycle, host, and recovery Observations for absorbed Workshops. It maintains stable internal correlation, current presentation, and recoverable intent without replacing the external facts. Starting through Clankerhouse and starting directly in tmux enter the same reconciliation path.
+The continuous process that consumes Multiplexer topology, foreground process, harness lifecycle, host, and recovery Observations for absorbed Workshops. It maintains stable internal correlation, current presentation, and recoverable intent without replacing the external facts. Starting through Clankerhouse and starting directly in the Multiplexer enter the same reconciliation path.
 
 ## Declaration
 
@@ -80,6 +80,6 @@ An executable Clankerhouse runs inside the Workshop: either tracked in the targe
 
 ## Observation
 
-A timestamped fact reported by an external runtime Adapter, such as tmux topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
+A timestamped fact reported by an external runtime Adapter, such as multiplexer topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
 
 Harness state can remain an Observation without becoming a Clanker. A lifecycle report with no Clanker claim may describe a pane's current harness state only while a matching harness process is observed on that pane. It provides presentation state, not owned identity, Clanker actions, or Recovery authority.

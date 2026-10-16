@@ -2,19 +2,19 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by ADR-0007 (Herdr Adapter) and ADR-0008 (tmux Adapter retired; Herdr is the only Adapter).
 
 ## Context
 
 Clankerhouse historically used tmux session names as presentation, identity, correlation, and action targets. Names are mutable and tmux session, window, and pane IDs are valid only within one tmux server lifetime. This made collection, selection, rename, opening, and recovery depend on ambiguous or stale names.
 
-Clankerhouse owns durable Workshops, Terminals, Clankers, and Display Names. It does not own terminal multiplexing. Tmux is the only current multiplexer, but core identity and recovery semantics must not depend on tmux naming or command syntax.
+Clankerhouse owns durable Workshops, Terminals, Clankers, and Display Names. It does not own terminal multiplexing. At the time tmux was the only multiplexer, but core identity and recovery semantics must not depend on tmux naming or command syntax.
 
 ## Decision
 
 Clankerhouse places multiplexer behavior behind a deep Multiplexer module expressed in domain operations: observe topology, resolve current location, absorb unmanaged topology, validate and resolve managed locations, and open targets.
 
-Durable Clankerhouse resource IDs and Display Names are stored in the resource registry. Multiplexer-native IDs are opaque, ephemeral Multiplexer Locations scoped by multiplexer kind and instance identity. The tmux adapter records Clankerhouse identity claims in tmux options but the registry remains authoritative.
+Durable Clankerhouse resource IDs and Display Names are stored in the resource registry. Multiplexer-native IDs are opaque, ephemeral Multiplexer Locations scoped by multiplexer kind and instance identity. The Adapter records Clankerhouse identity claims on native objects but the registry remains authoritative.
 
 Unmanaged multiplexer resources remain visible. Entering one through Clankerhouse absorbs its whole session topology using the active pane's Workshop. Switching outside Clankerhouse does not absorb it. Processes are never inferred to be Clankers during absorption.
 
@@ -22,8 +22,8 @@ Existing snapshot names and name-based target fields remain compatibility hints 
 
 ## Consequences
 
-- Native tmux names can change without changing Clankerhouse identity.
+- Native multiplexer names can change without changing Clankerhouse identity.
 - Collection joins resources by native IDs rather than names.
 - Recovery can reconcile desired resources against explicit identity and current location.
 - A future multiplexer adapter can be added without changing Workshop, Terminal, or Clanker identity.
-- The first implementation has one adapter, so adapter discovery and a general plugin framework remain out of scope.
+- Adapter discovery and a general plugin framework remain out of scope.

@@ -5,16 +5,16 @@ The simplification ships as an expand/migrate/contract migration. The daemon/reg
 ## Preserved during the compatibility release
 
 - Existing command names and argument shapes under `bin/`, including `clankerhouse`, `clankers`, recovery, lifecycle reporting, stop, deletion, and harness launchers.
-- Existing tmux options and bindings. Identity options remain claims validated against the durable registry.
+- Herdr popup bindings installed by `clankerhouse-install-herdr`. Identity claims on Herdr panes remain claims validated against the durable registry.
 - Workshop manifest version 1. Manifests are imported and repaired as projections; they do not override a conflicting durable identity.
 - Lifecycle report JSON and the legacy report directory read path.
-- Snapshot schema version 10 and socket protocol version 1 methods. New protocol fields and methods are additive.
+- The current snapshot schema version and socket protocol version 1 methods. New protocol fields and methods are additive.
 - Recovery database schemas v1, v2, and v3 as import inputs. Legacy database files remain untouched and available for rollback.
 - A one-time `state.json` startup/crash fallback. Live synchronization uses the Unix socket only.
 
 ## Authority during the window
 
-After successful activation, the daemon epoch and unified registry are authoritative. Legacy stores are read-only import sources; manifests, lifecycle reports, tmux options, and `state.json` are projections or claims. A migration that cannot prove identity consistency or pass `PRAGMA foreign_key_check` fails activation rather than guessing.
+After successful activation, the daemon epoch and unified registry are authoritative. Legacy stores are read-only import sources; manifests, lifecycle reports, multiplexer claims, and `state.json` are projections or claims. A migration that cannot prove identity consistency or pass `PRAGMA foreign_key_check` fails activation rather than guessing.
 
 ## Remaining contract prerequisites
 

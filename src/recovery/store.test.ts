@@ -22,8 +22,8 @@ const desired = (overrides: Partial<DesiredClankerInput> = {}): DesiredClankerIn
   harness: "pi",
   workshopId: "workshop-1",
   workshopPath: "/tmp/workshop-1",
-  tmuxSessionName: "repo@recovery",
-  tmuxWindowName: "pi",
+  preferredSessionLabel: "repo@recovery",
+  preferredWindowLabel: "pi",
   cwd: "/tmp/workshop-1",
   harnessSessionId: null,
   launchSpec: { version: 1, profile: "worker" },
@@ -36,7 +36,7 @@ const mode = (path: string) => statSync(path).mode & 0o777
 describe("recovery store", () => {
   test("uses a separate state database and migrates once across idempotent reopen", () => {
     const { root, dbPath } = fixture()
-    expect(recoveryStatePath(root, {})).toBe(join(root, "clankerhouse", "recovery.sqlite3"))
+    expect(recoveryStatePath(root, {})).toBe(join(root, "clankerhouse-herdr", "recovery.sqlite3"))
     expect(recoveryStatePath(root, {})).not.toContain("workshops.sqlite3")
     mkdirSync(dirname(dbPath), { recursive: true })
     chmodSync(dirname(dbPath), 0o755)
@@ -52,7 +52,7 @@ describe("recovery store", () => {
     reopened.close()
 
     const raw = new Database(dbPath, { readonly: true })
-    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 3 })
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 4 })
     expect((raw.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal")
     expect(Number((raw.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous)).toBe(2)
     raw.close()
@@ -75,9 +75,9 @@ describe("recovery store", () => {
     const { dbPath } = fixture()
     mkdirSync(dirname(dbPath), { recursive: true })
     const raw = new Database(dbPath, { create: true })
-    raw.exec("PRAGMA user_version = 4")
+    raw.exec("PRAGMA user_version = 5")
     raw.close()
-    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 4/)
+    expect(() => openRecoveryStore({ dbPath })).toThrow(/version 5/)
   })
 
   test("upgrades an actual v1 schema to accept policy version 2 without breaking foreign keys", () => {
@@ -134,7 +134,8 @@ describe("recovery store", () => {
     store.close()
 
     const migrated = new Database(dbPath)
-    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 3 })
+    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 4 })
+    expect(migrated.query("SELECT preferred_session_label, preferred_window_label FROM desired_clankers WHERE clanker_id = 'legacy'").get()).toEqual({ preferred_session_label: "repo@old", preferred_window_label: "pi" })
     expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([])
     expect((migrated.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'desired_clankers'").get() as { sql: string }).sql).toContain("policy_version IN (1, 2)")
     expect(migrated.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'desired_clankers_%_idx' ORDER BY name").all()).toEqual([
@@ -298,7 +299,7 @@ describe("recovery store", () => {
     store.close()
   })
 
-  test("persists attempts, generic metadata, and boot/tmux epochs", () => {
+  test("persists attempts, generic metadata, and boot/multiplexer epochs", () => {
     const { dbPath } = fixture()
     const store = openRecoveryStore({ dbPath })
     store.createDesired(desired(), { now: 1 })
@@ -311,11 +312,11 @@ describe("recovery store", () => {
 
     store.setMetadata("daemon.generation", { value: 7 }, { now: 50 })
     expect(store.getMetadata<{ value: number }>("daemon.generation")).toEqual({ value: 7 })
-    expect(store.runtimeEpochs()).toEqual({ bootId: null, bootEpoch: 0, tmuxEpoch: 0, updatedAt: null })
-    expect(store.observeBoot("boot-a", { now: 60 })).toEqual({ bootId: "boot-a", bootEpoch: 1, tmuxEpoch: 0, updatedAt: 60 })
+    expect(store.runtimeEpochs()).toEqual({ bootId: null, bootEpoch: 0, multiplexerEpoch: 0, updatedAt: null })
+    expect(store.observeBoot("boot-a", { now: 60 })).toEqual({ bootId: "boot-a", bootEpoch: 1, multiplexerEpoch: 0, updatedAt: 60 })
     expect(store.observeBoot("boot-a", { now: 70 }).bootEpoch).toBe(1)
     expect(store.observeBoot("boot-b", { now: 80 }).bootEpoch).toBe(2)
-    expect(store.advanceTmuxEpoch({ now: 90 })).toEqual({ bootId: "boot-b", bootEpoch: 2, tmuxEpoch: 1, updatedAt: 90 })
+    expect(store.advanceMultiplexerEpoch({ now: 90 })).toEqual({ bootId: "boot-b", bootEpoch: 2, multiplexerEpoch: 1, updatedAt: 90 })
     expect(store.journalEntries({ clankerId: "clanker-1" }).map((entry) => entry.event)).toContain("attempt.finished")
     store.close()
   })

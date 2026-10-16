@@ -12,12 +12,12 @@ dry_run=false
 force=false
 no_daemon_handoff=false
 runtime_dir=
-tmux_socket=
+herdr_socket=
 preflight_hook=
 activation_hook=
 
 usage() {
-    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--no-enable] [--runtime-dir PATH --tmux-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--no-enable] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
 }
 while (($#)); do
     case "$1" in
@@ -27,7 +27,7 @@ while (($#)); do
         --herdr) with_herdr=true; shift ;;
         --no-enable) enable_services=false; shift ;;
         --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
-        --tmux-socket) tmux_socket=${2:?}; shift 2 ;;
+        --herdr-socket) herdr_socket=${2:?}; shift 2 ;;
         --no-daemon-handoff) no_daemon_handoff=true; shift ;;
         --preflight-hook) preflight_hook=${2:?}; shift 2 ;;
         --activation-hook) activation_hook=${2:?}; shift 2 ;;
@@ -39,11 +39,11 @@ while (($#)); do
 done
 [[ "$prefix" != *$'\n'* ]] || { echo "Install prefix may not contain a newline" >&2; exit 2; }
 prefix=$(realpath -m -- "$prefix")
-if [[ -n "$runtime_dir" || -n "$tmux_socket" ]]; then
-    [[ -n "$runtime_dir" && -n "$tmux_socket" ]] || { echo "--runtime-dir and --tmux-socket must be supplied together" >&2; exit 2; }
+if [[ -n "$runtime_dir" || -n "$herdr_socket" ]]; then
+    [[ -n "$runtime_dir" && -n "$herdr_socket" ]] || { echo "--runtime-dir and --herdr-socket must be supplied together" >&2; exit 2; }
     [[ "$no_daemon_handoff" == false ]] || { echo "Cannot combine an isolated daemon selection with --no-daemon-handoff" >&2; exit 2; }
     runtime_dir=$(realpath -m -- "$runtime_dir")
-    tmux_socket=$(realpath -m -- "$tmux_socket")
+    herdr_socket=$(realpath -m -- "$herdr_socket")
 fi
 for hook in "$preflight_hook" "$activation_hook"; do
     [[ -z "$hook" || -x "$hook" ]] || { echo "Install fault hook is not executable: $hook" >&2; exit 2; }
@@ -90,7 +90,7 @@ install_symlink() {
 
 refuse_unmanaged "$active" "installation"
 if [[ (-e "$active" || -L "$active") && -z "$runtime_dir" && "$no_daemon_handoff" == false && "$dry_run" == false ]]; then
-    echo "Upgrades require --runtime-dir and --tmux-socket for isolated daemon handoff, or explicit --no-daemon-handoff after quiescing it yourself" >&2
+    echo "Upgrades require --runtime-dir and --herdr-socket for isolated daemon handoff, or explicit --no-daemon-handoff after quiescing it yourself" >&2
     exit 2
 fi
 if [[ "$dry_run" == true ]]; then
@@ -134,7 +134,7 @@ for command in "$stage"/bin/*; do
 done
 if [[ "$with_integrations" == true ]]; then
     declare -a integration_destinations=(
-        "$HOME/.pi/agent/extensions/tmux-clanker-lifecycle.ts"
+        "$HOME/.pi/agent/extensions/clanker-lifecycle.ts"
         "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/clankerhouse-lifecycle.ts"
         "$HOME/.agents/skills/clanker-coordination"
         "$HOME/.claude/skills/clanker-coordination"
@@ -187,13 +187,19 @@ done
 
 if [[ "$with_integrations" == true ]]; then
     declare -a links=(
-        "$active/integrations/pi/tmux-clanker-lifecycle.ts:$HOME/.pi/agent/extensions/tmux-clanker-lifecycle.ts"
+        "$active/integrations/pi/clanker-lifecycle.ts:$HOME/.pi/agent/extensions/clanker-lifecycle.ts"
         "$active/integrations/opencode/clankerhouse-lifecycle.ts:${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/clankerhouse-lifecycle.ts"
     )
     for pair in "${links[@]}"; do
         source=${pair%%:*}; destination=${pair#*:}
         install_symlink "$source" "$destination"
     done
+    # Remove the Pi extension link installed under its pre-rename (tmux-era) name so
+    # Pi does not load the lifecycle extension twice. Only our own symlink is removed.
+    legacy_pi_extension="$HOME/.pi/agent/extensions/tmux-clanker-lifecycle.ts"
+    if [[ -L "$legacy_pi_extension" && "$(readlink -- "$legacy_pi_extension")" == "$active/integrations/pi/tmux-clanker-lifecycle.ts" ]]; then
+        rm -f -- "$legacy_pi_extension"
+    fi
     for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" "$HOME/.codex/skills"; do
         destination="$skill_root/clanker-coordination"
         install_symlink "$active/integrations/skills/clanker-coordination" "$destination"
@@ -242,9 +248,9 @@ elif [[ -e "$active" ]]; then
 fi
 
 if [[ -n "$runtime_dir" && -n "$previous_target" ]]; then
-    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --tmux-socket "$tmux_socket" --application "$previous_target"
+    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$previous_target"
 elif [[ -n "$runtime_dir" && -n "$legacy_target" ]]; then
-    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --tmux-socket "$tmux_socket" --application "$active"
+    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$active"
 fi
 
 if [[ -n "$legacy_target" ]]; then
@@ -270,18 +276,18 @@ switch_active "$final"
 
 activation_ok=true
 if [[ -n "$runtime_dir" ]]; then
-    if ! "$daemon_hook" activate --runtime-dir "$runtime_dir" --tmux-socket "$tmux_socket" --application "$final"; then activation_ok=false; fi
+    if ! "$daemon_hook" activate --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$final"; then activation_ok=false; fi
 fi
 if [[ "$activation_ok" == true && -n "$activation_hook" ]] && ! "$activation_hook" "$final"; then activation_ok=false; fi
 if [[ "$activation_ok" != true ]]; then
     echo "New version activation failed; restoring the previous target" >&2
     if [[ -n "$runtime_dir" ]]; then
-        "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --tmux-socket "$tmux_socket" --application "$final" || true
+        "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$final" || true
     fi
     if [[ -n "$previous_target" ]]; then
         switch_active "$previous_target"
         if [[ -n "$runtime_dir" ]]; then
-            "$daemon_hook" restart --runtime-dir "$runtime_dir" --tmux-socket "$tmux_socket" --application "$previous_target" || {
+            "$daemon_hook" restart --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$previous_target" || {
                 echo "Rollback restored $previous_target but its daemon health probe failed" >&2
                 exit 1
             }
@@ -323,4 +329,4 @@ mv "$manifest_next" "$manifest"
 trap - EXIT
 printf 'Installed Clankerhouse version %s\n' "$version_id"
 printf 'Active target: %s -> %s\n' "$active" "$final"
-printf 'Add %s to PATH or load %s with TPM.\n' "$bin_dir" "$active/clankerhouse.tmux"
+printf 'Add %s to PATH and run clankerhouse-install-herdr (or pass --herdr) for Herdr key bindings.\n' "$bin_dir"

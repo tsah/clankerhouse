@@ -41,13 +41,14 @@ def reporter_command(state):
     # Only invoke an available hook from a possible pane; the hook remains
     # responsible for selecting and validating the Multiplexer context.
     return (
-        'if { [ -n "${TMUX_PANE:-}" ] || [ -n "${HERDR_PANE_ID:-}" ]; } '
+        'if [ -n "${HERDR_PANE_ID:-}" ] '
         f'&& [ -x {quoted} ]; then exec {quoted} claude {state}; fi'
     )
 
 # Commands this installer generated in earlier versions, around any reporter path.
+# The first guard form is the one generated before tmux support was retired.
 generated_reporter = re.compile(
-    r'if \{ \[ -n "\$\{TMUX_PANE:-\}" \] \|\| \[ -n "\$\{HERDR_PANE_ID:-\}" \]; \} '
+    r'if (?:\{ \[ -n "\$\{TMUX_PANE:-\}" \] \|\| \[ -n "\$\{HERDR_PANE_ID:-\}" \]; \}|\[ -n "\$\{HERDR_PANE_ID:-\}" \]) '
     r'&& \[ -[rx] (?P<path>.+) \]; then (?:bash|exec) (?P=path) claude (?P<state>[a-z]+); fi'
 )
 def generated_state(hook):

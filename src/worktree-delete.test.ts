@@ -23,14 +23,11 @@ function fixture(options: { padding?: number; fault?: string } = {}) {
     XDG_CONFIG_HOME: join(root, "config"),
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
-    CLANKERHOUSE_MULTIPLEXER: "herdr",
     CLANKERHOUSE_INSTANCE: "",
     CLANKERHOUSE_CLANKERS: join(root, "bin/clankers"),
     HERDR_SOCKET_PATH: join(root, "no-live-runtime.sock"),
     HERDR_ENV: "",
     HERDR_PANE_ID: "",
-    TMUX: "",
-    TMUX_PANE: "",
     PATH: `${join(root, "bin")}:${process.env.PATH || ""}`,
     QA_ROOT: root,
     QA_FAULT: options.fault || "",
@@ -78,7 +75,7 @@ else: sys.exit(99)
 `)
   chmodSync(env.CLANKERHOUSE_CLANKERS, 0o755)
   // Use Git only inside this fixture as a narrow Worktrunk double. The standalone
-  // scenario exercises the production helper with real Worktrunk and tmux.
+  // scenario exercises the production helper with real Worktrunk and Herdr.
   const wt = join(root, "bin/wt")
   writeFileSync(wt, `#!/bin/bash
 set -euo pipefail

@@ -20,14 +20,12 @@
         "src/directory-discovery.test.ts",
         "src/incidents.test.ts",
         "src/repository-cache.test.ts",
-        "src/server/process-discovery.test.ts",
-        "src/tmux-fields.test.ts",
-        "tests/test_opencode_status.py"
+        "src/server/process-discovery.test.ts"
       ],
       "standalone": [
         "scripts/qa",
-        "scripts/qa-absorption",
-        "scripts/qa-native-hot"
+        "scripts/qa-native-hot",
+        "scripts/qa-herdr"
       ],
       "manual": [
         "Inspect the full unfiltered tree",
@@ -47,8 +45,7 @@
         "native-client/src/main.rs"
       ],
       "standalone": [
-        "scripts/qa",
-        "scripts/qa-current-session"
+        "scripts/qa"
       ],
       "manual": [
         "Search exact, fuzzy, hyphenated, and absent terms",
@@ -60,7 +57,7 @@
     },
     {
       "id": "client-routed-opening",
-      "title": "Opening exact sessions, children, windows, and directories for the requesting client",
+      "title": "Opening exact sessions, children, windows, and directories",
       "core": true,
       "unit": [
         "src/multiplexer.test.ts",
@@ -68,12 +65,12 @@
         "native-client/src/main.rs"
       ],
       "standalone": [
-        "scripts/qa-client-routing",
-        "scripts/qa-absorption"
+        "scripts/qa-herdr",
+        "scripts/qa"
       ],
       "manual": [
         "Open a child session from the native TUI",
-        "Confirm only the requesting tmux client moves",
+        "Confirm Herdr focuses exactly the selected workspace, tab, or pane",
         "Return to the original session and open a detail target"
       ]
     },
@@ -93,7 +90,6 @@
       "standalone": [
         "scripts/qa",
         "scripts/qa-lineage-actions",
-        "scripts/qa-stop-popup",
         "scripts/qa-recovery",
         "scripts/qa-herdr"
       ],
@@ -101,7 +97,7 @@
       "manual": [
         "Exercise every advertised action in the laboratory",
         "Cancel each destructive confirmation once",
-        "Use Alt-D outside the TUI in tmux and Herdr; confirm the invoking session/worktree is selected, cancellation is harmless, and confirmation deletes only that target",
+        "Use Alt-D outside the TUI in Herdr; confirm the invoking session/worktree is selected, cancellation is harmless, and confirmation deletes only that target",
         "Confirm a slow deletion inside the TUI, then search and jump to another Workshop before it finishes; confirm deletion completes after the picker exits and the jump destination survives",
         "Confirm worktree deletion preserves its branch, including the repository default branch",
         "Delete a worktree with a runtime snapshot larger than 128 KiB; confirm its linked sessions close, unrelated sessions survive, and a malformed initial snapshot prevents removal",
@@ -119,12 +115,11 @@
       ],
       "standalone": [
         "scripts/qa",
-        "scripts/qa-current-session",
         "scripts/qa-lineage-actions",
         "scripts/qa-herdr",
         "scripts/qa-spawn-model"
       ],
-      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs under tmux and Herdr.",
+      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs.",
       "manual": [
         "Create a Workshop and child",
         "Confirm an agent Workshop has only its agent tab, with no extra main shell, and adding an agent preserves existing tabs",
@@ -142,12 +137,12 @@
         "src/resource-registry.test.ts"
       ],
       "standalone": [
-        "scripts/qa-absorption"
+        "scripts/qa-herdr"
       ],
       "manual": [
         "Enter an unmanaged session through Clankerhouse",
         "Confirm the complete terminal topology is registered",
-        "Confirm ordinary tmux switching and process observation do not absorb or assign Clanker identity"
+        "Confirm ordinary Herdr workspace switching and process observation do not absorb or assign Clanker identity"
       ]
     },
     {
@@ -245,8 +240,8 @@
       ],
       "standalone": [
         "scripts/qa-daemon",
-        "scripts/qa-absorption",
-        "scripts/qa-install"
+        "scripts/qa-install",
+        "scripts/qa-herdr"
       ],
       "manual": [
         "Validate integrity and foreign keys",
@@ -311,7 +306,6 @@
       "standalone": [
         "scripts/qa",
         "scripts/qa-native-hot",
-        "scripts/qa-client-routing",
         "scripts/qa-lineage-actions",
         "scripts/qa-herdr"
       ],
@@ -373,22 +367,8 @@
       ]
     },
     {
-      "id": "popup-lifecycle",
-      "title": "Standalone stop popup and surviving-session preservation",
-      "core": false,
-      "unit": [],
-      "standalone": [
-        "scripts/qa-stop-popup"
-      ],
-      "manual": [
-        "Cancel then confirm a stop",
-        "Inspect valid progress glyphs under a POSIX locale and actionable failure detail",
-        "Confirm unrelated sessions survive"
-      ]
-    },
-    {
       "id": "multiplexer-adapters",
-      "title": "Replaceable Multiplexer Interface with tmux and herdr adapters",
+      "title": "Replaceable Multiplexer Interface with the Herdr adapter",
       "core": true,
       "unit": [
         "src/multiplexer.test.ts",
@@ -399,13 +379,12 @@
       ],
       "standalone": [
         "scripts/qa-herdr",
-        "scripts/qa-absorption",
         "scripts/qa-recovery"
       ],
       "manual": [
-        "From a managed Herdr pane with no explicit selector, confirm every generic CLI, picker, child process, and instance path resolves Herdr while an explicit tmux override still wins",
-        "Spawn a clanker, confirm it appears with attested state, then migrate one session while tmux clankerhouse keeps running",
-        "Confirm the tmux adapter is unchanged when selection and managed Herdr pane markers are absent"
+        "From a Herdr pane, confirm every generic CLI, picker, child process, and instance path resolves the Herdr instance",
+        "Spawn a clanker and confirm it appears with attested state",
+        "Confirm a capability-less stub Adapter still passes the managed-layer unit suite"
       ]
     },
     {

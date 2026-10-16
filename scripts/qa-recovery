@@ -1,9 +1,10 @@
 #!/bin/bash
 
 set -euo pipefail
-export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 root=$(realpath -m -- "${CLANKERHOUSE_RECOVERY_QA_ROOT:-/tmp/qa-clankerhouse-recovery-$(id -u)-$$}")
 [[ "$root" =~ ^/tmp/qa-clankerhouse-recovery-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe recovery QA root: $root" >&2; exit 2; }
 marker="$root/.clankerhouse-recovery-qa-owned"
@@ -11,7 +12,6 @@ marker="$root/.clankerhouse-recovery-qa-owned"
 rm -rf -- "$root"
 mkdir -p "$root"/{bin,home,runtime,state,repo}
 touch "$marker"
-socket="$root/tmux.sock"
 boot_file="$root/boot-id"
 log="$root/harness.log"
 printf 'boot-a\n' > "$boot_file"
@@ -28,7 +28,7 @@ grep -F 'After=default.target network-online.target clankerhouse-resource-guard.
 grep -F 'Before=clankerhouse-recovery.service' "$repo/share/systemd/user/clankerhouse-resource-guard.service.in" >/dev/null || { echo "Resource guard must start before recovery" >&2; exit 1; }
 
 cleanup() {
-    tmux -S "$socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     [[ "${CLANKERHOUSE_RECOVERY_QA_KEEP:-0}" == 1 ]] || { [[ -f "$marker" ]] && rm -rf -- "$root"; }
 }
 trap cleanup EXIT INT TERM
@@ -60,10 +60,14 @@ printf '%s\t%s\t%s\t%s\n' "$harness" "$mode" "$session_id" "${CLANKER_RECOVERY_A
 args=(recovery attest "$CLANKER_ID" --session-id "$session_id")
 [[ -z "${CLANKER_RECOVERY_ATTEMPT:-}" ]] || args+=(--attempt "$CLANKER_RECOVERY_ATTEMPT")
 "$CLANKERHOUSE_CLANKERS" "${args[@]}" >/dev/null
-tmux set-option -p -t "$TMUX_PANE" @clankerhouse_harness_session_id "$session_id"
+"$CLANKERHOUSE_CLANKERS" mux claim --pane "$HERDR_PANE_ID" harnessSessionId "$session_id"
 if [[ "$clean_exit" == true ]]; then
     # Let spawn finish attaching pane metadata before exercising clean process exit.
-    sleep 0.1
+    for _ in {1..100}; do
+        [[ -n "$("$CLANKERHOUSE_CLANKERS" mux read-claim --pane "$HERDR_PANE_ID" clankerId 2>/dev/null)" ]] && break
+        sleep 0.05
+    done
+    sleep 1
     exit 0
 fi
 exec sleep 300
@@ -111,24 +115,34 @@ printf 'dirty\n' >> "$fixture/tracked.txt"
 printf 'untracked\n' > "$fixture/untracked.txt"
 before_status=$(git -C "$fixture" status --porcelain=v1)
 
-qa_env=(env
-    "HOME=$root/home"
-    "PATH=$root/bin:$PATH"
-    "TMUX=$socket,0,0"
-    "XDG_RUNTIME_DIR=$root/runtime"
-    "XDG_STATE_HOME=$root/state"
-    "CLANKERHOUSE_BOOT_ID_PATH=$boot_file"
-    "CLANKERHOUSE_HOME=$repo"
-    "CLANKERHOUSE_BIN_DIR=$repo/bin"
-    "CLANKERHOUSE_LIBEXEC=$repo/libexec"
-    "CLANKERHOUSE_CLANKERS=$repo/bin/clankers"
-    "CLANKERHOUSE_OPENCODE_LAUNCHER=$root/bin/opencode"
-    "CLANKERHOUSE_QA_HARNESS_LOG=$log"
-    "CLANKERHOUSE_PROCESS_OWNER=disabled"
-    "DOTFILES_DIR=$repo")
+# Harness panes inherit the isolated Herdr server's environment, so the server is
+# started with the same isolated runtime and state the QA commands use.
+export PATH="$root/bin:$PATH" XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state"
+export CLANKERHOUSE_BOOT_ID_PATH="$boot_file" CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin"
+export CLANKERHOUSE_LIBEXEC="$repo/libexec" CLANKERHOUSE_CLANKERS="$repo/bin/clankers"
+export CLANKERHOUSE_OPENCODE_LAUNCHER="$root/bin/opencode" CLANKERHOUSE_QA_HARNESS_LOG="$log"
+export CLANKERHOUSE_PROCESS_OWNER=disabled DOTFILES_DIR="$repo"
+unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
+start_herdr() {
+    local status=0
+    qa_herdr_start "$1" || status=$?
+    [[ "$status" != 77 ]] || exit 0
+    [[ "$status" == 0 ]] || exit "$status"
+}
+start_herdr "$root/herdr-a"
+qa_env=(env "HOME=$root/home")
 clankers() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 recover() { "${qa_env[@]}" "$repo/bin/clankerhouse-recovery" --once; }
-window_count() { tmux -S "$socket" list-windows -a -F '#{@clankerhouse_clanker_id}' 2>/dev/null | grep -c '^clanker-' || true; }
+# Clanker panes as "PANE CLANKER_ID" lines, from the Multiplexer Interface.
+clanker_panes() {
+    clankers mux observe 2>/dev/null | python3 -c 'import json,sys
+for s in json.load(sys.stdin)["sessions"]:
+    for w in s["windows"]:
+        for p in w["panes"]:
+            cid = (p.get("claims") or {}).get("clankerId") or p.get("clankerId") or ""
+            if cid.startswith("clanker-"): print(p["id"], cid)' || true
+}
+window_count() { clanker_panes | grep -c . || true; }
 wait_for_count() {
     local expected=$1
     for _ in {1..100}; do [[ "$(window_count)" == "$expected" ]] && return 0; sleep 0.05; done
@@ -161,8 +175,8 @@ recover
 wait_for_count 3
 
 # Abrupt pane loss becomes pending and never launches during reconciliation.
-read -r exited_pane exited_id < <(tmux -S "$socket" list-panes -a -F '#{pane_id} #{@clankerhouse_clanker_id}' | awk '$2 ~ /^clanker-/ {print $1, $2; exit}')
-tmux -S "$socket" kill-pane -t "$exited_pane"
+read -r exited_pane exited_id < <(clanker_panes | head -1)
+clankers mux kill --pane "$exited_pane"
 wait_for_count 2
 recover
 wait_for_count 2
@@ -176,11 +190,13 @@ wait_for_attested 4
 [[ "$(awk -F '\t' '$2=="recovery" {count++} END {print count+0}' "$log")" == 1 ]] || { echo "Expected one explicit resume" >&2; exit 1; }
 
 # Hard reboot creates an automatic campaign and admits only one clanker on a healthy host.
-tmux -S "$socket" kill-server
+# The host comes back with an empty multiplexer: a fresh isolated Herdr server.
+qa_herdr_stop
 rm -rf "$root/runtime"
 mkdir -p "$root/runtime"
 printf 'boot-b\n' > "$boot_file"
-STATE_DIR="$root/state/clankerhouse" python3 - <<'PY'
+start_herdr "$root/herdr-b"
+STATE_DIR="$root/state/clankerhouse-herdr" python3 - <<'PY'
 import json, os, pathlib, time
 now = int(time.time() * 1000)
 path = pathlib.Path(os.environ["STATE_DIR"])
@@ -194,7 +210,7 @@ path.mkdir(parents=True, exist_ok=True)
 PY
 recover
 wait_for_count 1
-auto_id=$(tmux -S "$socket" list-panes -a -F '#{@clankerhouse_clanker_id}' | grep '^clanker-' | head -1)
+auto_id=$(clanker_panes | awk 'NR == 1 {print $2}')
 interrupted_condition=$(clankers recovery status | EXITED_ID="$exited_id" python3 -c 'import json,os,sys; print(next(r["recoveryCondition"] for r in json.load(sys.stdin)["clankers"] if r["clankerId"] == os.environ["EXITED_ID"]))')
 [[ "$interrupted_condition" == interrupted_unknown ]] || { echo "Interrupted recovery was not quarantined for review" >&2; exit 1; }
 if clankers recovery resume "$exited_id" --force >/dev/null 2>&1; then
@@ -225,6 +241,7 @@ recover
 wait_for_count 0
 
 # A clean harness process exit durably opts out of future boot recovery.
+clankers workshop ensure --cwd "$fixture" >/dev/null
 clean_exit_id=$(cd "$fixture" && "${qa_env[@]}" "$repo/bin/clankers" spawn --workshop "$fixture" --name clean-exit --harness pi --prompt "QA clean exit" | python3 -c 'import json,sys; print(json.load(sys.stdin)["clankerId"])')
 for _ in {1..100}; do
     clean_exit_state=$(clankers recovery status | CLEAN_EXIT_ID="$clean_exit_id" python3 -c 'import json,os,sys; rows=json.load(sys.stdin)["clankers"]; print(next(row["desiredState"] for row in rows if row["clankerId"] == os.environ["CLEAN_EXIT_ID"]))')
@@ -238,7 +255,7 @@ wait_for_count 0
 
 after_status=$(git -C "$fixture" status --porcelain=v1)
 [[ "$before_status" == "$after_status" ]] || { echo "Recovery changed dirty or untracked Git state" >&2; diff -u <(printf '%s\n' "$before_status") <(printf '%s\n' "$after_status") >&2 || true; exit 1; }
-[[ "$(stat -c '%a' "$root/state/clankerhouse")" == 700 ]] || { echo "Recovery state directory is not mode 700" >&2; exit 1; }
-[[ "$(stat -c '%a' "$root/state/clankerhouse/recovery.sqlite3")" == 600 ]] || { echo "Recovery database is not mode 600" >&2; exit 1; }
+[[ "$(stat -c '%a' "$root/state/clankerhouse-herdr")" == 700 ]] || { echo "Recovery state directory is not mode 700" >&2; exit 1; }
+[[ "$(stat -c '%a' "$root/state/clankerhouse-herdr/recovery.sqlite3")" == 600 ]] || { echo "Recovery database is not mode 600" >&2; exit 1; }
 
 printf 'Clankerhouse recovery QA passed: guarded automatic Spot campaign, exact identities, no interrupted-tool replay, single staggered admission, hard-reboot ambiguity quarantine, lease contention, durable stop/suspension/tombstones, clean-exit opt-out, private state permissions, and dirty worktree preservation behave correctly.\n'

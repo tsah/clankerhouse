@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Conservative Linux resource-pressure guard for tagged tmux Clankers.
+"""Conservative Linux resource-pressure guard for tagged Clankers.
 
 The guard deliberately has no third-party dependencies. It stops only attributable
 child workload trees, or durably stops an owned Recovery Clanker as a fallback.
 It only considers panes
-which explicitly advertise @dotfiles_harness=pi|claude|opencode|codex, and revalidates a
+whose harness claim is pi|claude|opencode|codex, and revalidates a
 process immediately before each signal.
 """
 
@@ -71,25 +71,16 @@ class Config:
     dry_run: bool = False
     state_home: pathlib.Path = pathlib.Path.home() / ".local/state"
     runtime_dir: pathlib.Path = pathlib.Path("/tmp")
-    multiplexer: str = "tmux"
-    instance_suffix: str = ""
+    instance_suffix: str = "-herdr"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         env = os.environ if env is None else env
         home = pathlib.Path(env.get("HOME", str(pathlib.Path.home())))
-        requested_multiplexer = env.get("CLANKERHOUSE_MULTIPLEXER", "").strip().lower()
-        if requested_multiplexer and requested_multiplexer not in ("tmux", "herdr"):
-            raise ValueError(f"unsupported CLANKERHOUSE_MULTIPLEXER: {requested_multiplexer} (expected tmux or herdr)")
-        multiplexer = requested_multiplexer or (
-            "herdr" if env.get("HERDR_ENV", "").strip() == "1" and env.get("HERDR_PANE_ID", "").strip() else "tmux"
-        )
         instance = env.get("CLANKERHOUSE_INSTANCE", "").strip()
         if instance and (instance in (".", "..") or re.fullmatch(r"[A-Za-z0-9._-]+", instance) is None):
             raise ValueError(f"invalid CLANKERHOUSE_INSTANCE: {instance}")
-        instance_suffix = (
-            "" if instance in ("default", "tmux") else f"-{instance}"
-        ) if instance else ("" if multiplexer == "tmux" else f"-{multiplexer}")
+        instance_suffix = ("" if instance == "default" else f"-{instance}") if instance else "-herdr"
         return cls(
             samples=_env_int(env, "RESOURCE_GUARD_SAMPLES", 61, 1),
             interval=_env_float(env, "RESOURCE_GUARD_INTERVAL", 5.0),
@@ -109,7 +100,6 @@ class Config:
             dry_run=_env_bool(env, "RESOURCE_GUARD_DRY_RUN"),
             state_home=pathlib.Path(env.get("XDG_STATE_HOME", str(home / ".local/state"))),
             runtime_dir=pathlib.Path(env.get("XDG_RUNTIME_DIR", "/tmp")),
-            multiplexer=multiplexer,
             instance_suffix=instance_suffix,
         )
 
@@ -296,42 +286,8 @@ class LinuxSystem:
         return 0
 
 
-class TmuxClient:
-    FORMAT = "\t".join((
-        "#{pane_id}", "#{@dotfiles_harness}", "#{@clankerhouse_clanker_id}",
-        "#{@clankerhouse_clanker_pid}", "#{pane_pid}", "#{pane_active}",
-        "#{window_active}", "#{session_attached}", "#{session_name}", "#{pane_current_path}",
-        "#{@dotfiles_worktree_path}",
-    ))
-
-    def list_panes(self) -> str:
-        result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", self.FORMAT],
-            check=False, capture_output=True, text=True,
-        )
-        return result.stdout if result.returncode == 0 else ""
-
-    def pane_identity(self, pane: str) -> tuple[str, str, int, int, bool] | None:
-        fmt = "\t".join(("#{@dotfiles_harness}", "#{@clankerhouse_clanker_id}", "#{@clankerhouse_clanker_pid}", "#{pane_pid}", "#{pane_active}", "#{window_active}", "#{session_attached}"))
-        result = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", pane, fmt],
-            check=False, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return None
-        parts = result.stdout.strip().split("\t")
-        if len(parts) != 7:
-            return None
-        try:
-            focused = parts[4] == "1" and parts[5] == "1" and parts[6] not in ("", "0")
-            return parts[0], parts[1], int(parts[2] or 0), int(parts[3]), focused
-        except ValueError:
-            return None
-
-
 class MultiplexerClient:
-    """Runtime-neutral pane discovery through `clankers mux observe`, emitting the same
-    tab-separated rows as TmuxClient so the guard's discovery logic is shared."""
+    """Pane discovery through `clankers mux observe`, emitted as tab-separated rows."""
 
     def __init__(self, cli: str | None = None) -> None:
         self.cli = cli or os.environ.get("CLANKERHOUSE_CLANKERS", "clankers")
@@ -372,17 +328,6 @@ class MultiplexerClient:
             except ValueError:
                 return None
         return None
-
-
-def default_multiplexer_client(multiplexer: str | None = None):
-    if multiplexer is None:
-        requested = os.environ.get("CLANKERHOUSE_MULTIPLEXER", "").strip().lower()
-        multiplexer = requested or (
-            "herdr"
-            if os.environ.get("HERDR_ENV", "").strip() == "1" and os.environ.get("HERDR_PANE_ID", "").strip()
-            else "tmux"
-        )
-    return MultiplexerClient() if multiplexer == "herdr" else TmuxClient()
 
 
 def parse_meminfo(text: str) -> dict[str, int]:
@@ -448,7 +393,7 @@ class ResourceGuard:
         config: Config | None = None,
         *,
         system: LinuxSystem | None = None,
-        tmux: TmuxClient | None = None,
+        multiplexer: MultiplexerClient | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
         run_command: Callable[[list[str]], int] | None = None,
@@ -458,7 +403,7 @@ class ResourceGuard:
             pathlib.Path(os.environ.get("CLANKERHOUSE_PROC_ROOT", "/proc")),
             pathlib.Path(os.environ.get("CLANKERHOUSE_SYSFS_ROOT", "/sys")),
         )
-        self.tmux = tmux or default_multiplexer_client(self.config.multiplexer)
+        self.multiplexer = multiplexer or MultiplexerClient()
         self.sleep = sleep
         self.now = now
         self.run_command = run_command or (lambda argv: subprocess.run(argv, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
@@ -706,7 +651,7 @@ class ResourceGuard:
     def discover(self) -> list[Candidate]:
         candidates: list[Candidate] = []
         uid = os.getuid()
-        for line in self.tmux.list_panes().splitlines():
+        for line in self.multiplexer.list_panes().splitlines():
             parts = line.split("\t")
             if len(parts) != 11:
                 continue
@@ -755,7 +700,7 @@ class ResourceGuard:
         return [candidate for candidate in candidates if candidate.clanker_id not in duplicate_ids]
 
     def validate(self, candidate: Candidate) -> bool:
-        identity = self.tmux.pane_identity(candidate.pane)
+        identity = self.multiplexer.pane_identity(candidate.pane)
         if identity is None:
             return False
         harness, clanker_id, tagged_pid, pane_pid, focused = identity

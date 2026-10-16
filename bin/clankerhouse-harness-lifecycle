@@ -40,7 +40,7 @@ if [[ "${CLANKER_RECOVERY_TRACKED:-}" == "1" && -n "${CLANKER_ID:-}" && -n "${CL
         fi
         args=(recovery attest-exit "$CLANKER_ID" --attempt "$CLANKER_RECOVERY_ATTEMPT" --reason "$reason")
         [[ -z "$session_id" ]] || args+=(--session-id "$session_id")
-        CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_command" "${args[@]}" >/dev/null || true
+        "$clankers_command" "${args[@]}" >/dev/null || true
     fi
 fi
 

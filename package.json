@@ -1,7 +1,7 @@
 {
   "name": "clankerhouse",
   "version": "0.1.0",
-  "description": "Tmux-native workshops, visible harness sessions, and durable recovery",
+  "description": "Herdr-native workshops, visible harness sessions, and durable recovery",
   "license": "MIT",
   "author": "Tsah Weiss",
   "repository": {
@@ -14,7 +14,7 @@
   },
   "type": "module",
   "keywords": [
-    "tmux",
+    "herdr",
     "tui",
     "worktree",
     "developer-tools"
@@ -38,7 +38,7 @@
     "test:all": "./test",
     "test:unit": "./test --unit",
     "test:standalone": "./test --standalone",
-    "test:python": "PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch tests.test_opencode_status",
+    "test:python": "PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch",
     "test:native": "cargo test --manifest-path native-client/Cargo.toml",
     "qa:native-hot": "scripts/qa-native-hot",
     "test:nvim": "scripts/qa-nvim",
@@ -46,10 +46,7 @@
     "qa:daemon": "scripts/qa-daemon",
     "qa:recovery": "scripts/qa-recovery",
     "qa:process-owner": "scripts/qa-process-owner",
-    "qa:popup": "scripts/qa-stop-popup",
-    "qa:current-session": "scripts/qa-current-session",
-    "qa:absorption": "scripts/qa-absorption",
-    "qa:client-routing": "scripts/qa-client-routing",
+    "qa:herdr": "scripts/qa-herdr",
     "qa:install": "scripts/qa-install",
     "qa:tui": "scripts/qa",
     "qa": "./test",
@@ -68,7 +65,6 @@
     "tests",
     "resource_guard.py",
     "spot_watch.py",
-    "clankerhouse.tmux",
     "README.md",
     "LICENSE",
     "tsconfig.json"

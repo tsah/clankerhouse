@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Clankerhouse owns durable Workshop, Terminal, and Clanker identity while tmux, processes, harnesses, Git, and the host own their current facts. The existing projection sometimes discarded facts that failed identity correlation, then presentation inferred replacement state such as treating the current session as working. This made missing attestation look like missing reality and allowed derived UI state to masquerade as runtime state.
+Clankerhouse owns durable Workshop, Terminal, and Clanker identity while the Multiplexer, processes, harnesses, Git, and the host own their current facts. The existing projection sometimes discarded facts that failed identity correlation, then presentation inferred replacement state such as treating the current session as working. This made missing attestation look like missing reality and allowed derived UI state to masquerade as runtime state.
 
 ## Decision
 
@@ -24,4 +24,4 @@ Projection keeps existing state and target fields as compatibility outputs while
 - A mismatched lifecycle report remains diagnosable without affecting aggregate runtime state.
 - Stable identity and mutation safety continue to use validated registry records and Multiplexer Locations.
 - Snapshot additions remain optional and backward-compatible during migration.
-- Recovery adoption must eventually consume the same validated observation model instead of raw tmux claims.
+- Recovery adoption must eventually consume the same validated observation model instead of raw multiplexer claims.

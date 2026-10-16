@@ -7,7 +7,6 @@ import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation } from "./multiplexer/interface"
 import { OrchestrationStore, clankerBusy, generatedMessageId, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type PromptObservation, type SendStatus } from "./orchestration"
 import { runtimeDirFor } from "./paths"
-import { parseTmuxFields } from "./tmux-fields"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
 export type ClankerDelivery = "steer" | "followUp"
@@ -143,11 +142,6 @@ export interface PaneMetadata {
   worktreePath: string
   focused?: boolean
 }
-
-export const parsePaneMetadata = (output: string): PaneMetadata[] => output.split("\n").filter(Boolean).map((line) => {
-  const [harness = "", id = "", socketPath = "", sessionId = "", session = "", window = "", name = "", pane = "", cwd = "", worktreePath = ""] = parseTmuxFields(line)
-  return { harness, id, socketPath, sessionId, session, window, name, pane, cwd, worktreePath }
-}).filter((row) => row.harness && row.pane)
 
 /** Cross-process mutex for pane-id allocation, runtime-agnostic (atomic mkdir under the runtime dir). */
 const withPaneLock = async <T>(pane: string, work: () => Promise<T>): Promise<T> => {

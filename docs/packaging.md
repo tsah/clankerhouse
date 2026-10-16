@@ -1,6 +1,6 @@
 # Packaging contract
 
-Clankerhouse is a standalone Linux application and a TPM-compatible tmux plugin.
+Clankerhouse is a standalone Linux application that runs inside Herdr.
 The source checkout is the canonical product tree; dotfiles may retain only
 compatibility launchers and personal configuration.
 
@@ -11,7 +11,6 @@ compatibility launchers and personal configuration.
 - `src/`: TUI, API, projection, transport, workshop, and recovery code
 - `integrations/`: Pi, Claude-compatible reporter, OpenCode, and shared skill
 - `share/systemd/user/`: user-unit templates rendered by the installer
-- `clankerhouse.tmux`: plugin entry point and configurable default bindings
 
 ## Prefix installation
 
@@ -31,15 +30,15 @@ version directory. Existing unmanaged files are never replaced without
 `$XDG_STATE_HOME/clankerhouse/installations`.
 
 Systemd and harness integration remain opt-in. Uninstall removes only paths in
-the installation manifest and deliberately preserves `$XDG_STATE_HOME/clankerhouse`
-and `$XDG_RUNTIME_DIR/clankerhouse-$UID`.
+the installation manifest and deliberately preserves `$XDG_STATE_HOME/clankerhouse-herdr`
+and `$XDG_RUNTIME_DIR/clankerhouse-$UID-herdr`.
 
 ## Daemon handoff and rollback
 
-An upgrade of an existing target requires either both `--runtime-dir` and
-`--tmux-socket`, or the explicit `--no-daemon-handoff` assertion. The normal
-handoff hook accepts only a daemon whose `/proc` identity matches the selected
-runtime, tmux socket, and resolved application target. It sends SIGTERM, waits
+An upgrade of an existing target requires either `--runtime-dir` together with
+`--herdr-socket`, or the explicit `--no-daemon-handoff` assertion. The normal handoff hook accepts only a
+daemon whose `/proc` identity matches the selected runtime directory, Herdr
+socket, and resolved application target. It sends SIGTERM, waits
 for quiescence, switches the active symlink, starts the selected runtime through
 the new target, and probes the versioned Unix-socket `server.status` Interface.
 
@@ -57,7 +56,7 @@ the rollback target. Unmanaged-file refusal and legacy manifests remain valid.
 
 1. Back up durable state and record `readlink -f $prefix/lib/clankerhouse` (or
    the legacy fixed directory).
-2. Supply an isolated runtime and exact tmux socket to the installer; do not use
+2. Supply the exact runtime directory and Herdr socket to the installer; do not use
    `--no-daemon-handoff` while a daemon may still be live.
 3. Confirm the reported active target and run `clankerhouse-doctor` through the
    stable prefix launcher.
@@ -66,15 +65,14 @@ the rollback target. Unmanaged-file refusal and legacy manifests remain valid.
 5. On uninstall, quiesce the selected daemon first; package uninstall preserves
    runtime and registry state by design.
 
-## Tmux plugin
+## Herdr bindings
 
-`clankerhouse.tmux` resolves commands relative to itself and does not perform a
-network install. TPM may clone the repository, but recovery services should use
-a stable prefix installation. All bindings can be disabled or remapped through
-tmux options documented in `README.md`.
+`clankerhouse-install-herdr` writes Alt-K, Alt-B, and Alt-D popup bindings into a
+managed block of Herdr's `config.toml`. Rerunning it keeps keys the operator
+changed. Recovery services should use a stable prefix installation.
 
 ## Release gate
 
 A release must pass type checking, Bun and Python tests, API/daemon/recovery/TUI
-QA, standalone stop-popup QA, and relocatable prefix install/TPM/uninstall QA.
+QA, the isolated Herdr Adapter scenario, and relocatable prefix install/uninstall QA.
 The package must have no runtime dependency on a parent dotfiles checkout.

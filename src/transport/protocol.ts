@@ -7,7 +7,7 @@ export const SNAPSHOT_PROTOCOL_VERSION = 1 as const
 export type AvailableAction = "open" | "absorb" | "rename" | "attach" | "reparent" | "detach" | "delete" | "create" | "start" | "stop" | "recovery"
 
 export type MutationIntent =
-  | { type: "open"; target: Target; client?: string }
+  | { type: "open"; target: Target }
   | { type: "absorb"; target: Target }
   | { type: "rename"; session: string; resourceId?: string; displayName: string }
   | { type: "attach" | "reparent"; workshopId: string; parentWorkshopId: string; session?: string }
@@ -117,8 +117,8 @@ const validTarget = (value: unknown): value is Target => {
   if (!value || typeof value !== "object") return false
   const target = value as Record<string, unknown>
   if (target.type === "directory") return validText(target.path)
-  if (target.type === "tmux_session") return validText(target.session)
-  if (target.type === "tmux_window") return validText(target.session) && validText(target.windowId) && validText(target.pane)
+  if (target.type === "session") return validText(target.session)
+  if (target.type === "window") return validText(target.session) && validText(target.windowId) && validText(target.pane)
   return target.type === "opencode" && validText(target.session) && validText(target.pane)
 }
 
@@ -127,8 +127,8 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
   const intent = value as Record<string, unknown>
   switch (intent.type) {
     case "open": {
-      if (!validTarget(intent.target) || (intent.client !== undefined && !validText(intent.client, 512))) return undefined
-      return { type: "open", target: intent.target, ...(typeof intent.client === "string" ? { client: intent.client } : {}) }
+      if (!validTarget(intent.target)) return undefined
+      return { type: "open", target: intent.target }
     }
     case "absorb": return validTarget(intent.target) ? { type: "absorb", target: intent.target } : undefined
     case "rename": return validText(intent.session) && validText(intent.displayName, 256) ? { type: "rename", session: intent.session, resourceId: validText(intent.resourceId) ? intent.resourceId : undefined, displayName: intent.displayName } : undefined

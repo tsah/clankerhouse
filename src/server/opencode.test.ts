@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import type { ForegroundAgentDiscovery } from "./process-discovery"
 import { openCodeSessionIdFromArgv, projectOpenCodeService } from "./opencode"
-import type { TmuxWindow } from "./resources"
+import type { MuxWindow } from "./resources"
 
-const window = (overrides: Partial<TmuxWindow> = {}): TmuxWindow => ({
+const window = (overrides: Partial<MuxWindow> = {}): MuxWindow => ({
   session: "repo@work",
   sessionId: "$1",
   id: "@1",

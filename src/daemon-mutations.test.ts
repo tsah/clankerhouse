@@ -26,25 +26,25 @@ const settled = async (journal: OperationJournal, id: string) => {
 
 describe("staged daemon mutation durability", () => {
   test("a label change is persisted before its hook is dispatched, and the done key refreshes the projection it may have labelled", () => {
-    expect(mutationStages({ type: "create", repository: "/repo", branch: "feature", create: true })).toEqual(["identity.validated", "worktree.ready", "tmux.ready", "hook.dispatched", "projection.refreshed"])
+    expect(mutationStages({ type: "create", repository: "/repo", branch: "feature", create: true })).toEqual(["identity.validated", "worktree.ready", "multiplexer.ready", "hook.dispatched", "projection.refreshed"])
     expect(mutationStages({ type: "label", path: "/repo/feature", key: "stage", value: "retro" })).toEqual(["identity.validated", "labels.updated", "title.mirrored", "hook.dispatched", "projection.refreshed"])
     expect(mutationStages({ type: "done", path: "/repo/feature" })).toEqual(["identity.validated", "hook.completed", "projection.refreshed"])
   })
 
-  test("splices deleted Workshop lineage before closing its tmux session", () => {
+  test("splices deleted Workshop lineage before closing its multiplexer session", () => {
     expect(mutationStages({ type: "delete", kind: "worktree", session: "middle", path: "/repo/middle", confirmed: true })).toEqual([
       "identity.validated",
-      "tmux.marked",
+      "multiplexer.marked",
       "worktree.deleted",
       "lineage.spliced",
-      "tmux-children.updated",
-      "tmux.deleted",
+      "multiplexer-children.updated",
+      "multiplexer.deleted",
       "projection.refreshed",
     ])
   })
 
   test("replays inserted lineage stages for legacy deletes already past them", async () => {
-    for (const legacyStage of ["tmux.deleted", "projection.refreshed"]) {
+    for (const legacyStage of ["multiplexer.deleted", "projection.refreshed"]) {
       const { dbPath } = fixture()
       const registry = openDurableRegistry({ dbPath })
       const intent = { type: "delete" as const, kind: "worktree" as const, session: "middle", path: "/repo/middle", confirmed: true as const }
@@ -60,27 +60,27 @@ describe("staged daemon mutation durability", () => {
       const journal = await OperationJournal.open(executor, registry)
 
       expect(await settled(journal, operation.id)).toMatchObject({ state: "succeeded", stage: "completed" })
-      expect(reconciled).toEqual(["lineage.spliced", "tmux-children.updated", "tmux.deleted", "projection.refreshed"])
+      expect(reconciled).toEqual(["lineage.spliced", "multiplexer-children.updated", "multiplexer.deleted", "projection.refreshed"])
       registry.close()
     }
   })
 
-  test("reconciles a partial tmux rename and metadata write instead of repeating either effect", async () => {
+  test("reconciles a partial multiplexer rename and metadata write instead of repeating either effect", async () => {
     const { dbPath } = fixture()
     const registry = openDurableRegistry({ dbPath })
-    let tmuxName = "before"
+    let muxName = "before"
     let displayName = "before"
-    let tmuxApplies = 0
+    let muxApplies = 0
     let metadataApplies = 0
-    let failTmuxAfterEffect = true
+    let failMuxAfterEffect = true
     let failMetadataAfterEffect = true
     const executor = createStagedMutationExecutor(async (intent, stage, execution) => {
       expect(intent.type).toBe("rename")
       const checkpoint = execution.operation.result && typeof execution.operation.result === "object" ? execution.operation.result as Record<string, unknown> : {}
       if (stage === "identity.validated") return { checkpoint: { nativeSessionId: "$exact" } }
-      if (stage === "tmux.renamed") {
-        if (tmuxName !== "after") { tmuxApplies += 1; tmuxName = "after" }
-        if (failTmuxAfterEffect) { failTmuxAfterEffect = false; throw new Error("crash after tmux effect") }
+      if (stage === "multiplexer.renamed") {
+        if (muxName !== "after") { muxApplies += 1; muxName = "after" }
+        if (failMuxAfterEffect) { failMuxAfterEffect = false; throw new Error("crash after multiplexer effect") }
         return { checkpoint }
       }
       if (stage === "display-name.persisted") {
@@ -96,21 +96,21 @@ describe("staged daemon mutation durability", () => {
     expect((await settled(journal, submitted.operation.operationId)).stage).toBe("identity.validated")
 
     await journal.submit("rename-faults", intent)
-    expect((await settled(journal, submitted.operation.operationId)).stage).toBe("tmux.renamed")
+    expect((await settled(journal, submitted.operation.operationId)).stage).toBe("multiplexer.renamed")
     await journal.submit("rename-faults", intent)
     const complete = await settled(journal, submitted.operation.operationId)
     expect(complete).toMatchObject({ state: "succeeded", stage: "completed", attempts: 3, result: { session: "after" } })
-    expect({ tmuxApplies, metadataApplies }).toEqual({ tmuxApplies: 1, metadataApplies: 1 })
+    expect({ muxApplies, metadataApplies }).toEqual({ muxApplies: 1, metadataApplies: 1 })
     expect(registry.operation(submitted.operation.operationId)).toMatchObject({ status: "succeeded", stage: "completed", attempts: 3 })
     registry.close()
   })
 
-  test("finishes tmux cleanup after worktree removal was interrupted", async () => {
+  test("finishes multiplexer cleanup after worktree removal was interrupted", async () => {
     const { dbPath } = fixture()
     const registry = openDurableRegistry({ dbPath })
-    const external = { worktree: true, tmux: true }
+    const external = { worktree: true, mux: true }
     let removals = 0
-    let tmuxKills = 0
+    let muxKills = 0
     let interrupt = true
     const executor = createStagedMutationExecutor(async (_intent, stage, execution) => {
       const checkpoint = execution.operation.result && typeof execution.operation.result === "object" ? execution.operation.result as Record<string, unknown> : {}
@@ -119,7 +119,7 @@ describe("staged daemon mutation durability", () => {
         if (external.worktree) { external.worktree = false; removals += 1 }
         if (interrupt) { interrupt = false; throw new Error("crash after worktree removal") }
       }
-      if (stage === "tmux.deleted" && external.tmux) { external.tmux = false; tmuxKills += 1 }
+      if (stage === "multiplexer.deleted" && external.mux) { external.mux = false; muxKills += 1 }
       return stage === "projection.refreshed"
         ? { checkpoint, result: { deleted: true } }
         : { checkpoint }
@@ -127,10 +127,10 @@ describe("staged daemon mutation durability", () => {
     const journal = await OperationJournal.open(executor, registry)
     const intent = { type: "delete" as const, kind: "worktree" as const, session: "repo", path: "/repo.feature", confirmed: true as const }
     const submitted = await journal.submit("delete-partial", intent)
-    expect((await settled(journal, submitted.operation.operationId)).stage).toBe("tmux.marked")
+    expect((await settled(journal, submitted.operation.operationId)).stage).toBe("multiplexer.marked")
     await journal.submit("delete-partial", intent)
     expect(await settled(journal, submitted.operation.operationId)).toMatchObject({ state: "succeeded", result: { deleted: true } })
-    expect({ removals, tmuxKills, external }).toEqual({ removals: 1, tmuxKills: 1, external: { worktree: false, tmux: false } })
+    expect({ removals, muxKills, external }).toEqual({ removals: 1, muxKills: 1, external: { worktree: false, mux: false } })
     registry.close()
   })
 
@@ -154,7 +154,7 @@ describe("staged daemon mutation durability", () => {
         if (!external.worktree) { worktreeCreates += 1; external.worktree = "/repo.feature" }
         return { checkpoint: { ...checkpoint, path: external.worktree } }
       }
-      if (stage === "tmux.ready") {
+      if (stage === "multiplexer.ready") {
         if (!external.session) { sessionCreates += 1; external.session = "repo@feature" }
         return { checkpoint: { ...checkpoint, session: external.session, outcome: { target: external.session } } }
       }

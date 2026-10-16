@@ -3,12 +3,12 @@ import type { ResourceIncident } from "../incidents"
 import type { LineageSnapshot, WorkshopRecord } from "../workshop"
 import { sessionState } from "../model"
 import { projectResources, type ProjectInputs } from "./project"
-import type { TmuxSession, TmuxWindow } from "./resources"
+import type { MuxSession, MuxWindow } from "./resources"
 
 const observedAt = 3_700_000
-const tmuxServerKey = "tmux:/tmp/test.sock"
+const instanceId = "herdr:/tmp/test.sock"
 const emptyLineage = (): LineageSnapshot => ({ byPath: new Map(), byId: new Map() })
-const tmuxSession = (overrides: Partial<TmuxSession> = {}): TmuxSession => ({
+const muxSession = (overrides: Partial<MuxSession> = {}): MuxSession => ({
   id: "$1",
   name: "repo@work",
   recency: 3_600,
@@ -18,7 +18,7 @@ const tmuxSession = (overrides: Partial<TmuxSession> = {}): TmuxSession => ({
   directoryPath: "",
   ...overrides,
 })
-const tmuxWindow = (overrides: Partial<TmuxWindow> = {}): TmuxWindow => ({
+const muxWindow = (overrides: Partial<MuxWindow> = {}): MuxWindow => ({
   session: "repo@work",
   sessionId: "$1",
   id: "@1",
@@ -47,7 +47,7 @@ const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   codexPanes: new Set(),
   managedResources: new Map(),
   observedAt,
-  tmuxServerKey,
+  instanceId,
   home: "/home/test",
   ...overrides,
 })
@@ -84,8 +84,8 @@ describe("session resource projection", () => {
     const lineage: LineageSnapshot = { byPath: new Map([[live.canonicalPath, live], [idle.canonicalPath, idle]]), byId: new Map([[live.workshopId, live], [idle.workshopId, idle]]) }
 
     const projected = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow()],
+      sessions: [muxSession()],
+      windows: [muxWindow()],
       directories: [{ path: "/tmp/idle", branch: "idle", source: "worktree" }],
       lineage,
     })).sessions
@@ -102,13 +102,13 @@ describe("session resource projection", () => {
     expect(idleRow?.availableActions).toContain("rename")
     expect(idleRow?.labels).toEqual(["merged"])
     expect(idleRow?.searchText).toContain("merged")
-    expect(projectResources(inputs({ sessions: [tmuxSession()], windows: [tmuxWindow()] })).sessions[0]?.labels).toEqual([])
+    expect(projectResources(inputs({ sessions: [muxSession()], windows: [muxWindow()] })).sessions[0]?.labels).toEqual([])
   })
 
   test("projects prepared git, window, and age data without consulting wall-clock time", () => {
     const prepared = inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow()],
+      sessions: [muxSession()],
+      windows: [muxWindow()],
       gitMetaByPath: new Map([["/tmp/work", { branch: "feature", flags: "dirty" }]]),
     })
 
@@ -120,7 +120,7 @@ describe("session resource projection", () => {
       const second = projectResources(prepared)
       expect(second).toEqual(first)
       expect(first.sessions[0]).toMatchObject({ name: "repo@work", branch: "feature", flags: "dirty", age: "1m" })
-      expect(first.sessions[0]?.details[0]).toMatchObject({ kind: "window", title: "main", age: "1m", target: { type: "tmux_window", windowId: "@1" } })
+      expect(first.sessions[0]?.details[0]).toMatchObject({ kind: "window", title: "main", age: "1m", target: { type: "window", windowId: "@1" } })
       expect(first.effects).toEqual([])
     } finally {
       Date.now = originalNow
@@ -130,25 +130,25 @@ describe("session resource projection", () => {
   test("returns focused completion and activity writes as explicit effects", () => {
     const seen = new Map<string, number>()
     const result = projectResources(inputs({
-      sessions: [tmuxSession({ attached: true })],
-      windows: [tmuxWindow({ command: "pi", name: "pi", title: "π working", active: true, clankerId: "clanker-1", explicitHarness: "pi" })],
+      sessions: [muxSession({ attached: true })],
+      windows: [muxWindow({ command: "pi", name: "pi", title: "π working", active: true, clankerId: "clanker-1", explicitHarness: "pi" })],
       clankerReports: [{ clankerId: "clanker-1", harness: "pi", pane: "%1", state: "done", updatedAt: 3_650_000 }],
       seen,
     }))
 
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "pi", state: "idle", completionKey: `${tmuxServerKey}:pane:%1` })
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "pi", state: "idle", completionKey: `${instanceId}:pane:%1` })
     expect(result.effects).toEqual([
       { type: "markDirectoryActivity", path: "/tmp/work", source: "active", updatedAt: observedAt, minIntervalMs: 60_000 },
       { type: "markDirectoryActivity", path: "/tmp/work", source: "clanker", updatedAt: 3_650_000, minIntervalMs: 0 },
-      { type: "markSeen", key: `${tmuxServerKey}:pane:%1`, seenAt: observedAt },
+      { type: "markSeen", key: `${instanceId}:pane:%1`, seenAt: observedAt },
     ])
     expect(seen.size).toBe(0)
   })
 
   test("associates OpenCode panes, suppresses duplicate window details, and preserves ready state", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow()],
+      sessions: [muxSession()],
+      windows: [muxWindow()],
       opencodes: [{ directory: "/tmp/work", status: "completed", detail: "", title: "reviewer", age: "5s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_690_000, stablePane: "%1" }],
     }))
 
@@ -160,8 +160,8 @@ describe("session resource projection", () => {
 
   test("projects a bound active OpenCode root session as working", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-stale", harnessSessionId: "session-stale" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-stale", harnessSessionId: "session-stale" })],
       opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
     }))
 
@@ -171,8 +171,8 @@ describe("session resource projection", () => {
 
   test("retains OpenCode ownership when the projected root matches pane metadata", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", harnessSessionId: "session-root" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", harnessSessionId: "session-root" })],
       opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
     }))
 
@@ -181,15 +181,15 @@ describe("session resource projection", () => {
 
   test("uses the exact active OpenCode session when a legacy process has no lifecycle report", () => {
     const active = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
       activeOpenCodeSessions: new Set(["session-root"]),
     }))
     expect(active.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", state: "working", clankerId: "clanker-current" })
 
     const reported = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
       activeOpenCodeSessions: new Set(["session-root"]),
       clankerReports: [{ clankerId: "clanker-current", harness: "opencode", pane: "%1", state: "done", updatedAt: 3_650_000, harnessSessionId: "session-root" }],
     }))
@@ -198,8 +198,8 @@ describe("session resource projection", () => {
 
   test("does not infer OpenCode ownership when both session IDs are absent", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-unverified" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-unverified" })],
       opencodes: [{ directory: "/tmp/work", status: "done", detail: "awaiting next task", title: "task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1" }],
     }))
 
@@ -208,8 +208,8 @@ describe("session resource projection", () => {
 
   test("reports process resemblance without creating Clanker identity", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ title: "✓ complete" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ title: "✓ complete" })],
       detectedHarnessByPane: new Map([["%1", "codex"]]),
     }))
     expect(result.sessions[0]?.markers).toEqual(["codex"])
@@ -226,9 +226,9 @@ describe("session resource projection", () => {
   test("projects Herdr agent status as observed working state without creating Clanker identity", () => {
     const result = projectResources(inputs({
       multiplexerKind: "herdr",
-      tmuxServerKey: "herdr:/tmp/test.sock",
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ agentStatus: { agent: "pi", status: "working" } })],
+      instanceId: "herdr:/tmp/test.sock",
+      sessions: [muxSession()],
+      windows: [muxWindow({ agentStatus: { agent: "pi", status: "working" } })],
     }))
 
     expect(result.sessions[0]?.markers).toEqual(["pi"])
@@ -246,9 +246,9 @@ describe("session resource projection", () => {
   test("keeps Herdr working state visible alongside a rejected identity claim", () => {
     const result = projectResources(inputs({
       multiplexerKind: "herdr",
-      tmuxServerKey: "herdr:/tmp/test.sock",
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ agentStatus: { agent: "pi", status: "working" } })],
+      instanceId: "herdr:/tmp/test.sock",
+      sessions: [muxSession()],
+      windows: [muxWindow({ agentStatus: { agent: "pi", status: "working" } })],
       clankerReports: [{ pane: "%1", clankerId: "unowned-clanker", harness: "pi", state: "working", updatedAt: 3_690_000 }],
     }))
 
@@ -259,8 +259,8 @@ describe("session resource projection", () => {
 
   test("projects matching identity-free OpenCode lifecycle as observed working state", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ command: "opencode2", harnessSessionId: "session-root" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ command: "opencode2", harnessSessionId: "session-root" })],
       detectedHarnessByPane: new Map([["%1", "opencode"]]),
       clankerReports: [{ pane: "%1", harness: "opencode", harnessSessionId: "session-root", state: "working", updatedAt: 3_690_000 }],
     }))
@@ -278,8 +278,8 @@ describe("session resource projection", () => {
 
   test("rejects a service-global OpenCode report without exact selected-session evidence", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ command: "opencode2" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ command: "opencode2" })],
       detectedHarnessByPane: new Map([["%1", "opencode"]]),
       clankerReports: [{ pane: "%1", harness: "opencode", harnessSessionId: "session-from-another-pane", state: "blocked", updatedAt: 3_690_000 }],
     }))
@@ -290,8 +290,8 @@ describe("session resource projection", () => {
 
   test("does not create Clanker identity from a stale report on a reused pane", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-old" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-old" })],
       clankerReports: [{ clankerId: "clanker-old", harness: "pi", pane: "%1", state: "unknown", updatedAt: 3_650_000, hookEvent: "session_shutdown" }],
     }))
 
@@ -307,8 +307,8 @@ describe("session resource projection", () => {
 
   test("uses the exact current Clanker report even when a stale pane report is newer", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", explicitHarness: "pi" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "pi" })],
       clankerReports: [
         { clankerId: "clanker-old", harness: "pi", pane: "%1", state: "unknown", updatedAt: 3_650_000 },
         { clankerId: "clanker-current", harness: "pi", pane: "%1", state: "working", updatedAt: 3_640_000 },
@@ -322,8 +322,8 @@ describe("session resource projection", () => {
 
   test("does not apply a prior harness session report to a replacement", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", explicitHarness: "pi", harnessSessionId: "session-new" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "pi", harnessSessionId: "session-new" })],
       clankerReports: [{ clankerId: "clanker-current", harness: "pi", pane: "%1", state: "done", updatedAt: 3_650_000, harnessSessionId: "session-old" }],
     }))
 
@@ -333,8 +333,8 @@ describe("session resource projection", () => {
 
   test("does not apply a prior recovery attempt report to a replacement", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root", recoveryAttemptId: "attempt-new" })],
+      sessions: [muxSession()],
+      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root", recoveryAttemptId: "attempt-new" })],
       clankerReports: [{ clankerId: "clanker-current", harness: "opencode", pane: "%1", state: "done", updatedAt: 3_650_000, harnessSessionId: "session-root", recoveryAttemptId: "attempt-old" }],
     }))
 
@@ -344,8 +344,8 @@ describe("session resource projection", () => {
 
   test("projects incomplete lifecycle evidence as rejected instead of suppressing it", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
-      windows: [tmuxWindow()],
+      sessions: [muxSession()],
+      windows: [muxWindow()],
       clankerReports: [{ pane: "%1", harness: "pi", state: "working", updatedAt: 3_690_000 }],
     }))
 
@@ -450,9 +450,9 @@ describe("session resource projection", () => {
     expect(result.sessions.find((row) => row.workshopId === preferred.workshopId)?.childWorkshopCount).toBe(1)
   })
 
-  test("marks a live tmux session as a worktree deletion target from current Git evidence", () => {
+  test("marks a live multiplexer session as a worktree deletion target from current Git evidence", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession()],
+      sessions: [muxSession()],
       directories: [{ path: "/tmp/work", source: "worktree", branch: "feature" }],
       gitMetaByPath: new Map([["/tmp/work", { branch: "feature", flags: "" }]]),
     }))
@@ -461,17 +461,17 @@ describe("session resource projection", () => {
     expect(result.sessions[0]).toMatchObject({
       path: "/tmp/work",
       directorySource: "worktree",
-      target: { type: "tmux_session", session: "repo@work" },
+      target: { type: "session", session: "repo@work" },
     })
   })
 
   test("uses a managed Workshop's canonical path and does not duplicate it as a directory", () => {
     const record = workshop({ workshopId: "workshop-1", canonicalPath: "/tmp/canonical", parentWorkshopId: null })
     const lineage: LineageSnapshot = { byPath: new Map([[record.canonicalPath, record]]), byId: new Map([[record.workshopId, record]]) }
-    const managed = { id: "mux-session-1", kind: "session" as const, workshopId: record.workshopId, parentId: null, displayName: "managed", createdAt: 1, updatedAt: 1, location: { kind: "tmux" as const, instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }
+    const managed = { id: "mux-session-1", kind: "session" as const, workshopId: record.workshopId, parentId: null, displayName: "managed", createdAt: 1, updatedAt: 1, location: { kind: "herdr" as const, instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }
     const result = projectResources(inputs({
-      sessions: [tmuxSession({ path: "/tmp/stale-legacy-path", workshopId: record.workshopId, resourceId: managed.id })],
-      windows: [tmuxWindow()],
+      sessions: [muxSession({ path: "/tmp/stale-legacy-path", workshopId: record.workshopId, resourceId: managed.id })],
+      windows: [muxWindow()],
       directories: [{ path: record.canonicalPath, source: "worktree", branch: "canonical" }],
       lineage,
       managedResources: new Map([[managed.id, managed]]),
@@ -479,7 +479,7 @@ describe("session resource projection", () => {
     }))
 
     expect(result.sessions).toHaveLength(1)
-    expect(result.sessions[0]).toMatchObject({ name: "managed", path: record.canonicalPath, branch: "canonical", workshopId: record.workshopId, target: { type: "tmux_session" } })
+    expect(result.sessions[0]).toMatchObject({ name: "managed", path: record.canonicalPath, branch: "canonical", workshopId: record.workshopId, target: { type: "session" } })
   })
 
   test("applies and sorts incidents using the prepared observation time", () => {
@@ -491,13 +491,13 @@ describe("session resource projection", () => {
     expect(result.sessions[0]?.details.find((detail) => detail.kind === "incident")).toMatchObject({ age: "1h", state: "failed" })
   })
 
-  test("separates owned display names from scoped tmux identity", () => {
+  test("separates owned display names from scoped multiplexer identity", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession({ resourceId: "mux-session-1", displayName: "Owned workshop" })],
-      windows: [tmuxWindow({ terminalId: "terminal-1", terminalDisplayName: "Owned terminal" })],
+      sessions: [muxSession({ resourceId: "mux-session-1", displayName: "Owned workshop" })],
+      windows: [muxWindow({ terminalId: "terminal-1", terminalDisplayName: "Owned terminal" })],
       managedResources: new Map([
-        ["mux-session-1", { id: "mux-session-1", kind: "session", workshopId: "workshop-1", parentId: null, displayName: "Owned workshop", createdAt: 1, updatedAt: 1, location: { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }],
-        ["terminal-1", { id: "terminal-1", kind: "terminal", workshopId: "workshop-1", parentId: "window-1", displayName: "Owned terminal", createdAt: 1, updatedAt: 1, location: { kind: "tmux", instanceId: tmuxServerKey, nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1", observedAt: 1 } }],
+        ["mux-session-1", { id: "mux-session-1", kind: "session", workshopId: "workshop-1", parentId: null, displayName: "Owned workshop", createdAt: 1, updatedAt: 1, location: { kind: "herdr", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }],
+        ["terminal-1", { id: "terminal-1", kind: "terminal", workshopId: "workshop-1", parentId: "window-1", displayName: "Owned terminal", createdAt: 1, updatedAt: 1, location: { kind: "herdr", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1", observedAt: 1 } }],
       ]),
     }))
 
@@ -508,7 +508,7 @@ describe("session resource projection", () => {
       target: {
         session: "repo@work",
         resourceId: "mux-session-1",
-        location: { instanceId: tmuxServerKey, nativeSessionId: "$1" },
+        location: { instanceId: instanceId, nativeSessionId: "$1" },
       },
     })
     expect(result.sessions[0]?.details[0]).toMatchObject({
@@ -520,8 +520,8 @@ describe("session resource projection", () => {
 
   test("treats unregistered identity claims as unmanaged and joins panes by session id", () => {
     const result = projectResources(inputs({
-      sessions: [tmuxSession({ resourceId: "spoofed", displayName: "Ignored" })],
-      windows: [tmuxWindow({ session: "stale-name", terminalId: "spoofed-terminal" })],
+      sessions: [muxSession({ resourceId: "spoofed", displayName: "Ignored" })],
+      windows: [muxWindow({ session: "stale-name", terminalId: "spoofed-terminal" })],
     }))
 
     expect(result.sessions[0]).toMatchObject({ name: "repo@work", management: "unmanaged" })

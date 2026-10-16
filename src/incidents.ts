@@ -132,7 +132,7 @@ const incidentDetail = (incident: ResourceIncident, target: Target, observedAt: 
 })
 
 const rowMatches = (row: SessionRow, incident: ResourceIncident) => {
-  if (incident.clanker.sessionName && row.target.type === "tmux_session" && row.name === incident.clanker.sessionName) return true
+  if (incident.clanker.sessionName && row.target.type === "session" && row.name === incident.clanker.sessionName) return true
   const path = incidentPath(incident)
   return Boolean(path && row.path && canonicalActivityPath(row.path) === canonicalActivityPath(path))
 }

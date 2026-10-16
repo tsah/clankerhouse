@@ -4,12 +4,12 @@
 
 Clankerhouse will become one long-lived daemon Module behind one Unix-socket Interface. The daemon owns observation, projection, durable state, mutation coordination, side effects, lifecycle, and subscriptions. Clients send typed intents and render daemon-projected observations.
 
-This migration preserves the domain language in `CONTEXT.md` and ADR-0001: the Multiplexer remains replaceable, tmux remains its only Adapter, durable IDs remain authoritative, and Multiplexer Locations are validated ephemeral claims.
+This migration preserves the domain language in `CONTEXT.md` and ADR-0001: the Multiplexer remains replaceable behind one Adapter (Herdr since ADR-0008), durable IDs remain authoritative, and Multiplexer Locations are validated ephemeral claims.
 
 ## Safety invariants
 
-- The source checkout and the user's installed application, services, tmux server, and state are never modified by development or QA.
-- Integration QA supplies isolated `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, install prefix, and tmux socket.
+- The source checkout and the user's installed application, services, Herdr server, and state are never modified by development or QA.
+- Integration QA supplies isolated `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, install prefix, and Herdr server socket.
 - Runtime directories and sockets remain private, owned by the current user, and resistant to symlink/path replacement.
 - Stable IDs, ownership checks, foreign keys, exact Multiplexer target resolution, and destructive-action confirmation are not weakened.
 - Schema and protocol changes use expand/migrate/contract. Activation happens only after old readers no longer need newly written state.
@@ -42,7 +42,7 @@ Create one registry database containing Workshops, Terminals, Clankers, desired 
 
 1. create expanded tables without changing legacy stores;
 2. import `workshops.sqlite3`, `resources.sqlite3`, and recovery v1/v2/v3 data with provenance/idempotency keys;
-3. import manifests and validated tmux identity claims only as projections/claims;
+3. import manifests and validated multiplexer identity claims only as projections/claims;
 4. run `foreign_key_check` and semantic identity checks;
 5. dual-read with the new registry preferred and legacy fallback during the compatibility window;
 6. activate daemon writes to the registry;
@@ -52,7 +52,7 @@ The recovery journal remains append-only. Interrupted imports resume without dup
 
 ### Phase 4 — Deepen the mutation Module
 
-One daemon-owned Module accepts create, absorb, open, rename, reparent, detach, delete, start, stop, and recovery intents. Every operation has an idempotency key, durable stages, and a result journal. External effects (Worktrunk, tmux, systemd, manifests) are reconciled rather than assumed atomic. Retries resume at the last durable stage and compensate only effects proven to be owned by the operation.
+One daemon-owned Module accepts create, absorb, open, rename, reparent, detach, delete, start, stop, and recovery intents. Every operation has an idempotency key, durable stages, and a result journal. External effects (Worktrunk, the Multiplexer, systemd, manifests) are reconciled rather than assumed atomic. Retries resume at the last durable stage and compensate only effects proven to be owned by the operation.
 
 Legacy CLI commands and lifecycle integrations become socket clients. A documented compatibility window keeps their command shapes and report formats while routing state changes through the daemon.
 
@@ -68,12 +68,12 @@ Install into a validated versioned directory, run preflight/build/QA there, then
 
 - [ ] A hot native Alt-K path renders a cached/streamed valid first frame in under 100 ms.
 - [ ] Daemon replacement never causes a transient `Snapshot Unavailable`; native retains the last valid frame and reconnects.
-- [ ] Exactly one epoch can publish authoritative revisions for a runtime/tmux instance; stale producers are rejected.
+- [ ] Exactly one epoch can publish authoritative revisions for a runtime/multiplexer instance; stale producers are rejected.
 - [ ] Native supports jump, repository/branch creation, rename, attach/reparent, detach, deletion, and exact target opening.
 - [ ] No live client polls `state.json`; fallback is read once at startup only.
 - [ ] All state-changing commands issue typed daemon mutation intents and retries are safe after each injected external failure.
-- [ ] Registry fixtures for legacy Workshop lineage, resource registry, recovery v1/v2/v3, manifests, and tmux claims import without loss and pass `PRAGMA foreign_key_check`.
-- [ ] Existing CLI commands, tmux bindings, lifecycle reports, and recovery behavior have focused compatibility tests and a documented window.
+- [ ] Registry fixtures for legacy Workshop lineage, resource registry, recovery v1/v2/v3, manifests, and multiplexer claims import without loss and pass `PRAGMA foreign_key_check`.
+- [ ] Existing CLI commands, multiplexer bindings, lifecycle reports, and recovery behavior have focused compatibility tests and a documented window.
 - [ ] OpenCode status no longer shells out to Python on the live projection path and never infers Clanker identity from process resemblance.
 - [ ] Failed install preflight or activation leaves the previous version and daemon usable.
 - [ ] TypeScript, Python, Rust, integration, and relevant isolated QA suites pass.

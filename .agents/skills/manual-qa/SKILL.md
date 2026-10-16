@@ -1,7 +1,7 @@
 ---
 name: manual-qa
 description: Run and judge Clankerhouse's complete feature catalogue in isolated standalone environments. Use for manual QA, release acceptance, feature walkthroughs, and requests to verify the whole product rather than merely run unit tests.
-compatibility: Linux with Bun, tmux, Git, Python, Rust, jq, and the Clankerhouse development dependencies.
+compatibility: Linux with Bun, Herdr, Git, Python, Rust, jq, and the Clankerhouse development dependencies.
 ---
 
 # Clankerhouse Manual QA
@@ -12,8 +12,8 @@ The coding agent is the semantic judge. Automated assertions are evidence, not a
 
 1. Work from the repository root.
 2. Read `CONTEXT.md`, `docs/features.json`, and relevant ADRs.
-3. Never use the live `HOME`, XDG state/runtime paths, tmux socket, registry, Recovery database, or installation prefix for simulations.
-4. Every scenario must use temporary `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, installation prefix, and tmux socket.
+3. Never use the live `HOME`, XDG state/runtime paths, Herdr socket, registry, Recovery database, or installation prefix for simulations.
+4. Every scenario must use temporary `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, installation prefix, and Herdr server socket (`HERDR_SOCKET_PATH`).
 5. Refuse to continue if a scenario cannot prove isolation.
 6. Do not deploy, reload live bindings, stop live services, or mutate live Clankers.
 
@@ -65,10 +65,10 @@ When judging the visual TUI, run the real native binary in a bounded PTY, captur
 
 ### 4. Exercise interactions end to end
 
-Use real nested tmux clients, the real daemon/socket, real native client, temporary Git repositories/worktrees, and deterministic fake harness executables. At minimum verify:
+Use an isolated real Herdr server, the real daemon/socket, real native client, temporary Git repositories/worktrees, and deterministic fake harness executables. At minimum verify:
 
 - selecting and opening roots, children, windows, and directories
-- only the requesting tmux client moves
+- focus moves to the exact selected target
 - search, expansion, scrolling, and no-match behavior
 - rename, attach, detach, create, delete, start, and stop
 - absorption and stable identity after native rename

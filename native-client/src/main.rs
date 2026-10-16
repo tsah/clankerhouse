@@ -24,13 +24,13 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const CACHE_VERSION: u64 = 10;
+const CACHE_VERSION: u64 = 11;
 static DELETE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Target {
-    TmuxSession {
+    Session {
         session: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         management: Option<String>,
@@ -43,7 +43,7 @@ enum Target {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         location: Option<MultiplexerLocation>,
     },
-    TmuxWindow {
+    Window {
         session: String,
         #[serde(rename = "windowId")]
         window_id: String,
@@ -236,8 +236,6 @@ enum DeleteKind {
 enum MutationIntent {
     Open {
         target: Target,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        client: Option<String>,
     },
     Rename {
         session: String,
@@ -336,7 +334,6 @@ struct App {
     query: String,
     unfiltered_selection: Option<String>,
     current_session: String,
-    tmux_client: Option<String>,
     error: String,
     mutation: Option<PendingMutation>,
     delete_only: bool,
@@ -671,7 +668,7 @@ fn subtree_has_clanker(
 
 fn target_key(target: &Target) -> String {
     match target {
-        Target::TmuxSession {
+        Target::Session {
             session,
             resource_id,
             ..
@@ -679,7 +676,7 @@ fn target_key(target: &Target) -> String {
             || format!("session:{session}"),
             |id| format!("session:{id}"),
         ),
-        Target::TmuxWindow {
+        Target::Window {
             session,
             window_id,
             resource_id,
@@ -703,7 +700,7 @@ fn target_key(target: &Target) -> String {
 
 fn target_is_session(target: &Target, current: &str) -> bool {
     let identities = current.split('\t').collect::<HashSet<_>>();
-    matches!(target, Target::TmuxSession { session, location, .. } if identities.contains(session.as_str()) || location.as_ref().is_some_and(|location| identities.contains(location.native_session_id.as_str())))
+    matches!(target, Target::Session { session, location, .. } if identities.contains(session.as_str()) || location.as_ref().is_some_and(|location| identities.contains(location.native_session_id.as_str())))
 }
 
 fn fuzzy_score(text: &str, query: &str) -> Option<i64> {
@@ -1005,7 +1002,6 @@ impl App {
             query: String::new(),
             unfiltered_selection: None,
             current_session,
-            tmux_client: None,
             error: String::new(),
             mutation: None,
             delete_only: false,
@@ -1064,7 +1060,6 @@ impl App {
             query: String::new(),
             unfiltered_selection: None,
             current_session,
-            tmux_client: None,
             error: String::new(),
             mutation: None,
             delete_only: false,
@@ -1096,7 +1091,7 @@ impl App {
         let native_id = self.current_session.split('\t').next().unwrap_or_default();
         let candidates = self.rows.iter().enumerate().filter(|(_, row)| {
             row.detail.is_none()
-                && matches!(&row.session.target, Target::TmuxSession { location: Some(location), .. }
+                && matches!(&row.session.target, Target::Session { location: Some(location), .. }
                     if location.native_session_id == native_id)
         }).map(|(index, _)| index).collect::<Vec<_>>();
         if self.current_session.is_empty() || candidates.len() != 1 {
@@ -1688,8 +1683,8 @@ fn detail_key(detail: &DetailRow) -> String {
 
 fn session_name(target: &Target) -> Option<&str> {
     match target {
-        Target::TmuxSession { session, .. }
-        | Target::TmuxWindow { session, .. }
+        Target::Session { session, .. }
+        | Target::Window { session, .. }
         | Target::Opencode { session, .. } => Some(session),
         Target::Directory { .. } => None,
     }
@@ -1705,7 +1700,7 @@ fn rename_intent(session_row: &SessionRow, display_name: &str) -> Option<Mutatio
     {
         return None;
     }
-    let Target::TmuxSession {
+    let Target::Session {
         session,
         resource_id,
         ..
@@ -1734,7 +1729,7 @@ fn delete_intent(row: &TreeRow) -> Option<MutationIntent> {
     if row.detail.is_none() && row.session.directory_source == "worktree" {
         let session = match &row.session.target {
             Target::Directory { .. } => row.session.name.clone(),
-            Target::TmuxSession { session, .. } => session.clone(),
+            Target::Session { session, .. } => session.clone(),
             _ => return None,
         };
         return Some(MutationIntent::Delete {
@@ -1749,7 +1744,7 @@ fn delete_intent(row: &TreeRow) -> Option<MutationIntent> {
         return None;
     }
     match row.detail.as_ref().map(|detail| &detail.target) {
-        Some(Target::TmuxWindow { session, pane, .. })
+        Some(Target::Window { session, pane, .. })
         | Some(Target::Opencode { session, pane, .. }) => Some(MutationIntent::Delete {
             kind: DeleteKind::Pane,
             session: session.clone(),
@@ -1759,7 +1754,7 @@ fn delete_intent(row: &TreeRow) -> Option<MutationIntent> {
         }),
         Some(_) => None,
         None => {
-            let Target::TmuxSession { session, .. } = &row.session.target else {
+            let Target::Session { session, .. } = &row.session.target else {
                 return None;
             };
             Some(MutationIntent::Delete {
@@ -1958,7 +1953,7 @@ fn state_glyph(state: ClankerState, frame: usize) -> (&'static str, Color) {
 
 fn mutation_progress_label(intent: &MutationIntent) -> &'static str {
     match intent {
-        MutationIntent::Rename { .. } => "Renaming tmux session…",
+        MutationIntent::Rename { .. } => "Renaming session…",
         MutationIntent::Attach { .. } => "Attaching Workshop…",
         MutationIntent::Detach { .. } => "Detaching Workshop…",
         MutationIntent::Delete { .. } => "Deleting target…",
@@ -2165,7 +2160,7 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
             frame.render_widget(
                 Line::from(vec![
                     Span::styled(
-                        "Clankerhouse · Rename tmux session",
+                        "Clankerhouse · Rename session",
                         Style::default()
                             .fg(Color::LightCyan)
                             .add_modifier(Modifier::BOLD),
@@ -2807,7 +2802,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                     return None;
                 }
                 if !row.allows(AvailableAction::Rename)
-                    || !matches!(row.session.target, Target::TmuxSession { .. })
+                    || !matches!(row.session.target, Target::Session { .. })
                 {
                     return None;
                 }
@@ -2833,7 +2828,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             KeyCode::Char('d') => {
                 let row = app.selected()?.clone();
                 let Some(intent) = delete_intent(&row) else {
-                    app.error = "Nothing to delete: target has no live tmux pane or session".into();
+                    app.error = "Nothing to delete: target has no live pane or session".into();
                     return None;
                 };
                 app.delete_label = delete_label(&row, &intent);
@@ -2923,7 +2918,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             {
                 return Some(AppCommand::Submit(MutationIntent::Open {
                     target: row.target(),
-                    client: app.tmux_client.clone(),
                 }));
             }
         }
@@ -3134,29 +3128,6 @@ fn refresh_repository_cache_if_unavailable(
     Ok(true)
 }
 
-fn resolved_multiplexer_kind(environment: &HashMap<String, String>) -> Result<&'static str, String> {
-    let requested = environment
-        .get("CLANKERHOUSE_MULTIPLEXER")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    match requested.as_deref() {
-        Some("tmux") => Ok("tmux"),
-        Some("herdr") => Ok("herdr"),
-        Some(other) => Err(format!(
-            "Unsupported CLANKERHOUSE_MULTIPLEXER: {other} (expected tmux or herdr)"
-        )),
-        None if environment.get("HERDR_ENV").is_some_and(|value| value.trim() == "1")
-            && environment
-                .get("HERDR_PANE_ID")
-                .is_some_and(|value| !value.trim().is_empty()) => Ok("herdr"),
-        None => Ok("tmux"),
-    }
-}
-
-fn uses_tmux_context(environment: &HashMap<String, String>) -> Result<bool, String> {
-    Ok(resolved_multiplexer_kind(environment)? == "tmux")
-}
-
 fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<PathBuf, String> {
     if let Some(explicit) = environment
         .get("CLANKERHOUSE_RUNTIME_DIR")
@@ -3164,7 +3135,6 @@ fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<
     {
         return Ok(PathBuf::from(explicit));
     }
-    let multiplexer = resolved_multiplexer_kind(environment)?;
     let instance = environment
         .get("CLANKERHOUSE_INSTANCE")
         .map(|value| value.trim())
@@ -3175,15 +3145,11 @@ fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<
     {
         return Err(format!("Invalid CLANKERHOUSE_INSTANCE: {instance}"));
     }
-    let suffix = instance
-        .map(|instance| match instance {
-            "default" | "tmux" => String::new(),
-            other => format!("-{other}"),
-        })
-        .unwrap_or_else(|| match multiplexer {
-            "tmux" => String::new(),
-            other => format!("-{other}"),
-        });
+    let suffix = match instance {
+        Some("default") => String::new(),
+        Some(other) => format!("-{other}"),
+        None => "-herdr".to_string(),
+    };
     let base = environment
         .get("XDG_RUNTIME_DIR")
         .filter(|path| !path.is_empty())
@@ -3302,40 +3268,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| io::Error::other(error).into());
     }
 
-    let use_tmux_context = uses_tmux_context(&env::vars().collect()).map_err(io::Error::other)?;
     let current_session = env::var("CLANKERHOUSE_CURRENT_SESSION")
         .ok()
         .filter(|session| !session.is_empty())
-        .or_else(|| {
-            use_tmux_context.then(|| ()).and_then(|_| env::var_os("TMUX")).and_then(|_| {
-                let output = Command::new("tmux")
-                    .args(["display-message", "-p", "#{session_id}\t#{session_name}"])
-                    .output()
-                    .ok()?;
-                output
-                    .status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    .filter(|session| !session.is_empty())
-            })
-        })
         .unwrap_or_default();
-    let tmux_client = env::var("CLANKERHOUSE_TMUX_CLIENT")
-        .ok()
-        .filter(|client| !client.is_empty())
-        .or_else(|| {
-            use_tmux_context.then(|| ()).and_then(|_| env::var_os("TMUX")).and_then(|_| {
-                let output = Command::new("tmux")
-                    .args(["display-message", "-p", "#{client_name}"])
-                    .output()
-                    .ok()?;
-                output
-                    .status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    .filter(|client| !client.is_empty())
-            })
-        });
     let cache_path = runtime.join("state.json");
     let dump_tree = arguments.iter().any(|argument| argument == "--dump-tree");
     let check = arguments.iter().any(|argument| argument == "--check");
@@ -3354,7 +3290,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => App::new(cache_path, current_session),
     }
     .map_err(io::Error::other)?;
-    app.tmux_client = tmux_client;
     if let Some(error) = repository_cache_error {
         app.error = format!("Unable to refresh repositories: {error}");
     }
@@ -3386,10 +3321,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if check {
-        let tmux_sessions = app
+        let sessions = app
             .sessions
             .iter()
-            .filter(|row| matches!(row.target, Target::TmuxSession { .. }))
+            .filter(|row| matches!(row.target, Target::Session { .. }))
             .count();
         let directory_resources = app
             .sessions
@@ -3397,7 +3332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|row| matches!(row.target, Target::Directory { .. }))
             .count();
         println!(
-            "Native snapshot ready: {tmux_sessions} tmux sessions, {directory_resources} directory resources, {} visible targets",
+            "Native snapshot ready: {sessions} sessions, {directory_resources} directory resources, {} visible targets",
             app.rows.len()
         );
         return Ok(());
@@ -3416,7 +3351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?
     };
     let terminal = ratatui::init();
-    let open_client = app.tmux_client.clone();
     let result = run(terminal, app, snapshot_receiver, &socket_path);
     ratatui::restore();
     match result? {
@@ -3434,10 +3368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             daemon_mutation(
                 &socket_path,
-                &MutationIntent::Open {
-                    target,
-                    client: open_client,
-                },
+                &MutationIntent::Open { target },
             )
             .map(|_| ())
             .map_err(|error| io::Error::other(error).into())
@@ -3485,10 +3416,10 @@ mod tests {
     #[test]
     fn parses_the_existing_snapshot_contract() {
         let snapshot: Snapshot = serde_json::from_str(r#"{
-            "version": 10,
+            "version": 11,
             "sessions": [{
-                "name": "workshop", "path": "/tmp/workshop", "target": {"type": "tmux_session", "session": "workshop"},
-                "details": [{"kind": "clanker", "state": "working", "target": {"type": "tmux_window", "session": "workshop", "windowId": "@1", "pane": "%1"}, "observation": {"source": "lifecycle", "confidence": "attested", "state": "working", "observedAt": 10}}]
+                "name": "workshop", "path": "/tmp/workshop", "target": {"type": "session", "session": "workshop"},
+                "details": [{"kind": "clanker", "state": "working", "target": {"type": "window", "session": "workshop", "windowId": "@1", "pane": "%1"}, "observation": {"source": "lifecycle", "confidence": "attested", "state": "working", "observedAt": 10}}]
             }]
         }"#).unwrap();
         assert_eq!(snapshot.sessions.len(), 1);
@@ -3498,8 +3429,8 @@ mod tests {
     #[test]
     fn process_presence_is_neutral_but_rejected_lifecycle_evidence_is_unknown() {
         let sessions: Vec<SessionRow> = serde_json::from_str(r#"[
-            {"name":"observed","path":"/tmp/observed","target":{"type":"tmux_session","session":"observed"},"details":[{"kind":"observation","harness":"opencode","state":"unknown","target":{"type":"tmux_window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"process","confidence":"observed","state":"present","observedAt":10}}]},
-            {"name":"rejected","path":"/tmp/rejected","target":{"type":"tmux_session","session":"rejected"},"details":[{"kind":"observation","harness":"pi","state":"unknown","target":{"type":"tmux_window","session":"rejected","windowId":"@2","pane":"%2"},"observation":{"source":"lifecycle","confidence":"rejected","state":"done","observedAt":10}}]}
+            {"name":"observed","path":"/tmp/observed","target":{"type":"session","session":"observed"},"details":[{"kind":"observation","harness":"opencode","state":"unknown","target":{"type":"window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"process","confidence":"observed","state":"present","observedAt":10}}]},
+            {"name":"rejected","path":"/tmp/rejected","target":{"type":"session","session":"rejected"},"details":[{"kind":"observation","harness":"pi","state":"unknown","target":{"type":"window","session":"rejected","windowId":"@2","pane":"%2"},"observation":{"source":"lifecycle","confidence":"rejected","state":"done","observedAt":10}}]}
         ]"#).unwrap();
         assert!(neutral_session(&sessions[0]));
         assert!(!neutral_session(&sessions[1]));
@@ -3508,14 +3439,14 @@ mod tests {
     #[test]
     fn parses_and_keys_managed_targets_by_stable_identity() {
         let target: Target = serde_json::from_str(r#"{
-            "type":"tmux_session",
+            "type":"session",
             "session":"mutable-name",
             "management":"managed",
             "resourceId":"mux-session-1",
-            "location":{"kind":"tmux","instanceId":"server","nativeSessionId":"$1","nativeWindowId":null,"nativePaneId":null}
+            "location":{"kind":"herdr","instanceId":"server","nativeSessionId":"w1","nativeWindowId":null,"nativePaneId":null}
         }"#).unwrap();
         assert_eq!(target_key(&target), "session:mux-session-1");
-        assert!(target_is_session(&target, "$1\told-name"));
+        assert!(target_is_session(&target, "w1"));
         assert!(
             serde_json::to_string(&target)
                 .unwrap()
@@ -3526,10 +3457,10 @@ mod tests {
     #[test]
     fn live_clankers_supersede_old_reboot_incidents() {
         let session: SessionRow = serde_json::from_str(r#"{
-            "name": "workshop", "path": "/tmp/workshop", "target": {"type": "tmux_session", "session": "workshop"},
+            "name": "workshop", "path": "/tmp/workshop", "target": {"type": "session", "session": "workshop"},
             "details": [
-                {"kind": "clanker", "state": "idle", "target": {"type": "tmux_window", "session": "workshop", "windowId": "@1", "pane": "%1"}},
-                {"kind": "incident", "status": "lost on reboot", "state": "failed", "target": {"type": "tmux_session", "session": "workshop"}}
+                {"kind": "clanker", "state": "idle", "target": {"type": "window", "session": "workshop", "windowId": "@1", "pane": "%1"}},
+                {"kind": "incident", "status": "lost on reboot", "state": "failed", "target": {"type": "session", "session": "workshop"}}
             ]
         }"#).unwrap();
         assert_eq!(session_state(&session), ClankerState::Idle);
@@ -3538,7 +3469,7 @@ mod tests {
     #[test]
     fn failed_lineage_with_fewer_than_ten_rows_starts_expanded() {
         let snapshot: Snapshot = serde_json::from_str(r#"{
-            "version": 10,
+            "version": 11,
             "sessions": [
                 {
                     "name": "failed-root", "path": "/tmp/root", "workshopId": "root",
@@ -3682,7 +3613,7 @@ mod tests {
         ));
         let cache_path = root.join("state.json");
         fs::create_dir_all(&root).unwrap();
-        fs::write(&cache_path, r#"{"version":10,"sessions":[{"name":"kept","path":"/repo","target":{"type":"directory","path":"/repo"}}]}"#).unwrap();
+        fs::write(&cache_path, r#"{"version":11,"sessions":[{"name":"kept","path":"/repo","target":{"type":"directory","path":"/repo"}}]}"#).unwrap();
         let mut app = App::new(cache_path.clone(), String::new()).unwrap();
 
         fs::remove_file(&cache_path).unwrap();
@@ -3709,7 +3640,7 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("state.json"), r#"{"version":10,"sessions":[]}"#).unwrap();
+        fs::write(root.join("state.json"), r#"{"version":11,"sessions":[]}"#).unwrap();
         let mut app = App::new(root.join("state.json"), String::new()).unwrap();
         app.mode = Mode::Branch;
         app.branches = vec![BranchRow {
@@ -3729,11 +3660,11 @@ mod tests {
     #[test]
     fn inline_summary_reports_hidden_details() {
         let session: SessionRow = serde_json::from_str(r#"{
-            "name":"workshop","path":"/repo","target":{"type":"tmux_session","session":"workshop"},
+            "name":"workshop","path":"/repo","target":{"type":"session","session":"workshop"},
             "details":[
-                {"kind":"clanker","harness":"opencode","state":"working","target":{"type":"tmux_window","session":"workshop","windowId":"@1","pane":"%1"}},
-                {"kind":"clanker","harness":"claude","state":"idle","target":{"type":"tmux_window","session":"workshop","windowId":"@2","pane":"%2"}},
-                {"kind":"window","title":"shell","state":"idle","target":{"type":"tmux_window","session":"workshop","windowId":"@3","pane":"%3"}}
+                {"kind":"clanker","harness":"opencode","state":"working","target":{"type":"window","session":"workshop","windowId":"@1","pane":"%1"}},
+                {"kind":"clanker","harness":"claude","state":"idle","target":{"type":"window","session":"workshop","windowId":"@2","pane":"%2"}},
+                {"kind":"window","title":"shell","state":"idle","target":{"type":"window","session":"workshop","windowId":"@3","pane":"%3"}}
             ]
         }"#).unwrap();
         assert_eq!(inline_summary(&session, 15), "opencode  +2");
@@ -3744,11 +3675,11 @@ mod tests {
     fn jump_rows_sort_status_bearing_rows_before_neutral_then_by_last_seen() {
         let app = app_with_sessions(
             r#"[
-                {"name":"working","path":"/working","recency":10,"target":{"type":"tmux_session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"working","windowId":"@1","pane":"%1"}}]},
-                {"name":"failed","path":"/failed","recency":20,"target":{"type":"tmux_session","session":"failed"},"details":[{"kind":"incident","state":"failed","target":{"type":"tmux_session","session":"failed"}}]},
-                {"name":"ready","path":"/ready","recency":30,"target":{"type":"tmux_session","session":"ready"},"details":[{"kind":"clanker","state":"done","target":{"type":"tmux_window","session":"ready","windowId":"@2","pane":"%2"}}]},
-                {"name":"idle","path":"/idle","recency":40,"target":{"type":"tmux_session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"tmux_window","session":"idle","windowId":"@3","pane":"%3"}}]},
-                {"name":"neutral","path":"/neutral","recency":50,"target":{"type":"tmux_session","session":"neutral"}}
+                {"name":"working","path":"/working","recency":10,"target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@1","pane":"%1"}}]},
+                {"name":"failed","path":"/failed","recency":20,"target":{"type":"session","session":"failed"},"details":[{"kind":"incident","state":"failed","target":{"type":"session","session":"failed"}}]},
+                {"name":"ready","path":"/ready","recency":30,"target":{"type":"session","session":"ready"},"details":[{"kind":"clanker","state":"done","target":{"type":"window","session":"ready","windowId":"@2","pane":"%2"}}]},
+                {"name":"idle","path":"/idle","recency":40,"target":{"type":"session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"window","session":"idle","windowId":"@3","pane":"%3"}}]},
+                {"name":"neutral","path":"/neutral","recency":50,"target":{"type":"session","session":"neutral"}}
             ]"#,
         );
         assert_eq!(
@@ -3766,9 +3697,9 @@ mod tests {
         let mut app = app_with_sessions(
             r#"[
                 {"name":"directory","path":"/directory","recency":500,"target":{"type":"directory","path":"/directory"}},
-                {"name":"root","path":"/root","recency":1,"workshopId":"root","target":{"type":"tmux_session","session":"root"}},
-                {"name":"idle","path":"/idle","recency":10,"parentWorkshopId":"root","target":{"type":"tmux_session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"tmux_window","session":"idle","windowId":"@1","pane":"%1"}}]},
-                {"name":"shell","path":"/shell","recency":200,"parentWorkshopId":"root","target":{"type":"tmux_session","session":"shell"}}
+                {"name":"root","path":"/root","recency":1,"workshopId":"root","target":{"type":"session","session":"root"}},
+                {"name":"idle","path":"/idle","recency":10,"parentWorkshopId":"root","target":{"type":"session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"window","session":"idle","windowId":"@1","pane":"%1"}}]},
+                {"name":"shell","path":"/shell","recency":200,"parentWorkshopId":"root","target":{"type":"session","session":"shell"}}
             ]"#,
         );
         assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(),
@@ -3786,9 +3717,9 @@ mod tests {
     fn lineage_sorts_by_its_most_recent_descendant() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"root","path":"/root","recency":10,"workshopId":"root","target":{"type":"tmux_session","session":"root"}},
-                {"name":"child","path":"/child","recency":90,"workshopId":"child","parentWorkshopId":"root","target":{"type":"tmux_session","session":"child"}},
-                {"name":"other","path":"/other","recency":50,"target":{"type":"tmux_session","session":"other"}}
+                {"name":"root","path":"/root","recency":10,"workshopId":"root","target":{"type":"session","session":"root"}},
+                {"name":"child","path":"/child","recency":90,"workshopId":"child","parentWorkshopId":"root","target":{"type":"session","session":"child"}},
+                {"name":"other","path":"/other","recency":50,"target":{"type":"session","session":"other"}}
             ]"#,
         );
         app.expanded_lineage.insert("root".into());
@@ -3807,7 +3738,7 @@ mod tests {
     fn a_direct_session_match_beats_its_incidental_detail_match() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"qa-delete-final","path":"/qa-delete-final","directorySource":"worktree","target":{"type":"tmux_session","session":"qa-delete-final"},"details":[{"kind":"window","title":"final","state":"idle","target":{"type":"tmux_window","session":"qa-delete-final","windowId":"@1","pane":"%1"}}]}
+                {"name":"qa-delete-final","path":"/qa-delete-final","directorySource":"worktree","target":{"type":"session","session":"qa-delete-final"},"details":[{"kind":"window","title":"final","state":"idle","target":{"type":"window","session":"qa-delete-final","windowId":"@1","pane":"%1"}}]}
             ]"#,
         );
         app.update_query("final".into());
@@ -3819,8 +3750,8 @@ mod tests {
     fn an_exact_detail_search_selects_the_matching_detail() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"search-root","path":"/root","markers":["exact-hit"],"workshopId":"root","target":{"type":"tmux_session","session":"root"}},
-                {"name":"search-child","path":"/child","workshopId":"child","parentWorkshopId":"root","target":{"type":"tmux_session","session":"child"},"details":[{"kind":"window","title":"exact-hit","state":"idle","target":{"type":"tmux_window","session":"child","windowId":"@1","pane":"%1"}}]}
+                {"name":"search-root","path":"/root","markers":["exact-hit"],"workshopId":"root","target":{"type":"session","session":"root"}},
+                {"name":"search-child","path":"/child","workshopId":"child","parentWorkshopId":"root","target":{"type":"session","session":"child"},"details":[{"kind":"window","title":"exact-hit","state":"idle","target":{"type":"window","session":"child","windowId":"@1","pane":"%1"}}]}
             ]"#,
         );
         app.update_query("exact-hit".into());
@@ -3833,9 +3764,9 @@ mod tests {
     fn broadening_a_lineage_search_preserves_the_match_until_cleared() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"tweezr@idp-java","path":"/root","workshopId":"root","target":{"type":"tmux_session","session":"root"}},
-                {"name":"tweezr@fix-coverage-hyphenation","path":"/coverage","workshopId":"coverage","parentWorkshopId":"root","target":{"type":"tmux_session","session":"coverage"}},
-                {"name":"tweezr@fix-java-failed-tests","path":"/failed","workshopId":"failed","parentWorkshopId":"root","target":{"type":"tmux_session","session":"failed"}}
+                {"name":"tweezr@idp-java","path":"/root","workshopId":"root","target":{"type":"session","session":"root"}},
+                {"name":"tweezr@fix-coverage-hyphenation","path":"/coverage","workshopId":"coverage","parentWorkshopId":"root","target":{"type":"session","session":"coverage"}},
+                {"name":"tweezr@fix-java-failed-tests","path":"/failed","workshopId":"failed","parentWorkshopId":"root","target":{"type":"session","session":"failed"}}
             ]"#,
         );
         app.selected = app.rows.iter().position(|row| row.session.name == "tweezr@idp-java").unwrap();
@@ -3869,10 +3800,10 @@ mod tests {
             "recency": 100 - index,
             "workshopId": format!("workshop-{index:02}"),
             "parentWorkshopId": if index == 26 { Some("workshop-25") } else { None },
-            "target": { "type": "tmux_session", "session": format!("workshop-{index:02}") },
+            "target": { "type": "session", "session": format!("workshop-{index:02}") },
             "details": [{
                 "kind": "window", "title": "shell", "state": "idle",
-                "target": { "type": "tmux_window", "session": format!("workshop-{index:02}"),
+                "target": { "type": "window", "session": format!("workshop-{index:02}"),
                     "windowId": format!("@{index}"), "pane": format!("%{index}") }
             }]
         })).collect::<Vec<_>>();
@@ -3908,13 +3839,13 @@ mod tests {
     #[test]
     fn clearing_search_restores_stable_identity_after_a_snapshot_update() {
         let mut app = app_with_sessions(r#"[
-            {"name":"original","path":"/original","target":{"type":"tmux_session","session":"original","resourceId":"stable-id"}},
-            {"name":"result","path":"/result","target":{"type":"tmux_session","session":"result"}}
+            {"name":"original","path":"/original","target":{"type":"session","session":"original","resourceId":"stable-id"}},
+            {"name":"result","path":"/result","target":{"type":"session","session":"result"}}
         ]"#);
         app.update_query("result".into());
         let sessions = serde_json::from_str(r#"[
-            {"name":"result","path":"/result","recency":100,"target":{"type":"tmux_session","session":"result"}},
-            {"name":"renamed","path":"/original","target":{"type":"tmux_session","session":"renamed","resourceId":"stable-id"}}
+            {"name":"result","path":"/result","recency":100,"target":{"type":"session","session":"result"}},
+            {"name":"renamed","path":"/original","target":{"type":"session","session":"renamed","resourceId":"stable-id"}}
         ]"#).unwrap();
         app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions }, false).unwrap();
         app.update_query(String::new());
@@ -3925,9 +3856,9 @@ mod tests {
     #[test]
     fn clearing_search_falls_back_when_the_original_target_disappears() {
         let mut app = app_with_sessions(r#"[
-            {"name":"original","path":"/original","target":{"type":"tmux_session","session":"original"}},
-            {"name":"result","path":"/result","target":{"type":"tmux_session","session":"result"}},
-            {"name":"current","path":"/current","target":{"type":"tmux_session","session":"current"}}
+            {"name":"original","path":"/original","target":{"type":"session","session":"original"}},
+            {"name":"result","path":"/result","target":{"type":"session","session":"result"}},
+            {"name":"current","path":"/current","target":{"type":"session","session":"current"}}
         ]"#);
         app.current_session = "current".into();
         app.selected = app.rows.iter().position(|row| row.session.name == "original").unwrap();
@@ -3947,8 +3878,8 @@ mod tests {
     #[test]
     fn lineage_uses_its_most_actionable_descendant_state() {
         let sessions: Vec<SessionRow> = serde_json::from_str(r#"[
-            {"name":"parent","path":"/parent","workshopId":"parent","target":{"type":"tmux_session","session":"parent"}},
-            {"name":"child","path":"/child","workshopId":"child","parentWorkshopId":"parent","target":{"type":"tmux_session","session":"child"},"details":[{"kind":"clanker","state":"blocked","target":{"type":"tmux_window","session":"child","windowId":"@1","pane":"%1"}}]}
+            {"name":"parent","path":"/parent","workshopId":"parent","target":{"type":"session","session":"parent"}},
+            {"name":"child","path":"/child","workshopId":"child","parentWorkshopId":"parent","target":{"type":"session","session":"child"},"details":[{"kind":"clanker","state":"blocked","target":{"type":"window","session":"child","windowId":"@1","pane":"%1"}}]}
         ]"#).unwrap();
         let mut by_parent = HashMap::new();
         by_parent.insert(None, vec![0]);
@@ -3963,9 +3894,9 @@ mod tests {
     fn unknown_clanker_lineage_keeps_its_glyph_and_precedes_neutral_rows() {
         let app = app_with_sessions(
             r#"[
-                {"name":"neutral","path":"/neutral","target":{"type":"tmux_session","session":"neutral"},"details":[{"kind":"window","state":"unknown","target":{"type":"tmux_window","session":"neutral","windowId":"@1","pane":"%1"}}]},
-                {"name":"parent","path":"/parent","workshopId":"parent","target":{"type":"tmux_session","session":"parent"},"details":[{"kind":"window","state":"unknown","target":{"type":"tmux_window","session":"parent","windowId":"@2","pane":"%2"}}]},
-                {"name":"unknown","path":"/unknown","workshopId":"unknown","parentWorkshopId":"parent","target":{"type":"tmux_session","session":"unknown"},"details":[{"kind":"clanker","state":"unknown","target":{"type":"tmux_window","session":"unknown","windowId":"@3","pane":"%3"}}]}
+                {"name":"neutral","path":"/neutral","target":{"type":"session","session":"neutral"},"details":[{"kind":"window","state":"unknown","target":{"type":"window","session":"neutral","windowId":"@1","pane":"%1"}}]},
+                {"name":"parent","path":"/parent","workshopId":"parent","target":{"type":"session","session":"parent"},"details":[{"kind":"window","state":"unknown","target":{"type":"window","session":"parent","windowId":"@2","pane":"%2"}}]},
+                {"name":"unknown","path":"/unknown","workshopId":"unknown","parentWorkshopId":"parent","target":{"type":"session","session":"unknown"},"details":[{"kind":"clanker","state":"unknown","target":{"type":"window","session":"unknown","windowId":"@3","pane":"%3"}}]}
             ]"#,
         );
         assert_eq!(
@@ -4011,7 +3942,7 @@ mod tests {
     #[test]
     fn rename_mode_constructs_a_typed_intent_with_stable_resource_id() {
         let mut app = app_with_sessions(
-            r#"[{"name":"display","path":"/repo","resourceId":"resource-1","availableActions":["open","rename"],"target":{"type":"tmux_session","session":"native-name","resourceId":"resource-1"}}]"#,
+            r#"[{"name":"display","path":"/repo","resourceId":"resource-1","availableActions":["open","rename"],"target":{"type":"session","session":"native-name","resourceId":"resource-1"}}]"#,
         );
 
         assert_eq!(handle_key(&mut app, alt('r')), None);
@@ -4032,11 +3963,11 @@ mod tests {
     fn attach_and_detach_use_projected_actions_and_stable_workshop_ids() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"parent","path":"/parent","workshopId":"parent-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"parent-native"}},
-                {"name":"source","path":"/source","workshopId":"source-id","parentWorkshopId":"parent-id","attachmentCandidateWorkshopIds":["candidate-id"],"availableActions":["open","attach","detach"],"target":{"type":"tmux_session","session":"source-native"}},
-                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"source-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"child-native"}},
-                {"name":"candidate","path":"/candidate","workshopId":"candidate-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"candidate-native"}},
-                {"name":"outsider","path":"/outsider","workshopId":"outsider-id","availableActions":["open","attach"],"target":{"type":"tmux_session","session":"outsider-native"}}
+                {"name":"parent","path":"/parent","workshopId":"parent-id","availableActions":["open","attach"],"target":{"type":"session","session":"parent-native"}},
+                {"name":"source","path":"/source","workshopId":"source-id","parentWorkshopId":"parent-id","attachmentCandidateWorkshopIds":["candidate-id"],"availableActions":["open","attach","detach"],"target":{"type":"session","session":"source-native"}},
+                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"source-id","availableActions":["open","attach"],"target":{"type":"session","session":"child-native"}},
+                {"name":"candidate","path":"/candidate","workshopId":"candidate-id","availableActions":["open","attach"],"target":{"type":"session","session":"candidate-native"}},
+                {"name":"outsider","path":"/outsider","workshopId":"outsider-id","availableActions":["open","attach"],"target":{"type":"session","session":"outsider-native"}}
             ]"#,
         );
         assert!(app.repository_identities.is_empty());
@@ -4109,7 +4040,7 @@ mod tests {
     #[test]
     fn delete_requires_confirmation_and_preserves_exact_selected_scope() {
         let mut app = app_with_sessions(
-            r#"[{"name":"display","path":"/repo","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"},"details":[{"kind":"clanker","title":"worker","state":"idle","target":{"type":"tmux_window","session":"native-session","windowId":"@2","pane":"%7"}}]}]"#,
+            r#"[{"name":"display","path":"/repo","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"},"details":[{"kind":"clanker","title":"worker","state":"idle","target":{"type":"window","session":"native-session","windowId":"@2","pane":"%7"}}]}]"#,
         );
         app.expanded_details.insert("display".into());
         app.rebuild(None);
@@ -4166,7 +4097,7 @@ mod tests {
     fn a_linked_worktree_outside_the_projected_worktree_set_is_still_a_worktree() {
         // The projection only tags dev-root directories; the daemon's answer is authoritative.
         let mut app = app_with_sessions(
-            r#"[{"name":"side","path":"/elsewhere/side","branch":"side","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"side","path":"/elsewhere/side","branch":"side","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
 
         assert_eq!(
@@ -4199,7 +4130,7 @@ mod tests {
     #[test]
     fn delete_treats_a_live_worktree_session_as_worktree_scope() {
         let mut app = app_with_sessions(
-            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
 
         assert_eq!(
@@ -4229,8 +4160,8 @@ mod tests {
 
     fn deletion_fixture() -> App {
         app_with_sessions(r#"[
-            {"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-feature","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w1"}}},
-            {"name":"survivor","path":"/repo/survivor","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-survivor","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w2"}}}
+            {"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-feature","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w1"}}},
+            {"name":"survivor","path":"/repo/survivor","availableActions":["open","delete"],"target":{"type":"session","session":"native-survivor","location":{"kind":"herdr","instanceId":"herdr:/qa.sock","nativeSessionId":"w2"}}}
         ]"#)
     }
 
@@ -4277,7 +4208,7 @@ mod tests {
     #[test]
     fn exit_waits_only_for_durable_submission_not_deletion_completion() {
         for command in [AppCommand::Close, AppCommand::Submit(MutationIntent::Open {
-            target: Target::Directory { path: "/repo/survivor".into() }, client: None,
+            target: Target::Directory { path: "/repo/survivor".into() },
         })] {
             let mut app = deletion_fixture();
             let delete = confirm_fixture_delete(&mut app);
@@ -4389,7 +4320,7 @@ mod tests {
     #[test]
     fn observation_keys_include_the_evidence_source() {
         let app = app_with_sessions(
-            r#"[{"name":"observed","path":"/repo","target":{"type":"tmux_session","session":"observed"},"details":[{"kind":"observation","title":"pi","state":"unknown","target":{"type":"tmux_window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"process","confidence":"observed","state":"present"}},{"kind":"observation","title":"report","state":"unknown","target":{"type":"tmux_window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"lifecycle","confidence":"rejected","state":"working"}}]}]"#,
+            r#"[{"name":"observed","path":"/repo","target":{"type":"session","session":"observed"},"details":[{"kind":"observation","title":"pi","state":"unknown","target":{"type":"window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"process","confidence":"observed","state":"present"}},{"kind":"observation","title":"report","state":"unknown","target":{"type":"window","session":"observed","windowId":"@1","pane":"%1"},"observation":{"source":"lifecycle","confidence":"rejected","state":"working"}}]}]"#,
         );
         let keys = app
             .sessions[0]
@@ -4405,7 +4336,7 @@ mod tests {
     #[test]
     fn external_delete_signal_uses_the_normal_confirmation_path() {
         let mut app = app_with_sessions(
-            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
 
         DELETE_REQUESTED.store(true, Ordering::SeqCst);
@@ -4424,7 +4355,7 @@ mod tests {
     #[test]
     fn done_hook_that_handles_alt_d_skips_the_destroy_confirmation() {
         let mut app = app_with_sessions(
-            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["retro"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["retro"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
 
         assert!(handle_key(&mut app, alt('d')).is_some());
@@ -4442,7 +4373,7 @@ mod tests {
     #[test]
     fn a_done_workshop_can_be_reopened_from_the_destroy_confirmation() {
         let mut app = app_with_sessions(
-            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["done"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","labels":["done"],"directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
         select_done_group(&mut app);
         handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -4475,7 +4406,7 @@ mod tests {
     #[test]
     fn done_hook_failure_reports_the_error_without_offering_destruction() {
         let mut app = app_with_sessions(
-            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"native-session"}}]"#,
         );
 
         assert!(handle_key(&mut app, alt('d')).is_some());
@@ -4496,12 +4427,12 @@ mod tests {
         assert_eq!(app.mode, Mode::Jump);
         assert_eq!(
             app.error,
-            "Nothing to delete: target has no live tmux pane or session"
+            "Nothing to delete: target has no live pane or session"
         );
     }
 
     #[test]
-    fn delete_supports_projected_worktree_directories_without_live_tmux() {
+    fn delete_supports_projected_worktree_directories_without_live_sessions() {
         let mut app = app_with_sessions(
             r#"[{"name":"feature","path":"/repo/feature","branch":"feature","directorySource":"worktree","availableActions":["open","create"],"target":{"type":"directory","path":"/repo/feature"}}]"#,
         );
@@ -4528,7 +4459,7 @@ mod tests {
     #[test]
     fn projected_actions_gate_exact_open_and_destructive_keys() {
         let mut app = app_with_sessions(
-            r#"[{"name":"blocked","path":"/repo","workshopId":"workshop-id","target":{"type":"tmux_session","session":"native-session"},"details":[{"kind":"window","title":"shell","state":"idle","target":{"type":"tmux_window","session":"native-session","windowId":"@9","pane":"%9"}}]}]"#,
+            r#"[{"name":"blocked","path":"/repo","workshopId":"workshop-id","target":{"type":"session","session":"native-session"},"details":[{"kind":"window","title":"shell","state":"idle","target":{"type":"window","session":"native-session","windowId":"@9","pane":"%9"}}]}]"#,
         );
         assert_eq!(
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4551,7 +4482,7 @@ mod tests {
         assert_eq!(
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(AppCommand::Submit(MutationIntent::Open {
-                target: Target::TmuxWindow {
+                target: Target::Window {
                     session: "native-session".into(),
                     window_id: "@9".into(),
                     pane: "%9".into(),
@@ -4559,7 +4490,6 @@ mod tests {
                     resource_id: None,
                     location: None,
                 },
-                client: None,
             }))
         );
     }
@@ -4648,7 +4578,7 @@ mod tests {
     #[test]
     fn alt_r_edits_a_workshop_title_and_an_empty_title_clears_it() {
         let mut app = app_with_sessions(
-            r#"[{"name":"repo@feature","path":"/repo/feature","branch":"feature","title":"Old title","workshopId":"w1","availableActions":["open","rename"],"target":{"type":"tmux_session","session":"native-session"}}]"#,
+            r#"[{"name":"repo@feature","path":"/repo/feature","branch":"feature","title":"Old title","workshopId":"w1","availableActions":["open","rename"],"target":{"type":"session","session":"native-session"}}]"#,
         );
         assert_eq!(handle_key(&mut app, alt('r')), None);
         assert_eq!(app.mode, Mode::Rename);
@@ -4685,9 +4615,9 @@ mod tests {
     #[test]
     fn the_list_shows_every_project_wherever_it_was_opened_from() {
         let mut app = app_with_sessions(r#"[
-            {"name":"tweezr@feature","path":"/t/feature","project":"tweezr","target":{"type":"tmux_session","session":"tweezr@feature"}},
-            {"name":"clankerhouse@retro","path":"/c/retro","project":"clankerhouse","target":{"type":"tmux_session","session":"clankerhouse@retro"}},
-            {"name":"home","path":"/home/me","target":{"type":"tmux_session","session":"home"}}
+            {"name":"tweezr@feature","path":"/t/feature","project":"tweezr","target":{"type":"session","session":"tweezr@feature"}},
+            {"name":"clankerhouse@retro","path":"/c/retro","project":"clankerhouse","target":{"type":"session","session":"clankerhouse@retro"}},
+            {"name":"home","path":"/home/me","target":{"type":"session","session":"home"}}
         ]"#);
         app.current_session = "tweezr@feature".into();
         app.rebuild(None);
@@ -4705,7 +4635,7 @@ mod tests {
         assert_eq!(label_color("retro"), label_color("retro"));
         assert!(LABEL_COLORS.contains(&label_color("retro")));
         // The project is searchable even when a title has replaced the "project@" name.
-        let titled: SessionRow = serde_json::from_str(r#"{"name":"Fix login","title":"Fix login","path":"/t/x","branch":"fix-login","project":"tweezr","labels":["urgent"],"target":{"type":"tmux_session","session":"Fix login"}}"#).unwrap();
+        let titled: SessionRow = serde_json::from_str(r#"{"name":"Fix login","title":"Fix login","path":"/t/x","branch":"fix-login","project":"tweezr","labels":["urgent"],"target":{"type":"session","session":"Fix login"}}"#).unwrap();
         for query in ["tweezr", "login", "fix-login", "urgent", "tweezr urgent"] {
             assert!(search_score(&titled, query).is_some(), "{query}");
         }
@@ -4721,8 +4651,8 @@ mod tests {
     fn done_workshops_are_grayed_out_even_when_fresh_or_current() {
         let mut app = app_with_sessions(
             r#"[
-                {"name":"finished","path":"/finished","recency":1000000,"labels":["done"],"target":{"type":"tmux_session","session":"finished"}},
-                {"name":"active","path":"/active","recency":1000000,"target":{"type":"tmux_session","session":"active"}}
+                {"name":"finished","path":"/finished","recency":1000000,"labels":["done"],"target":{"type":"session","session":"finished"}},
+                {"name":"active","path":"/active","recency":1000000,"target":{"type":"session","session":"active"}}
             ]"#,
         );
         handle_key(&mut app, alt('.'));
@@ -4733,11 +4663,11 @@ mod tests {
     }
 
     const DONE_LINEAGE: &str = r#"[
-        {"name":"main","path":"/main","recency":50,"workshopId":"main","target":{"type":"tmux_session","session":"main"}},
-        {"name":"feat","path":"/feat","recency":40,"workshopId":"feat","parentWorkshopId":"main","target":{"type":"tmux_session","session":"feat"}},
-        {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"workshopId":"old-a","parentWorkshopId":"main","target":{"type":"tmux_session","session":"old-a"}},
-        {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"workshopId":"old-b","parentWorkshopId":"main","target":{"type":"tmux_session","session":"old-b"}},
-        {"name":"old-b-child","path":"/old-b-child","recency":10,"labels":["done"],"workshopId":"old-b-child","parentWorkshopId":"old-b","target":{"type":"tmux_session","session":"old-b-child"}}
+        {"name":"main","path":"/main","recency":50,"workshopId":"main","target":{"type":"session","session":"main"}},
+        {"name":"feat","path":"/feat","recency":40,"workshopId":"feat","parentWorkshopId":"main","target":{"type":"session","session":"feat"}},
+        {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"workshopId":"old-a","parentWorkshopId":"main","target":{"type":"session","session":"old-a"}},
+        {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"workshopId":"old-b","parentWorkshopId":"main","target":{"type":"session","session":"old-b"}},
+        {"name":"old-b-child","path":"/old-b-child","recency":10,"labels":["done"],"workshopId":"old-b-child","parentWorkshopId":"old-b","target":{"type":"session","session":"old-b-child"}}
     ]"#;
 
     fn row_named<'a>(app: &'a App, name: &str) -> Option<&'a TreeRow> {
@@ -4774,9 +4704,9 @@ mod tests {
     fn done_roots_fold_into_a_summary_above_every_other_root() {
         let app = app_with_sessions(
             r#"[
-                {"name":"live","path":"/live","recency":10,"target":{"type":"tmux_session","session":"live"}},
-                {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"target":{"type":"tmux_session","session":"old-a"}},
-                {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"target":{"type":"tmux_session","session":"old-b"}}
+                {"name":"live","path":"/live","recency":10,"target":{"type":"session","session":"live"}},
+                {"name":"old-a","path":"/old-a","recency":30,"labels":["done"],"target":{"type":"session","session":"old-a"}},
+                {"name":"old-b","path":"/old-b","recency":20,"labels":["done"],"target":{"type":"session","session":"old-b"}}
             ]"#,
         );
 
@@ -4791,8 +4721,8 @@ mod tests {
     fn a_done_workshop_stays_visible_while_anything_below_it_is_live() {
         let app = app_with_sessions(
             r#"[
-                {"name":"old","path":"/old","labels":["done"],"workshopId":"old","target":{"type":"tmux_session","session":"old"}},
-                {"name":"live-child","path":"/live-child","workshopId":"live-child","parentWorkshopId":"old","target":{"type":"tmux_session","session":"live-child"}}
+                {"name":"old","path":"/old","labels":["done"],"workshopId":"old","target":{"type":"session","session":"old"}},
+                {"name":"live-child","path":"/live-child","workshopId":"live-child","parentWorkshopId":"old","target":{"type":"session","session":"live-child"}}
             ]"#,
         );
 
@@ -4805,7 +4735,7 @@ mod tests {
     fn a_done_workshop_with_an_active_clanker_is_not_folded() {
         for state in ["working", "blocked", "failed"] {
             let app = app_with_sessions(&format!(
-                r#"[{{"name":"old","path":"/old","labels":["done"],"target":{{"type":"tmux_session","session":"old"}},"details":[{{"kind":"clanker","state":"{state}","target":{{"type":"tmux_window","session":"old","windowId":"@1","pane":"%1"}}}}]}}]"#
+                r#"[{{"name":"old","path":"/old","labels":["done"],"target":{{"type":"session","session":"old"}},"details":[{{"kind":"clanker","state":"{state}","target":{{"type":"window","session":"old","windowId":"@1","pane":"%1"}}}}]}}]"#
             ));
             assert!(row_named(&app, "old").is_some(), "{state} clanker must stay visible");
         }
@@ -4814,7 +4744,7 @@ mod tests {
     #[test]
     fn a_done_workshop_with_an_unseen_finished_clanker_still_folds() {
         let app = app_with_sessions(
-            r#"[{"name":"old","path":"/old","labels":["done"],"target":{"type":"tmux_session","session":"old"},"details":[{"kind":"clanker","state":"done","target":{"type":"tmux_window","session":"old","windowId":"@1","pane":"%1"}}]}]"#,
+            r#"[{"name":"old","path":"/old","labels":["done"],"target":{"type":"session","session":"old"},"details":[{"kind":"clanker","state":"done","target":{"type":"window","session":"old","windowId":"@1","pane":"%1"}}]}]"#,
         );
 
         assert!(row_named(&app, "old").is_none());
@@ -4935,8 +4865,8 @@ mod tests {
         let mut app = app_with_sessions(
             r#"[
                 {"name":"legacy-parent","path":"/legacy","workshopId":"parent-id","target":{"type":"directory","path":"/legacy"}},
-                {"name":"live-parent","path":"/live","workshopId":"parent-id","target":{"type":"tmux_session","session":"live-parent"}},
-                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"parent-id","availableActions":["open"],"target":{"type":"tmux_session","session":"child-native"}}
+                {"name":"live-parent","path":"/live","workshopId":"parent-id","target":{"type":"session","session":"live-parent"}},
+                {"name":"child","path":"/child","workshopId":"child-id","parentWorkshopId":"parent-id","availableActions":["open"],"target":{"type":"session","session":"child-native"}}
             ]"#,
         );
 
@@ -4954,7 +4884,6 @@ mod tests {
         );
         assert!(app.rows.iter().all(|row| row.depth == 0));
 
-        app.tmux_client = Some("/dev/pts/9".into());
         app.selected = app
             .rows
             .iter()
@@ -4963,37 +4892,32 @@ mod tests {
         assert_eq!(
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(AppCommand::Submit(MutationIntent::Open {
-                target: Target::TmuxSession {
+                target: Target::Session {
                     session: "child-native".into(),
                     management: None,
                     resource_id: None,
                     location: None,
                 },
-                client: Some("/dev/pts/9".into()),
             }))
         );
     }
 
     #[test]
-    fn managed_herdr_pane_uses_herdr_runtime_and_ignores_outer_tmux_context() {
+    fn runtime_root_defaults_to_the_herdr_instance() {
         let environment = HashMap::from([
             ("XDG_RUNTIME_DIR".to_string(), "/run/test".to_string()),
-            ("HERDR_ENV".to_string(), "1".to_string()),
-            ("HERDR_PANE_ID".to_string(), "w2:p1".to_string()),
         ]);
         assert_eq!(
             runtime_root_from(&environment, 42).unwrap(),
             PathBuf::from("/run/test/clankerhouse-42-herdr")
         );
-        assert!(!uses_tmux_context(&environment).unwrap());
 
-        let mut explicit_tmux = environment.clone();
-        explicit_tmux.insert("CLANKERHOUSE_MULTIPLEXER".into(), "tmux".into());
+        let mut default_instance = environment.clone();
+        default_instance.insert("CLANKERHOUSE_INSTANCE".into(), "default".into());
         assert_eq!(
-            runtime_root_from(&explicit_tmux, 42).unwrap(),
+            runtime_root_from(&default_instance, 42).unwrap(),
             PathBuf::from("/run/test/clankerhouse-42")
         );
-        assert!(uses_tmux_context(&explicit_tmux).unwrap());
 
         let mut explicit_instance = environment.clone();
         explicit_instance.insert("CLANKERHOUSE_INSTANCE".into(), "review".into());
@@ -5007,15 +4931,15 @@ mod tests {
 
     fn large_current_lineage_snapshot() -> Snapshot {
         let mut sessions = vec![
-            serde_json::json!({"name":"root", "path":"/root", "workshopId":"root", "target":{"type":"tmux_session","session":"root"}}),
-            serde_json::json!({"name":"branch", "path":"/branch", "workshopId":"branch", "parentWorkshopId":"root", "target":{"type":"tmux_session","session":"branch"}}),
-            serde_json::json!({"name":"current", "path":"/current", "workshopId":"current", "parentWorkshopId":"branch", "target":{"type":"tmux_session","session":"native-current","resourceId":"current-id"}}),
-            serde_json::json!({"name":"other-branch", "path":"/other-branch", "workshopId":"other-branch", "parentWorkshopId":"root", "target":{"type":"tmux_session","session":"other-branch"}}),
+            serde_json::json!({"name":"root", "path":"/root", "workshopId":"root", "target":{"type":"session","session":"root"}}),
+            serde_json::json!({"name":"branch", "path":"/branch", "workshopId":"branch", "parentWorkshopId":"root", "target":{"type":"session","session":"branch"}}),
+            serde_json::json!({"name":"current", "path":"/current", "workshopId":"current", "parentWorkshopId":"branch", "target":{"type":"session","session":"native-current","resourceId":"current-id"}}),
+            serde_json::json!({"name":"other-branch", "path":"/other-branch", "workshopId":"other-branch", "parentWorkshopId":"root", "target":{"type":"session","session":"other-branch"}}),
         ];
         for parent in ["current", "other-branch"] {
             for index in 0..12 {
                 let name = format!("{parent}-child-{index}");
-                sessions.push(serde_json::json!({"name":name, "path":format!("/{name}"), "parentWorkshopId":parent, "target":{"type":"tmux_session","session":name}}));
+                sessions.push(serde_json::json!({"name":name, "path":format!("/{name}"), "parentWorkshopId":parent, "target":{"type":"session","session":name}}));
             }
         }
         serde_json::from_value(serde_json::json!({"version":CACHE_VERSION,"sessions":sessions})).unwrap()
@@ -5065,9 +4989,9 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("state.json"),
-            r#"{"version":10,"sessions":[
-                {"name":"working","path":"/working","target":{"type":"tmux_session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"tmux_window","session":"working","windowId":"@1","pane":"%1"}}]},
-                {"name":"current","path":"/current","target":{"type":"tmux_session","session":"current"},"details":[{"kind":"window","state":"unknown","target":{"type":"tmux_window","session":"current","windowId":"@2","pane":"%2"}}]}
+            r#"{"version":11,"sessions":[
+                {"name":"working","path":"/working","target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@1","pane":"%1"}}]},
+                {"name":"current","path":"/current","target":{"type":"session","session":"current"},"details":[{"kind":"window","state":"unknown","target":{"type":"window","session":"current","windowId":"@2","pane":"%2"}}]}
             ]}"#,
         )
         .unwrap();

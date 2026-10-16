@@ -134,7 +134,7 @@ local function at_current_position(row, context)
   })
 end
 
--- Multiplexer-neutral equivalent of the historical tmux proximity search:
+-- Proximity search:
 -- window/tab tier, session/workspace tier, then index distance inside the tier.
 local function nearest(rows, context)
   local origin = context.location

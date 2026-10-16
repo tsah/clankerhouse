@@ -38,7 +38,7 @@ import { parseClankerObservation, selectCurrentLifecycleObservations } from "./s
 import type { LifecycleObservation } from "./server/observations"
 import { isCodexWindow, projectResources } from "./server/project"
 import type { ProjectEffect } from "./server/project"
-import type { DirectoryRow, TmuxSession, TmuxWindow } from "./server/resources"
+import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
 import { acquireProducerLease, startSnapshotServer } from "./transport"
 import type { MutationIntent, ProducerLease, SnapshotServer } from "./transport"
 
@@ -56,7 +56,7 @@ const seenStateDir = `${runtimeDir}/seen-state`
 const refreshMs = Number(Bun.env.CLANKERHOUSE_REFRESH_MS ?? 15_000) || 15_000
 const coldRefreshMs = Number(Bun.env.CLANKERHOUSE_COLD_REFRESH_MS ?? 60_000) || 60_000
 const directoryRefreshMs = Number(Bun.env.CLANKERHOUSE_DIRECTORY_REFRESH_MS ?? 10 * 60_000) || 10 * 60_000
-const cacheVersion = 10
+const cacheVersion = 11
 let projectionSource: string = randomUUID()
 let producerLease: ProducerLease | undefined
 let latestWrittenProjection: ProjectionSnapshot<SessionRow> | undefined
@@ -97,7 +97,7 @@ const runCommand = (cmd: string[], options: { cwd?: string; allowFailure?: boole
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const expandHome = (path: string) => path === "~" ? Bun.env.HOME ?? path : path.startsWith("~/") ? `${Bun.env.HOME}${path.slice(1)}` : path
 let daemonMultiplexerInstance: ManagedMultiplexer | undefined
-/** The daemon's Multiplexer Adapter, selected once per process (tmux unless CLANKERHOUSE_MULTIPLEXER says otherwise). */
+/** The daemon's Multiplexer Adapter, created once per process. */
 const daemonMultiplexer = () => (daemonMultiplexerInstance ??= openManagedMultiplexer())
 
 const collectMultiplexerResources = Effect.tryPromise({
@@ -108,7 +108,7 @@ const collectMultiplexerResources = Effect.tryPromise({
       invalidateProjectionEnrichment()
       snapshot = await multiplexer.observe()
     }
-    const sessions: TmuxSession[] = snapshot.sessions.map((session) => ({
+    const sessions: MuxSession[] = snapshot.sessions.map((session) => ({
       id: session.id,
       name: session.nativeName,
       recency: session.recency,
@@ -121,7 +121,7 @@ const collectMultiplexerResources = Effect.tryPromise({
       resourceId: session.resourceId,
       displayName: session.displayName,
     }))
-    const windows: TmuxWindow[] = snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => ({
+    const windows: MuxWindow[] = snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => ({
       session: session.nativeName,
       sessionId: session.id,
       id: window.id,
@@ -407,7 +407,7 @@ const collectSessions = Effect.all([
           codexPanes: new Set([...detectedHarnessByPane].flatMap(([pane, harness]) => harness === "codex" ? [pane] : [])),
           managedResources,
           observedAt: Date.now(),
-          tmuxServerKey: resources.instanceId,
+          instanceId: resources.instanceId,
           multiplexerKind: resources.kind,
           home: Bun.env.HOME,
         })
@@ -595,7 +595,7 @@ const serverProgram = Effect.gen(function* () {
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   producerLease = yield* Effect.tryPromise({
-    try: async () => acquireProducerLease(`${runtimeDir}/producer.lease`, daemonMultiplexer().kind === "tmux" ? `${process.env.TMUX?.split(",")[0] || "default-tmux"}` : await daemonMultiplexer().instanceId()),
+    try: async () => acquireProducerLease(`${runtimeDir}/producer.lease`, await daemonMultiplexer().instanceId()),
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   projectionSource = producerLease.epoch
@@ -727,7 +727,7 @@ const dumpState = collectSessions.pipe(
       name: session.name,
       resourceId: session.resourceId,
       management: session.management,
-      location: session.target.type === "tmux_session" ? session.target.location : undefined,
+      location: session.target.type === "session" ? session.target.location : undefined,
       path: session.path,
       state: sessionState(session),
       recency: session.recency,
@@ -792,7 +792,7 @@ const consumeDeleteOutput = async (stream: ReadableStream<Uint8Array>, reportPro
 }
 
 const runDeleteCommand = async (argv: string[], reportProgress?: DeleteProgressReporter): Promise<DeleteCommandResult> => {
-  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_MULTIPLEXER: daemonMultiplexer().kind, CLANKERHOUSE_PROGRESS: "1", CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
+  const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_PROGRESS: "1", CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
   const [exitCode, stdout, stderr] = await Promise.all([
     proc.exited,
     consumeDeleteOutput(proc.stdout, reportProgress),
@@ -882,7 +882,7 @@ const ensureWorktreeSession = async (path: string) => {
     try { return candidate && realpathSync(candidate) === path } catch { return false }
   })
   if (existing) return existing[1]!
-  const created = Bun.spawnSync([binPath("clankers"), "workshop", "ensure", "--cwd", path], { cwd: repoRoot, stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_MULTIPLEXER: daemonMultiplexer().kind, CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
+  const created = Bun.spawnSync([binPath("clankers"), "workshop", "ensure", "--cwd", path], { cwd: repoRoot, stdout: "pipe", stderr: "pipe", env: { ...Bun.env, CLANKERHOUSE_DAEMON_INTERNAL: "1" } })
   if (created.exitCode !== 0) throw new Error(created.stderr.toString().trim() || `session creation exited ${created.exitCode}`)
   const session = created.stdout.toString().trim()
   if (!session) throw new Error("Session creation did not return a session name")
@@ -915,7 +915,6 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
 
   if (intent.type === "open" || intent.type === "absorb") {
     const multiplexer = daemonMultiplexer()
-    const requestingClient = intent.type === "open" ? intent.client : undefined
     if (stage === "identity.validated") {
       if (intent.target.type === "directory") {
         const path = realpathSync(expandHome(intent.target.path))
@@ -923,13 +922,12 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       if (intent.type === "absorb" && !intent.target.location) throw new Error("Absorption requires an exact Multiplexer Location")
       const target = intent.target
-      if (requestingClient && !await multiplexer.currentLocation(requestingClient)) throw new Error("Requesting multiplexer client no longer exists")
       const snapshot = await multiplexer.observe()
       const session = target.location
         ? snapshot.sessions.find((candidate) => candidate.id === target.location!.nativeSessionId && snapshot.instanceId === target.location!.instanceId)
         : snapshot.sessions.find((candidate) => candidate.nativeName === target.session)
       if (!session) throw new Error("Selected Multiplexer target no longer exists")
-      const location = target.location ?? { kind: snapshot.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: target.type === "tmux_window" ? target.windowId : null, nativePaneId: target.type === "tmux_window" || target.type === "opencode" ? target.pane : null }
+      const location = target.location ?? { kind: snapshot.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: target.type === "window" ? target.windowId : null, nativePaneId: target.type === "window" || target.type === "opencode" ? target.pane : null }
       return { checkpoint: { ...checkpoint, location } }
     }
     if (stage === "topology.absorbed") {
@@ -955,14 +953,14 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "target.opened") {
       const location = checkpoint.location as { nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
-      const current = await multiplexer.currentLocation(requestingClient)
+      const current = await multiplexer.currentLocation()
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
         && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)
-      if (!alreadyOpen && (intent.target.type === "tmux_session" || intent.target.type === "tmux_window")) {
-        await multiplexer.openTarget(intent.target, requestingClient)
+      if (!alreadyOpen && (intent.target.type === "session" || intent.target.type === "window")) {
+        await multiplexer.openTarget(intent.target)
       } else if (!alreadyOpen) {
-        const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target), ...(requestingClient ? ["--client", requestingClient] : [])])
+        const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
         if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
       }
       const openedLocation = checkpoint.location as { instanceId?: string; nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
@@ -995,7 +993,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       return { checkpoint: { ...checkpoint, nativeSessionId: row[0] } }
     }
     const nativeSessionId = String(checkpoint.nativeSessionId)
-    if (stage === "tmux.renamed") {
+    if (stage === "multiplexer.renamed") {
       const row = await exactSession({ nativeSessionId })
       if (!row) throw new Error("Selected session disappeared before rename reconciliation")
       if (row[1] !== intent.displayName) {
@@ -1044,7 +1042,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       return { checkpoint }
     }
-    if (stage === "tmux-parent.updated") {
+    if (stage === "multiplexer-parent.updated") {
       if (checkpoint.nativeSessionId) await applyExactWorkshopParent(String(checkpoint.nativeSessionId), intent.workshopId, parentWorkshopId)
       const outcome = parentWorkshopId ? { attached: true } : { detached: true }
       return { checkpoint: { ...checkpoint, outcome } }
@@ -1084,7 +1082,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       return { checkpoint: { ...checkpoint, nativeSessionId: session[0] } }
     }
-    if (stage === "tmux.marked") {
+    if (stage === "multiplexer.marked") {
       const nativeSessionId = String(checkpoint.nativeSessionId)
       if (await exactSession({ nativeSessionId })) {
         const ids = await sessionClankerIds(nativeSessionId)
@@ -1092,7 +1090,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
         let allStopped = false
         try { allStopped = ids.every((id) => recovery.getDesired(id)?.desiredState === "stopped") } finally { recovery.close() }
         if (!allStopped) {
-          const marked = await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "mark-session", nativeSessionId])
+          const marked = await runDeleteCommand([binPath("clankerhouse-mux-stop"), "mark-session", nativeSessionId])
           if (marked.exitCode !== 0) throw new Error(marked.stderr.trim() || "Unable to mark worktree session for deletion")
         }
       }
@@ -1136,7 +1134,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       return { checkpoint: { ...checkpoint, lineageSpliceVersion: 1, deletedWorkshopId: workshopId, deletedWorkshopRevision: workshopRevision, deletedParentWorkshopId: parentWorkshopId, deletedChildren } }
     }
-    if (stage === "tmux-children.updated") {
+    if (stage === "multiplexer-children.updated") {
       const parentWorkshopId = typeof checkpoint.deletedParentWorkshopId === "string" ? checkpoint.deletedParentWorkshopId : null
       const childWorkshopIds = Array.isArray(checkpoint.deletedChildren) ? checkpoint.deletedChildren.flatMap((value) => value && typeof value === "object" && typeof (value as { workshopId?: unknown }).workshopId === "string" ? [(value as { workshopId: string }).workshopId] : []) : []
       const rows = (await multiplexerSessionRows()).rows
@@ -1145,7 +1143,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       }
       return { checkpoint }
     }
-    if (stage === "tmux.deleted") {
+    if (stage === "multiplexer.deleted") {
       const nativeSessionId = String(checkpoint.nativeSessionId)
       if (await exactSession({ nativeSessionId })) await daemonMultiplexer().kill(sessionLocation(nativeSessionId))
       return { checkpoint: { ...checkpoint, outcome: { deleted: true } } }
@@ -1155,8 +1153,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const exists = intent.kind === "pane" ? await exactPaneExists(nativeSessionId, String(checkpoint.pane)) : Boolean(await exactSession({ nativeSessionId }))
       if (exists) {
         const command = intent.kind === "pane"
-          ? await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "pane", String(checkpoint.pane)])
-          : await runDeleteCommand([binPath("clankerhouse-tmux-stop"), "session", nativeSessionId])
+          ? await runDeleteCommand([binPath("clankerhouse-mux-stop"), "pane", String(checkpoint.pane)])
+          : await runDeleteCommand([binPath("clankerhouse-mux-stop"), "session", nativeSessionId])
         if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Deletion failed")
       }
       return { checkpoint: { ...checkpoint, outcome: { deleted: true } } }
@@ -1216,14 +1214,14 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const path = createWorktreeSync(repository, intent.branch, intent.create, intent.base, intent.remoteRef)
       return { checkpoint: { ...checkpoint, path, created: true } }
     }
-    if (stage === "tmux.ready") {
+    if (stage === "multiplexer.ready") {
       const path = realpathSync(String(checkpoint.path))
       // Titled before its session exists, so the session is born with the human name.
       if (intent.title) changeWorkshopLabel(ensureWorkshopForLabels(path).workshopId, TITLE_KEY, intent.title)
       rememberDirectory({ path, source: "worktree", branch: intent.branch, activityAt: Date.now(), activitySource: "opened" })
       if (intent.deferSession) return { checkpoint: { ...checkpoint, outcome: { path } } }
       const session = await ensureWorktreeSession(path)
-      return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "tmux_session", session } } } }
+      return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "session", session } } } }
     }
     if (stage === "hook.dispatched") {
       if (checkpoint.created) dispatchPostCreateHook(ensureWorkshopForLabels(realpathSync(String(checkpoint.path))))
@@ -1284,8 +1282,7 @@ const mirrorWorkshopTitle = async (path: string, title: string) => {
     let matches = false
     try { matches = Boolean(candidate) && realpathSync(candidate!) === path } catch {}
     if (!matches || row[1] === title) continue
-    // tmux reserves "." and ":" in session names.
-    try { await daemonMultiplexer().rename(sessionLocation(row[0]!), daemonMultiplexer().kind === "tmux" ? title.replace(/[.:]/g, "-") : title) }
+    try { await daemonMultiplexer().rename(sessionLocation(row[0]!), title) }
     catch (error) { console.error(`Unable to rename ${daemonMultiplexer().kind} session for ${path}: ${error instanceof Error ? error.message : String(error)}`) }
   }
 }
@@ -1318,7 +1315,7 @@ const reapDoneWorkshops = async (rows: readonly SessionRow[], now = Date.now()) 
       continue
     }
     console.error(`Reaping done Workshop ${workshop.canonicalPath}`)
-    const session = row.target.type === "tmux_session" ? row.target.session : row.name
+    const session = row.target.type === "session" ? row.target.session : row.name
     await submitMutation(daemonSocketPath, `reap:${workshop.workshopId}:${workshop.labelledAt}`, { type: "delete", kind: "worktree", session, path: workshop.canonicalPath, confirmed: true })
   }
 }

@@ -14,7 +14,7 @@ describe("recovery reconciliation", () => {
   test("a Spot reboot campaign restores healthy sessions sequentially and preserves blocked ones", () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-campaign-")); roots.push(root)
     const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })
-    for (const id of ["healthy", "blocked"]) store.createDesired({ clankerId: id, harness: "pi", workshopId: "w", workshopPath: root, tmuxSessionName: "w", tmuxWindowName: id, cwd: root, harnessSessionId: `session-${id}`, launchSpec: { version: 1, profile: null }, originalTask: "continue safely" }, { now: 1 })
+    for (const id of ["healthy", "blocked"]) store.createDesired({ clankerId: id, harness: "pi", workshopId: "w", workshopPath: root, preferredSessionLabel: "w", preferredWindowLabel: id, cwd: root, harnessSessionId: `session-${id}`, launchSpec: { version: 1, profile: null }, originalTask: "continue safely" }, { now: 1 })
     store.markRecoveryPending("blocked", "reboot", { now: 2 })
     store.admitRecovery("blocked", { automatic: false, bootEpoch: 1, trigger: "manual", now: 3 })
     store.markRecoveryPending("blocked", "scope disappeared", { now: 4 })
@@ -33,8 +33,8 @@ describe("recovery reconciliation", () => {
       windows: [{ id: "existing-window", nativeName: "pi", index: "0", active: true, panes: [] }],
     }] : []
     const multiplexer = {
-      kind: "tmux",
-      observe: async () => ({ kind: "tmux", instanceId: "isolated", sessions }),
+      kind: "herdr",
+      observe: async () => ({ kind: "herdr", instanceId: "isolated", sessions }),
       spawn: async (request: SpawnRequest) => {
         expect(store.attemptsFor("clanker-tab").at(-1)?.status).toBe("running")
         requests.push(request)
@@ -44,7 +44,7 @@ describe("recovery reconciliation", () => {
       ensureManagedSession: async () => {},
     } as unknown as ManagedMultiplexer
     try {
-      store.createDesired({ clankerId: "clanker-tab", harness: "pi", workshopId: "w", workshopPath: root, tmuxSessionName: "workshop", tmuxWindowName: "pi", cwd: root, harnessSessionId: "exact-session", launchSpec: { version: 1, profile: null }, originalTask: "task" }, { now: 1 })
+      store.createDesired({ clankerId: "clanker-tab", harness: "pi", workshopId: "w", workshopPath: root, preferredSessionLabel: "workshop", preferredWindowLabel: "pi", cwd: root, harnessSessionId: "exact-session", launchSpec: { version: 1, profile: null }, originalTask: "task" }, { now: 1 })
       const attempt = store.beginAttempt("clanker-tab", "initial", { now: 2 })
       store.finishAttempt(attempt.id, "succeeded", { now: 3 })
       const result = await reconcileRecovery(store, { now: 100, allowLaunch: true, bypassAdmission: true, multiplexer })
@@ -66,7 +66,7 @@ describe("recovery reconciliation", () => {
     const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })
     for (let index = 1; index <= 7; index++) {
       const id = `clanker-${index}`
-      store.createDesired({ clankerId: id, harness: "pi", workshopId: "w", workshopPath: root, tmuxSessionName: "w", tmuxWindowName: `pi-${index}`, cwd: root, harnessSessionId: `session-${index}`, launchSpec: { version: 1, profile: null }, originalTask: "expensive test" }, { now: index })
+      store.createDesired({ clankerId: id, harness: "pi", workshopId: "w", workshopPath: root, preferredSessionLabel: "w", preferredWindowLabel: `pi-${index}`, cwd: root, harnessSessionId: `session-${index}`, launchSpec: { version: 1, profile: null }, originalTask: "expensive test" }, { now: index })
       const initial = store.beginAttempt(id, "initial", { now: 20 + index }); store.finishAttempt(initial.id, "succeeded", { now: 30 + index })
     }
     const result = await reconcileRecovery(store, { trigger: "hard_reboot", now: 100 })

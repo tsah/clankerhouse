@@ -43,17 +43,18 @@ const resourcesFixture = (path: string, workshop = "workshop-root") => {
     INSERT INTO resources VALUES ('mux-session-1', 'session', '${workshop}', NULL, 'native-session-name', 30, 30);
     INSERT INTO resources VALUES ('mux-window-1', 'window', '${workshop}', 'mux-session-1', 'editor', 31, 31);
     INSERT INTO resources VALUES ('terminal-1', 'terminal', '${workshop}', 'mux-window-1', 'shell', 32, 32);
-    INSERT INTO multiplexer_locations VALUES ('mux-session-1', 'tmux', 'server-epoch-a', '$1', '', '', 40);
-    INSERT INTO multiplexer_locations VALUES ('mux-window-1', 'tmux', 'server-epoch-a', '$1', '@1', '', 40);
-    INSERT INTO multiplexer_locations VALUES ('terminal-1', 'tmux', 'server-epoch-a', '$1', '@1', '%1', 40);
+    INSERT INTO multiplexer_locations VALUES ('mux-session-1', 'herdr', 'server-epoch-a', '$1', '', '', 40);
+    INSERT INTO multiplexer_locations VALUES ('mux-window-1', 'herdr', 'server-epoch-a', '$1', '@1', '', 40);
+    INSERT INTO multiplexer_locations VALUES ('terminal-1', 'herdr', 'server-epoch-a', '$1', '@1', '%1', 40);
     PRAGMA user_version = 1;
   `)
   db.close()
 }
 
-const recoveryFixture = (path: string, version: 1 | 2 | 3, suffix = String(version), workshop = "workshop-root") => {
+const recoveryFixture = (path: string, version: 1 | 2 | 3 | 4, suffix = String(version), workshop = "workshop-root") => {
   const v2Columns = version >= 2 ? `,
       recovery_condition TEXT NOT NULL, quarantine_reason TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0, owner_unit TEXT` : ""
+  const labelColumns = version >= 4 ? "preferred_session_label TEXT NOT NULL, preferred_window_label TEXT NOT NULL" : "tmux_session_name TEXT NOT NULL, tmux_window_name TEXT NOT NULL"
   const v2AttemptColumns = version >= 2 ? ", automatic INTEGER NOT NULL DEFAULT 0, boot_epoch INTEGER" : ""
   const desiredValues = version >= 2
     ? `'clanker-${suffix}', 'pi', '${workshop}', '/work/root', 'repo', 'pi', '/work/root', 'ses-${suffix}', '{"version":1,"profile":"worker"}', 'recover fixture ${suffix}', 1, 'running', 'pending', NULL, 2, 'clankerhouse-pi.scope', 3, 50, 60`
@@ -66,7 +67,7 @@ const recoveryFixture = (path: string, version: 1 | 2 | 3, suffix = String(versi
     PRAGMA foreign_keys = ON;
     CREATE TABLE desired_clankers (
       clanker_id TEXT PRIMARY KEY, harness TEXT NOT NULL, workshop_id TEXT NOT NULL, workshop_path TEXT NOT NULL,
-      tmux_session_name TEXT NOT NULL, tmux_window_name TEXT NOT NULL, cwd TEXT NOT NULL, harness_session_id TEXT,
+      ${labelColumns}, cwd TEXT NOT NULL, harness_session_id TEXT,
       launch_spec TEXT NOT NULL, original_task TEXT NOT NULL, policy_version INTEGER NOT NULL, desired_state TEXT NOT NULL
       ${v2Columns}, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
@@ -89,7 +90,7 @@ const recoveryFixture = (path: string, version: 1 | 2 | 3, suffix = String(versi
 describe("single durable registry", () => {
   test("creates a private, FK-enforced registry with the complete Phase 3 durable shape", () => {
     const { root, registry } = fixture()
-    expect(registryStatePath(join(root, "state"), {})).toBe(registry)
+    expect(registryStatePath(join(root, "state"), { CLANKERHOUSE_INSTANCE: "default" })).toBe(registry)
     chmodSync(dirname(registry), 0o755)
     const module = openDurableRegistry({ dbPath: registry })
     expect(module.validate()).toEqual({ foreignKeyViolations: [], semanticViolations: [] })
@@ -129,7 +130,7 @@ describe("single durable registry", () => {
     expect(preferred.byId.get("workshop-child")).toMatchObject({ parentWorkshopId: "workshop-root", childWorkshopCount: 0 })
   })
 
-  for (const version of [1, 2, 3] as const) test(`imports a real recovery v${version} fixture with journal, attempt, lease and metadata`, () => {
+  for (const version of [1, 2, 3, 4] as const) test(`imports a real recovery v${version} fixture with journal, attempt, lease and metadata`, () => {
     const { state, registry } = fixture()
     const lineage = join(state, "workshops.sqlite3")
     const recovery = join(state, `recovery-v${version}.sqlite3`)
@@ -152,7 +153,35 @@ describe("single durable registry", () => {
     expect(raw.query("SELECT recovery_condition, consecutive_failures FROM desired_recovery").get()).toEqual(version === 1
       ? { recovery_condition: "pending", consecutive_failures: 0 }
       : { recovery_condition: "pending", consecutive_failures: 2 })
+    expect(raw.query("SELECT preferred_session_label, preferred_window_label FROM desired_recovery").get()).toEqual({ preferred_session_label: "repo", preferred_window_label: "pi" })
     expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([])
+    raw.close()
+  })
+
+  test("migrates a v2 registry's tmux recovery labels to preferred labels", () => {
+    const { state, registry } = fixture()
+    const lineage = join(state, "workshops.sqlite3")
+    const recovery = join(state, "recovery-v3.sqlite3")
+    lineageFixture(lineage)
+    recoveryFixture(recovery, 3)
+    const module = openDurableRegistry({ dbPath: registry })
+    module.importWorkshops(lineage)
+    module.importRecovery(recovery)
+    module.close()
+    const legacy = new Database(registry)
+    legacy.exec(`
+      ALTER TABLE desired_recovery RENAME COLUMN preferred_session_label TO tmux_session_name;
+      ALTER TABLE desired_recovery RENAME COLUMN preferred_window_label TO tmux_window_name;
+      PRAGMA user_version = 2;
+    `)
+    legacy.close()
+
+    const reopened = openDurableRegistry({ dbPath: registry })
+    expect(reopened.validate()).toEqual({ foreignKeyViolations: [], semanticViolations: [] })
+    reopened.close()
+    const raw = new Database(registry, { readonly: true })
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 3 })
+    expect(raw.query("SELECT preferred_session_label, preferred_window_label FROM desired_recovery").get()).toEqual({ preferred_session_label: "repo", preferred_window_label: "pi" })
     raw.close()
   })
 

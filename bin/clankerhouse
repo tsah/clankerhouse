@@ -2,9 +2,4 @@
 # Clankerhouse interactive workshop and clanker navigator.
 set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# shellcheck source=/dev/null
-. "$script_dir/../libexec/clankerhouse-env"
-if [ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" = herdr ]; then
-    exec "$script_dir/clankerhouse-herdr" "$@"
-fi
-exec "$script_dir/clankerhouse-native" "$@"
+exec "$script_dir/clankerhouse-herdr" "$@"

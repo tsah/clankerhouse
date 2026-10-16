@@ -5,7 +5,7 @@ description: >-
   user asks to find clankers, inspect status, monitor or wait, send instructions,
   steer, or retrieve results, report your own state to a parent orchestrator,
   watch child Workshops, or when told to mark yourself or this Workshop done.
-  Never communicate through tmux input or capture.
+  Never communicate through raw pane input or capture.
 ---
 
 # Clanker coordination
@@ -15,7 +15,7 @@ workshop. Pi, Claude, OpenCode, and Codex are **harnesses**, not agents.
 Harness-native in-process subagents are not clankers and must use their
 harness-native result and steering tools.
 
-Use the stable `CLANKER_ID` for every operation. Workshop, tmux session, window,
+Use the stable `CLANKER_ID` for every operation. Workshop, multiplexer session, window,
 and pane names are display metadata, not orchestration identity.
 
 ```bash
@@ -36,14 +36,14 @@ Rules:
 
 1. Check capabilities before wait/send/result and never silently fall back.
 2. Use generation-aware waits; timeouts are nondestructive.
-3. Never use `tmux send-keys`, `load-buffer`, `paste-buffer`, or `capture-pane`
-   for communication or monitoring.
+3. Never type into, paste into, or read the screen of a clanker's pane for
+   communication or monitoring.
 4. If several clankers match, show harness, name, workshop, state, and ID; do not
    guess. Reuse an ID returned by a workshop/clanker spawn.
-5. Pi supports native send/result and report waits. Claude under Herdr supports
-   queued send and report waits but not result; use its `lastReport`. Under
-   tmux, Claude and Codex support report waits only. OpenCode is monitor-only
-   until its native contract is verified. Capabilities remain authoritative.
+5. Pi supports native send/result and report waits. Claude supports queued
+   send and report waits but not result; use its `lastReport`. Codex supports
+   report waits only. OpenCode is monitor-only until its native contract is
+   verified. Capabilities remain authoritative.
 6. One unsettled external Pi message is admitted at a time. Wait for it before
    retrying.
 7. A send to a busy, blocked, or focused Claude returns `"delivery": "queued"`.

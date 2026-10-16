@@ -11,9 +11,8 @@ const isolatedEnv = (overrides: Record<string, string> = {}) => ({
   CLANKER_SESSION_ID: "",
   CLANKER_RECOVERY_ATTEMPT: "",
   CLANKER_RECOVERY_TRACKED: "",
-  HERDR_ENV: "",
   HERDR_PANE_ID: "",
-  CLANKERHOUSE_MULTIPLEXER: "tmux",
+  CLANKERHOUSE_INSTANCE: "",
   ...overrides,
 })
 afterEach(() => {
@@ -26,14 +25,12 @@ describe("OpenCode lifecycle reports", () => {
     roots.push(root)
     const bin = join(root, "bin")
     const runtime = join(root, "runtime")
-    const tmuxLog = join(root, "tmux.log")
+    const clankersLog = join(root, "clankers.log")
     mkdirSync(bin)
-    writeFileSync(join(bin, "tmux"), `#!/bin/sh
-printf '%s\\n' "$*" >> "$TMUX_LOG"
-if [ "$1" = show-option ]; then printf '%s\\n' "$CLANKER_ID"; fi
+    writeFileSync(join(bin, "clankers"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$CLANKERS_LOG"
+if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
 `)
-    writeFileSync(join(bin, "clankers"), "#!/bin/sh\nexit 0\n")
-    chmodSync(join(bin, "tmux"), 0o755)
     chmodSync(join(bin, "clankers"), 0o755)
 
     const script = join(root, "exercise.ts")
@@ -58,18 +55,18 @@ if [ "$1" = show-option ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.deleted", properties: { info } })
       console.log(JSON.stringify({ created, working, blocked, resumed, done, updated, deleted: report() }))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}`, "clanker-state", "%44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
       env: isolatedEnv({
         PATH: `${bin}:${process.env.PATH || ""}`,
         XDG_RUNTIME_DIR: runtime,
-        TMUX_PANE: "%44",
+        HERDR_PANE_ID: "w1:p44",
         CLANKER_ID: "clanker-opencode",
         CLANKER_SESSION_ID: "session-root",
         CLANKER_RECOVERY_ATTEMPT: "attempt-1",
         CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
         REPORT_PATH: reportPath,
-        TMUX_LOG: tmuxLog,
+        CLANKERS_LOG: clankersLog,
       }),
       stdout: "pipe",
       stderr: "pipe",
@@ -77,53 +74,16 @@ if [ "$1" = show-option ]; then printf '%s\\n' "$CLANKER_ID"; fi
 
     expect(child.exitCode, child.stderr.toString()).toBe(0)
     const output = JSON.parse(child.stdout.toString())
-    expect(output.created).toMatchObject({ harness: "opencode", clankerId: "clanker-opencode", harnessSessionId: "session-root", pane: "%44", state: "idle", generation: 0 })
+    expect(output.created).toMatchObject({ harness: "opencode", clankerId: "clanker-opencode", harnessSessionId: "session-root", pane: "w1:p44", state: "idle", generation: 0 })
     expect(output.working).toMatchObject({ state: "working", generation: 1, settledGeneration: 0, hookEvent: "session.status" })
     expect(output.blocked).toMatchObject({ state: "blocked", hookEvent: "question.asked" })
     expect(output.resumed).toMatchObject({ state: "working", hookEvent: "question.replied" })
     expect(output.done).toMatchObject({ state: "done", generation: 1, settledGeneration: 1, hookEvent: "session.idle" })
     expect(output.updated).toEqual(output.done)
     expect(output.deleted).toMatchObject({ state: "unknown", hookEvent: "session.deleted" })
-    expect(readFileSync(tmuxLog, "utf8")).toContain("set-option -pu -t %44 @clankerhouse_clanker_id")
-  })
-
-  test("routes inferred Herdr claims and attestation through the Herdr instance", () => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-opencode-herdr-"))
-    roots.push(root)
-    const bin = join(root, "bin")
-    const log = join(root, "clankers.log")
-    mkdirSync(bin)
-    writeFileSync(join(bin, "clankers"), `#!/bin/sh
-printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
-`)
-    chmodSync(join(bin, "clankers"), 0o755)
-    const script = join(root, "exercise-herdr.ts")
-    const pluginPath = new URL("./clankerhouse-lifecycle.ts", import.meta.url).pathname
-    writeFileSync(script, `
-      import { handleLifecycleEvent } from ${JSON.stringify(pluginPath)}
-      const info = { id: "session-root", projectID: "project", directory: "/tmp/work", title: "task", version: "1", time: { created: 1, updated: 1 } }
-      await handleLifecycleEvent({ type: "session.created", properties: { info } })
-    `)
-    const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({
-        PATH: `${bin}:${process.env.PATH || ""}`,
-        XDG_RUNTIME_DIR: join(root, "runtime"),
-        HERDR_ENV: "1",
-        HERDR_PANE_ID: "w1:p2",
-        CLANKERHOUSE_MULTIPLEXER: "",
-        CLANKER_ID: "clanker-opencode",
-        CLANKER_SESSION_ID: "session-root",
-        CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
-        CLANKERS_LOG: log,
-      }),
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    expect(child.exitCode, child.stderr.toString()).toBe(0)
-    const calls = readFileSync(log, "utf8").trim().split("\n")
-    expect(calls.length).toBeGreaterThan(0)
-    expect(calls.every((call) => call.startsWith("herdr|"))).toBe(true)
-    expect(calls).toContain("herdr|mux claim --pane w1:p2 harness opencode")
+    const calls = readFileSync(clankersLog, "utf8")
+    expect(calls).toContain("mux claim --pane w1:p44 harness opencode")
+    expect(calls).toContain("mux claim --pane w1:p44 clankerId --unset")
   })
 
   test("ignores unrelated sessions", () => {
@@ -136,7 +96,7 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "child-session", status: { type: "busy" } } })
     `)
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: join(root, "runtime"), TMUX_PANE: "%44", CLANKER_ID: "clanker-opencode", CLANKER_SESSION_ID: "session-root", CLANKERHOUSE_CLANKERS: "/bin/true" }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: join(root, "runtime"), HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKER_SESSION_ID: "session-root", CLANKERHOUSE_CLANKERS: "/bin/true" }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -158,9 +118,9 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-root", status: { type: "busy" } } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}`, "clanker-state", "%44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, TMUX_PANE: "%44", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -169,7 +129,7 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
     expect(JSON.parse(child.stdout.toString())).toMatchObject({
       harness: "opencode",
       harnessSessionId: "session-root",
-      pane: "%44",
+      pane: "w1:p44",
       state: "working",
       hookEvent: "session.status",
     })
@@ -180,7 +140,7 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-opencode-lifecycle-"))
     roots.push(root)
     const runtime = join(root, "runtime")
-    const runtimeRoot = join(runtime, `clankerhouse-${process.getuid?.() || 0}`)
+    const runtimeRoot = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`)
     mkdirSync(runtimeRoot, { recursive: true })
     const requests: unknown[] = []
     const server = createServer((socket) => {
@@ -205,7 +165,7 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       await Bun.sleep(50)
     `)
     const child = Bun.spawn([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, TMUX_PANE: "%44" }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44" }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -217,7 +177,7 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
     expect(requests.map((request: any) => request.params.state)).toEqual(["idle", "working"])
     expect(requests.every((request: any) => request.method === "observation.report")).toBe(true)
     expect(requests.every((request: any) => request.params.recoveryAttemptId === undefined)).toBe(true)
-    expect(existsSync(join(runtimeRoot, "clanker-state", "%44.json"))).toBe(false)
+    expect(existsSync(join(runtimeRoot, "clanker-state", "w1_p44.json"))).toBe(false)
   })
 
   test("recovers an untracked root from a status event after plugin reload", () => {
@@ -235,9 +195,9 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       )
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}`, "clanker-state", "%44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, TMUX_PANE: "%44", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -252,8 +212,6 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
     const bin = join(root, "bin")
     const runtime = join(root, "runtime")
     mkdirSync(bin)
-    writeFileSync(join(bin, "tmux"), "#!/bin/sh\nexit 0\n")
-    chmodSync(join(bin, "tmux"), 0o755)
     const script = join(root, "exercise.ts")
     const pluginPath = new URL("./clankerhouse-lifecycle.ts", import.meta.url).pathname
     writeFileSync(script, `
@@ -264,9 +222,9 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-child", status: { type: "busy" } } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}`, "clanker-state", "%44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, TMUX_PANE: "%44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -280,8 +238,6 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
     const bin = join(root, "bin")
     const runtime = join(root, "runtime")
     mkdirSync(bin)
-    writeFileSync(join(bin, "tmux"), "#!/bin/sh\nexit 0\n")
-    chmodSync(join(bin, "tmux"), 0o755)
     const script = join(root, "exercise.ts")
     const pluginPath = new URL("./clankerhouse-lifecycle.ts", import.meta.url).pathname
     writeFileSync(script, `
@@ -293,9 +249,9 @@ printf '%s|%s\n' "\${CLANKERHOUSE_MULTIPLEXER-unset}" "$*" >> "$CLANKERS_LOG"
       await handleLifecycleEvent({ type: "session.created", properties: { info: info("session-root") } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}`, "clanker-state", "%44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, TMUX_PANE: "%44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })

@@ -20,11 +20,7 @@ printf 'Clankerhouse home: %s\n' "$CLANKERHOUSE_HOME"
 [[ -x "$CLANKERHOUSE_BIN_DIR/clankers" ]] && ok 'clankers command' || fail 'clankers command missing'
 [[ -x "$CLANKERHOUSE_LIBEXEC/worktree-delete" ]] && ok 'worktree helper' || fail 'worktree helper missing'
 required bun
-if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == herdr ]]; then
-    required herdr
-else
-    required tmux
-fi
+required herdr
 required git
 required python3
 required flock
@@ -40,11 +36,6 @@ if rg -n --glob '!clankerhouse-doctor' '(\$HOME|%h)/dotfiles|~/dotfiles' "$CLANK
     fail 'standalone runtime still contains a dotfiles path dependency'
 else
     ok 'no dotfiles path dependencies in standalone runtime'
-fi
-
-if [[ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" == tmux && -n "${TMUX:-}" ]]; then
-    root=$(tmux show-option -gqv @clankerhouse-root 2>/dev/null || true)
-    [[ -n "$root" ]] && ok "tmux plugin loaded: $root" || warn 'tmux plugin is not loaded'
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

@@ -14,9 +14,9 @@ import { decideRecovery } from "./planner"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
-const spawnedRuntimeEnv = (multiplexer: ManagedMultiplexer) => {
+const spawnedRuntimeEnv = (): Record<string, string> => {
   const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
-  return { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
+  return instance ? { CLANKERHOUSE_INSTANCE: instance } : {}
 }
 
 export const linuxBootId = (path = Bun.env.CLANKERHOUSE_BOOT_ID_PATH || "/proc/sys/kernel/random/boot_id") => readFileSync(path, "utf8").trim()
@@ -69,7 +69,7 @@ const resolveWorkshop = async (desired: DesiredClankerRecord, multiplexer: Manag
   const existing = sessions.find((row) => row.workshopId === desired.workshopId || realpathSafe(row.path) === realpathSafe(desired.workshopPath))
   if (existing) return existing
   if (!existsSync(desired.workshopPath)) throw new Error(`Workshop path no longer exists: ${desired.workshopPath}`)
-  let name = desired.tmuxSessionName
+  let name = desired.preferredSessionLabel
   if (sessions.some((row) => row.name === name)) name = `${name}-${createHash("sha256").update(desired.workshopPath).digest("hex").slice(0, 8)}`
   return { id: undefined, name, path: desired.workshopPath, workshopId: desired.workshopId, windowNames: [] }
 }
@@ -171,12 +171,12 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       store.setMetadata("recovery.last_admission_at", now, { now })
       try {
         const session = await resolveWorkshop(desired, multiplexer)
-        const windowName = nextWindowName(session.windowNames, desired.tmuxWindowName)
+        const windowName = nextWindowName(session.windowNames, desired.preferredWindowLabel)
         const workshop = workshopLaunchIdentity(desired.workshopId, desired.workshopPath)
         const argv = previousSucceeded
           ? recoveryHarnessCommand(desired, attemptId, workshop)
           : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId, workshop })
-        const launch = { cwd: desired.cwd, env: { ...spawnedRuntimeEnv(multiplexer), ...workshopEnvironment(workshop) }, launch: { kind: "argv" as const, argv } }
+        const launch = { cwd: desired.cwd, env: { ...spawnedRuntimeEnv(), ...workshopEnvironment(workshop) }, launch: { kind: "argv" as const, argv } }
         const launched = await multiplexer.spawn(session.id
           ? { ...launch, scope: "window", nativeSessionId: session.id, name: windowName }
           : { ...launch, scope: "session", name: session.name, windowName })
@@ -208,12 +208,11 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
 
 export const controllerIdentity = (): ProcessIdentity => ({ bootId: linuxBootId(), pid: process.pid, processStartTicks: processStartTicks() })
 
-/** Runtime instance epoch. For tmux this is the server epoch stored in a global option, so persisted metadata stays comparable across upgrades. */
+/** Runtime instance epoch: the Multiplexer instance id, which changes only when a different runtime instance serves Clankerhouse. */
 const runtimeServerEpoch = async (multiplexer: ManagedMultiplexer) => {
   try {
     if (!await multiplexer.available()) return undefined
-    const instanceId = await multiplexer.instanceId()
-    return multiplexer.kind === "tmux" ? instanceId.split(":").at(-1) : instanceId
+    return await multiplexer.instanceId()
   } catch { return undefined }
 }
 
@@ -269,8 +268,8 @@ export class RecoveryController {
         const epochs = this.store.observeBoot(identity.bootId)
         const hardReboot = Boolean(previousBoot && previousBoot !== identity.bootId)
         const beforeServerEpoch = await runtimeServerEpoch(this.multiplexer)
-        const recordedServerEpoch = this.store.getMetadata<string>("runtime.tmux_server_epoch")
-        const trigger = hardReboot ? "hard_reboot" : recordedServerEpoch && beforeServerEpoch && recordedServerEpoch !== beforeServerEpoch ? "tmux_restart" : "reconcile"
+        const recordedServerEpoch = this.store.getMetadata<string>("runtime.server_epoch")
+        const trigger = hardReboot ? "hard_reboot" : recordedServerEpoch && beforeServerEpoch && recordedServerEpoch !== beforeServerEpoch ? "multiplexer_restart" : "reconcile"
         const automaticEnabled = Bun.env.CLANKERHOUSE_AUTO_RECOVER === undefined ? RECOVERY_POLICY.automaticRecovery : Bun.env.CLANKERHOUSE_AUTO_RECOVER !== "0"
         let campaign = this.store.getMetadata<RecoveryCampaign>("recovery.campaign")
         if (hardReboot && automaticEnabled && campaign?.bootEpoch !== epochs.bootEpoch) {
@@ -293,8 +292,8 @@ export class RecoveryController {
         }
         const serverEpoch = await runtimeServerEpoch(this.multiplexer)
         if (serverEpoch && serverEpoch !== recordedServerEpoch) {
-          if (recordedServerEpoch) this.store.advanceTmuxEpoch()
-          this.store.setMetadata("runtime.tmux_server_epoch", serverEpoch)
+          if (recordedServerEpoch) this.store.advanceMultiplexerEpoch()
+          this.store.setMetadata("runtime.server_epoch", serverEpoch)
         }
       }
       if (options.once && lease) break

@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# Orchestration API end to end in an isolated tmux server, state, and runtime: a child
+# clanker reports to its parent Workshop, the parent's resumable watch wakes on reports,
+# settles, staleness, spawns, and exits exactly once, and Reports survive a daemon restart.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-orchestration-$uid-$$"}")
+[[ "$root" =~ ^/tmp/qa-clankerhouse-orchestration-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe QA root: $root" >&2; exit 2; }
+marker="$root.clankerhouse-qa-owned"
+if [[ -e "$root" && ! -f "$marker" ]]; then echo "Refusing unowned QA root: $root" >&2; exit 2; fi
+rm -rf -- "$root"
+socket="$root/tmux.sock"
+runtime="$root/runtime"
+state_home="$root/state"
+mkdir -p "$runtime" "$state_home" "$root/home" "$root/data" "$root/config"
+touch "$marker"
+server_pid=""
+watch_pid=""
+
+cleanup() {
+    for pid in "$watch_pid" "$server_pid"; do
+        if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    tmux -S "$socket" kill-server 2>/dev/null || true
+    if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
+}
+trap cleanup EXIT INT TERM
+
+fail() { echo "Clankerhouse orchestration QA failed: $*" >&2; exit 1; }
+json_assert() {
+    python3 -c 'import json,sys; text=sys.stdin.read(); data=[json.loads(line) for line in text.splitlines() if line.strip()] if sys.argv[2:]==["lines"] else json.loads(text); assert eval(sys.argv[1], {"data": data}), (sys.argv[1], data)' "$@"
+}
+
+qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$root/data" "XDG_CONFIG_HOME=$root/config"
+    "TMUX=$socket,1,0" "HERDR_ENV=" "HERDR_PANE_ID=" "HERDR_SOCKET_PATH=" "CLANKERHOUSE_MULTIPLEXER=tmux" "CLANKERHOUSE_INSTANCE=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=")
+api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
+hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env TMUX_PANE="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
+
+# One repository with three Workshops: parent -> child -> grandchild.
+parent="$root/repo"
+git init -q -b main "$parent"
+git -C "$parent" -c user.name=QA -c user.email=qa@example.invalid commit -qm fixture --allow-empty
+git -C "$parent" worktree add -q -b child "$root/child"
+git -C "$parent" worktree add -q -b grandchild "$root/grandchild"
+lineage=$("${qa_env[@]}" bun --eval '
+  const [modulePath, parent, child, grandchild] = process.argv.slice(1)
+  const { identifyWorkshopSync, registerWorkshop } = await import(modulePath)
+  const p = registerWorkshop(identifyWorkshopSync(parent), { parentWorkshopId: null })
+  const c = registerWorkshop(identifyWorkshopSync(child), { parentWorkshopId: p.workshopId })
+  const g = registerWorkshop(identifyWorkshopSync(grandchild), { parentWorkshopId: c.workshopId })
+  console.log([p.workshopId, c.workshopId, g.workshopId].join(" "))
+' "$repo/src/workshop.ts" "$parent" "$root/child" "$root/grandchild")
+read -r parent_id child_id grandchild_id <<<"$lineage"
+[[ -n "$grandchild_id" ]] || fail "lineage fixture was not registered"
+
+claude_pane() {
+    local session=$1 path=$2 clanker=$3
+    tmux -S "$socket" new-session -d -s "$session" -n claude -c "$path" "sleep 600"
+    tmux -S "$socket" set-option -t "$session" @dotfiles_worktree_path "$path"
+    local pane
+    pane=$(tmux -S "$socket" display-message -p -t "$session:claude" '#{pane_id}')
+    tmux -S "$socket" set-option -p -t "$pane" @dotfiles_harness claude
+    tmux -S "$socket" set-option -p -t "$pane" @clankerhouse_clanker_id "$clanker"
+    printf '%s' "$pane"
+}
+tmux -S "$socket" new-session -d -s qa-parent -n main -c "$parent" "sleep 600"
+tmux -S "$socket" set-option -t qa-parent @dotfiles_worktree_path "$parent"
+child_pane=$(claude_pane qa-child "$root/child" clanker-qa-child)
+hook "$child_pane" clanker-qa-child idle '{"hook_event_name":"SessionStart"}'
+
+start_daemon() {
+    "${qa_env[@]}" env CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
+        bun run "$repo/src/daemon.ts" --server >>"$root/server.log" 2>&1 &
+    server_pid=$!
+    for _ in {1..600}; do
+        [[ -S "$runtime/clankerhouse-$uid/daemon.sock" ]] && return 0
+        kill -0 "$server_pid" 2>/dev/null || { cat "$root/server.log" >&2; fail "daemon exited during startup"; }
+        sleep 0.05
+    done
+    cat "$root/server.log" >&2; ls -la "$runtime"/* >&2; fail "daemon socket did not appear"
+}
+start_daemon
+
+cursor="$root/orchestrator/watch.cursor"
+watch_once() { (cd "$parent" && api watch --children-of . --descendants --cursor-file "$cursor" --once "$@"); }
+expect_timeout() {
+    set +e
+    local output; output=$(watch_once --timeout "${1:-1}" 2>"$root/watch.err"); local code=$?
+    set -e
+    [[ $code -eq 124 ]] || fail "watch exited $code, expected timeout 124; output: $output; stderr: $(cat "$root/watch.err")"
+    [[ -z "$output" ]] || fail "watch repeated or invented events: $output"
+    json_assert 'data["error"]["code"] == "TIMEOUT"' <"$root/watch.err"
+}
+
+# The first re-armable watch starts from now and records its baseline immediately.
+expect_timeout 1
+[[ -f "$cursor" ]] || fail "watch did not persist its starting cursor"
+echo "PASS: watch starts from now and persists its cursor"
+
+# A1: a child reports to its parent by default; --to and --no-parent override; payloads validated.
+report() { (cd "$root/child" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-child "$repo/bin/clankers" report "$@"); }
+report --state question --message "Which retention?" --payload '{"options":["7d","30d"],"recommendation":"30d"}' \
+    | json_assert "data['to'] == '$parent_id' and data['workshopId'] == '$child_id' and data['clankerId'] == 'clanker-qa-child' and data['payload']['recommendation'] == '30d'"
+report --state working --no-parent | json_assert 'data["to"] is None'
+report --state blocked --to clanker-qa-other | json_assert 'data["to"] == "clanker-qa-other"'
+printf '%s' '{"from":"stdin"}' | report --state done | json_assert 'data["payload"] == {"from": "stdin"}'
+for bad in '[]' '"text"' '{broken' "$(python3 -c 'import json; print(json.dumps({"x": "y" * 70000}))')"; do
+    set +e; error=$(report --state done --payload "$bad" 2>&1 >/dev/null); code=$?; set -e
+    [[ $code -eq 2 ]] || fail "invalid payload exited $code, expected 2"
+    printf '%s' "$error" | json_assert 'data["error"]["code"] == "INVALID_REQUEST"'
+done
+set +e; error=$( (cd "$root/child" && api report --state done) 2>&1 >/dev/null); code=$?; set -e
+[[ $code -eq 2 ]] && printf '%s' "$error" | grep -q "Cannot identify the reporting clanker" || fail "report outside a clanker was accepted"
+watch_once --timeout 5 >"$root/batch1"
+json_assert "len(data) == 4 and all(event['type'] == 'reported' for event in data) and data[0]['message'] == 'Which retention?' and data[0]['payload']['options'] == ['7d', '30d'] and [event['seq'] for event in data] == sorted(event['seq'] for event in data)" lines <"$root/batch1"
+expect_timeout 1
+echo "PASS: A1 reports reach the parent's watch with validated payloads"
+
+# A2: Reports are durable across a daemon restart, and status shows the newest.
+kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
+start_daemon
+api status clanker-qa-child | json_assert 'data["lastReport"]["state"] == "done" and data["lastReport"]["payload"] == {"from": "stdin"} and data["state"] == "idle"'
+echo "PASS: A2 reports survive a daemon restart; status shows lastReport without changing lifecycle state"
+
+# A3 settled: one turn of the child settles; the event is emitted once.
+hook "$child_pane" clanker-qa-child working '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'
+hook "$child_pane" clanker-qa-child done '{"hook_event_name":"Stop","background_tasks":[]}'
+watch_once --timeout 5 | json_assert "len(data) == 1 and data[0]['type'] == 'settled' and data[0]['clankerId'] == 'clanker-qa-child' and data[0]['generation'] == 1 and data[0]['state'] == 'done'" lines
+expect_timeout 1
+
+# A3 resume: a long-running watch killed after emitting resumes without duplicates.
+hook "$child_pane" clanker-qa-child working '{"hook_event_name":"UserPromptSubmit","prompt":"again"}'
+hook "$child_pane" clanker-qa-child done '{"hook_event_name":"Stop","background_tasks":[]}'
+# exec keeps the watch itself at $watch_pid, so the kill below reaches it.
+(cd "$parent" && exec "${qa_env[@]}" "$repo/bin/clankers" watch --children-of "$parent_id" --descendants --cursor-file "$cursor" >"$root/stream" 2>"$root/stream.err") &
+watch_pid=$!
+for _ in {1..400}; do [[ -s "$root/stream" ]] && break; sleep 0.05; done
+[[ -s "$root/stream" ]] || fail "long-running watch printed nothing: $(cat "$root/stream.err")"
+sleep 0.3
+kill -KILL "$watch_pid"; wait "$watch_pid" 2>/dev/null || true; watch_pid=""
+json_assert "len(data) == 1 and data[0]['type'] == 'settled' and data[0]['generation'] == 2" lines <"$root/stream"
+expect_timeout 1
+echo "PASS: A3 settled once; a killed watch resumes exactly once from its cursor"
+
+# A3 stale: a working turn with no hook event for longer than --stale-after.
+hook "$child_pane" clanker-qa-child working '{"hook_event_name":"UserPromptSubmit","prompt":"slow"}'
+sleep 1.2
+watch_once --timeout 5 --stale-after 1 | json_assert "len(data) == 1 and data[0]['type'] == 'stale' and data[0]['generation'] == 3" lines
+set +e; output=$(watch_once --timeout 1 --stale-after 1 2>/dev/null); code=$?; set -e
+[[ $code -eq 124 && -z "$output" ]] || fail "stale was emitted twice for one working generation: $output"
+echo "PASS: A3 stale emitted once per working generation"
+
+# A3 spawned: a clanker in a new grandchild Workshop appears under --descendants.
+shallow() { (cd "$parent" && api watch --children-of "$parent_id" --cursor-file "$root/shallow.cursor" --once --timeout 1 2>/dev/null); }
+[[ -z "$(shallow || true)" ]] || fail "baseline children-only watch printed events"
+grandchild_pane=$(claude_pane qa-grandchild "$root/grandchild" clanker-qa-grandchild)
+watch_once --timeout 5 | json_assert "len(data) == 1 and data[0] == {**data[0], 'type': 'spawned', 'clankerId': 'clanker-qa-grandchild', 'workshopId': '$grandchild_id', 'parentWorkshopId': '$child_id'}" lines
+set +e; output=$(shallow); code=$?; set -e
+[[ $code -eq 124 && -z "$output" ]] || fail "a watch without --descendants followed a grandchild: $output"
+echo "PASS: A3 spawned for a new descendant Workshop's clanker"
+
+# A3 exited: the child pane goes away.
+[[ "$(tmux -S "$socket" show-option -p -qv -t "$child_pane" @clankerhouse_clanker_id)" == clanker-qa-child ]] || fail "refusing to kill an unexpected pane"
+tmux -S "$socket" kill-pane -t "$child_pane"
+watch_once --timeout 5 | json_assert "len(data) == 1 and data[0]['type'] == 'exited' and data[0]['clankerId'] == 'clanker-qa-child' and data[0]['workshopId'] == '$child_id'" lines
+expect_timeout 1
+echo "PASS: A3 exited once"
+
+# --clanker watches follow named clankers only.
+hook "$grandchild_pane" clanker-qa-grandchild working '{"hook_event_name":"UserPromptSubmit","prompt":"x"}'
+hook "$grandchild_pane" clanker-qa-grandchild done '{"hook_event_name":"Stop","background_tasks":[]}'
+(cd "$parent" && api watch --clanker clanker-qa-grandchild --cursor-file "$root/named.cursor" --once --timeout 1 >/dev/null 2>&1) || true
+(cd "$root/grandchild" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-grandchild "$repo/bin/clankers" report --state failed --message "tests red") >/dev/null
+(cd "$parent" && api watch --clanker clanker-qa-grandchild --cursor-file "$root/named.cursor" --once --timeout 5) \
+    | json_assert "len(data) == 1 and data[0]['type'] == 'reported' and data[0]['state'] == 'failed' and data[0]['to'] == '$child_id'" lines
+echo "PASS: --clanker watch"
+
+api --help | grep -q "clankers watch" || fail "help omits watch"
+echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, and cursor resume after kill."

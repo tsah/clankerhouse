@@ -24,9 +24,21 @@ export const harnessModelArgs = (harness: RecoveryHarness | "codex", model?: str
   return ["--model", model]
 }
 
-const trackedEnvironment = (clankerId: string, sessionId: string | null, attemptId?: string) => [
+/** The Workshop a clanker is launched in; the parent is empty for a root Workshop. */
+export interface WorkshopLaunchIdentity { workshopId: string; parentWorkshopId: string | null }
+
+export const workshopEnvironment = (workshop: WorkshopLaunchIdentity): Record<string, string> => ({
+  CLANKERHOUSE_WORKSHOP_ID: workshop.workshopId,
+  CLANKERHOUSE_PARENT_WORKSHOP_ID: workshop.parentWorkshopId ?? "",
+})
+
+const workshopEnvironmentArgs = (workshop?: WorkshopLaunchIdentity) =>
+  workshop ? Object.entries(workshopEnvironment(workshop)).map(([key, value]) => `${key}=${value}`) : []
+
+const trackedEnvironment = (clankerId: string, sessionId: string | null, attemptId?: string, workshop?: WorkshopLaunchIdentity) => [
   ...plannotatorEnv(),
   `CLANKER_ID=${clankerId}`,
+  ...workshopEnvironmentArgs(workshop),
   "CLANKER_RECOVERY_TRACKED=1",
   ...(sessionId ? [`CLANKER_SESSION_ID=${sessionId}`] : []),
   ...(attemptId ? [`CLANKER_RECOVERY_ATTEMPT=${attemptId}`] : []),
@@ -55,10 +67,11 @@ export interface InitialHarnessCommandInput {
   harnessSessionId: string | null
   launchSpec: LaunchSpec
   attemptId?: string
+  workshop?: WorkshopLaunchIdentity
 }
 
 export const initialHarnessCommand = (input: InitialHarnessCommandInput) => {
-  const env = trackedEnvironment(input.clankerId, input.harnessSessionId, input.attemptId)
+  const env = trackedEnvironment(input.clankerId, input.harnessSessionId, input.attemptId, input.workshop)
   const profile = input.launchSpec.profile
   const model = modelOverride(input.launchSpec)
   const modelArgs = harnessModelArgs(input.harness, model)
@@ -75,9 +88,9 @@ export const initialHarnessCommand = (input: InitialHarnessCommandInput) => {
   return input.attemptId ? ownedHarnessCommand(command, input.clankerId, input.attemptId, resourceClass(input.launchSpec)) : command
 }
 
-export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId: string) => {
+export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId: string, workshop: WorkshopLaunchIdentity = { workshopId: desired.workshopId, parentWorkshopId: null }) => {
   if (!desired.harnessSessionId) throw new Error(`Clanker ${desired.clankerId} has no exact harness session id`)
-  const env = trackedEnvironment(desired.clankerId, desired.harnessSessionId, attemptId)
+  const env = trackedEnvironment(desired.clankerId, desired.harnessSessionId, attemptId, workshop)
   const prompt = recoveryPrompt(attemptId)
   const profile = desired.launchSpec.profile
   const model = modelOverride(desired.launchSpec)

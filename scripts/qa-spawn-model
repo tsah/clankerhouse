@@ -25,7 +25,8 @@ clanker = os.environ.get("CLANKER_ID", "unexpected")
 mode = "recovery" if "--session" in argv or "--resume" in argv else "initial"
 path = pathlib.Path(os.environ["CLANKERHOUSE_QA_LOG_DIR"]) / (clanker + "." + mode + ".json")
 record = {"harness": harness, "argv": argv, "cwd": os.getcwd(), "complete": False,
-          "pane": os.environ.get("TMUX_PANE"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT")}
+          "pane": os.environ.get("TMUX_PANE"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT"),
+          "workshopId": os.environ.get("CLANKERHOUSE_WORKSHOP_ID"), "parentWorkshopId": os.environ.get("CLANKERHOUSE_PARENT_WORKSHOP_ID")}
 def save():
     pending = path.with_suffix(".tmp")
     pending.write_text(json.dumps(record), encoding="utf-8")
@@ -225,6 +226,9 @@ def main():
             cwd = Path(result["identity"]["path"]).resolve()
             require(root in cwd.parents, f"Worktrunk escaped the isolated root: {cwd}")
             require(log["harness"] == harness and log["cwd"] == str(cwd), f"Wrong harness/cwd: {log}")
+            details = json.loads(cli("workshop", "show", "--path", str(cwd), cwd=cwd).stdout)
+            require(log["workshopId"] == details["workshopId"], f"Launch env names the wrong Workshop: {log['workshopId']} != {details['workshopId']}")
+            require(log["parentWorkshopId"] == (details["parentWorkshopId"] or ""), f"Launch env names the wrong parent Workshop: {log}")
             if kind == "workshop":
                 require(cwd != fixtures[kind] and cwd.parent == root / "worktrees", "Worktrunk did not create the configured worktree")
                 require(run([tools["git"], "-C", cwd, "branch", "--show-current"]).stdout.strip() == name,
@@ -260,7 +264,7 @@ def main():
                 require(desired["launchSpec"] == spec, f"Wrong durable launchSpec: {desired['launchSpec']}")
                 require(desired["harnessSessionId"] == log["sessionId"], "Session identity was not persisted")
             require(not (root / "shell-expanded").exists(), "Model was executed by a shell")
-            print(f"PASS: {kind} {name}", flush=True)
+            print(f"PASS: {kind} {name} (Workshop {log['workshopId']}, parent {log['parentWorkshopId'] or 'none'})", flush=True)
             return result, log, spec
 
         # Spaces, quotes, dollars and semicolons must remain in one raw argv value.
@@ -276,6 +280,17 @@ def main():
         launch("direct", "claude", "claude-default")
         launch("workshop", "claude", "claude-legacy-v2", resource="validation-heavy")
         launch("direct", "codex", "codex-default")
+
+        # A child Workshop's clanker names its parent in the launch environment.
+        cli("workshop", "ensure", "--cwd", str(fixtures["workshop"]))
+        parent = json.loads(cli("workshop", "show", "--path", str(fixtures["workshop"]), cwd=fixtures["workshop"]).stdout)
+        child = json.loads(cli("workshop", "spawn", "--name", "child-env", "--harness", "claude", "--parent", parent["workshopId"], cwd=fixtures["workshop"]).stdout)
+        child_log = wait_log(child["clankerId"])
+        child_details = json.loads(cli("workshop", "show", "--path", child["identity"]["path"], cwd=fixtures["workshop"]).stdout)
+        require(child_details["parentWorkshopId"] == parent["workshopId"], f"Child Workshop lost its parent: {child_details}")
+        require((child_log["workshopId"], child_log["parentWorkshopId"]) == (child_details["workshopId"], parent["workshopId"]),
+                f"Child launch env does not name its Workshop and parent: {child_log}")
+        print(f"PASS: child Workshop clanker env names parent {parent['workshopId']}", flush=True)
 
         # A registered Workshop with no runtime should also launch directly into one
         # agent tab, even through the ordinary (non-worktree-creating) spawn command.
@@ -313,6 +328,8 @@ def main():
             recovered = wait_log(clanker, "recovery")
             require(recovered["sessionId"] == initial["sessionId"], "Recovery changed exact session identity")
             require(recovered["cwd"] == initial["cwd"], "Recovery changed worktree")
+            require((recovered["workshopId"], recovered["parentWorkshopId"]) == (initial["workshopId"], initial["parentWorkshopId"]),
+                    f"Recovery changed the Workshop launch env: {recovered}")
             if initial["harness"] == "claude":
                 require(len(mux("list-windows", "-t", result["session"], "-F", "#{window_id}").stdout.splitlines()) == 1,
                         "Recovery recreated an unnecessary shell tab")

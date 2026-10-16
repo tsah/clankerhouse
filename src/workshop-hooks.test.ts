@@ -33,7 +33,8 @@ const writeHook = (repo: string, event: "done" | "labels-changed" | "post-create
 }
 
 const waitForFile = async (path: string) => {
-  for (let attempt = 0; attempt < 200 && !existsSync(path); attempt += 1) await Bun.sleep(10)
+  // The hook's shell creates the file before it writes to it.
+  for (let attempt = 0; attempt < 200 && !(existsSync(path) && readFileSync(path, "utf8")); attempt += 1) await Bun.sleep(10)
   return readFileSync(path, "utf8")
 }
 

@@ -381,6 +381,28 @@ export const workshopForId = (id: string, dbPath = workshopStatePath) => {
   }
 }
 
+/** Launch identity for a clanker: the registered Workshop and its current parent, read at launch time. */
+export const workshopLaunchIdentity = (workshopId: string, workshopPath?: string, dbPath = workshopStatePath) => {
+  const record = workshopForId(workshopId, dbPath) ?? (workshopPath ? workshopForPath(workshopPath, dbPath) : undefined)
+  return { workshopId: record?.workshopId ?? workshopId, parentWorkshopId: record?.parentWorkshopId ?? null }
+}
+
+/** Every registered Workshop across repositories, for consumers that follow lineage globally. */
+export const listWorkshopRecords = (dbPath = workshopStatePath): WorkshopRecord[] => {
+  if (!existsSync(dbPath)) return []
+  const db = openStore(dbPath)
+  try {
+    const rows = db.query(`
+      SELECT w.id, w.repo_id, w.canonical_path, w.branch, w.parent_id, w.revision, w.created_at, w.updated_at, r.common_dir
+      FROM workshops w
+      JOIN repositories r ON r.id = w.repo_id
+    `).all() as Array<WorkshopRow & { common_dir: string }>
+    return rows.map(rowToRecord)
+  } finally {
+    db.close()
+  }
+}
+
 const labelsForWorkshop = (db: Database, workshopId: string): WorkshopLabels => Object.fromEntries(
   (db.query("SELECT key, value FROM workshop_labels WHERE workshop_id = ?1 ORDER BY key").all(workshopId) as Array<{ key: string; value: string }>).map((row) => [row.key, row.value]),
 )

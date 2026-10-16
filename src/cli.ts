@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 import { randomUUID } from "node:crypto"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, fstatSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { ClankerApiError, clankerCapabilities, clankerStatus, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
+import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, listClankers, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
+import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
+import { submitReport } from "./report"
+import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
 import { recordRecoveryIncident } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
@@ -121,14 +124,91 @@ const resourceClass = (value: string | undefined): RecoveryResourceClass | undef
   throw new Error("--resource-class must be interactive, validation-heavy, or untrusted")
 }
 
+/** Piped or redirected stdin only: a terminal or an inherited /dev/null never blocks the reporter. */
+const pipedStdin = async () => {
+  try {
+    const stat = fstatSync(0)
+    if (!stat.isFIFO() && !stat.isFile()) return undefined
+  } catch { return undefined }
+  return Bun.stdin.text()
+}
+
+/** `--children-of` takes an optional Workshop selector; without one it means the current Workshop. */
+const takeOptionalValue = (parsed: ParsedArgs, flag: string) => {
+  const index = parsed.args.indexOf(flag)
+  if (index < 0) return undefined
+  const value = parsed.args[index + 1]
+  const present = value !== undefined && !value.startsWith("-")
+  parsed.args.splice(index, present ? 2 : 1)
+  return present ? value : "."
+}
+
+const takeAll = (parsed: ParsedArgs, flag: string) => {
+  const values: string[] = []
+  for (let value = parsed.take(flag); value !== undefined; value = parsed.take(flag)) values.push(value)
+  return values
+}
+
+const runReport = async (parsed: ParsedArgs) => {
+  const state = parseReportState(parsed.take("--state"))
+  const message = parsed.take("--message") ?? null
+  const inline = parsed.take("--payload")
+  const file = parsed.take("--payload-file")
+  const to = parsed.take("--to")
+  const noParent = parsed.has("--no-parent")
+  if (inline !== undefined && file !== undefined) throw new Error("--payload and --payload-file are mutually exclusive")
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}`)
+  const payloadText = inline ?? (file !== undefined ? readFileSync(file, "utf8") : await pipedStdin())
+  const report = await submitReport({ state, message, payload: parseReportPayload(payloadText), to, noParent })
+  return console.log(JSON.stringify(report))
+}
+
+const runWatchCommand = async (parsed: ParsedArgs) => {
+  const childrenOf = takeOptionalValue(parsed, "--children-of")
+  const descendants = parsed.has("--descendants")
+  const clankerIds = takeAll(parsed, "--clanker")
+  const cursorFile = parsed.take("--cursor-file")
+  const once = parsed.has("--once")
+  const timeoutSeconds = nonNegativeNumber(parsed.take("--timeout"), "--timeout")
+  const staleAfterSeconds = nonNegativeNumber(parsed.take("--stale-after"), "--stale-after")
+  // `--clanker A B` lists further ids positionally.
+  if (clankerIds.length) clankerIds.push(...parsed.args.splice(0).filter((arg) => !arg.startsWith("-")))
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}`)
+  if ((childrenOf === undefined) === (clankerIds.length === 0)) throw new Error("Usage: clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]")
+  if (descendants && childrenOf === undefined) throw new Error("--descendants requires --children-of")
+  const scope: WatchScope = childrenOf !== undefined
+    ? { kind: "children", workshopId: resolveWorkshopSelector(childrenOf).workshopId, descendants }
+    : { kind: "clankers", clankerIds }
+  await runWatch({
+    view: liveWatchView(scope),
+    emit: emitJsonLine,
+    cursorFile: cursorFile === undefined ? undefined : resolve(cursorFile),
+    once,
+    timeoutMs: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000,
+    staleAfterMs: staleAfterSeconds === undefined ? DEFAULT_STALE_AFTER_MS : staleAfterSeconds * 1000,
+  })
+}
+
 const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) => {
   if (command === "list") return console.log(JSON.stringify(await listClankers({ cwd: parsed.take("--cwd") })))
-  if (command === "status") return console.log(JSON.stringify(await clankerStatus(requiredClankerId(parsed))))
+  if (command === "status") return console.log(JSON.stringify(await clankerStatusWithReport(requiredClankerId(parsed))))
   if (command === "capabilities") return console.log(JSON.stringify(await clankerCapabilities(requiredClankerId(parsed))))
+  if (command === "report") return runReport(parsed)
+  if (command === "watch") return runWatchCommand(parsed)
+  if (command === "send-status") {
+    const messageId = parsed.take("--message") || parsed.shift()
+    if (!messageId) throw new Error("MESSAGE_ID is required")
+    return console.log(JSON.stringify(await sendStatus(messageId)))
+  }
   if (command === "wait") {
     const afterGeneration = nonNegativeNumber(parsed.take("--after"), "--after")
+    const messageId = parsed.take("--message")
     const timeoutSeconds = nonNegativeNumber(parsed.take("--timeout"), "--timeout")
-    return console.log(JSON.stringify(await waitForClanker(requiredClankerId(parsed), { afterGeneration, timeoutMs: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000 })))
+    const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
+    if (messageId !== undefined && afterGeneration !== undefined) throw new Error("--message and --after are mutually exclusive")
+    const id = requiredClankerId(parsed)
+    if (messageId !== undefined) return console.log(JSON.stringify(await waitForMessage(id, messageId, { timeoutMs })))
+    return console.log(JSON.stringify(await waitForClanker(id, { afterGeneration, timeoutMs })))
   }
   if (command === "send") {
     const delivery = clankerDelivery(parsed.take("--delivery"))
@@ -139,14 +219,21 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     const text = textFlag ?? await Bun.stdin.text()
     const receipt = await sendClanker(id, text, { delivery })
     if (!wait) return console.log(JSON.stringify(receipt))
-    const settled = await waitForClanker(id, { afterGeneration: receipt.afterGeneration, timeoutMs: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000 })
+    const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
+    const status = await clankerCapabilities(id)
+    if (status.capabilities.result !== "reports") {
+      // Report-only harnesses have no result text; the turn's own Report stands in for it.
+      const { lastReport, message: _message, ...settled } = await waitForMessage(id, receipt.messageId, { timeoutMs })
+      return console.log(JSON.stringify({ ...receipt, settled, lastReport }))
+    }
+    const settled = await waitForClanker(id, { afterGeneration: receipt.afterGeneration, timeoutMs })
     return console.log(JSON.stringify({ ...receipt, settled, result: await resultForClanker(id, settled.settledGeneration) }))
   }
   if (command === "result") {
     const generation = nonNegativeNumber(parsed.take("--generation"), "--generation")
     return console.log(JSON.stringify(await resultForClanker(requiredClankerId(parsed), generation)))
   }
-  throw new Error("Usage: clankers list|status|capabilities|wait|send|result ...")
+  throw new Error("Usage: clankers list|status|capabilities|wait|send|send-status|result|report|watch ...")
 }
 
 const resolveWorkshopPath = (selector: string, cwd = process.cwd()) => {
@@ -223,9 +310,12 @@ const usage = `Usage:
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH]
   clankers status|capabilities CLANKER_ID
-  clankers wait CLANKER_ID [--after GENERATION] [--timeout SECONDS]
+  clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
   clankers send CLANKER_ID [--delivery steer|follow-up] [--wait] [--text TEXT]
+  clankers send-status MESSAGE_ID
   clankers result CLANKER_ID [--generation GENERATION]
+  clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
+  clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers recovery status|journal|reconcile|checkpoint
   clankers recovery attest-exit CLANKER_ID --attempt ID [--session-id ID]
@@ -320,7 +410,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
   const command = parsed.shift()
   if (!command || command === "help" || command === "--help" || command === "-h") return console.log(usage)
-  if (["list", "status", "capabilities", "wait", "send", "result"].includes(command)) return runClankerApi(command, parsed)
+  if (["list", "status", "capabilities", "wait", "send", "send-status", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
 
   if (command === "mux") return runMultiplexerCli(parsed)
 
@@ -563,7 +653,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, { profile, model, name, wait, resourceClass: selectedResourceClass })))
   }
 
-  throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|result ...")
+  throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|send-status|result|report|watch ...")
 }
 
 if (import.meta.main) {

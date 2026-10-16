@@ -198,6 +198,26 @@
       ]
     },
     {
+      "id": "orchestration-api",
+      "title": "Clanker Reports, resumable child-Workshop watches, and queued acknowledged Claude sends",
+      "core": true,
+      "unit": [
+        "src/orchestration.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-orchestration",
+        "scripts/qa-spawn-model"
+      ],
+      "manual": [
+        "From a child Workshop's clanker, report a question with a payload; confirm the parent's `watch --once` prints it addressed to the parent Workshop, and that --to and --no-parent override the addressee",
+        "Restart the daemon and confirm `clankers status` still shows the clanker's lastReport while its lifecycle state is unchanged",
+        "Kill and re-run a watch with the same cursor file; confirm no event repeats and none is lost, including children spawned in between",
+        "Under Herdr, send to a working Claude clanker; confirm `delivery: queued`, one delivery after it stops, `send-status` acked with a startedGeneration, and that `wait --message` returns on that turn",
+        "Inside a spawned and a recovered clanker, confirm CLANKERHOUSE_WORKSHOP_ID and CLANKERHOUSE_PARENT_WORKSHOP_ID",
+        "During a tool-heavy Claude turn, confirm `status.lastEventAt` advances on each tool call"
+      ]
+    },
+    {
       "id": "daemon-transport",
       "title": "Authoritative socket snapshots, subscriptions, refresh, leases, and operations",
       "core": true,

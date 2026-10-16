@@ -47,4 +47,16 @@ describe("spooled hook requests", () => {
       expect(existsSync(join(directory, "b.json"))).toBe(false)
     } finally { stop() }
   })
+
+  test("keeps applying requests by polling when change notification is unavailable", async () => {
+    const directory = spool()
+    const applied: HookAttestRequest[] = []
+    const exhausted = (() => { throw new Error("EMFILE: too many open files, watch") }) as unknown as typeof import("node:fs").watch
+    const stop = watchHookAttestRequests(directory, async (next) => { applied.push(next) }, 30_000, 20, exhausted)
+    try {
+      writeFileSync(join(directory, "late.json"), JSON.stringify({ ...request, pane: "late" }))
+      for (let tick = 0; tick < 200 && applied.length < 1; tick++) await Bun.sleep(5)
+      expect(applied.map((next) => next.pane)).toEqual(["late"])
+    } finally { stop() }
+  })
 })

@@ -19,6 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Activity only feeds recency ordering, so a busy clanker refreshes it at most this often.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(2);
+/// Submitted-prompt hashes kept in the pane record for delivery acknowledgement.
+const PROMPT_HISTORY: usize = 8;
 /// A claim is a rare, best-effort write; a stalled Herdr must not stall the harness.
 const HERDR_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -205,6 +207,16 @@ fn run(args: &[String]) -> Result<(), String> {
         settled = generation;
     }
     let or_previous = |value: &str, key: &str| if value.is_empty() { previous.get(key).cloned().unwrap_or(Value::Null) } else { json!(value) };
+    // Queued sends are acknowledged by the hash of the prompt that started a turn, so the
+    // last few submissions stay in the record across the hooks that rewrite it.
+    let mut prompts: Vec<Value> = previous.get("prompts").and_then(Value::as_array).cloned().unwrap_or_default();
+    if hook_event.as_deref() == Some("UserPromptSubmit") {
+        if let Some(prompt) = payload.get("prompt").and_then(Value::as_str) {
+            prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation }));
+            let excess = prompts.len().saturating_sub(PROMPT_HISTORY);
+            prompts.drain(..excess);
+        }
+    }
     let record = json!({
         "harness": harness,
         "clankerId": clanker_id,
@@ -216,6 +228,9 @@ fn run(args: &[String]) -> Result<(), String> {
         "settledGeneration": settled,
         "updatedAt": now_ms(),
         "hookEvent": hook_event,
+        "promptSha256": prompts.last().and_then(|prompt| prompt.get("sha256")).cloned().unwrap_or(Value::Null),
+        "promptGeneration": prompts.last().and_then(|prompt| prompt.get("generation")).cloned().unwrap_or(Value::Null),
+        "prompts": prompts,
     });
     write_atomic(&target, record.to_string().as_bytes())?;
 
@@ -406,6 +421,12 @@ fn mark_activity(ctx: &Context, payload: &Value) {
     let _ = write_atomic(&target, record.to_string().as_bytes());
 }
 
+/// Hash of a submitted prompt, normalized as `promptSha256` in `src/orchestration.ts` is:
+/// CRLF folded to LF and surrounding ASCII whitespace removed.
+fn prompt_sha256(prompt: &str) -> String {
+    sha256_hex(prompt.replace("\r\n", "\n").trim_matches(|c: char| c.is_ascii_whitespace()).as_bytes())
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
@@ -461,7 +482,13 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sha256_hex;
+    use super::{prompt_sha256, sha256_hex};
+
+    #[test]
+    fn prompt_hash_ignores_line_endings_and_surrounding_whitespace() {
+        assert_eq!(prompt_sha256("abc"), sha256_hex(b"abc"));
+        assert_eq!(prompt_sha256("\n  a\r\nb \t\n"), sha256_hex(b"a\nb"));
+    }
 
     #[test]
     fn sha256_matches_known_digests() {

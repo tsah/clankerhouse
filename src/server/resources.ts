@@ -2,7 +2,7 @@ import type { ActivitySource } from "../activity"
 import type { ClankerState, DirectorySource } from "../model"
 import type { RuntimeAgentStatus } from "../multiplexer/interface"
 
-export interface TmuxSession {
+export interface MuxSession {
   id: string
   name: string
   recency: number
@@ -16,7 +16,7 @@ export interface TmuxSession {
   displayName?: string
 }
 
-export interface TmuxWindow {
+export interface MuxWindow {
   session: string
   sessionId: string
   id: string

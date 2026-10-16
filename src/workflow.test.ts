@@ -67,7 +67,7 @@ describe("spawn model validation", () => {
 })
 
 describe("workshop spawn rollback", () => {
-  test("removes the new tmux session, worktree, and branch after registry failure", async () => {
+  test("removes the new multiplexer session, worktree, and branch after registry failure", async () => {
     const created = {
       identity: { path: "/tmp/repo/failed-workshop", commonDir: "/tmp/repo/.git", repo: "repo", branch: "failed-workshop" },
       session: "repo@failed-workshop",
@@ -75,8 +75,8 @@ describe("workshop spawn rollback", () => {
     const commands: string[][] = []
     const killed: string[] = []
     const multiplexer = {
-      kind: "tmux",
-      observe: async () => ({ kind: "tmux", instanceId: "tmux:test", sessions: [{ id: "$7", nativeName: "repo@failed-workshop", path: "/tmp/repo/failed-workshop", recency: 0, attached: false, worktreePath: "", directoryPath: "", windows: [] }] }),
+      kind: "herdr",
+      observe: async () => ({ kind: "herdr", instanceId: "herdr:test", sessions: [{ id: "$7", nativeName: "repo@failed-workshop", path: "/tmp/repo/failed-workshop", recency: 0, attached: false, worktreePath: "", directoryPath: "", windows: [] }] }),
       kill: async (location: { nativeSessionId: string }) => { killed.push(location.nativeSessionId) },
     } as unknown as ManagedMultiplexer
     const rollback = (workshop: Parameters<typeof rollbackCreatedWorkshop>[0]) => rollbackCreatedWorkshop(workshop, {

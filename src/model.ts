@@ -8,8 +8,8 @@ export interface TargetIdentity {
 }
 
 export type Target =
-  | ({ type: "tmux_session"; session: string } & TargetIdentity)
-  | ({ type: "tmux_window"; session: string; windowId: string; pane: string } & TargetIdentity)
+  | ({ type: "session"; session: string } & TargetIdentity)
+  | ({ type: "window"; session: string; windowId: string; pane: string } & TargetIdentity)
   | ({ type: "opencode"; session: string; pane: string } & TargetIdentity)
   | { type: "directory"; path: string }
 
@@ -17,7 +17,7 @@ export type ClankerState = "failed" | "blocked" | "working" | "done" | "idle" | 
 export type ReportedClankerState = ClankerState
 
 export interface RuntimeObservation {
-  source: "tmux" | "runtime" | "process" | "lifecycle"
+  source: "runtime" | "process" | "lifecycle"
   confidence: "observed" | "attested" | "rejected"
   state: ClankerState | "present" | "unreported"
   observedAt: number
@@ -182,8 +182,8 @@ export const structuredSearch = (fields: Array<string | SearchField>, query: str
 export const targetKey = (target: Target) => {
   if ("resourceId" in target && target.resourceId) return `${target.type}:${target.resourceId}`
   switch (target.type) {
-    case "tmux_session": return `session:${target.session}`
-    case "tmux_window": return `window:${target.session}:${target.windowId}`
+    case "session": return `session:${target.session}`
+    case "window": return `window:${target.session}:${target.windowId}`
     case "opencode": return `opencode:${target.session}:${target.pane}`
     case "directory": return `directory:${target.path}`
   }

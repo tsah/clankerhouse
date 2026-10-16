@@ -1,6 +1,6 @@
 # Clankerhouse restart and Spot recovery QA
 
-This plan validates guarded automatic recovery after a Spot/Linux reboot, explicit single-clanker recovery for later same-boot loss, process-scope cleanup, and EC2 Spot checkpoint handling. It must never inspect, signal, or mutate real workshops, clankers, tmux servers, worktrees, harness sessions, or AWS resources.
+This plan validates guarded automatic recovery after a Spot/Linux reboot, explicit single-clanker recovery for later same-boot loss, process-scope cleanup, and EC2 Spot checkpoint handling. It must never inspect, signal, or mutate real workshops, clankers, Herdr servers, worktrees, harness sessions, or AWS resources.
 
 ## Safety boundary
 
@@ -9,7 +9,7 @@ Every destructive scenario must:
 - use a root matching `/tmp/qa-clankerhouse-recovery-*`;
 - create and verify `.clankerhouse-recovery-qa-owned` before cleanup;
 - use a disposable Git repository;
-- use a private `tmux -S .../tmux.sock` server through an isolated `TMUX` value;
+- use a private Herdr server through an isolated `HERDR_SOCKET_PATH`;
 - use private `HOME`, `XDG_STATE_HOME`, and `XDG_RUNTIME_DIR` trees;
 - put fake `pi`, `claude`, and `opencode` executables first in `PATH`;
 - simulate boot IDs with `CLANKERHOUSE_BOOT_ID_PATH`;
@@ -49,7 +49,7 @@ scripts/qa
 12. Circuit-breaker, incident, attempt, and pressure snapshots survive a simulated reboot.
 13. When no child workload is safely attributable, a tracked Clanker is durably stopped with its pane preserved; untracked harness processes are never signalled as a fallback. Intentional stop, resource stop, quarantine, and tombstones prevent resurrection.
 14. Dirty/untracked Git state and native harness session files remain preserved.
-15. No operation touches the user's real tmux socket, cgroups, or harness stores.
+15. No operation touches the user's real Herdr socket, cgroups, or harness stores.
 
 Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, command construction, and IMDSv2 token/404/401/rebalance/interruption behavior.
 

@@ -38,7 +38,7 @@ describe("herdr multiplexer adapter", () => {
     const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr([]) })
     expect(adapter.kind).toBe("herdr")
     expect(adapter.paneAddressEnv()).toBe("HERDR_PANE_ID")
-    expect(adapter.capabilities()).toMatchObject({ processInfo: true, agentStatus: true, agentPrompt: true, durableIds: true, clientRouting: false, argvLaunch: true, claimScopes: ["session", "pane"] })
+    expect(adapter.capabilities()).toMatchObject({ processInfo: true, agentStatus: true, agentPrompt: true, durableIds: true, argvLaunch: true, claimScopes: ["session", "pane"] })
   })
 
   test("maps workspaces, tabs, and panes onto the session topology with claims from tokens", async () => {

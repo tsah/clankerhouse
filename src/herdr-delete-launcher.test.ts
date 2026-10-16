@@ -43,7 +43,6 @@ function readConfig(path: string) {
 type NativeCall = {
   args: string[]
   current: string
-  multiplexer: string
   runtime: string
   cwd: string
 }
@@ -76,7 +75,6 @@ with open(os.environ["FAKE_NATIVE_LOG"], "a") as log:
     log.write(json.dumps({
         "args": sys.argv[1:],
         "current": os.environ.get("CLANKERHOUSE_CURRENT_SESSION", ""),
-        "multiplexer": os.environ.get("CLANKERHOUSE_MULTIPLEXER", ""),
         "runtime": os.environ.get("CLANKERHOUSE_RUNTIME_DIR", ""),
         "cwd": os.getcwd(),
     }) + "\\n")
@@ -227,8 +225,8 @@ describe("Herdr delete launcher", () => {
     const result = f.launch("--delete", "--dump-tree")
     expect(result.exitCode, result.stderr.toString()).toBe(0)
     expect(f.calls()).toEqual([
-      { args: ["--server-health", `herdr:${f.env.HERDR_SOCKET_PATH}`], current: "workspace:exact-17", multiplexer: "herdr", runtime: f.runtime, cwd: f.prefix },
-      { args: ["--delete-current", "--dump-tree"], current: "workspace:exact-17", multiplexer: "herdr", runtime: f.runtime, cwd: f.prefix },
+      { args: ["--server-health", `herdr:${f.env.HERDR_SOCKET_PATH}`], current: "workspace:exact-17", runtime: f.runtime, cwd: f.prefix },
+      { args: ["--delete-current", "--dump-tree"], current: "workspace:exact-17", runtime: f.runtime, cwd: f.prefix },
     ])
     expect(existsSync(f.daemonLog)).toBe(false)
   })

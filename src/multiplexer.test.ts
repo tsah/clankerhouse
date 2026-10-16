@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { TmuxMultiplexer, type MultiplexerCommand } from "./multiplexer"
+import { ManagedMultiplexer } from "./multiplexer"
+import { polledChanges, type ClaimKey, type ClaimScope, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type SpawnRequest } from "./multiplexer/interface"
 import { openResourceRegistry } from "./resource-registry"
-import { tmuxFields } from "./tmux-fields"
 
 const roots: string[] = []
 afterEach(() => {
@@ -17,58 +17,68 @@ const fixture = () => {
   return join(root, "resources.sqlite3")
 }
 
-const topologyCommand = (calls: string[][], options: { sessionId?: string; sessionResourceId?: string } = {}): MultiplexerCommand => async (argv) => {
-  calls.push(argv)
-  if (argv[0] === "display-message" && argv.at(-1) === "#{socket_path}") return { stdout: "/tmp/tmux.sock", stderr: "", code: 0 }
-  if (argv[0] === "show-options") return { stdout: "epoch-1", stderr: "", code: 0 }
-  if (argv[0] === "list-sessions") return {
-    stdout: tmuxFields(options.sessionId || "$1", "native-session", "10", "20", "5", "/repo", "", "/repo", "1", "", "workshop-1", "", options.sessionResourceId || "", ""),
-    stderr: "",
-    code: 0,
-  }
-  if (argv[0] === "list-panes") return {
-    stdout: [
-      tmuxFields(options.sessionId || "$1", "@1", "0", "editor", "1", "%1", "0", "101", "zsh", "shell", "/repo", "20", "1", "", "", "", "", "", ""),
-      tmuxFields(options.sessionId || "$1", "@1", "0", "editor", "1", "%2", "1", "102", "pi", "worker", "/other", "19", "0", "", "", "", "", "", ""),
-      tmuxFields(options.sessionId || "$1", "@2", "1", "logs", "0", "%3", "0", "103", "zsh", "logs", "/repo", "18", "1", "", "", "", "", "", ""),
-    ].join("\n"),
-    stderr: "",
-    code: 0,
-  }
-  if (argv[0] === "set-option") return { stdout: "", stderr: "", code: 0 }
-  throw new Error(`Unexpected tmux command: ${argv.join(" ")}`)
+const INSTANCE = "fake:/tmp/fake.sock"
+
+const topology = (options: { sessionId?: string; sessionResourceId?: string } = {}): MultiplexerSession[] => [{
+  id: options.sessionId || "s1",
+  nativeName: "native-session",
+  path: "/repo",
+  recency: 20,
+  attached: true,
+  worktreePath: "",
+  directoryPath: "/repo",
+  workshopId: "workshop-1",
+  resourceId: options.sessionResourceId,
+  windows: [
+    { id: "t1", index: "0", nativeName: "editor", active: true, panes: [
+      { id: "p1", index: "0", pid: "101", command: "zsh", title: "shell", currentPath: "/repo", activity: 20, active: true },
+      { id: "p2", index: "1", pid: "102", command: "pi", title: "worker", currentPath: "/other", activity: 19, active: false },
+    ] },
+    { id: "t2", index: "1", nativeName: "logs", active: false, panes: [
+      { id: "p3", index: "0", pid: "103", command: "zsh", title: "logs", currentPath: "/repo", activity: 18, active: true },
+    ] },
+  ],
+}]
+
+/** In-memory Adapter that records claims; durable ids are off so claims carry identity. */
+class FakeAdapter implements Multiplexer {
+  readonly kind = "fake"
+  readonly claims: Array<[NativeLocation, ClaimKey, string | null]> = []
+  readonly focused: NativeLocation[] = []
+  sessions: MultiplexerSession[]
+  constructor(sessions: MultiplexerSession[], readonly claimScopes: readonly ClaimScope[] = ["session", "window", "pane"]) { this.sessions = sessions }
+  capabilities(): MultiplexerCapabilities { return { processInfo: false, agentStatus: false, agentPrompt: false, sessionRefs: false, persistentLabels: false, durableIds: false, popup: false, worktrees: false, nativeChanges: false, argvLaunch: false, claimScopes: this.claimScopes } }
+  async instanceId() { return INSTANCE }
+  async observe(): Promise<MultiplexerSnapshot> { return { kind: this.kind, instanceId: INSTANCE, sessions: structuredClone(this.sessions) } }
+  changes(signal: AbortSignal): AsyncIterable<MultiplexerChange> { return polledChanges(() => this.observe(), 5, signal) }
+  async currentLocation(): Promise<CurrentLocation | undefined> { return undefined }
+  async spawn(request: SpawnRequest) { return { nativeSessionId: request.scope === "session" ? "s9" : request.nativeSessionId, nativeWindowId: "t9", nativePaneId: "p9" } }
+  async kill() {}
+  async rename() {}
+  async focus(location: NativeLocation) { this.focused.push(location) }
+  async claim(location: NativeLocation, key: ClaimKey, value: string | null) { this.claims.push([location, key, value]) }
+  async readClaim() { return undefined }
+  paneAddressEnv() { return "FAKE_PANE" }
+  insideRuntime() { return false }
+  async available() { return true }
 }
 
-describe("tmux multiplexer adapter", () => {
-  test("observes complete topology using opaque native ids", async () => {
-    const calls: string[][] = []
-    const snapshot = await new TmuxMultiplexer({ command: topologyCommand(calls) }).observe()
-
-    expect(snapshot).toMatchObject({ kind: "tmux", instanceId: "tmux:/tmp/tmux.sock:epoch-1" })
-    expect(snapshot.sessions[0]).toMatchObject({ id: "$1", nativeName: "native-session", workshopId: "workshop-1" })
-    expect(snapshot.sessions[0]?.windows.map((window) => [window.id, window.panes.map((pane) => pane.id)])).toEqual([
-      ["@1", ["%1", "%2"]],
-      ["@2", ["%3"]],
-    ])
-    expect(calls.some((argv) => argv[0] === "list-panes" && argv.includes("-a"))).toBe(true)
-  })
-
+describe("managed multiplexer", () => {
   test("absorbs an entire session idempotently and seeds names without interpreting them", async () => {
-    const calls: string[][] = []
     const registryPath = fixture()
-    const adapter = new TmuxMultiplexer({ command: topologyCommand(calls), registryPath })
-    const location = { kind: "tmux", instanceId: "tmux:/tmp/tmux.sock:epoch-1", nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1" }
+    const adapter = new FakeAdapter(topology())
+    const managed = new ManagedMultiplexer(adapter, { registryPath })
+    const location = { kind: "fake", instanceId: INSTANCE, nativeSessionId: "s1", nativeWindowId: "t1", nativePaneId: "p1" }
 
-    const first = await adapter.absorb(location)
-    const second = await adapter.absorb(location)
+    const first = await managed.absorb(location)
+    const second = await managed.absorb(location)
 
     expect(second.session.id).toBe(first.session.id)
     expect(first).toMatchObject({ workshopId: "workshop-1", session: { displayName: "native-session" } })
     expect(first.windows.map((window) => window.displayName)).toEqual(["editor", "logs"])
     expect(first.terminals.map((terminal) => terminal.displayName)).toEqual(["editor.0", "editor.1", "logs"])
-    expect(first.terminals).toHaveLength(3)
-    expect(calls.some((argv) => argv.includes("@clankerhouse_session_id"))).toBe(true)
-    expect(calls.filter((argv) => argv.includes("@clankerhouse_terminal_id"))).toHaveLength(6)
+    expect(adapter.claims.some(([, key]) => key === "sessionId")).toBe(true)
+    expect(adapter.claims.filter(([, key]) => key === "terminalId")).toHaveLength(6)
 
     const registry = openResourceRegistry({ dbPath: registryPath })
     expect(registry.list({ workshopId: "workshop-1" })).toHaveLength(6)
@@ -76,93 +86,66 @@ describe("tmux multiplexer adapter", () => {
   })
 
   test("reconciles missing windows and panes in an already absorbed session", async () => {
-    const calls: string[][] = []
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-multiplexer-"))
-    roots.push(root)
-    const registryPath = join(root, "resources.sqlite3")
-    const command = topologyCommand(calls)
-    const multiplexer = new TmuxMultiplexer({ command, registryPath })
-    const snapshot = await multiplexer.observe()
-    const absorbed = await multiplexer.absorb({ kind: "tmux", instanceId: snapshot.instanceId, nativeSessionId: "$1", nativeWindowId: "@2", nativePaneId: "%3" }, snapshot)
-    const current = await multiplexer.observe()
+    const adapter = new FakeAdapter(topology())
+    const managed = new ManagedMultiplexer(adapter, { registryPath: fixture() })
+    const snapshot = await managed.observe()
+    const absorbed = await managed.absorb({ kind: "fake", instanceId: INSTANCE, nativeSessionId: "s1", nativeWindowId: "t2", nativePaneId: "p3" }, snapshot)
+    const current = await managed.observe()
     const session = current.sessions[0]!
     session.workshopId = absorbed.workshopId
     session.resourceId = absorbed.session.id
     session.windows[0]!.resourceId = absorbed.windows[0]!.id
     session.windows[0]!.panes[0]!.terminalId = absorbed.terminals[0]!.id
-    session.windows.push({ id: "@9", index: "9", nativeName: "new", active: false, panes: [{ id: "%9", index: "0", pid: "900", command: "zsh", title: "new", currentPath: session.path, activity: 1, active: false }] })
-    calls.length = 0
+    session.windows.push({ id: "t9", index: "9", nativeName: "new", active: false, panes: [{ id: "p9", index: "0", pid: "900", command: "zsh", title: "new", currentPath: session.path, activity: 1, active: false }] })
+    adapter.claims.length = 0
 
-    expect(await multiplexer.reconcileAbsorbedTopology(current)).toBe(true)
-    expect(calls.some((argv) => argv.includes("@clankerhouse_window_id") && argv.includes("@9"))).toBe(true)
-    expect(calls.some((argv) => argv.includes("@clankerhouse_terminal_id") && argv.includes("%9"))).toBe(true)
-    expect(calls.some((argv) => argv.includes("@clankerhouse_session_id"))).toBe(false)
+    expect(await managed.reconcileAbsorbedTopology(current)).toBe(true)
+    expect(adapter.claims.some(([at, key]) => key === "windowId" && at.nativeWindowId === "t9")).toBe(true)
+    expect(adapter.claims.some(([at, key]) => key === "terminalId" && at.nativePaneId === "p9")).toBe(true)
+    expect(adapter.claims.some(([, key]) => key === "sessionId")).toBe(false)
   })
 
   test("resolves managed resources from the registry rather than stale target hints", async () => {
     const registryPath = fixture()
     const registry = openResourceRegistry({ dbPath: registryPath })
-    const session = registry.upsert({
-      kind: "session",
-      workshopId: "workshop-1",
-      displayName: "owned",
-      location: { kind: "tmux", instanceId: "tmux:/tmp/tmux.sock:epoch-1", nativeSessionId: "$9" },
-    })
+    const session = registry.upsert({ kind: "session", workshopId: "workshop-1", displayName: "owned", location: { kind: "fake", instanceId: INSTANCE, nativeSessionId: "s9" } })
     registry.close()
 
-    const adapter = new TmuxMultiplexer({ command: topologyCommand([], { sessionId: "$9", sessionResourceId: session.id }), registryPath })
-    const resolved = await adapter.resolve({
+    const managed = new ManagedMultiplexer(new FakeAdapter(topology({ sessionId: "s9", sessionResourceId: session.id })), { registryPath })
+    const resolved = await managed.resolve({
       management: "managed",
       resourceId: session.id,
-      location: { kind: "tmux", instanceId: "stale", nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null },
+      location: { kind: "fake", instanceId: "stale", nativeSessionId: "s1", nativeWindowId: null, nativePaneId: null },
     })
-    expect(resolved?.nativeSessionId).toBe("$9")
+    expect(resolved?.nativeSessionId).toBe("s9")
   })
 
-  test("opens and observes against the explicit requesting client", async () => {
-    const calls: string[][] = []
-    const command: MultiplexerCommand = async (argv) => {
-      calls.push(argv)
-      if (argv[0] === "list-clients") return { stdout: tmuxFields("/dev/pts/9", "$2", "@2", "%2"), stderr: "", code: 0 }
-      if (argv[0] === "display-message") return { stdout: "/tmp/tmux.sock", stderr: "", code: 0 }
-      return { stdout: "", stderr: "", code: 0 }
-    }
-    const adapter = new TmuxMultiplexer({ command })
-
-    expect(await adapter.currentLocation("/dev/pts/9")).toMatchObject({ nativeSessionId: "$2" })
-    await adapter.open({ nativeSessionId: "$3", nativeWindowId: null, nativePaneId: null }, "/dev/pts/9")
-
-    expect(calls[0]).toEqual(["list-clients", "-F", expect.any(String)])
-    expect(calls).toContainEqual(["switch-client", "-c", "/dev/pts/9", "-t", "$3"])
+  test("opens a session target by native name through the Adapter", async () => {
+    const adapter = new FakeAdapter(topology())
+    const managed = new ManagedMultiplexer(adapter, { registryPath: fixture() })
+    await managed.openTarget({ type: "session", session: "native-session" })
+    await managed.openTarget({ type: "window", session: "native-session", windowId: "t2", pane: "p3" })
+    expect(adapter.focused).toEqual([
+      { nativeSessionId: "s1", nativeWindowId: null, nativePaneId: null },
+      { nativeSessionId: "s1", nativeWindowId: "t2", nativePaneId: null },
+    ])
   })
 
-  test("does not let unknown tmux claims mint Clankerhouse identity", async () => {
-    const registryPath = fixture()
-    const adapter = new TmuxMultiplexer({ command: topologyCommand([], { sessionResourceId: "mux-session-spoofed" }), registryPath })
-    const absorbed = await adapter.absorb({
-      kind: "tmux",
-      instanceId: "tmux:/tmp/tmux.sock:epoch-1",
-      nativeSessionId: "$1",
-      nativeWindowId: "@1",
-      nativePaneId: "%1",
-    })
+  test("does not let unknown claims mint Clankerhouse identity", async () => {
+    const managed = new ManagedMultiplexer(new FakeAdapter(topology({ sessionResourceId: "mux-session-spoofed" })), { registryPath: fixture() })
+    const absorbed = await managed.absorb({ kind: "fake", instanceId: INSTANCE, nativeSessionId: "s1", nativeWindowId: "t1", nativePaneId: "p1" })
 
     expect(absorbed.session.id).toMatch(/^mux-session-/)
     expect(absorbed.session.id).not.toBe("mux-session-spoofed")
   })
 
-  test("rejects a registry location whose tmux identity claim is stale", async () => {
+  test("rejects a registry location whose identity claim is stale", async () => {
     const registryPath = fixture()
     const registry = openResourceRegistry({ dbPath: registryPath })
-    const session = registry.upsert({
-      kind: "session",
-      workshopId: "workshop-1",
-      displayName: "owned",
-      location: { kind: "tmux", instanceId: "tmux:/tmp/tmux.sock:epoch-1", nativeSessionId: "$9" },
-    })
+    const session = registry.upsert({ kind: "session", workshopId: "workshop-1", displayName: "owned", location: { kind: "fake", instanceId: INSTANCE, nativeSessionId: "s9" } })
     registry.close()
 
-    const adapter = new TmuxMultiplexer({ command: topologyCommand([], { sessionId: "$9" }), registryPath })
-    await expect(adapter.resolve({ management: "managed", resourceId: session.id })).rejects.toThrow("location is stale")
+    const managed = new ManagedMultiplexer(new FakeAdapter(topology({ sessionId: "s9" })), { registryPath })
+    await expect(managed.resolve({ management: "managed", resourceId: session.id })).rejects.toThrow("location is stale")
   })
 })

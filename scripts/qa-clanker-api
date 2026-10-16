@@ -3,6 +3,8 @@
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 root=${CLANKER_API_QA_ROOT:-"/tmp/qa-clanker-api-$$"}
 case "$root" in /tmp/qa-clanker-api-*) ;; *) echo "Refusing unsafe QA root: $root" >&2; exit 2 ;; esac
 if [[ -e "$root" ]]; then
@@ -12,25 +14,28 @@ fi
 mkdir -p "$root"
 touch "$root/.qa-owned"
 
-socket="$root/tmux.sock"
 runtime="$root/runtime"
 state_home="$root/state"
 fixture="$root/repo"
 other_fixture="$root/other-repo"
-report_dir="$runtime/clankerhouse-$(id -u)/clanker-state"
+report_dir="$runtime/clankerhouse-$(id -u)-herdr/clanker-state"
 qa_home="$root/home"
 data_home="$root/data"
-config_home="$root/config"
-mkdir -p "$runtime" "$state_home" "$report_dir" "$qa_home" "$data_home" "$config_home"
+mkdir -p "$runtime" "$state_home" "$report_dir" "$qa_home" "$data_home"
 chmod 700 "$report_dir"
 server_pid=""
 
 cleanup() {
     if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
-    tmux -S "$socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     [[ -f "$root/.qa-owned" ]] && rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
+unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
+herdr_status=0
+qa_herdr_start "$root/herdr" || herdr_status=$?
+[[ "$herdr_status" != 77 ]] || exit 0
+[[ "$herdr_status" == 0 ]] || exit "$herdr_status"
 
 fail() { echo "Clankerhouse clanker API QA failed: $*" >&2; exit 1; }
 json_assert() {
@@ -47,27 +52,35 @@ for directory in "$fixture" "$other_fixture"; do
     git -C "$directory" commit -qm fixture
 done
 
+qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "DOTFILES_DIR=$repo")
+api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
+mux() { api mux "$@"; }
+json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+pane_claims() { mux observe | python3 -c 'import json,sys
+for s in json.load(sys.stdin)["sessions"]:
+    for w in s["windows"]:
+        for p in w["panes"]:
+            if p["id"] == sys.argv[1]: print(json.dumps(p.get("claims") or {}, sort_keys=True))' "$1"; }
+pane_exists() { [[ -n "$(pane_claims "$1")" ]]; }
+
 # All panes are inert terminals. Communication goes to the fake native socket,
-# never their stdin; the capture below only verifies this private fixture.
-tmux -S "$socket" new-session -d -s qa-clanker-api -n pi -c "$fixture" "sh -c 'printf PI-PANE-UNCHANGED; exec sleep 300'"
-tmux -S "$socket" new-window -d -t qa-clanker-api -n claude -c "$fixture" "sleep 300"
-tmux -S "$socket" new-window -d -t qa-clanker-api -n codex -c "$fixture" "sleep 300"
-tmux -S "$socket" new-window -d -t qa-clanker-api -n opencode -c "$fixture" "sleep 300"
-tmux -S "$socket" new-session -d -s qa-clanker-other -n claude -c "$other_fixture" "sleep 300"
+# never their stdin; the pane read below only verifies this private fixture.
+spawned=$(mux spawn --new-session qa-clanker-api --name pi --cwd "$fixture" -- sh -c 'printf PI-PANE-UNCHANGED; exec sleep 300')
+api_session=$(json_field nativeSessionId <<<"$spawned")
+pi_pane=$(json_field nativePaneId <<<"$spawned")
+claude_pane=$(mux spawn --session "$api_session" --name claude --cwd "$fixture" -- sleep 300 | json_field nativePaneId)
+codex_pane=$(mux spawn --session "$api_session" --name codex --cwd "$fixture" -- sleep 300 | json_field nativePaneId)
+opencode_pane=$(mux spawn --session "$api_session" --name opencode --cwd "$fixture" -- sleep 300 | json_field nativePaneId)
+spawned=$(mux spawn --new-session qa-clanker-other --name claude --cwd "$other_fixture" -- sleep 300)
+other_session=$(json_field nativeSessionId <<<"$spawned")
+other_pane=$(json_field nativePaneId <<<"$spawned")
 
-pane() { tmux -S "$socket" display-message -p -t "$1" '#{pane_id}'; }
-pi_pane=$(pane qa-clanker-api:pi)
-claude_pane=$(pane qa-clanker-api:claude)
-codex_pane=$(pane qa-clanker-api:codex)
-opencode_pane=$(pane qa-clanker-api:opencode)
-other_pane=$(pane qa-clanker-other:claude)
-
-tmux -S "$socket" set-option -t qa-clanker-api @dotfiles_worktree_path "$fixture"
-tmux -S "$socket" set-option -t qa-clanker-other @dotfiles_worktree_path "$other_fixture"
+mux claim --session "$api_session" worktreePath "$fixture"
+mux claim --session "$other_session" worktreePath "$other_fixture"
 for spec in "$pi_pane pi clanker-qa-pi" "$claude_pane claude clanker-qa-claude" "$codex_pane codex ''" "$opencode_pane opencode clanker-qa-opencode" "$other_pane claude clanker-qa-other"; do
     read -r target harness id <<<"$spec"
-    tmux -S "$socket" set-option -p -t "$target" @dotfiles_harness "$harness"
-    [[ -n "$id" && "$id" != "''" ]] && tmux -S "$socket" set-option -p -t "$target" @clankerhouse_clanker_id "$id"
+    mux claim --pane "$target" harness "$harness"
+    [[ -n "$id" && "$id" != "''" ]] && mux claim --pane "$target" clankerId "$id"
 done
 
 pi_report="$report_dir/${pi_pane//[^A-Za-z0-9_.%-]/_}.json"
@@ -142,16 +155,13 @@ python3 "$root/native-server.py" "$native_socket" "$pi_report" "$pi_pane" clanke
 server_pid=$!
 for _ in {1..50}; do [[ -S "$native_socket" ]] && break; sleep 0.02; done
 [[ -S "$native_socket" ]] || fail "native socket did not start"
-tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_clanker_socket "$native_socket"
+mux claim --pane "$pi_pane" clankerSocket "$native_socket"
 
-qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "XDG_CONFIG_HOME=$config_home" "TMUX=$socket,1,0" "HERDR_PANE_ID=" "HERDR_SOCKET_PATH=" "CLANKERHOUSE_MULTIPLEXER=tmux" "DOTFILES_DIR=$repo")
-api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
-
-# Subprocess workers using `pi --no-session` inherit the parent's TMUX_PANE.
+# Subprocess workers using `pi --no-session` inherit the parent's HERDR_PANE_ID.
 # Loading the global lifecycle extension in such a worker
 # must leave the parent's identity, report, socket, and Recovery untouched.
 cat > "$root/sessionless-extension.ts" <<EOF
-import extension from "$repo/integrations/pi/tmux-clanker-lifecycle.ts"
+import extension from "$repo/integrations/pi/clanker-lifecycle.ts"
 const handlers = new Map<string, Function>()
 const pi = {
   events: { on: () => () => {} },
@@ -169,25 +179,25 @@ printf '%s\n' "$*" >> "$SESSIONLESS_RECOVERY_LOG"
 exit 1
 SH
 chmod +x "$root/unexpected-clankers"
-tmux -S "$socket" set-option -p -t "$pi_pane" @clankerhouse_harness_session_id parent-session
-before_options=$(tmux -S "$socket" show-options -p -t "$pi_pane")
+mux claim --pane "$pi_pane" harnessSessionId parent-session
+before_options=$(pane_claims "$pi_pane")
 before_report=$(sha256sum "$pi_report")
 before_sockets=$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)
 sessionless_handlers=$("${qa_env[@]}" env \
-    TMUX_PANE="$pi_pane" \
+    HERDR_PANE_ID="$pi_pane" \
     CLANKER_ID=clanker-qa-pi \
     CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" \
     SESSIONLESS_RECOVERY_LOG="$root/sessionless-recovery.log" \
     bun "$root/sessionless-extension.ts" --mode json -p --no-session)
 [[ "$sessionless_handlers" == '[]' ]] || fail "sessionless Pi registered lifecycle handlers"
-[[ "$(tmux -S "$socket" show-options -p -t "$pi_pane")" == "$before_options" ]] || fail "sessionless Pi replaced parent pane identity"
+[[ "$(pane_claims "$pi_pane")" == "$before_options" ]] || fail "sessionless Pi replaced parent pane identity"
 [[ "$(sha256sum "$pi_report")" == "$before_report" ]] || fail "sessionless Pi replaced parent lifecycle report"
 [[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "sessionless Pi created a native Clanker socket"
 [[ ! -e "$root/sessionless-recovery.log" ]] || fail "sessionless Pi created or attested Recovery identity"
 
 # SDK workers have no --no-session argv marker. They load multiple extension
 # instances within one process, but only the visible TUI context owns the pane.
-# Exercise real claims/report/socket adapters on this isolated tmux server.
+# Exercise real claims/report/socket adapters on this isolated Herdr server.
 cp "$pi_report" "$root/pi-before-sdk.json"
 python3 - "$pi_report" <<'PY'
 import json, sys
@@ -199,7 +209,7 @@ path.write_text(json.dumps(report))
 PY
 sdk_before_report=$(sha256sum "$pi_report")
 cat > "$root/sdk-extension.ts" <<EOF
-import extension from "$repo/integrations/pi/tmux-clanker-lifecycle.ts"
+import extension from "$repo/integrations/pi/clanker-lifecycle.ts"
 for (const mode of ["print", "json", "rpc"]) {
   const handlers = new Map<string, Function>()
   const events = new Map<string, Function>()
@@ -217,10 +227,10 @@ for (const mode of ["print", "json", "rpc"]) {
   await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx)
 }
 EOF
-"${qa_env[@]}" env TMUX_PANE="$pi_pane" CLANKER_ID=clanker-qa-pi \
+"${qa_env[@]}" env HERDR_PANE_ID="$pi_pane" CLANKER_ID=clanker-qa-pi \
     CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" SESSIONLESS_RECOVERY_LOG="$root/sdk-recovery.log" \
     bun "$root/sdk-extension.ts"
-[[ "$(tmux -S "$socket" show-options -p -t "$pi_pane")" == "$before_options" ]] || fail "SDK Pi worker replaced parent pane identity"
+[[ "$(pane_claims "$pi_pane")" == "$before_options" ]] || fail "SDK Pi worker replaced parent pane identity"
 [[ "$(sha256sum "$pi_report")" == "$sdk_before_report" ]] || fail "SDK Pi worker replaced parent lifecycle report"
 [[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "SDK Pi worker created a native Clanker socket"
 [[ ! -e "$root/sdk-recovery.log" ]] || fail "SDK Pi worker created or attested Recovery identity"
@@ -234,15 +244,15 @@ filtered=$(api list --cwd "$fixture")
 printf '%s' "$filtered" | json_assert 'len(data) == 4 and {row["harness"] for row in data} == {"pi","claude","codex","opencode"}'
 codex_id=$(printf '%s' "$filtered" | python3 -c 'import json,sys; print(next(row["id"] for row in json.load(sys.stdin) if row["harness"]=="codex"))')
 [[ "$codex_id" == clanker-* ]] || fail "Codex pane did not receive a stable ID"
-[[ "$(tmux -S "$socket" show-option -p -qv -t "$codex_pane" @clankerhouse_clanker_id)" == "$codex_id" ]] || fail "Codex ID was not stored in tmux metadata"
-tmux -S "$socket" rename-session -t qa-clanker-api qa-clanker-api-renamed
+[[ "$(mux read-claim --pane "$codex_pane" clankerId)" == "$codex_id" ]] || fail "Codex ID was not stored as a pane claim"
+qa_herdr workspace rename "$api_session" qa-clanker-api-renamed >/dev/null
 filtered_again=$(api list --cwd "$fixture")
 [[ "$codex_id" == "$(printf '%s' "$filtered_again" | python3 -c 'import json,sys; print(next(row["id"] for row in json.load(sys.stdin) if row["harness"]=="codex"))')" ]] || fail "clanker ID changed after session rename"
 
 # Status and capability matrix.
 api status clanker-qa-pi | json_assert 'data["id"] == "clanker-qa-pi" and data["state"] == "done"'
 api capabilities clanker-qa-pi | json_assert 'data["capabilities"]["send"] == "unix-socket" and data["capabilities"]["wait"] == "reports" and data["capabilities"]["result"] == "reports"'
-api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] is False and data["capabilities"]["result"] is False'
+api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] == "multiplexer-prompt" and data["capabilities"]["result"] is False'
 api capabilities clanker-qa-opencode | json_assert 'data["capabilities"]["wait"] is False and data["capabilities"]["send"] is False and data["capabilities"]["result"] is False'
 set +e
 unknown_error=$(api status clanker-missing 2>&1 >/dev/null); unknown_code=$?
@@ -251,20 +261,20 @@ set -e
 printf '%s' "$unknown_error" | json_assert 'data["apiVersion"] == 1 and data["error"]["code"] == "NOT_FOUND"'
 
 # Duplicate IDs must not select arbitrarily.
-tmux -S "$socket" set-option -p -t "$opencode_pane" @clankerhouse_clanker_id clanker-qa-claude
+mux claim --pane "$opencode_pane" clankerId clanker-qa-claude
 set +e
 duplicate_error=$(api status clanker-qa-claude 2>&1 >/dev/null); duplicate_code=$?
 set -e
 [[ $duplicate_code -eq 3 ]] || fail "duplicate clanker exit was $duplicate_code, expected 3"
 printf '%s' "$duplicate_error" | json_assert 'data["error"]["code"] == "AMBIGUOUS"'
-tmux -S "$socket" set-option -p -t "$opencode_pane" @clankerhouse_clanker_id clanker-qa-opencode
+mux claim --pane "$opencode_pane" clankerId clanker-qa-opencode
 
 # Native sends, delivery modes, waits, and result generations. Pane output must not change.
-before=$(tmux -S "$socket" capture-pane -p -J -t "$pi_pane" -S -20)
+before=$(qa_herdr pane read "$pi_pane" --source recent)
 printf 'default' | api send clanker-qa-pi --wait | json_assert 'data["afterGeneration"] == 1 and data["result"]["generation"] == 2 and data["result"]["reply"] == "result:default"'
 printf 'steered' | api send clanker-qa-pi --delivery steer --wait | json_assert 'data["delivery"] == "steer" and data["result"]["generation"] == 3'
 printf 'followed' | api send clanker-qa-pi --delivery follow-up --wait | json_assert 'data["delivery"] == "followUp" and data["result"]["generation"] == 4'
-after=$(tmux -S "$socket" capture-pane -p -J -t "$pi_pane" -S -20)
+after=$(qa_herdr pane read "$pi_pane" --source recent)
 [[ "$before" == "$after" ]] || fail "native send modified the Pi terminal pane"
 api result clanker-qa-pi | json_assert 'data["generation"] == 4 and data["reply"] == "result:followed"'
 api result clanker-qa-pi --generation 2 | json_assert 'data["generation"] == 2 and data["reply"] == "result:default"'
@@ -278,15 +288,15 @@ printf '%s' "$mismatch" | json_assert 'data["error"]["code"] == "UNAVAILABLE"'
 
 # Generic report waiting, stale-identity reset, and no-after active-generation semantics.
 printf '%s' '{"harness":"codex","clankerId":"clanker-stale","pane":"'"$codex_pane"'","state":"done","generation":99,"settledGeneration":99,"updatedAt":1}' > "$codex_report"
-printf '{}' | "${qa_env[@]}" env TMUX_PANE="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex working
+printf '{}' | "${qa_env[@]}" env HERDR_PANE_ID="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex working
 python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["clankerId"]==sys.argv[2] and data["generation"]==1 and data["settledGeneration"]==0' "$codex_report" "$codex_id"
-printf '{}' | "${qa_env[@]}" env TMUX_PANE="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex done
+printf '{}' | "${qa_env[@]}" env HERDR_PANE_ID="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex done
 api wait "$codex_id" --after 0 --timeout 2 | json_assert 'data["settledGeneration"] == 1'
 
 # A foreground Stop with a running native background task is not completion.
 # Replay the documented Claude payload through the real reporter and API; do not
 # infer background work from the fixture's processes or scrape terminal output.
-claude_reporter=("${qa_env[@]}" env TMUX_PANE="$claude_pane" CLANKER_ID=clanker-qa-claude "$repo/bin/clankerhouse-clanker-state-report" claude)
+claude_reporter=("${qa_env[@]}" env HERDR_PANE_ID="$claude_pane" CLANKER_ID=clanker-qa-claude "$repo/bin/clankerhouse-clanker-state-report" claude)
 printf '%s' '{"hook_event_name":"UserPromptSubmit"}' | "${claude_reporter[@]}" working
 printf '%s' '{"hook_event_name":"Stop","background_tasks":[{"id":"shell-task","type":"shell","status":"running"}]}' | "${claude_reporter[@]}" done
 api status clanker-qa-claude | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
@@ -311,10 +321,19 @@ timeout_error=$(api wait clanker-qa-claude --after 3 --timeout 0 2>&1 >/dev/null
 set -e
 [[ $timeout_code -eq 124 ]] || fail "timeout exit was $timeout_code, expected 124"
 printf '%s' "$timeout_error" | json_assert 'data["error"]["code"] == "TIMEOUT"'
-tmux -S "$socket" display-message -p -t "$claude_pane" '#{pane_id}' >/dev/null || fail "timeout destroyed its pane"
+pane_exists "$claude_pane" || fail "timeout destroyed its pane"
+
+# Claude send goes only through Herdr's validated agent prompt, which refuses a pane
+# that no recognized interactive agent owns; it never falls back to raw input.
+claude_before=$(qa_herdr pane read "$claude_pane" --source recent)
+set +e
+printf x | api send clanker-qa-claude >/dev/null 2>&1; claude_send_code=$?
+set -e
+[[ $claude_send_code -ne 0 ]] || fail "Claude send succeeded without a recognized interactive agent"
+[[ "$(qa_herdr pane read "$claude_pane" --source recent)" == "$claude_before" ]] || fail "rejected Claude send modified the pane"
 
 # Unsupported capability errors.
-for command in "send clanker-qa-claude" "result clanker-qa-claude" "wait clanker-qa-opencode" "send clanker-qa-opencode" "result clanker-qa-opencode"; do
+for command in "result clanker-qa-claude" "wait clanker-qa-opencode" "send clanker-qa-opencode" "result clanker-qa-opencode"; do
     read -r -a args <<<"$command"
     set +e
     if [[ ${args[0]} == send ]]; then error=$(printf x | api "${args[@]}" 2>&1 >/dev/null); else error=$(api "${args[@]}" 2>&1 >/dev/null); fi
@@ -324,10 +343,10 @@ for command in "send clanker-qa-claude" "result clanker-qa-claude" "wait clanker
     printf '%s' "$error" | json_assert 'data["error"]["code"] == "UNSUPPORTED"'
 done
 
-# Production clanker communication paths must not contain tmux input/capture operations.
-if rg -n 'send-keys|load-buffer|paste-buffer|capture-pane' \
-    "$repo/src" "$repo/integrations/pi/tmux-clanker-lifecycle.ts" >/dev/null; then
-    fail "production clanker communication path contains forbidden tmux terminal manipulation"
+# Production clanker communication paths must not contain raw pane input/capture operations.
+if rg -n 'send-keys|send-text|send_keys|send_text|pane\.read|"read"' \
+    "$repo/src/clanker-api.ts" "$repo/src/multiplexer" "$repo/integrations/pi/clanker-lifecycle.ts" >/dev/null; then
+    fail "production clanker communication path contains forbidden raw pane manipulation"
 fi
 
 echo "Clankerhouse clanker API QA passed: discovery, stable identity, filtering, rename safety, duplicate rejection, status/capabilities, native sends, delivery modes, correlated waits/results, terminal non-mutation, identity mismatch, report waiting, Claude background-task settlement, stale-report reset, timeout behavior, and unsupported transports all behave correctly."

@@ -1,11 +1,10 @@
 #!/bin/bash
 # Source this file from Clankerhouse shell scripts that must address their own pane or
-# write identity claims. It keeps the tmux fast path (direct tmux commands) and routes
-# every other Multiplexer through `clankers mux`, so scripts stay runtime-neutral.
+# write identity claims. Every operation routes through `clankers mux`, so scripts never
+# speak the Multiplexer's native protocol.
 #
 # Functions:
-#   ch_mux_kind                 -> tmux | herdr
-#   ch_mux_pane                 -> this process's pane address (TMUX_PANE / HERDR_PANE_ID)
+#   ch_mux_pane                 -> this process's pane address (HERDR_PANE_ID)
 #   ch_mux_pane_read KEY        -> pane claim value
 #   ch_mux_pane_claim KEY VALUE -> write pane claim
 #   ch_mux_pane_unset KEY       -> clear pane claim
@@ -21,88 +20,39 @@ _ch_mux_clankers() {
     printf '%s\n' "$here/bin/clankers"
 }
 
-ch_mux_kind() {
-    if [[ -n "${CLANKERHOUSE_MULTIPLEXER:-}" ]]; then
-        case "${CLANKERHOUSE_MULTIPLEXER,,}" in
-            tmux|herdr) printf '%s\n' "${CLANKERHOUSE_MULTIPLEXER,,}"; return ;;
-            *) printf 'Unsupported CLANKERHOUSE_MULTIPLEXER: %s (expected tmux or herdr)\n' "$CLANKERHOUSE_MULTIPLEXER" >&2; return 2 ;;
-        esac
-    fi
-    # Both markers prove this is a managed herdr pane rather than a stale inherited variable.
-    # Explicit CLANKERHOUSE_MULTIPLEXER always overrides the inferred innermost runtime.
-    if [[ "${HERDR_ENV:-}" == 1 && -n "${HERDR_PANE_ID:-}" ]]; then printf 'herdr\n'; return; fi
-    printf 'tmux\n'
-}
-
 _ch_mux_run_clankers() {
-    local kind
-    kind=$(ch_mux_kind) || return
-    CLANKERHOUSE_MULTIPLEXER="$kind" "$(_ch_mux_clankers)" "$@"
+    "$(_ch_mux_clankers)" "$@"
 }
 
 ch_mux_pane() {
-    case "$(ch_mux_kind)" in
-        herdr) printf '%s\n' "${HERDR_PANE_ID:-}" ;;
-        *) printf '%s\n' "${TMUX_PANE:-}" ;;
-    esac
-}
-
-# Semantic claim key -> tmux pane option (first option is read, all are written).
-_ch_mux_tmux_option() {
-    case "$1" in
-        clankerId) printf '@clankerhouse_clanker_id' ;;
-        harness) printf '@dotfiles_harness' ;;
-        harnessSessionId) printf '@clankerhouse_harness_session_id' ;;
-        recoveryAttemptId) printf '@clankerhouse_recovery_attempt' ;;
-        clankerSocket) printf '@clankerhouse_clanker_socket' ;;
-        clankerPid) printf '@clankerhouse_clanker_pid' ;;
-        clankerCapabilities) printf '@clankerhouse_clanker_capabilities' ;;
-        terminalId) printf '@clankerhouse_terminal_id' ;;
-        terminalDisplayName) printf '@clankerhouse_terminal_display_name' ;;
-        *) return 1 ;;
-    esac
+    printf '%s\n' "${HERDR_PANE_ID:-}"
 }
 
 ch_mux_pane_read() {
     local pane key
     pane=$(ch_mux_pane); key=$1
     [[ -n "$pane" ]] || return 0
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        tmux show-option -p -qv -t "$pane" "$(_ch_mux_tmux_option "$key")" 2>/dev/null || true
-    else
-        _ch_mux_run_clankers mux read-claim --pane "$pane" "$key" 2>/dev/null || true
-    fi
+    _ch_mux_run_clankers mux read-claim --pane "$pane" "$key" 2>/dev/null || true
 }
 
 ch_mux_pane_claim() {
     local pane key value
     pane=$(ch_mux_pane); key=$1; value=$2
     [[ -n "$pane" ]] || return 0
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        tmux set-option -p -t "$pane" "$(_ch_mux_tmux_option "$key")" "$value" 2>/dev/null || true
-    else
-        _ch_mux_run_clankers mux claim --pane "$pane" "$key" "$value" 2>/dev/null || true
-    fi
+    _ch_mux_run_clankers mux claim --pane "$pane" "$key" "$value" 2>/dev/null || true
 }
 
 ch_mux_pane_unset() {
     local pane key
     pane=$(ch_mux_pane); key=$1
     [[ -n "$pane" ]] || return 0
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        tmux set-option -p -u -t "$pane" "$(_ch_mux_tmux_option "$key")" 2>/dev/null || true
-    else
-        _ch_mux_run_clankers mux claim --pane "$pane" "$key" --unset 2>/dev/null || true
-    fi
+    _ch_mux_run_clankers mux claim --pane "$pane" "$key" --unset 2>/dev/null || true
 }
 
 ch_mux_pane_path() {
-    local pane
+    local pane path
     pane=$(ch_mux_pane)
-    if [[ -n "$pane" && "$(ch_mux_kind)" == tmux ]]; then
-        tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null && return 0
-    elif [[ -n "$pane" ]]; then
-        local path
+    if [[ -n "$pane" ]]; then
         path=$(_ch_mux_run_clankers mux pane-path --pane "$pane" 2>/dev/null || true)
         [[ -z "$path" ]] || { printf '%s\n' "$path"; return 0; }
     fi
@@ -110,45 +60,31 @@ ch_mux_pane_path() {
 }
 
 ch_mux_pane_clanker_id() {
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        tmux display-message -p -t "$1" '#{@clankerhouse_clanker_id}' 2>/dev/null || true
-    else
-        _ch_mux_run_clankers mux clanker-ids --pane "$1" 2>/dev/null || true
-    fi
+    _ch_mux_run_clankers mux clanker-ids --pane "$1" 2>/dev/null || true
 }
 
 ch_mux_session_clanker_ids() {
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        tmux list-panes -t "$1" -F '#{@clankerhouse_clanker_id}' 2>/dev/null || true
-    else
-        _ch_mux_run_clankers mux clanker-ids --session "$1" 2>/dev/null || true
-    fi
+    _ch_mux_run_clankers mux clanker-ids --session "$1" 2>/dev/null || true
 }
 
 ch_mux_kill() {
-    if [[ "$(ch_mux_kind)" == tmux ]]; then
-        if [[ "$1" == pane ]]; then tmux kill-pane -t "$2"; else tmux kill-session -t "$2"; fi
-    else
-        if [[ "$1" == pane ]]; then _ch_mux_run_clankers mux kill --pane "$2"; else _ch_mux_run_clankers mux kill --session "$2"; fi
-    fi
+    if [[ "$1" == pane ]]; then _ch_mux_run_clankers mux kill --pane "$2"; else _ch_mux_run_clankers mux kill --session "$2"; fi
 }
 
-# Instance scoping: a herdr instance and the legacy tmux instance keep separate
-# runtime and state directories so both daemons can run at once.
+# Instance scoping: CLANKERHOUSE_INSTANCE names a separate instance with its own
+# runtime and state directories; otherwise the Herdr instance paths are used.
 ch_instance_slug() {
     if [[ -n "${CLANKERHOUSE_INSTANCE:-}" ]]; then
         local instance
         instance=$(printf '%s' "$CLANKERHOUSE_INSTANCE" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
         case "$instance" in
-            default|tmux) printf '' ;;
+            default) printf '' ;;
             ""|.|..|*[!A-Za-z0-9._-]*) printf 'Invalid CLANKERHOUSE_INSTANCE: %s\n' "$instance" >&2; return 2 ;;
             *) printf -- '-%s' "$instance" ;;
         esac
         return
     fi
-    local mux
-    mux=$(ch_mux_kind) || return
-    case "$mux" in tmux) printf '' ;; *) printf -- '-%s' "$mux" ;; esac
+    printf -- '-herdr'
 }
 
 ch_runtime_dir() {

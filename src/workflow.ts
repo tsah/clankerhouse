@@ -17,9 +17,9 @@ import { dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hook
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
 
-const spawnedRuntimeEnv = (multiplexer: ManagedMultiplexer) => {
+const spawnedRuntimeEnv = (): Record<string, string> => {
   const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
-  return { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
+  return instance ? { CLANKERHOUSE_INSTANCE: instance } : {}
 }
 
 export class ClankerRegistrationError extends Error {
@@ -65,7 +65,7 @@ export async function sessionName(id: WorktreeIdentity, multiplexer: ManagedMult
   // A titled Workshop's session carries the title; the multiplexer keeps its spaces where it can.
   const record = workshopForPath(id.path)
   const title = record ? workshopLabels(record.workshopId)[TITLE_KEY] : undefined
-  const human = title ? (multiplexer.kind === "tmux" ? title.replace(/[.:]/g, "-") : title) : safeName(`${id.repo}@${id.branch}`)
+  const human = title || safeName(`${id.repo}@${id.branch}`)
   const existing = sessionBySelector((await multiplexer.observe()).sessions, human)
   if (!existing) return human
   if (sessionPathOf(existing) === id.path) return human
@@ -90,7 +90,7 @@ export async function ensureSession(id: WorktreeIdentity, options: { parentWorks
   let nativeSessionId = existing?.id
   if (!nativeSessionId) {
     const present = sessionBySelector((await multiplexer.observe()).sessions, name)
-    nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: id.path, windowName: "main", env: spawnedRuntimeEnv(multiplexer) })).nativeSessionId
+    nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: id.path, windowName: "main", env: spawnedRuntimeEnv() })).nativeSessionId
   }
   await applyWorkshopClaims(multiplexer, nativeSessionId, id, record)
   await ensureManagedSession(nativeSessionId, multiplexer)
@@ -155,8 +155,8 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
         harness: recoverableHarness,
         workshopId: recoveryWorkshopId,
         workshopPath: id.path,
-        tmuxSessionName: session,
-        tmuxWindowName: name,
+        preferredSessionLabel: session,
+        preferredWindowLabel: name,
         cwd: id.path,
         harnessSessionId,
         launchSpec,
@@ -174,7 +174,7 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { store?.close() }
   }
-  const launch = { cwd: id.path, env: { ...spawnedRuntimeEnv(multiplexer), ...workshopEnvironment(launchWorkshop) }, launch: { kind: "argv" as const, argv } }
+  const launch = { cwd: id.path, env: { ...spawnedRuntimeEnv(), ...workshopEnvironment(launchWorkshop) }, launch: { kind: "argv" as const, argv } }
   const spawnedLocation = await multiplexer.spawn(live
     ? { ...launch, scope: "window", nativeSessionId: live.id, name }
     : { ...launch, scope: "session", name: session, windowName: name })
@@ -343,7 +343,7 @@ export async function ensureDirectorySession(directory: string, multiplexer: Man
   const current = sessionBySelector(sessions, name)
   if (current && sessionPathOf(current) !== canonical) name = `${base}-${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`
   const present = sessionBySelector(sessions, name)
-  const nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: canonical, windowName: "main", env: spawnedRuntimeEnv(multiplexer) })).nativeSessionId
+  const nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: canonical, windowName: "main", env: spawnedRuntimeEnv() })).nativeSessionId
   await multiplexer.claim(sessionLocation(nativeSessionId), "directoryPath", canonical)
   await ensureManagedSession(nativeSessionId, multiplexer)
   return name

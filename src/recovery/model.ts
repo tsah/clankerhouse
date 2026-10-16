@@ -1,4 +1,4 @@
-export const RECOVERY_SCHEMA_VERSION = 3 as const
+export const RECOVERY_SCHEMA_VERSION = 4 as const
 export const RECOVERY_POLICY = Object.freeze({
   version: 2 as const,
   automaticRecovery: true,
@@ -32,8 +32,8 @@ export interface DesiredClankerInput {
   harness: RecoveryHarness
   workshopId: string
   workshopPath: string
-  tmuxSessionName: string
-  tmuxWindowName: string
+  preferredSessionLabel: string
+  preferredWindowLabel: string
   cwd: string
   harnessSessionId: string | null
   launchSpec: LaunchSpec
@@ -92,7 +92,7 @@ export interface RecoveryAttempt {
 export interface RuntimeEpochs {
   bootId: string | null
   bootEpoch: number
-  tmuxEpoch: number
+  multiplexerEpoch: number
   updatedAt: number | null
 }
 
@@ -133,8 +133,8 @@ export const validateDesiredClankerInput = (value: DesiredClankerInput): Desired
   if (value.harness !== "pi" && value.harness !== "claude" && value.harness !== "opencode") throw new Error("Invalid recovery harness")
   assertText(value.workshopId, "workshop id", { max: 256 })
   assertText(value.workshopPath, "workshop path", { absolute: true })
-  assertText(value.tmuxSessionName, "tmux session name", { max: 256 })
-  assertText(value.tmuxWindowName, "tmux window name", { max: 256 })
+  assertText(value.preferredSessionLabel, "preferred session label", { max: 256 })
+  assertText(value.preferredWindowLabel, "preferred window label", { max: 256 })
   assertText(value.cwd, "cwd", { absolute: true })
   if (value.harnessSessionId !== null) assertText(value.harnessSessionId, "harness session id", { max: 512 })
   if (typeof value.originalTask !== "string" || value.originalTask.trim().length === 0 || value.originalTask.includes("\0")) throw new Error("Invalid original task")

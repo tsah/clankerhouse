@@ -18,7 +18,7 @@ unit/static:
   feature-catalogue, TypeScript, Python, Rust
 standalone/end-to-end:
   native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, Recovery, Resource Guard, process owner,
-  stop popup, current session, lineage actions, workshop labels, absorption, client routing, installer, full TUI
+  lineage actions, workshop labels, Herdr adapter, installer, full TUI
 EOF
         exit 0
         ;;
@@ -42,7 +42,7 @@ if [[ "$mode" == all || "$mode" == unit ]]; then
     run "native hook build" cargo build --manifest-path native-client/Cargo.toml --release --locked --bin clankerhouse-hook
     run "TypeScript unit and component tests" bun test
     run "Python unit and component tests" env PYTHONPATH=.. python3 -m unittest \
-        tests.test_resource_guard tests.test_spot_watch tests.test_opencode_status
+        tests.test_resource_guard tests.test_spot_watch
     run "Rust native-client unit tests" cargo test --manifest-path native-client/Cargo.toml
 fi
 
@@ -56,13 +56,9 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "Recovery campaign scenario" scripts/qa-recovery
     run "Resource Guard workload mitigation scenario" scripts/qa-resource-guard
     run "process ownership scenario" scripts/qa-process-owner
-    run "standalone stop popup scenario" scripts/qa-stop-popup
-    run "current-session and lineage scenario" scripts/qa-current-session
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
-    run "whole-session absorption scenario" scripts/qa-absorption
-    run "herdr multiplexer adapter scenario" env HERDR_OPTIONAL=1 scripts/qa-herdr
-    run "requesting-client child navigation scenario" scripts/qa-client-routing
+    run "Herdr multiplexer adapter scenario" scripts/qa-herdr
     run "atomic installer and rollback scenario" scripts/qa-install
     run "complete native TUI interaction scenario" scripts/qa
 fi

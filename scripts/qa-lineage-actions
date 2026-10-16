@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
-export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
+export HERDR_ENV= HERDR_PANE_ID=
 
 uid=$(id -u)
 root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-lineage-actions-$uid-$$"}")
@@ -10,18 +10,19 @@ if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
     exit 1
 fi
 marker="$root.clankerhouse-qa-owned"
-tmux_socket="$root/tmux.sock"
 runtime="$root/runtime"
 state_home="$root/state"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 server_pid=""
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 
 cleanup() {
     if [[ -n "$server_pid" ]]; then
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
-    tmux -S "$tmux_socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     if [[ -f "$marker" ]]; then rm -rf "$root"; rm -f "$marker"; fi
 }
 trap cleanup EXIT INT TERM
@@ -59,15 +60,22 @@ parent_id=$(jq -r '.parent.workshopId' <<<"$lineage")
 middle_id=$(jq -r '.middle.workshopId' <<<"$lineage")
 child_id=$(jq -r '.child.workshopId' <<<"$lineage")
 
+clankers() {
+    env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CLANKERHOUSE_HOME="$repo" "$repo/bin/clankers" "$@"
+}
+workspace_id() {
+    qa_herdr workspace list | jq -r --arg label "$1" '.result.workspaces[] | select(.label == $label) | .workspace_id'
+}
 create_session() {
-    local name=$1 path=$2 workshop_id=$3 parent_workshop_id=$4
-    tmux -S "$tmux_socket" -f /dev/null new-session -d -s "$name" -n main -x 100 -y 30 -c "$path" "sleep 300"
-    tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_worktree_path "$path"
-    tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_workshop_id "$workshop_id"
+    local name=$1 path=$2 workshop_id=$3 parent_workshop_id=$4 id
+    id=$(qa_herdr workspace create --cwd "$path" --label "$name" --no-focus | jq -r '.result.workspace.workspace_id')
+    clankers mux claim --session "$id" worktreePath "$path"
+    clankers mux claim --session "$id" workshopId "$workshop_id"
     if [[ -n "$parent_workshop_id" ]]; then
-        tmux -S "$tmux_socket" set-option -t "$name" @dotfiles_workshop_parent_id "$parent_workshop_id"
+        clankers mux claim --session "$id" workshopParentId "$parent_workshop_id"
     fi
 }
+qa_herdr_start "$root/herdr"
 create_session qa-parent "$parent_path" "$parent_id" ""
 create_session qa-middle "$middle_path" "$middle_id" "$parent_id"
 create_session qa-child "$child_path" "$child_id" "$middle_id"
@@ -76,7 +84,6 @@ create_session qa-child "$child_path" "$child_id" "$middle_id"
 # the daemon projection consumed by the native TUI client.
 env \
     HOME="$root/home" \
-    TMUX="$tmux_socket,0,0" \
     XDG_RUNTIME_DIR="$runtime" \
     XDG_STATE_HOME="$state_home" \
     XDG_DATA_HOME="$root/data" \
@@ -85,7 +92,7 @@ env \
     CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
     bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
 server_pid=$!
-daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
+daemon_socket="$runtime/clankerhouse-$uid-herdr/daemon.sock"
 for _ in {1..600}; do
     [[ -S "$daemon_socket" ]] && break
     kill -0 "$server_pid" 2>/dev/null || {
@@ -96,7 +103,7 @@ for _ in {1..600}; do
     sleep 0.05
 done
 [[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
-[[ ! -e "$runtime/clankerhouse-$uid/repositories.json" ]] || { printf 'Unexpected repository picker cache in isolated attachment scenario\n' >&2; exit 1; }
+[[ ! -e "$runtime/clankerhouse-$uid-herdr/repositories.json" ]] || { printf 'Unexpected repository picker cache in isolated attachment scenario\n' >&2; exit 1; }
 
 SOCKET_PATH="$daemon_socket" PARENT_ID="$parent_id" CHILD_ID="$child_id" MIDDLE_PATH="$middle_path" bun --eval '
   const [transportPath] = process.argv.slice(1)
@@ -118,17 +125,18 @@ SOCKET_PATH="$daemon_socket" PARENT_ID="$parent_id" CHILD_ID="$child_id" MIDDLE_
 ' "$repo/src/transport/index.ts"
 
 [[ ! -d "$middle_path" ]] || { printf 'Expected deleted middle worktree to be absent\n' >&2; exit 1; }
-! tmux -S "$tmux_socket" has-session -t '=qa-middle' 2>/dev/null || { printf 'Expected deleted middle tmux session to be absent\n' >&2; exit 1; }
-tmux -S "$tmux_socket" has-session -t '=qa-child'
+[[ -z "$(workspace_id qa-middle)" ]] || { printf 'Expected deleted middle session to be absent\n' >&2; exit 1; }
+child_session=$(workspace_id qa-child)
+[[ -n "$child_session" ]] || { printf 'Expected child session to survive\n' >&2; exit 1; }
 
-db="$state_home/clankerhouse/workshops.sqlite3"
+db="$state_home/clankerhouse-herdr/workshops.sqlite3"
 actual_parent=$(sqlite3 "$db" "select coalesce(parent_id, '') from workshops where id = '$child_id';")
 removed=$(sqlite3 "$db" "select count(*) from workshops where id = '$middle_id';")
-tmux_parent=$(tmux -S "$tmux_socket" show-option -qv -t qa-child @dotfiles_workshop_parent_id)
+claimed_parent=$(clankers mux read-claim --session "$child_session" workshopParentId)
 manifest_parent=$(jq -r '.parentWorkshopId // ""' "$child_path/.clankerhouse/workshop.json")
 [[ "$actual_parent" == "$parent_id" ]] || { printf 'Expected child DB parent %s, got %s\n' "$parent_id" "$actual_parent" >&2; exit 1; }
 [[ "$removed" == 0 ]] || { printf 'Expected deleted middle Workshop declaration to be removed\n' >&2; exit 1; }
-[[ "$tmux_parent" == "$parent_id" ]] || { printf 'Expected child tmux parent %s, got %s\n' "$parent_id" "$tmux_parent" >&2; exit 1; }
+[[ "$claimed_parent" == "$parent_id" ]] || { printf 'Expected child session parent claim %s, got %s\n' "$parent_id" "$claimed_parent" >&2; exit 1; }
 [[ "$manifest_parent" == "$parent_id" ]] || { printf 'Expected child manifest parent %s, got %s\n' "$parent_id" "$manifest_parent" >&2; exit 1; }
 
 snapshot_parent=$(SOCKET_PATH="$daemon_socket" CHILD_ID="$child_id" bun --eval '
@@ -141,4 +149,4 @@ snapshot_parent=$(SOCKET_PATH="$daemon_socket" CHILD_ID="$child_id" bun --eval '
 ' "$repo/src/transport/index.ts")
 [[ "$snapshot_parent" == "$parent_id" ]] || { printf 'Expected projected child parent %s, got %s\n' "$parent_id" "$snapshot_parent" >&2; exit 1; }
 
-printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, tmux claim, and projection to the available parent.\n'
+printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, session claim, and projection to the available parent.\n'

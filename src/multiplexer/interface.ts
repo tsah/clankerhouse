@@ -4,8 +4,8 @@
  * A Multiplexer Adapter hosts terminal topology for Clankerhouse. The Interface is
  * expressed in Clankerhouse domain operations: every Adapter implements the required
  * core, and declares which optional Runtime Capabilities it provides. Callers gate on
- * the declaration instead of assuming a runtime. Native vocabulary (tmux options,
- * herdr workspaces and tokens) never leaves the Adapter module that owns it.
+ * the declaration instead of assuming a runtime. Native vocabulary (herdr workspaces,
+ * tabs and tokens) never leaves the Adapter module that owns it.
  */
 import type { MultiplexerLocation } from "../resource-registry"
 
@@ -28,8 +28,6 @@ export interface MultiplexerCapabilities {
   popup: boolean
   /** Runtime-managed worktree checkouts grouped by repository. */
   worktrees: boolean
-  /** Focus a specific attached client rather than the whole server. */
-  clientRouting: boolean
   /** `changes()` is fed by runtime events rather than synthesized by polling. */
   nativeChanges: boolean
   /** `spawn` accepts an argv launch, not only a shell. */
@@ -142,8 +140,6 @@ export type SpawnRequest =
 
 export interface SpawnResult { nativeSessionId: string; nativeWindowId: string; nativePaneId: string }
 
-export interface AttachedClient { id: string; location: NativeLocation }
-
 export interface MultiplexerChange {
   /** Coarse change class; consumers re-observe rather than trusting event payloads. */
   kind: "topology" | "focus" | "metadata" | "status" | "reconnect"
@@ -159,14 +155,13 @@ export interface Multiplexer {
   observe(): Promise<MultiplexerSnapshot>
   /** Change Stream. May be synthesized by polling. Ends when the signal aborts. */
   changes(signal: AbortSignal): AsyncIterable<MultiplexerChange>
-  /** Location the given client (or the ambient caller) is currently looking at. */
-  currentLocation(client?: string): Promise<CurrentLocation | undefined>
-  listClients(): Promise<AttachedClient[]>
+  /** Location the runtime is currently focused on. */
+  currentLocation(): Promise<CurrentLocation | undefined>
   spawn(request: SpawnRequest): Promise<SpawnResult>
   kill(location: NativeLocation): Promise<void>
   /** Change the native label of a session, window, or pane. */
   rename(location: NativeLocation, name: string): Promise<void>
-  focus(location: NativeLocation, client?: string): Promise<void>
+  focus(location: NativeLocation): Promise<void>
   /** Submit text through the runtime's validated interactive-harness prompt operation when `agentPrompt` is declared. */
   promptAgent?(location: NativeLocation, text: string): Promise<void>
   /** Write (or clear with null) an identity claim on the native object at `location`. */

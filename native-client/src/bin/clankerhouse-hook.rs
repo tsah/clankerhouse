@@ -14,7 +14,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Activity only feeds recency ordering, so a busy clanker refreshes it at most this often.
@@ -34,14 +33,7 @@ fn main() {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Mux {
-    Tmux,
-    Herdr,
-}
-
 struct Context {
-    mux: Mux,
     pane: String,
     runtime_dir: PathBuf,
     state_dir: PathBuf,
@@ -52,27 +44,19 @@ fn var(name: &str) -> String {
 }
 
 fn context() -> Result<Option<Context>, String> {
-    let requested = var("CLANKERHOUSE_MULTIPLEXER").to_lowercase();
-    let mux = match requested.as_str() {
-        "tmux" => Mux::Tmux,
-        "herdr" => Mux::Herdr,
-        "" if var("HERDR_ENV") == "1" && !var("HERDR_PANE_ID").is_empty() => Mux::Herdr,
-        "" => Mux::Tmux,
-        other => return Err(format!("unsupported CLANKERHOUSE_MULTIPLEXER: {other}")),
-    };
-    let pane = var(if mux == Mux::Herdr { "HERDR_PANE_ID" } else { "TMUX_PANE" });
+    let pane = var("HERDR_PANE_ID");
     if pane.is_empty() {
         return Ok(None);
     }
     let instance = var("CLANKERHOUSE_INSTANCE");
     let slug = if instance.is_empty() {
-        if mux == Mux::Herdr { "-herdr".to_string() } else { String::new() }
+        "-herdr".to_string()
     } else if instance == "."
         || instance == ".."
         || !instance.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     {
         return Err(format!("invalid CLANKERHOUSE_INSTANCE: {instance}"));
-    } else if instance == "default" || instance == "tmux" {
+    } else if instance == "default" {
         String::new()
     } else {
         format!("-{instance}")
@@ -84,7 +68,6 @@ fn context() -> Result<Option<Context>, String> {
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| format!("{}/.local/state", env::var("HOME").unwrap_or_default()));
     Ok(Some(Context {
-        mux,
         pane,
         runtime_dir: PathBuf::from(format!("{runtime_root}/clankerhouse-{uid}{slug}")),
         state_dir: PathBuf::from(format!("{state_home}/clankerhouse{slug}")),
@@ -288,15 +271,6 @@ fn generated_clanker_id() -> String {
     format!("clanker-{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
-fn tmux_option(key: &str) -> &'static str {
-    match key {
-        "clankerId" => "@clankerhouse_clanker_id",
-        "harness" => "@dotfiles_harness",
-        "harnessSessionId" => "@clankerhouse_harness_session_id",
-        _ => "@clankerhouse_recovery_attempt",
-    }
-}
-
 fn herdr_token(key: &str) -> &'static str {
     match key {
         "clankerId" => "ch_clanker_id",
@@ -335,64 +309,26 @@ fn herdr_request(method: &str, params: Value) -> Option<Value> {
 }
 
 fn read_claim(ctx: &Context, key: &str) -> Option<String> {
-    let value = match ctx.mux {
-        Mux::Herdr => herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?
-            .get("pane")?
-            .get("tokens")?
-            .get(herdr_token(key))?
-            .as_str()?
-            .to_string(),
-        Mux::Tmux => {
-            let output = Command::new("tmux")
-                .args(["show-option", "-p", "-qv", "-t", &ctx.pane, tmux_option(key)])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .ok()?;
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-    };
+    let value = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?
+        .get("pane")?
+        .get("tokens")?
+        .get(herdr_token(key))?
+        .as_str()?
+        .to_string();
     if value.is_empty() { None } else { Some(value) }
 }
 
 fn pane_path(ctx: &Context) -> Option<PathBuf> {
-    let path = match ctx.mux {
-        Mux::Herdr => {
-            let result = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?;
-            let pane = result.get("pane")?;
-            ["foreground_cwd", "cwd"].iter().find_map(|key| pane.get(*key)?.as_str().filter(|v| !v.is_empty()).map(str::to_string))?
-        }
-        Mux::Tmux => {
-            let output = Command::new("tmux")
-                .args(["display-message", "-p", "-t", &ctx.pane, "#{pane_current_path}"])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .ok()?;
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-    };
+    let result = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?;
+    let pane = result.get("pane")?;
+    let path = ["foreground_cwd", "cwd"].iter().find_map(|key| pane.get(*key)?.as_str().filter(|v| !v.is_empty()).map(str::to_string))?;
     if path.is_empty() { None } else { Some(PathBuf::from(path)) }
 }
 
 fn write_claims(ctx: &Context, claims: &BTreeMap<&str, Option<String>>) {
-    match ctx.mux {
-        Mux::Herdr => {
-            let tokens: Map<String, Value> =
-                claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value))).collect();
-            herdr_request("pane.report_metadata", json!({ "pane_id": ctx.pane, "source": "clankerhouse", "tokens": tokens }));
-        }
-        Mux::Tmux => {
-            for (key, value) in claims {
-                let mut command = Command::new("tmux");
-                match value {
-                    Some(value) => command.args(["set-option", "-p", "-t", &ctx.pane, tmux_option(key), value]),
-                    None => command.args(["set-option", "-p", "-u", "-t", &ctx.pane, tmux_option(key)]),
-                };
-                let _ = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-            }
-        }
-    }
+    let tokens: Map<String, Value> =
+        claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value))).collect();
+    herdr_request("pane.report_metadata", json!({ "pane_id": ctx.pane, "source": "clankerhouse", "tokens": tokens }));
 }
 
 fn mark_activity(ctx: &Context, payload: &Value) {

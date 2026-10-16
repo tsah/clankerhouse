@@ -3,7 +3,7 @@
 # selected onto it, and the Multiplexer Interface exercised end to end (observe, spawn
 # with env, claims as tokens, absorption into the registry, lifecycle report keyed by
 # HERDR_PANE_ID, repository popup bootstrap, focus, kill). Never touches the user's
-# herdr config or tmux server.
+# herdr config or live server.
 set -euo pipefail
 
 uid=$(id -u)
@@ -14,17 +14,13 @@ if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
 fi
 marker="$root.clankerhouse-qa-owned"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-herdr_bin=${HERDR_BIN:-$(command -v herdr || true)}
-if [[ -z "$herdr_bin" ]]; then
-    if [[ -n "${HERDR_OPTIONAL:-}" ]]; then
-        printf 'herdr binary not found; skipping herdr Adapter scenario (set HERDR_BIN to run it).\n' >&2
-        exit 0
-    fi
-    printf 'herdr binary not found; set HERDR_BIN or install herdr\n' >&2
-    exit 1
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
+if [[ -z "$qa_herdr_bin" && -n "${HERDR_OPTIONAL:-}" ]]; then
+    printf 'herdr binary not found; skipping herdr Adapter scenario (set HERDR_BIN to run it).\n' >&2
+    exit 0
 fi
 server_pid=""
-herdr_pid=""
 runtime="$root/runtime"
 state_home="$root/state"
 cfg="$root/cfg"
@@ -32,15 +28,7 @@ work="$root/work"
 
 cleanup() {
     if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
-    if [[ -n "$herdr_pid" ]]; then
-        # Never use `herdr server stop` here: a mis-scoped client can resolve the live
-        # default socket. Signal only the exact isolated process group started below,
-        # after revalidating its endpoint so PID reuse cannot target another process.
-        if [[ -r "/proc/$herdr_pid/environ" ]] && tr '\0' '\n' <"/proc/$herdr_pid/environ" | grep -Fqx "HERDR_SOCKET_PATH=$herdr_sock"; then
-            kill -TERM -- "-$herdr_pid" 2>/dev/null || true
-        fi
-        wait "$herdr_pid" 2>/dev/null || true
-    fi
+    qa_herdr_stop
     if [[ -f "$marker" ]]; then rm -rf "$root"; fi
 }
 trap cleanup EXIT INT TERM
@@ -58,49 +46,16 @@ git -C "$work" -c user.email=qa@example.com -c user.name=qa commit -q --allow-em
 external_worktree="$root/external-delete"
 git -C "$work" worktree add -q -b qa-external-delete "$external_worktree"
 
-# Herdr 0.8 resolves its default server independently of XDG_CONFIG_HOME. Pin every
-# server endpoint explicitly and run it in a private process group; otherwise a failed
-# isolated start followed by `server stop` can address the user's live default server.
-export XDG_CONFIG_HOME="$cfg"
-export HERDR_CONFIG_PATH="$cfg/herdr/config.toml"
-export HERDR_SOCKET_PATH="$cfg/herdr/herdr.sock"
-export HERDR_CLIENT_SOCKET_PATH="$cfg/herdr/herdr-client.sock"
-export HERDR_STARTUP_CWD="$root/home"
-mkdir -p "$cfg/herdr"
+qa_herdr_start "$root"
 herdr_sock=$HERDR_SOCKET_PATH
-live_herdr_sock="$HOME/.config/herdr/herdr.sock"
-[[ "$herdr_sock" != "$live_herdr_sock" ]] || { printf 'Refusing live Herdr socket in standalone QA: %s\n' "$herdr_sock" >&2; exit 1; }
-setsid "$herdr_bin" server >"$root/herdr.log" 2>&1 &
-herdr_pid=$!
-for _ in {1..200}; do
-    [[ -S "$herdr_sock" ]] && break
-    kill -0 "$herdr_pid" 2>/dev/null || break
-    sleep 0.05
-done
-if [[ ! -S "$herdr_sock" ]]; then
-    printf 'isolated herdr server did not start at %s:\n' "$herdr_sock" >&2
-    cat "$root/herdr.log" >&2
-    exit 1
-fi
-if [[ -S "$live_herdr_sock" && "$herdr_sock" -ef "$live_herdr_sock" ]]; then
-    printf 'Refusing isolated Herdr socket alias to live server: %s\n' "$herdr_sock" >&2
-    exit 1
-fi
 
 clankers="$repo/bin/clankers"
 probe_bin="$root/probe-bin"
-tmux_log="$root/forbidden-tmux.log"
 mkdir -p "$probe_bin"
-cat >"$probe_bin/tmux" <<'SH'
-#!/bin/sh
-printf '%s\n' "$*" >>"$TMUX_LOG"
-exit 97
-SH
-chmod +x "$probe_bin/tmux"
 common_env=(
     env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data"
     XDG_CONFIG_HOME="$cfg" HERDR_ENV=1 HERDR_PANE_ID=qa:caller CLANKERHOUSE_INSTANCE=herdr CLANKERHOUSE_CLANKERS="$clankers"
-    PATH="$probe_bin:$PATH" TMUX_LOG="$tmux_log"
+    PATH="$probe_bin:$PATH"
     CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
     CLANKERHOUSE_DEV_ROOT="$root" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_PROCESS_OWNER=disabled
 )
@@ -109,8 +64,7 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; [[ -f "$root/server.log" ]] && { printf -
 
 step "Adapter selection and capabilities"
 kind=$("${common_env[@]}" "$clankers" mux kind)
-[[ "$kind" == herdr ]] || fail "expected implicitly inferred herdr adapter, got $kind"
-[[ "$("${common_env[@]}" CLANKERHOUSE_MULTIPLEXER=tmux "$clankers" mux kind)" == tmux ]] || fail "explicit tmux override did not win"
+[[ "$kind" == herdr ]] || fail "expected herdr adapter, got $kind"
 "${common_env[@]}" "$clankers" mux capabilities | grep -q '"durableIds":true' || fail "herdr capabilities missing durableIds"
 [[ "$("${common_env[@]}" "$clankers" mux pane-address-env)" == HERDR_PANE_ID ]] || fail "pane address env"
 
@@ -118,10 +72,10 @@ step "Spawn a workshop session with an env-injected argv window"
 spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-workshop --name main --cwd "$work")
 session_id=$(printf '%s' "$spawned" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
 [[ "$session_id" == w* ]] || fail "unexpected session id $spawned"
-window=$("${common_env[@]}" "$clankers" mux spawn --session "$session_id" --name pi --cwd "$work" --env CLANKER_ID=clanker-qa --env CLANKERHOUSE_CLANKERS="$clankers" -- sh -c 'echo "PANE=$HERDR_PANE_ID CID=$CLANKER_ID MUX=$CLANKERHOUSE_MULTIPLEXER INSTANCE=$CLANKERHOUSE_INSTANCE" > "$0"; sleep 120' "$root/pane-env.txt")
+window=$("${common_env[@]}" "$clankers" mux spawn --session "$session_id" --name pi --cwd "$work" --env CLANKER_ID=clanker-qa --env CLANKERHOUSE_CLANKERS="$clankers" -- sh -c 'echo "PANE=$HERDR_PANE_ID CID=$CLANKER_ID INSTANCE=$CLANKERHOUSE_INSTANCE" > "$0"; sleep 120' "$root/pane-env.txt")
 pane_id=$(printf '%s' "$window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])')
 for _ in {1..100}; do [[ -s "$root/pane-env.txt" ]] && break; sleep 0.05; done
-grep -q "PANE=$pane_id CID=clanker-qa MUX=herdr INSTANCE=herdr" "$root/pane-env.txt" || fail "pane env not injected: $(cat "$root/pane-env.txt" 2>/dev/null)"
+grep -q "PANE=$pane_id CID=clanker-qa INSTANCE=herdr" "$root/pane-env.txt" || fail "pane env not injected: $(cat "$root/pane-env.txt" 2>/dev/null)"
 
 step "Claims round-trip as herdr tokens"
 "${common_env[@]}" "$clankers" mux claim --pane "$pane_id" clankerId clanker-qa
@@ -336,7 +290,7 @@ ln -s "$herdr_cfg" "$linked_cfg"
 [[ -L "$linked_cfg" ]] || fail "keybinding installer replaced the config symlink"
 grep -q '/opt/ch-herdr-linked' "$herdr_cfg" || fail "keybinding installer did not write through the symlink"
 
-step "Herdr launcher ensures a namespaced daemon separate from tmux"
+step "Herdr launcher ensures the namespaced daemon"
 # The existing daemon (started above with --server) already owns the herdr instance; the
 # launcher's --ensure-server must find it healthy under the -herdr runtime dir.
 bun_log="$root/hot-bun.log"
@@ -351,7 +305,6 @@ chmod +x "$probe_bin/bun"
 "${common_env[@]}" HERDR_SOCKET_PATH="$herdr_sock" PATH="$probe_bin:$PATH" REAL_BUN="$real_bun" BUN_LOG="$bun_log" bash "$repo/bin/clankerhouse-herdr" --ensure-server || fail "launcher could not confirm the herdr daemon"
 [[ ! -e "$bun_log" ]] || fail "hot Herdr launcher started Bun: $(cat "$bun_log")"
 [[ -S "$daemon_socket" ]] || fail "herdr daemon socket is not under the -herdr runtime dir"
-[[ ! -S "$runtime/clankerhouse-$uid/daemon.sock" ]] || fail "herdr daemon leaked into the tmux runtime dir"
 
 # The hot-launch probe is no longer needed; later CLI calls use real Bun.
 rm "$probe_bin/bun"
@@ -449,6 +402,5 @@ git -C "$work" show-ref --verify --quiet refs/heads/qa-external-delete || fail "
 
 step "Daemon log is free of adapter failures"
 if grep -Ei 'change stream stopped|Recovery controller stopped|Unsupported multiplexer' "$root/server.log"; then fail "daemon reported adapter failures"; fi
-[[ ! -e "$tmux_log" ]] || fail "implicit Herdr commands invoked tmux: $(cat "$tmux_log")"
 
 printf '\nherdr Adapter scenario passed.\n'

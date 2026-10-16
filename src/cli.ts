@@ -11,7 +11,6 @@ import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { harnessModelArgs } from "./recovery/harness"
 import { stopOwnedHarness } from "./recovery/process-owner"
-import { libexecPath } from "./installation"
 import { openManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
@@ -36,10 +35,10 @@ export const mutationProgressSteps = (intent: MutationIntent): readonly string[]
     "Validating worktree identity",
     "Stopping tracked Clankers",
     "Deleting worktree",
-    "Deleting tmux session",
+    "Deleting session",
     "Refreshing Clankerhouse",
   ]
-  return ["Validating tmux identity", `Deleting tmux ${intent.kind}`, "Refreshing Clankerhouse"]
+  return ["Validating identity", `Deleting ${intent.kind}`, "Refreshing Clankerhouse"]
 }
 
 // Fetching the base and checking out a large repository takes longer than an ordinary mutation.
@@ -323,9 +322,9 @@ const usage = `Usage:
   clankers recovery resume CLANKER_ID [--force]
   clankers recovery unquarantine CLANKER_ID --reason TEXT
   clankers recovery stop|start|suspend|tombstone CLANKER_ID
-  clankers mux kind|capabilities|pane-address-env|observe|current-location [--client CLIENT]
+  clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
-  clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION) [--client CLIENT]
+  clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
   clankers mux clanker-ids|pane-path (--pane PANE|--session SESSION)
   clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
 
@@ -353,7 +352,7 @@ const runMultiplexerCli = async (parsed: ParsedArgs) => {
   if (subcommand === "capabilities") return console.log(JSON.stringify({ kind: multiplexer.kind, ...multiplexer.capabilities() }))
   if (subcommand === "pane-address-env") return console.log(multiplexer.paneAddressEnv())
   if (subcommand === "observe") return console.log(JSON.stringify(await multiplexer.observe()))
-  if (subcommand === "current-location") return console.log(JSON.stringify(await multiplexer.currentLocation(parsed.take("--client")) ?? null))
+  if (subcommand === "current-location") return console.log(JSON.stringify(await multiplexer.currentLocation() ?? null))
   if (subcommand === "claim" || subcommand === "read-claim") {
     const unset = parsed.has("--unset")
     const location = muxLocation(parsed)
@@ -376,17 +375,14 @@ const runMultiplexerCli = async (parsed: ParsedArgs) => {
     return console.log([...new Set(panes.flatMap((pane) => pane.clankerId ? [pane.clankerId] : []))].join("\n"))
   }
   if (subcommand === "kill") return multiplexer.kill(muxLocation(parsed))
-  if (subcommand === "focus") {
-    const client = parsed.take("--client")
-    return multiplexer.focus(muxLocation(parsed), client)
-  }
+  if (subcommand === "focus") return multiplexer.focus(muxLocation(parsed))
   if (subcommand === "spawn") {
     const newSession = parsed.take("--new-session")
     const session = parsed.take("--session")
     const name = parsed.take("--name")
     const cwd = parsed.take("--cwd")
     const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
-    const env: Record<string, string> = { CLANKERHOUSE_MULTIPLEXER: multiplexer.kind, ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}) }
+    const env: Record<string, string> = instance ? { CLANKERHOUSE_INSTANCE: instance } : {}
     let pair = parsed.take("--env")
     while (pair) {
       const separator = pair.indexOf("=")
@@ -433,7 +429,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const report = diagnoseProjection(snapshot.sessions)
     if (json) console.log(JSON.stringify(report, null, 2))
     else {
-      console.log(`Clankerhouse projection: ${report.counts.tmuxSessions} tmux sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
+      console.log(`Clankerhouse projection: ${report.counts.sessions} sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
       if (!report.issues.length) console.log("No projection anomalies detected.")
       for (const entry of report.issues) console.log(`${entry.severity.toUpperCase()} ${entry.code}: ${entry.summary}`)
     }
@@ -447,29 +443,21 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const encoded = parsed.take("--json")
     if (!encoded) throw new Error("--json is required")
     const target = JSON.parse(encoded) as Target
-    const client = parsed.take("--client")
-    const routed = await routeCompatibilityMutation({ type: "open", target, ...(client ? { client } : {}) })
+    const routed = await routeCompatibilityMutation({ type: "open", target })
     if (routed) return
     const multiplexer = openManagedMultiplexer()
-    if (target.type === "tmux_session" || target.type === "tmux_window") {
-      await multiplexer.openTarget(target, client)
+    if (target.type === "session" || target.type === "window") {
+      await multiplexer.openTarget(target)
       return
     }
     if (target.type === "opencode") {
       const location = await multiplexer.resolve(target)
-      if (multiplexer.kind !== "tmux") {
-        if (!location) throw new Error(`OpenCode target has no current ${multiplexer.kind} location`)
-        await multiplexer.open(location, client)
-        return
-      }
-      const pane = location?.nativePaneId || target.pane
-      const proc = Bun.spawn([libexecPath("opencode-attach-target"), target.session, pane], { stdin: "inherit", stdout: "inherit", stderr: "inherit" })
-      const code = await proc.exited
-      if (code !== 0) throw new Error(`opencode attach exited ${code}`)
+      if (!location) throw new Error(`OpenCode target has no current ${multiplexer.kind} location`)
+      await multiplexer.open(location)
       return
     }
     const session = await ensureDirectorySession(target.path)
-    await multiplexer.openTarget({ type: "tmux_session", session }, client)
+    await multiplexer.openTarget({ type: "session", session })
     return
   }
 
@@ -477,7 +465,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const subcommand = parsed.shift()
     const store = openRecoveryStore()
     try {
-      if (subcommand === "status") return console.log(JSON.stringify({ epochs: store.runtimeEpochs(), tmuxServerEpoch: store.getMetadata("runtime.tmux_server_epoch") ?? null, clankers: store.listDesired({ includeTombstoned: true }).map((row) => ({ ...row, originalTask: undefined })), attempts: store.listDesired({ includeTombstoned: true }).flatMap((row) => store.attemptsFor(row.clankerId)) }))
+      if (subcommand === "status") return console.log(JSON.stringify({ epochs: store.runtimeEpochs(), serverEpoch: store.getMetadata("runtime.server_epoch") ?? null, clankers: store.listDesired({ includeTombstoned: true }).map((row) => ({ ...row, originalTask: undefined })), attempts: store.listDesired({ includeTombstoned: true }).flatMap((row) => store.attemptsFor(row.clankerId)) }))
       if (subcommand === "journal") return console.log(JSON.stringify(store.journalEntries({ afterId: nonNegativeNumber(parsed.take("--after"), "--after"), limit: nonNegativeNumber(parsed.take("--limit"), "--limit") })))
       if (subcommand === "reconcile") return console.log(JSON.stringify(await reconcileRecovery(store, { trigger: parsed.take("--reason") || "manual" })))
       if (subcommand === "pending") return console.log(JSON.stringify(store.listDesired().filter((row) => row.recoveryCondition !== "healthy")))

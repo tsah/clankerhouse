@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Standalone spawn --model acceptance. Requires Bun, Git, tmux and real Worktrunk.
+"""Standalone spawn --model acceptance. Requires Bun, Git, Herdr and real Worktrunk.
 Only external harnesses are faked. Set CLANKERHOUSE_SPAWN_MODEL_QA_KEEP=1 to keep
-isolated evidence (the private tmux server is still stopped).
+isolated evidence (the private Herdr server is still stopped).
 """
 import hashlib
 import json
@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +24,7 @@ clanker = os.environ.get("CLANKER_ID", "unexpected")
 mode = "recovery" if "--session" in argv or "--resume" in argv else "initial"
 path = pathlib.Path(os.environ["CLANKERHOUSE_QA_LOG_DIR"]) / (clanker + "." + mode + ".json")
 record = {"harness": harness, "argv": argv, "cwd": os.getcwd(), "complete": False,
-          "pane": os.environ.get("TMUX_PANE"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT"),
+          "pane": os.environ.get("HERDR_PANE_ID"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT"),
           "workshopId": os.environ.get("CLANKERHOUSE_WORKSHOP_ID"), "parentWorkshopId": os.environ.get("CLANKERHOUSE_PARENT_WORKSHOP_ID")}
 def save():
     pending = path.with_suffix(".tmp")
@@ -42,8 +41,8 @@ try:
         subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "recovery", "attest", clanker,
                         "--session-id", session, "--attempt", os.environ["CLANKER_RECOVERY_ATTEMPT"]],
                        check=True, capture_output=True, text=True, timeout=15)
-        subprocess.run(["tmux", "set-option", "-p", "-t", os.environ["TMUX_PANE"],
-                        "@clankerhouse_harness_session_id", session], check=True, timeout=5)
+        subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "mux", "claim", "--pane", os.environ["HERDR_PANE_ID"],
+                        "harnessSessionId", session], check=True, capture_output=True, timeout=15)
     record["complete"] = True
     save()
 except Exception as error:
@@ -65,13 +64,16 @@ def require(condition, message):
 
 def main():
     repo = Path(__file__).resolve().parent.parent
-    tools = {name: shutil.which(name) for name in ("bun", "git", "tmux", "wt", "python3")}
-    require(all(tools.values()), "Required executables: bun, git, tmux, wt, python3")
+    tools = {name: shutil.which(name) for name in ("bun", "git", "wt", "python3")}
+    tools["herdr"] = os.environ.get("HERDR_BIN") or shutil.which("herdr")
+    require(all(tools.values()), "Required executables: bun, git, herdr, wt, python3")
     root = Path(tempfile.mkdtemp(prefix="qa-clankerhouse-spawn-model-", dir="/tmp"))
     token = uuid.uuid4().hex
     marker = root / ".qa-owned"
     marker.write_text(token)
-    socket = root / "tmux.sock"
+    socket = root / "config/herdr/herdr.sock"
+    live_socket = Path.home() / ".config/herdr/herdr.sock"
+    server = None
     keep = os.environ.get("CLANKERHOUSE_SPAWN_MODEL_QA_KEEP") == "1"
     env = {}
 
@@ -83,11 +85,42 @@ def main():
             raise RuntimeError(f"{argv!r} exited {result.returncode}\n{result.stdout}\n{result.stderr}")
         return result
 
-    def mux(*args, check=True):
-        return run([tools["tmux"], "-S", socket, *args], check=check, timeout=10)
-
     def cli(*args, cwd=None, check=True):
         return run([repo / "bin/clankers", *args], cwd=cwd, check=check)
+
+    def observe():
+        return json.loads(cli("mux", "observe").stdout)["sessions"]
+
+    def herdr_panes():
+        # Topology straight from the isolated runtime: it never touches Clankerhouse state.
+        return json.loads(run([tools["herdr"], "pane", "list"], timeout=10).stdout)["result"]["panes"]
+
+    def panes():
+        # Herdr pane ids are never reused, so they also prove a terminal was not replaced.
+        return {f"{pane['pane_id']}:{pane['tab_id']}" for pane in herdr_panes()}
+
+    def windows_holding(pane_id):
+        # The session that holds the pane, as its ordered window ids.
+        rows = herdr_panes()
+        workspace = next((pane["workspace_id"] for pane in rows if pane["pane_id"] == pane_id), None)
+        return list(dict.fromkeys(pane["tab_id"] for pane in rows if pane["workspace_id"] == workspace)) if workspace else []
+
+    def stop_server():
+        # Never `herdr server stop`: a mis-scoped client can resolve the live default
+        # socket. Signal only the isolated process group, after revalidating its endpoint.
+        if server is None or server.poll() is not None:
+            return True
+        try:
+            environ = Path(f"/proc/{server.pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            environ = []
+        if f"HERDR_SOCKET_PATH={socket}".encode() in environ:
+            os.killpg(server.pid, signal.SIGTERM)
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     def status():
         return json.loads(cli("recovery", "status").stdout)
@@ -132,8 +165,9 @@ def main():
             "XDG_DATA_DIRS": str(root / "data-dirs"), "TMPDIR": str(root / "tmp"),
             "PI_CODING_AGENT_DIR": str(root / "pi"), "CLAUDE_CONFIG_DIR": str(root / "home/.claude"),
             "CODEX_HOME": str(root / "home/.codex"), "BUN_INSTALL": str(root / "home/.bun"),
-            "BUN_INSTALL_CACHE_DIR": str(root / "cache/bun"), "TMUX_TMPDIR": str(root / "runtime"),
-            "TMUX": f"{socket},0,0", "CLANKERHOUSE_MULTIPLEXER": "tmux",
+            "BUN_INSTALL_CACHE_DIR": str(root / "cache/bun"),
+            "HERDR_CONFIG_PATH": str(root / "config/herdr/config.toml"), "HERDR_SOCKET_PATH": str(socket),
+            "HERDR_CLIENT_SOCKET_PATH": str(root / "config/herdr/herdr-client.sock"), "HERDR_STARTUP_CWD": str(root),
             "CLANKERHOUSE_HOME": str(repo), "CLANKERHOUSE_BIN_DIR": str(repo / "bin"),
             "CLANKERHOUSE_LIBEXEC": str(repo / "libexec"),
             "CLANKERHOUSE_CLANKERS": str(repo / "bin/clankers"),
@@ -162,12 +196,19 @@ def main():
             run([tools["git"], "-C", fixture, "add", "tracked.txt"])
             run([tools["git"], "-C", fixture, "commit", "-qm", "fixture"])
             fixtures[kind] = fixture
-        config = root / "config/tmux.conf"
-        config.write_text('set -g default-shell /bin/sh\nset -g update-environment ""\n')
-        mux("-f", str(config), "new-session", "-d", "-s", "qa-anchor", "-c", str(root), "/bin/sh")
-        mux("set-option", "-g", "@qa_spawn_model_owner", token)
-        require(mux("display-message", "-p", "#{socket_path}").stdout.strip() == str(socket),
-                "tmux did not select the isolated socket")
+        # Herdr resolves its default server independently of XDG_CONFIG_HOME, so every
+        # endpoint is pinned above and the server runs in a private process group. Panes
+        # inherit only this isolated environment.
+        require(socket != live_socket, "Refusing the live Herdr socket")
+        (root / "config/herdr").mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(root / "herdr.log", "w") as herdr_log:
+            server = subprocess.Popen([tools["herdr"], "server"], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                      stdout=herdr_log, stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not socket.is_socket() and server.poll() is None:
+            time.sleep(0.05)
+        require(socket.is_socket(), f"Isolated Herdr server did not start: {(root / 'herdr.log').read_text()}")
+        require(not (live_socket.is_socket() and socket.samefile(live_socket)), "Isolated Herdr socket aliases the live server")
 
         def command(kind, harness, name):
             if kind == "direct":
@@ -180,8 +221,10 @@ def main():
             for directory in (root / "state", root / "runtime", root / "worktrees", root / "logs", *fixtures.values()):
                 for path in sorted(directory.rglob("*")):
                     relative = str(path.relative_to(root))
+                    if relative == "state/herdr" or relative.startswith("state/herdr/"):
+                        continue  # The isolated Herdr server's own state, written on its own schedule.
                     files[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "directory"
-            return files, mux("list-panes", "-a", "-F", "#{session_id}:#{window_id}:#{pane_id}").stdout
+            return files, panes()
 
         before = snapshot()
         for kind in fixtures:
@@ -214,14 +257,14 @@ def main():
             elif prompt_mode == "positional":
                 prompt = "QA positional prompt"
                 args += ["QA", "positional", "prompt"]
-            previous_panes = set(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}:#{pane_pid}").stdout.splitlines())
+            previous_panes = panes()
             result = json.loads(cli(*args, cwd=fixtures[kind]).stdout)
             log = wait_log(result["clankerId"])
-            current_panes = set(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}:#{pane_pid}").stdout.splitlines())
+            current_panes = panes()
             require(previous_panes <= current_panes, "Spawning an agent replaced an existing terminal")
             require(len(current_panes - previous_panes) == 1, "Agent spawn created an unnecessary shell tab")
             if kind == "workshop":
-                windows = mux("list-windows", "-t", result["session"], "-F", "#{window_id}").stdout.splitlines()
+                windows = windows_holding(result["pane"])
                 require(windows == [result["window"]], f"New Workshop should contain only its agent tab: {windows}")
             cwd = Path(result["identity"]["path"]).resolve()
             require(root in cwd.parents, f"Worktrunk escaped the isolated root: {cwd}")
@@ -298,18 +341,19 @@ def main():
         run([tools["git"], "init", "-q", "-b", "main", dormant])
         run([tools["git"], "-C", dormant, "-c", "user.name=QA", "-c", "user.email=qa@example.invalid", "commit", "-qm", "fixture", "--allow-empty"])
         dormant_session = cli("workshop", "ensure", "--cwd", str(dormant)).stdout.strip()
-        mux("kill-session", "-t", dormant_session)
+        dormant_id = next(session["id"] for session in observe() if dormant_session in (session["id"], session["nativeName"]))
+        cli("mux", "kill", "--session", dormant_id)
         dormant_spawn = json.loads(cli("spawn", "--workshop", str(dormant), "--name", "only-agent", "--harness", "pi", cwd=dormant).stdout)
         wait_log(dormant_spawn["clankerId"])
-        require(mux("list-windows", "-t", dormant_spawn["session"], "-F", "#{window_id}").stdout.splitlines() == [dormant_spawn["window"]],
+        require(windows_holding(dormant_spawn["pane"]) == [dormant_spawn["window"]],
                 "Dormant Workshop spawn created an unnecessary shell tab")
         print("PASS: dormant Workshop starts with only its agent tab", flush=True)
 
-        before_failure = mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}").stdout
+        before_failure = panes()
         failed = cli("workshop", "spawn", "--name", "failed-profile", "--harness", "pi", "--profile", "missing-qa-profile", "--no-parent",
                      cwd=fixtures["workshop"], check=False)
         require(failed.returncode != 0 and "profile" in failed.stderr.lower(), "Invalid profile was accepted")
-        require(mux("list-panes", "-a", "-F", "#{pane_id}:#{window_id}").stdout == before_failure, "Failed registration changed terminal topology")
+        require(panes() == before_failure, "Failed registration changed terminal topology")
         require(not (root / "worktrees/repo-workshop.failed-profile").exists(), "Failed Workshop was not rolled back")
         require(not run([tools["git"], "-C", fixtures["workshop"], "branch", "--list", "failed-profile"]).stdout.strip(), "Failed Workshop branch survived rollback")
         print("PASS: registration failure rolls back without creating a shell tab", flush=True)
@@ -319,9 +363,9 @@ def main():
         cli("recovery", "reconcile")
         for result, initial, spec in (pi, claude):
             clanker = result["clankerId"]
-            require(mux("show-option", "-p", "-t", result["pane"], "-qv", "@clankerhouse_clanker_id").stdout.strip() == clanker,
+            require(cli("mux", "read-claim", "--pane", result["pane"], "clankerId").stdout.strip() == clanker,
                     "Refusing to kill a pane without the expected fixture ownership")
-            mux("kill-pane", "-t", result["pane"])
+            cli("mux", "kill", "--pane", result["pane"])
             cli("recovery", "reconcile")
             resumed = json.loads(cli("recovery", "resume", clanker, "--force").stdout)
             require(clanker in resumed["launched"], f"Exact recovery not launched: {resumed}")
@@ -331,7 +375,9 @@ def main():
             require((recovered["workshopId"], recovered["parentWorkshopId"]) == (initial["workshopId"], initial["parentWorkshopId"]),
                     f"Recovery changed the Workshop launch env: {recovered}")
             if initial["harness"] == "claude":
-                require(len(mux("list-windows", "-t", result["session"], "-F", "#{window_id}").stdout.splitlines()) == 1,
+                recovered_pane = next(pane["id"] for session in observe() for window in session["windows"] for pane in window["panes"]
+                                      if (pane.get("claims") or {}).get("clankerId") == clanker)
+                require(len(windows_holding(recovered_pane)) == 1,
                         "Recovery recreated an unnecessary shell tab")
             expected = list(initial["argv"][:-1])
             expected[expected.index("--session-id")] = "--session" if initial["harness"] == "pi" else "--resume"
@@ -353,23 +399,16 @@ def main():
                  and marker.is_file() and not marker.is_symlink() and marker.read_text() == token)
         if not owned:
             raise RuntimeError(f"Refusing cleanup of unowned QA root: {root}")
-        safe_to_remove = True
-        if socket.exists() or socket.is_symlink():
-            info = socket.lstat()
-            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid(), "Refusing unowned tmux socket cleanup")
-            # The fresh, mode-700 marked directory owns this socket even if setup
-            # failed before the server's descriptive @qa option was installed.
-            killed = mux("kill-server", check=False)
-            if killed.returncode and "no server running" not in killed.stderr:
-                safe_to_remove = False
-                print(f"Private tmux cleanup failed: {killed.stderr}", file=sys.stderr)
+        safe_to_remove = stop_server()
+        if not safe_to_remove:
+            print("Private Herdr server did not stop", file=sys.stderr)
         if keep or not safe_to_remove:
             print(f"QA evidence: {root}", file=sys.stderr)
         else:
             shutil.rmtree(root)
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
-        require(safe_to_remove, "Could not stop the private tmux server; evidence retained")
+        require(safe_to_remove, "Could not stop the private Herdr server; evidence retained")
 
 
 if __name__ == "__main__":

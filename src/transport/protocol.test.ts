@@ -6,7 +6,7 @@ const mutation = (intent: unknown) => parseRequest({ version: 1, id: "request", 
 describe("mutation protocol target set", () => {
   test("accepts absorb, reparent, start, stop, and recovery intents", () => {
     const intents = [
-      { type: "absorb", target: { type: "tmux_session", session: "repo", management: "unmanaged", location: { kind: "tmux", instanceId: "server", nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null } } },
+      { type: "absorb", target: { type: "session", session: "repo", management: "unmanaged", location: { kind: "herdr", instanceId: "server", nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null } } },
       { type: "reparent", workshopId: "child", parentWorkshopId: "parent", session: "repo" },
       { type: "start", clankerId: "clanker-1", force: true },
       { type: "stop", clankerId: "clanker-1", confirmed: true, reason: "operator" },
@@ -16,10 +16,9 @@ describe("mutation protocol target set", () => {
     for (const intent of intents) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
   })
 
-  test("preserves an explicit requesting client on open intents", () => {
-    const intent = { type: "open", target: { type: "tmux_session", session: "child" }, client: "/dev/pts/9" }
+  test("open intents carry only the target", () => {
+    const intent = { type: "open", target: { type: "session", session: "child" } }
     expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
-    expect(mutation({ ...intent, client: "" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
   })
 
   test("accepts well-formed label and done intents and rejects malformed labels", () => {

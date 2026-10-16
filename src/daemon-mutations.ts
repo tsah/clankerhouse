@@ -5,14 +5,14 @@ export const mutationStages = (intent: MutationIntent): readonly string[] => {
   switch (intent.type) {
     case "open": return ["identity.validated", "target.opened"]
     case "absorb": return ["identity.validated", "topology.absorbed", "projection.refreshed"]
-    case "rename": return ["identity.validated", "tmux.renamed", "display-name.persisted", "projection.refreshed"]
+    case "rename": return ["identity.validated", "multiplexer.renamed", "display-name.persisted", "projection.refreshed"]
     case "attach":
-    case "reparent": return ["identity.validated", "lineage.updated", "tmux-parent.updated", "projection.refreshed"]
-    case "detach": return ["identity.validated", "lineage.updated", "tmux-parent.updated", "projection.refreshed"]
+    case "reparent": return ["identity.validated", "lineage.updated", "multiplexer-parent.updated", "projection.refreshed"]
+    case "detach": return ["identity.validated", "lineage.updated", "multiplexer-parent.updated", "projection.refreshed"]
     case "delete": return intent.kind === "worktree"
-      ? ["identity.validated", "tmux.marked", "worktree.deleted", "lineage.spliced", "tmux-children.updated", "tmux.deleted", "projection.refreshed"]
+      ? ["identity.validated", "multiplexer.marked", "worktree.deleted", "lineage.spliced", "multiplexer-children.updated", "multiplexer.deleted", "projection.refreshed"]
       : ["identity.validated", "target.deleted", "projection.refreshed"]
-    case "create": return ["identity.validated", "worktree.ready", "tmux.ready", "hook.dispatched", "projection.refreshed"]
+    case "create": return ["identity.validated", "worktree.ready", "multiplexer.ready", "hook.dispatched", "projection.refreshed"]
     case "start": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]
     case "stop": return ["identity.validated", "desired-state.updated", "harness.stopped", "projection.refreshed"]
     case "recovery": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]

@@ -8,7 +8,7 @@ Accepted
 
 Clankerhouse and OpenCode 2 increasingly provide overlapping control-plane behavior. OpenCode 2 owns a long-lived server, projects and worktrees, durable sessions, lifecycle events, prompts, permissions, results, and attachable clients. Reimplementing those semantics inside Clankerhouse creates two authorities and requires fragile correlation between server-global sessions, local processes, panes, and Clanker identity.
 
-Pi has the opposite shape. It is a local, extensible harness with transparent session persistence and public lifecycle, messaging, SDK, and RPC Interfaces, but it does not prescribe a central server, Workshop model, herd UI, tmux topology, or Recovery policy. Claude also remains a primary supported harness through its native session and lifecycle contracts. These harnesses leave Clankerhouse's Workshop, Terminal, Clanker, navigation, Recovery, and host-safety responsibilities distinct.
+Pi has the opposite shape. It is a local, extensible harness with transparent session persistence and public lifecycle, messaging, SDK, and RPC Interfaces, but it does not prescribe a central server, Workshop model, herd UI, multiplexer topology, or Recovery policy. Claude also remains a primary supported harness through its native session and lifecycle contracts. These harnesses leave Clankerhouse's Workshop, Terminal, Clanker, navigation, Recovery, and host-safety responsibilities distinct.
 
 Supporting every harness symmetrically would force Clankerhouse's Interfaces toward the least capable Adapter and spend implementation effort duplicating external systems rather than deepening its own Modules.
 

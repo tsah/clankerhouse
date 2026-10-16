@@ -5,24 +5,30 @@ set -euo pipefail
 action=${1:-}
 shift || true
 runtime_dir=
-tmux_socket=
+herdr_socket=
 application=
 while (($#)); do
     case "$1" in
         --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
-        --tmux-socket) tmux_socket=${2:?}; shift 2 ;;
+        --herdr-socket) herdr_socket=${2:?}; shift 2 ;;
         --application) application=${2:?}; shift 2 ;;
         *) echo "Unknown daemon hook argument: $1" >&2; exit 2 ;;
     esac
 done
-case "$action" in quiesce|activate|restart) ;; *) echo "Usage: scripts/install-daemon-hook quiesce|activate|restart --runtime-dir PATH --tmux-socket PATH --application PATH" >&2; exit 2;; esac
-[[ -n "$runtime_dir" && -n "$tmux_socket" && -n "$application" ]] || { echo "Daemon hooks require an explicit runtime, tmux socket, and application target" >&2; exit 2; }
+case "$action" in quiesce|activate|restart) ;; *) echo "Usage: scripts/install-daemon-hook quiesce|activate|restart --runtime-dir PATH --herdr-socket PATH --application PATH" >&2; exit 2;; esac
+[[ -n "$runtime_dir" && -n "$herdr_socket" && -n "$application" ]] || { echo "Daemon hooks require an explicit runtime, herdr socket, and application target" >&2; exit 2; }
 runtime_dir=$(realpath -m -- "$runtime_dir")
-tmux_socket=$(realpath -m -- "$tmux_socket")
+herdr_socket=$(realpath -m -- "$herdr_socket")
 application=$(realpath -e -- "$application")
 [[ -d "$runtime_dir" && ! -L "$runtime_dir" && -O "$runtime_dir" ]] || { echo "Refusing unsafe selected runtime: $runtime_dir" >&2; exit 1; }
-[[ -S "$tmux_socket" ]] || { echo "Selected tmux socket is unavailable: $tmux_socket" >&2; exit 1; }
-state_dir="$runtime_dir/clankerhouse-$(id -u)"
+[[ -S "$herdr_socket" ]] || { echo "Selected herdr socket is unavailable: $herdr_socket" >&2; exit 1; }
+instance_slug=-herdr
+if [[ -n "${CLANKERHOUSE_INSTANCE:-}" ]]; then
+    [[ "$CLANKERHOUSE_INSTANCE" =~ ^[A-Za-z0-9._-]+$ && "$CLANKERHOUSE_INSTANCE" != . && "$CLANKERHOUSE_INSTANCE" != .. ]] || { echo "Invalid CLANKERHOUSE_INSTANCE: $CLANKERHOUSE_INSTANCE" >&2; exit 2; }
+    instance_slug=-$CLANKERHOUSE_INSTANCE
+    [[ "$CLANKERHOUSE_INSTANCE" != default ]] || instance_slug=
+fi
+state_dir="$runtime_dir/clankerhouse-$(id -u)$instance_slug"
 if [[ -e "$state_dir" || -L "$state_dir" ]]; then
     [[ -d "$state_dir" && ! -L "$state_dir" && -O "$state_dir" ]] || { echo "Refusing unsafe daemon state directory: $state_dir" >&2; exit 1; }
 else
@@ -32,15 +38,14 @@ chmod 700 "$state_dir"
 pid_file="$state_dir/server.pid"
 
 process_matches_selection() {
-    local pid=$1 cwd= process_tmux= process_runtime=
+    local pid=$1 cwd= process_herdr= process_runtime=
     [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
     tr '\0' ' ' < "/proc/$pid/cmdline" | grep -F 'bun src/daemon.ts --server' >/dev/null || return 1
     cwd=$(readlink -e "/proc/$pid/cwd" 2>/dev/null || true)
     [[ "$cwd" == "$application" ]] || return 1
-    process_tmux=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^TMUX=//p' | head -n 1)
-    process_tmux=${process_tmux%%,*}
+    process_herdr=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^HERDR_SOCKET_PATH=//p' | head -n 1)
     process_runtime=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -n 1)
-    [[ "$process_tmux" == "$tmux_socket" && "$process_runtime" == "$runtime_dir" ]]
+    [[ "$process_herdr" == "$herdr_socket" && "$process_runtime" == "$runtime_dir" ]]
 }
 
 quiesce() {
@@ -89,11 +94,9 @@ case "$action" in
         quiesce
         ;;
     activate|restart)
-        tmux_pid=$(tmux -S "$tmux_socket" display-message -p '#{pid}')
-        env TMUX="$tmux_socket,$tmux_pid,0" XDG_RUNTIME_DIR="$runtime_dir" \
-            CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID= \
+        env HERDR_SOCKET_PATH="$herdr_socket" XDG_RUNTIME_DIR="$runtime_dir" \
             CLANKERHOUSE_HOME="$application" CLANKERHOUSE_BIN_DIR="$application/bin" CLANKERHOUSE_LIBEXEC="$application/libexec" \
-            "$application/bin/clankerhouse-picker" --ensure-server
+            "$application/bin/clankerhouse-herdr" --ensure-server
         for _ in {1..50}; do probe && exit 0; sleep 0.05; done
         echo "Daemon health probe failed for $application" >&2
         exit 1

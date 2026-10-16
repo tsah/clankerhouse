@@ -10,7 +10,7 @@ import { openResourceRegistry, type MultiplexerLocation, type ResourceRecord } f
 import { identifyWorkshopSync, persistWorkshopLineage, workshopForPath } from "../workshop"
 import {
   paneLocation, sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
-  type AttachedClient, type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type SpawnRequest,
+  type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type SpawnRequest,
 } from "./interface"
 
 export interface MultiplexerTarget {
@@ -19,10 +19,10 @@ export interface MultiplexerTarget {
   location?: Omit<MultiplexerLocation, "observedAt">
 }
 
-/** Target names retain `tmux_*` labels for wire compatibility; the runtime kind lives on the location. */
+/** The runtime kind lives on the location, not the target type. */
 export type OpenMultiplexerTarget =
-  | ({ type: "tmux_session"; session: string } & MultiplexerTarget)
-  | ({ type: "tmux_window"; session: string; windowId: string; pane: string } & MultiplexerTarget)
+  | ({ type: "session"; session: string } & MultiplexerTarget)
+  | ({ type: "window"; session: string; windowId: string; pane: string } & MultiplexerTarget)
 
 export interface AbsorbedSession {
   workshopId: string
@@ -53,12 +53,11 @@ export class ManagedMultiplexer {
   capabilities() { return this.adapter.capabilities() }
   instanceId() { return this.adapter.instanceId() }
   observe() { return this.adapter.observe() }
-  currentLocation(client?: string) { return this.adapter.currentLocation(client) }
-  listClients(): Promise<AttachedClient[]> { return this.adapter.listClients() }
+  currentLocation() { return this.adapter.currentLocation() }
   spawn(request: SpawnRequest) { return this.adapter.spawn(request) }
   kill(location: NativeLocation) { return this.adapter.kill(location) }
   rename(location: NativeLocation, name: string) { return this.adapter.rename(location, name) }
-  focus(location: NativeLocation, client?: string) { return this.adapter.focus(location, client) }
+  focus(location: NativeLocation) { return this.adapter.focus(location) }
   promptAgent(location: NativeLocation, text: string) {
     if (!this.capabilities().agentPrompt || !this.adapter.promptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent prompt")
     return this.adapter.promptAgent(location, text)
@@ -210,24 +209,24 @@ export class ManagedMultiplexer {
     return { ...target.location, observedAt: Date.now() }
   }
 
-  async open(location: NativeLocation, client?: string) {
-    await this.adapter.focus(location, client)
+  async open(location: NativeLocation) {
+    await this.adapter.focus(location)
   }
 
-  async openTarget(target: OpenMultiplexerTarget, client?: string) {
+  async openTarget(target: OpenMultiplexerTarget) {
     const resolved = await this.resolve(target)
     if (resolved) {
-      await this.open(resolved, client)
+      await this.open(resolved)
       return
     }
     const snapshot = await this.observe()
     const session = snapshot.sessions.find((candidate) => candidate.nativeName === target.session || candidate.id === target.session)
     if (!session) throw new Error(`Unknown ${this.kind} session: ${target.session}`)
-    if (target.type === "tmux_session") {
-      await this.open(sessionLocation(session.id), client)
+    if (target.type === "session") {
+      await this.open(sessionLocation(session.id))
       return
     }
-    await this.open(windowLocation(session.id, target.windowId), client)
+    await this.open(windowLocation(session.id, target.windowId))
   }
 
   /** Absorb the whole session that `selector` (native id or native name) identifies. */

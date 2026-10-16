@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
-export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
+export HERDR_ENV= HERDR_PANE_ID=
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 real_home=$HOME
@@ -13,18 +13,20 @@ home="$root/home"
 runtime="$root/runtime"
 state="$root/state"
 prefix="$root/prefix"
-socket="$root/tmux.sock"
 fake_bin="$root/fake-bin"
+socket=""
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 cleanup() {
     if [[ -L "$prefix/lib/clankerhouse" && -S "$socket" ]]; then
         target=$(readlink -f "$prefix/lib/clankerhouse" 2>/dev/null || true)
         if [[ -n "$target" && -d "$runtime" ]]; then
-            "$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --tmux-socket "$socket" --application "$target" >/dev/null 2>&1 || true
+            "$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --herdr-socket "$socket" --application "$target" >/dev/null 2>&1 || true
         fi
     fi
     HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state" PATH="$fake_bin:$PATH" \
         "$repo/scripts/uninstall" --prefix "$prefix" --force >/dev/null 2>&1 || true
-    tmux -S "$socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
@@ -79,7 +81,11 @@ config.mkdir()
 }, indent=2) + "\n")
 PY
 
-tmux -S "$socket" -f /dev/null new-session -d -s qa-install 'sleep 300'
+qa_herdr_start "$root/herdr"
+socket=$HERDR_SOCKET_PATH
+# The isolated server keeps its own config; installed integrations use the QA home.
+export XDG_CONFIG_HOME="$home/.config"
+state_dir="$runtime/clankerhouse-$(id -u)-herdr"
 
 # Unmanaged fixed installs remain protected before staging or daemon activity.
 mkdir -p "$root/unmanaged-prefix/lib/clankerhouse"
@@ -90,63 +96,62 @@ if "$repo/scripts/install" --prefix "$root/unmanaged-prefix" --no-daemon-handoff
 fi
 [[ -f "$root/unmanaged-prefix/lib/clankerhouse/keep" ]]
 
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" >/dev/null
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --herdr >/dev/null
 active="$prefix/lib/clankerhouse"
 versions="$prefix/lib/clankerhouse-versions"
 [[ -L "$active" ]]
 old_target=$(readlink -f "$active")
 [[ "$old_target/" == "$versions/"* && -f "$old_target/.clankerhouse-install" ]]
-[[ -S "$runtime/clankerhouse-$(id -u)/daemon.sock" ]]
+[[ -S "$state_dir/daemon.sock" ]]
 "$prefix/bin/clankerhouse-doctor" >/dev/null
 "$prefix/bin/clankers" help >/dev/null
 nvim --headless -u NONE --cmd "set runtimepath^=$active" \
     '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
-tmux -S "$socket" set-environment -g CLANKERHOUSE_HOME /stale/clankerhouse
-tmux -S "$socket" set-environment -g CLANKERHOUSE_BIN_DIR /stale/clankerhouse/bin
-tmux -S "$socket" set-environment -g CLANKERHOUSE_LIBEXEC /stale/clankerhouse/libexec
-TMUX="$socket,$(tmux -S "$socket" display-message -p '#{pid}'),0" "$active/clankerhouse.tmux"
-[[ "$(tmux -S "$socket" show-option -gqv @clankerhouse-root)" == "$active" ]]
-[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_HOME)" == "CLANKERHOUSE_HOME=$active" ]]
-[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_BIN_DIR)" == "CLANKERHOUSE_BIN_DIR=$active/bin" ]]
-[[ "$(tmux -S "$socket" show-environment -g CLANKERHOUSE_LIBEXEC)" == "CLANKERHOUSE_LIBEXEC=$active/libexec" ]]
-tmux -S "$socket" list-keys -T root M-k | grep -F "$prefix/bin/clankerhouse-native" >/dev/null
-tmux -S "$socket" list-keys -T root M-b | grep -F 'run-shell' >/dev/null
-tmux -S "$socket" list-keys -T root M-b | grep -F 'CLANKERHOUSE_TMUX_CLIENT=#{client_name}' >/dev/null
+herdr_config="$XDG_CONFIG_HOME/herdr/config.toml"
+grep -q 'key = "alt+k"' "$herdr_config"
+grep -F "command = \"$prefix/bin/clankerhouse-herdr" "$herdr_config" >/dev/null
+grep -q 'resume_agents_on_restore = false' "$herdr_config"
 
 # A failed preflight never quiesces or switches the selected isolated daemon.
-old_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
-if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --preflight-hook "$root/fail-preflight" >/dev/null 2>&1; then
+old_pid=$(<"$state_dir/server.pid")
+if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --preflight-hook "$root/fail-preflight" >/dev/null 2>&1; then
     echo "Injected preflight failure unexpectedly succeeded" >&2
     exit 1
 fi
 [[ "$(readlink -f "$active")" == "$old_target" ]]
-[[ "$(<"$runtime/clankerhouse-$(id -u)/server.pid")" == "$old_pid" ]]
-"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --tmux-socket "$socket" --application "$old_target"
+[[ "$(<"$state_dir/server.pid")" == "$old_pid" ]]
+"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --herdr-socket "$socket" --application "$old_target"
 
 # A failed new-daemon health/activation hook atomically restores and probes old.
 before_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
-if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --activation-hook "$root/fail-activation" >/dev/null 2>&1; then
+if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --activation-hook "$root/fail-activation" >/dev/null 2>&1; then
     echo "Injected activation failure unexpectedly succeeded" >&2
     exit 1
 fi
 [[ "$(readlink -f "$active")" == "$old_target" ]]
 [[ -x "$old_target/bin/clankers" ]]
 "$prefix/bin/clankers" help >/dev/null
-"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --tmux-socket "$socket" --application "$old_target"
+"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --herdr-socket "$socket" --application "$old_target"
 after_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
 [[ "$after_versions" == "$before_versions" ]]
-rollback_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
+rollback_pid=$(<"$state_dir/server.pid")
 [[ "$(readlink -e "/proc/$rollback_pid/cwd")" == "$old_target" ]]
+
+# An integrations upgrade removes our Pi extension link left under its pre-rename name.
+legacy_pi_extension=tmux-clanker-lifecycle.ts
+mkdir -p "$home/.pi/agent/extensions"
+ln -s "$active/integrations/pi/$legacy_pi_extension" "$home/.pi/agent/extensions/$legacy_pi_extension"
 
 # A successful upgrade retains the old version, moves optional links through the
 # stable active path, and renders user units through stable validated wrappers.
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --integrations --systemd --no-enable >/dev/null
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations --systemd --no-enable >/dev/null
 new_target=$(readlink -f "$active")
 [[ "$new_target" != "$old_target" && -d "$old_target" ]]
-new_pid=$(<"$runtime/clankerhouse-$(id -u)/server.pid")
+[[ ! -e "$home/.pi/agent/extensions/$legacy_pi_extension" && ! -L "$home/.pi/agent/extensions/$legacy_pi_extension" ]]
+new_pid=$(<"$state_dir/server.pid")
 [[ "$(readlink -e "/proc/$new_pid/cwd")" == "$new_target" ]]
-[[ -L "$home/.pi/agent/extensions/tmux-clanker-lifecycle.ts" ]]
-[[ "$(readlink "$home/.pi/agent/extensions/tmux-clanker-lifecycle.ts")" == "$active/integrations/pi/tmux-clanker-lifecycle.ts" ]]
+[[ -L "$home/.pi/agent/extensions/clanker-lifecycle.ts" ]]
+[[ "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" == "$active/integrations/pi/clanker-lifecycle.ts" ]]
 [[ -L "$home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
 [[ -L "$home/.agents/skills/clanker-coordination" ]]
 [[ -L "$home/.claude/skills/clanker-coordination" ]]
@@ -160,7 +165,7 @@ skill_mtime=$(stat -c %Y "$opencode_skill")
 
 # Reinstalling integrations whose stable targets are already correct must not
 # replace their symlink inodes and trigger live harness/plugin reloads.
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --tmux-socket "$socket" --integrations >/dev/null
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations >/dev/null
 new_target=$(readlink -f "$active")
 [[ "$(stat -c %i "$opencode_plugin")" == "$plugin_inode" ]]
 [[ "$(stat -c %Y "$opencode_plugin")" == "$plugin_mtime" ]]
@@ -169,7 +174,8 @@ new_target=$(readlink -f "$active")
 
 hook="$active/native-client/target/release/clankerhouse-hook"
 grep -F "$hook" "$home/.claude/settings.json" >/dev/null
-python3 - "$home/.claude/settings.json" "$hook" "$socket" <<'PY'
+pane=$(qa_herdr pane list | jq -r '.result.panes[0].pane_id')
+python3 - "$home/.claude/settings.json" "$hook" "$pane" "$state_dir" <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
 settings = Path(sys.argv[1])
@@ -186,7 +192,7 @@ assert backup.stat().st_mode & 0o777 == 0o600
 # Run the actual installed commands, not merely inspect generated JSON.
 # A plain Claude terminal must not invoke even an installed reporter.
 env = dict(os.environ)
-for key in ("TMUX", "TMUX_PANE", "HERDR_ENV", "HERDR_PANE_ID"):
+for key in ("HERDR_ENV", "HERDR_PANE_ID"):
     env.pop(key, None)
 owned = [h["command"] for entries in data["hooks"].values() for entry in entries for h in entry["hooks"] if sys.argv[2] in h.get("command", "")]
 assert len(owned) == 6, owned
@@ -197,13 +203,14 @@ def run_hook(command, environment):
 for command in owned:
     run_hook(command, env)
 
-# Inside the isolated tmux pane, lifecycle reporting still works.
-pane = subprocess.check_output(["tmux", "-S", sys.argv[3], "list-panes", "-t", "qa-install", "-F", "#{pane_id}"], text=True).strip()
-pane_env = {**env, "TMUX": f"{sys.argv[3]},0,0", "TMUX_PANE": pane}
+# Inside the isolated Herdr pane, lifecycle reporting still works.
+pane = sys.argv[3]
+pane_env = {**env, "HERDR_ENV": "1", "HERDR_PANE_ID": pane}
 pre_tool = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 run_hook(pre_tool, pane_env)
-state_path = Path(env["XDG_RUNTIME_DIR"]) / f"clankerhouse-{os.getuid()}" / "clanker-state" / f"{pane}.json"
-report = json.loads(state_path.read_text())
+reports = [json.loads(path.read_text()) for path in (Path(sys.argv[4]) / "clanker-state").glob("*.json")]
+assert len(reports) == 1, reports
+report = reports[0]
 assert report["harness"] == "claude" and report["state"] == "working" and report["pane"] == pane, report
 
 # Simulate settings shared with an environment where the installed path is absent.
@@ -224,7 +231,7 @@ grep -Fx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
 
 # Uninstall only after an explicit isolated quiesce; package ownership removes
 # every retained version while preserving runtime and durable state roots.
-"$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --tmux-socket "$socket" --application "$new_target"
+"$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --herdr-socket "$socket" --application "$new_target"
 printf 'preserve\n' > "$state/preserved-state"
 "$repo/scripts/uninstall" --prefix "$prefix" >/dev/null
 [[ ! -e "$active" && ! -L "$active" && ! -e "$versions" ]]

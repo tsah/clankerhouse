@@ -8,19 +8,6 @@ CLANKERHOUSE_BIN_DIR=${CLANKERHOUSE_BIN_DIR:-$CLANKERHOUSE_HOME/bin}
 CLANKERHOUSE_LIBEXEC=${CLANKERHOUSE_LIBEXEC:-$CLANKERHOUSE_HOME/libexec}
 export CLANKERHOUSE_HOME CLANKERHOUSE_BIN_DIR CLANKERHOUSE_LIBEXEC
 
-# Normalize the innermost managed runtime once so every launcher child, including
-# shell/Python/Rust entry points, addresses the same Adapter and instance paths.
-# An explicit operator selection remains authoritative.
-if [ -z "${CLANKERHOUSE_MULTIPLEXER:-}" ] && [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    CLANKERHOUSE_MULTIPLEXER=herdr
-fi
-if [ -n "${CLANKERHOUSE_MULTIPLEXER:-}" ]; then
-    CLANKERHOUSE_MULTIPLEXER=$(printf '%s' "$CLANKERHOUSE_MULTIPLEXER" | tr '[:upper:]' '[:lower:]')
-    case "$CLANKERHOUSE_MULTIPLEXER" in
-        tmux|herdr) export CLANKERHOUSE_MULTIPLEXER ;;
-        *) printf 'Unsupported CLANKERHOUSE_MULTIPLEXER: %s (expected tmux or herdr)\n' "$CLANKERHOUSE_MULTIPLEXER" >&2; return 2 ;;
-    esac
-fi
 if [ -n "${CLANKERHOUSE_INSTANCE:-}" ]; then
     CLANKERHOUSE_INSTANCE=$(printf '%s' "$CLANKERHOUSE_INSTANCE" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
     case "$CLANKERHOUSE_INSTANCE" in
@@ -28,13 +15,6 @@ if [ -n "${CLANKERHOUSE_INSTANCE:-}" ]; then
         *) export CLANKERHOUSE_INSTANCE ;;
     esac
 fi
-
-clankerhouse_require_tmux() {
-    if [ "${CLANKERHOUSE_MULTIPLEXER:-tmux}" != tmux ]; then
-        printf '%s is tmux-only; use a runtime-neutral Clankerhouse command or explicitly select tmux.\n' "${1:-This command}" >&2
-        return 2
-    fi
-}
 
 for _clankerhouse_dir in "$HOME/.pi/agent/bin" "${BUN_INSTALL:-$HOME/.bun}/bin" "$HOME/.cargo/bin" "$HOME/.local/bin" "$HOME/.opencode/bin"; do
     case ":${PATH:-}:" in *":$_clankerhouse_dir:"*) ;; *) PATH="$_clankerhouse_dir:${PATH:-/usr/local/bin:/usr/bin:/bin}" ;; esac

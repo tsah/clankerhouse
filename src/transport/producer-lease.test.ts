@@ -15,9 +15,9 @@ afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, f
 describe("authoritative producer lease", () => {
   test("allows one live process identity and rejects a replaced epoch", async () => {
     const { path } = fixture()
-    const lease = await acquireProducerLease(path, "tmux-instance")
-    await expect(acquireProducerLease(path, "tmux-instance")).rejects.toThrow(/already owns/)
-    await replaceProducerLeaseRecord(path, "tmux-instance", "replacement")
+    const lease = await acquireProducerLease(path, "herdr-instance")
+    await expect(acquireProducerLease(path, "herdr-instance")).rejects.toThrow(/already owns/)
+    await replaceProducerLeaseRecord(path, "herdr-instance", "replacement")
     expect(() => lease.assertCurrentSync()).toThrow(/stale producer/)
     await lease.release()
   })
@@ -27,6 +27,6 @@ describe("authoritative producer lease", () => {
     const target = join(root, "target")
     writeFileSync(target, "{}")
     symlinkSync(target, path)
-    await expect(acquireProducerLease(path, "tmux-instance")).rejects.toThrow(/unsafe producer lease path/)
+    await expect(acquireProducerLease(path, "herdr-instance")).rejects.toThrow(/unsafe producer lease path/)
   })
 })

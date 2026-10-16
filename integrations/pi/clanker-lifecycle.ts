@@ -36,26 +36,22 @@ interface PersistedReport {
 	results?: ClankerResult[];
 }
 
-// Pane address: the innermost runtime that spawned this process. CLANKERHOUSE_MULTIPLEXER overrides.
-const inferredHerdr = process.env.HERDR_ENV?.trim() === "1" && Boolean(process.env.HERDR_PANE_ID?.trim());
-const requestedMultiplexer = process.env.CLANKERHOUSE_MULTIPLEXER?.trim().toLowerCase();
-if (requestedMultiplexer && requestedMultiplexer !== "tmux" && requestedMultiplexer !== "herdr") throw new Error(`Unsupported CLANKERHOUSE_MULTIPLEXER: ${requestedMultiplexer}`);
-const multiplexerKind = (requestedMultiplexer || (inferredHerdr ? "herdr" : "tmux")) as "tmux" | "herdr";
-const pane = (multiplexerKind === "herdr" ? process.env.HERDR_PANE_ID?.trim() : process.env.TMUX_PANE?.trim()) || "";
+// Pane address: the Herdr pane that hosts this process.
+const pane = process.env.HERDR_PANE_ID?.trim() || "";
 const clankersCli = process.env.CLANKERHOUSE_CLANKERS?.trim() || "clankers";
 const sessionless = process.argv.includes("--no-session");
 const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || "";
 if (requestedInstance && (requestedInstance === "." || requestedInstance === ".." || !/^[A-Za-z0-9._-]+$/.test(requestedInstance))) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${requestedInstance}`);
 const instanceSlug = requestedInstance
-	? (["default", "tmux"].includes(requestedInstance) ? "" : `-${requestedInstance}`)
-	: (multiplexerKind === "tmux" ? "" : `-${multiplexerKind}`);
+	? (requestedInstance === "default" ? "" : `-${requestedInstance}`)
+	: "-herdr";
 const runtimeRoot = join(process.env.XDG_RUNTIME_DIR || "/tmp", `clankerhouse-${process.getuid?.() || 0}${instanceSlug}`);
 const stateDirectory = join(runtimeRoot, "clanker-state");
 const socketDirectory = join(runtimeRoot, "clanker-sockets");
 const stateFile = pane ? join(stateDirectory, `${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`) : "";
 const daemonSocketPath = join(runtimeRoot, "daemon.sock");
 const daemonAvailable = Boolean(pane && existsSync(daemonSocketPath));
-const clankersEnv = { ...process.env, CLANKERHOUSE_MULTIPLEXER: multiplexerKind };
+const clankersEnv = process.env;
 
 let reportSeq = Date.now() * 1000;
 let reportInFlight = false;
@@ -96,41 +92,20 @@ async function drainReports() {
 	}
 }
 
-function tmux(args: string[]) {
-	return spawnSync("tmux", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-}
-
-/** tmux option name -> semantic claim key understood by `clankers mux`. */
-const claimKeyForOption: Record<string, string> = {
-	"@clankerhouse_clanker_id": "clankerId",
-	"@dotfiles_harness": "harness",
-	"@clankerhouse_harness_session_id": "harnessSessionId",
-	"@clankerhouse_recovery_attempt": "recoveryAttemptId",
-	"@clankerhouse_clanker_socket": "clankerSocket",
-	"@clankerhouse_clanker_pid": "clankerPid",
-	"@clankerhouse_clanker_capabilities": "clankerCapabilities",
-};
-
-function paneOption(name: string) {
+function paneClaim(key: string) {
 	if (!pane) return "";
-	if (multiplexerKind === "tmux") {
-		const result = tmux(["show-option", "-p", "-qv", "-t", pane, name]);
-		return result.status === 0 ? result.stdout.trim() : "";
-	}
-	const result = spawnSync(clankersCli, ["mux", "read-claim", "--pane", pane, claimKeyForOption[name] ?? name], { env: clankersEnv, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+	const result = spawnSync(clankersCli, ["mux", "read-claim", "--pane", pane, key], { env: clankersEnv, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 	return result.status === 0 ? result.stdout.trim() : "";
 }
 
-function setPaneOption(name: string, value: string) {
+function setPaneClaim(key: string, value: string) {
 	if (!pane) return;
-	if (multiplexerKind === "tmux") tmux(["set-option", "-p", "-t", pane, name, value]);
-	else spawnSync(clankersCli, ["mux", "claim", "--pane", pane, claimKeyForOption[name] ?? name, value], { env: clankersEnv, stdio: "ignore" });
+	spawnSync(clankersCli, ["mux", "claim", "--pane", pane, key, value], { env: clankersEnv, stdio: "ignore" });
 }
 
-function clearPaneOptionIf(name: string, expected: string) {
-	if (!pane || paneOption(name) !== expected) return;
-	if (multiplexerKind === "tmux") tmux(["set-option", "-p", "-u", "-t", pane, name]);
-	else spawnSync(clankersCli, ["mux", "claim", "--pane", pane, claimKeyForOption[name] ?? name, "--unset"], { env: clankersEnv, stdio: "ignore" });
+function clearPaneClaimIf(key: string, expected: string) {
+	if (!pane || paneClaim(key) !== expected) return;
+	spawnSync(clankersCli, ["mux", "claim", "--pane", pane, key, "--unset"], { env: clankersEnv, stdio: "ignore" });
 }
 
 function readPersistedReport(): PersistedReport {
@@ -158,7 +133,7 @@ export function extractAssistantResult(messages: Array<any>) {
 }
 
 export default function (pi: ExtensionAPI) {
-	// Headless Pi subprocesses such as Agent workers inherit TMUX_PANE but do
+	// Headless Pi subprocesses such as Agent workers inherit HERDR_PANE_ID but do
 	// not own its Terminal. Their --no-session identities are ephemeral and
 	// must never replace the parent Clanker or create Recovery declarations.
 	if (sessionless) return;
@@ -265,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 			server = undefined;
 		}
 		if (path) {
-			clearPaneOptionIf("@clankerhouse_clanker_socket", path);
+			clearPaneClaimIf("clankerSocket", path);
 			try { rmSync(path, { force: true }); } catch {}
 		}
 	};
@@ -276,13 +251,13 @@ export default function (pi: ExtensionAPI) {
 
 	const startSocket = async () => {
 		if (!pane || server) return;
-		clankerId = paneOption("@clankerhouse_clanker_id") || clankerId;
-		setPaneOption("@clankerhouse_clanker_id", clankerId);
-		setPaneOption("@dotfiles_harness", "pi");
-		if (harnessSessionId) setPaneOption("@clankerhouse_harness_session_id", harnessSessionId);
-		if (recoveryAttemptId) setPaneOption("@clankerhouse_recovery_attempt", recoveryAttemptId);
-		setPaneOption("@clankerhouse_clanker_pid", String(process.pid));
-		setPaneOption("@clankerhouse_clanker_capabilities", "status,wait,send,result");
+		clankerId = paneClaim("clankerId") || clankerId;
+		setPaneClaim("clankerId", clankerId);
+		setPaneClaim("harness", "pi");
+		if (harnessSessionId) setPaneClaim("harnessSessionId", harnessSessionId);
+		if (recoveryAttemptId) setPaneClaim("recoveryAttemptId", recoveryAttemptId);
+		setPaneClaim("clankerPid", String(process.pid));
+		setPaneClaim("clankerCapabilities", "status,wait,send,result");
 		mkdirSync(socketDirectory, { recursive: true, mode: 0o700 });
 		chmodSync(socketDirectory, 0o700);
 		// Unix-domain socket paths are limited to 107 bytes on Linux. Keep the
@@ -347,7 +322,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		chmodSync(path, 0o600);
 		activeSocketPath = path;
-		setPaneOption("@clankerhouse_clanker_socket", path);
+		setPaneClaim("clankerSocket", path);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -355,7 +330,7 @@ export default function (pi: ExtensionAPI) {
 		ownsPane = true;
 		currentContext = ctx;
 		harnessSessionId = ctx.sessionManager.getSessionId();
-		clankerId = paneOption("@clankerhouse_clanker_id") || process.env.CLANKER_ID?.trim() || `clanker-${randomUUID()}`;
+		clankerId = paneClaim("clankerId") || process.env.CLANKER_ID?.trim() || `clanker-${randomUUID()}`;
 		const persisted = readPersistedReport();
 		const persistedId = persisted.clankerId;
 		generation = Number(persistedId === clankerId ? persisted.generation : 0) || 0;
@@ -364,9 +339,9 @@ export default function (pi: ExtensionAPI) {
 		// Declare owned identity before validating a preallocated session. A
 		// mismatch must remain attributable to this Pi process rather than
 		// degrading into identity-free lifecycle evidence.
-		setPaneOption("@clankerhouse_clanker_id", clankerId);
-		setPaneOption("@dotfiles_harness", "pi");
-		setPaneOption("@clankerhouse_harness_session_id", harnessSessionId);
+		setPaneClaim("clankerId", clankerId);
+		setPaneClaim("harness", "pi");
+		setPaneClaim("harnessSessionId", harnessSessionId);
 		const expectedSessionId = process.env.CLANKER_SESSION_ID?.trim();
 		if (expectedSessionId && harnessSessionId !== expectedSessionId) {
 			reportParentState("blocked", "session_identity_mismatch");
@@ -404,10 +379,10 @@ export default function (pi: ExtensionAPI) {
 		if (!ownsPane) return;
 		reportParentState("unknown", "session_shutdown");
 		stopSocket();
-		clearPaneOptionIf("@clankerhouse_clanker_pid", String(process.pid));
+		clearPaneClaimIf("clankerPid", String(process.pid));
 		if (event.reason === "quit") {
-			clearPaneOptionIf("@dotfiles_harness", "pi");
-			clearPaneOptionIf("@clankerhouse_clanker_capabilities", "status,wait,send,result");
+			clearPaneClaimIf("harness", "pi");
+			clearPaneClaimIf("clankerCapabilities", "status,wait,send,result");
 		}
 		externalSendInFlight = false;
 		currentContext = undefined;

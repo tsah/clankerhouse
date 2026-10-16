@@ -16,7 +16,7 @@ export interface ProjectionDiagnosticReport {
   healthy: boolean
   counts: {
     resources: number
-    tmuxSessions: number
+    sessions: number
     directories: number
     managed: number
     unknownClankers: number
@@ -118,7 +118,7 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
       "warning",
       `Resource has a suspicious Display Name: ${JSON.stringify(row.name)}`,
       [key],
-      "Compare the durable Display Name with the native tmux label and rename only the owned metadata.",
+      "Compare the durable Display Name with the native session label and rename only the owned metadata.",
     ))
     if (row.target.type === "directory" && row.target.path !== row.path) issues.push(issue(
       "directory-path-mismatch",
@@ -179,7 +179,7 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
     healthy: !issues.some((entry) => entry.severity === "error"),
     counts: {
       resources: rows.length,
-      tmuxSessions: rows.filter((row) => row.target.type === "tmux_session").length,
+      sessions: rows.filter((row) => row.target.type === "session").length,
       directories: rows.filter((row) => row.target.type === "directory").length,
       managed: rows.filter((row) => row.management === "managed").length,
       unknownClankers,

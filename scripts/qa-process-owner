@@ -1,16 +1,21 @@
 #!/bin/bash
 set -euo pipefail
-export CLANKERHOUSE_MULTIPLEXER=tmux HERDR_ENV= HERDR_PANE_ID=
 
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 root=$(mktemp -d /tmp/clankerhouse-process-owner-XXXXXX)
-socket="$root/tmux.sock"
 unit="clankerhouse-qa-${UID}-$$.scope"
 cleanup() {
     systemctl --user stop "$unit" >/dev/null 2>&1 || true
-    tmux -S "$socket" kill-server >/dev/null 2>&1 || true
+    qa_herdr_stop
     rm -rf "$root"
 }
 trap cleanup EXIT INT TERM
+status=0
+qa_herdr_start "$root/herdr" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
 
 cat > "$root/tree" <<'SH'
 #!/bin/bash
@@ -26,13 +31,14 @@ wait
 SH
 chmod 755 "$root/tree"
 
-tmux -S "$socket" new-session -d -s qa -n owner "env QA_ROOT='$root' systemd-run --user --scope --quiet --unit='$unit' --property=KillMode=control-group --property=SendSIGKILL=yes --property=CollectMode=inactive-or-failed -- '$root/tree'"
+pane=$(qa_herdr workspace create --cwd "$root" --label qa --no-focus | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
+qa_herdr pane run "$pane" "env QA_ROOT='$root' systemd-run --user --scope --quiet --unit='$unit' --property=KillMode=control-group --property=SendSIGKILL=yes --property=CollectMode=inactive-or-failed -- '$root/tree'" >/dev/null
 for _ in {1..100}; do [[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] && break; sleep 0.05; done
 [[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] || { echo "Owned descendants did not start" >&2; exit 1; }
 setsid_pid=$(<"$root/setsid.pid")
 grandchild_pid=$(<"$root/grandchild.pid")
 
-tmux -S "$socket" kill-pane -t qa:owner
+qa_herdr pane close "$pane" >/dev/null
 kill -0 "$setsid_pid" 2>/dev/null || { echo "Fixture did not preserve the setsid child after pane loss" >&2; exit 1; }
 systemctl --user stop "$unit"
 for _ in {1..100}; do

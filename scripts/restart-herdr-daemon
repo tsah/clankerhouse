@@ -20,7 +20,7 @@ stop_daemon() {
     [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || { echo "Recorded daemon $pid is not running"; return 0; }
     # Only ever signal the Herdr daemon itself, never whatever reused the pid.
     if [[ "$(tr '\0' ' ' <"/proc/$pid/cmdline")" != *"src/daemon.ts --server"* ]] \
-        || ! tr '\0' '\n' <"/proc/$pid/environ" | grep -qx 'CLANKERHOUSE_MULTIPLEXER=herdr'; then
+        || ! tr '\0' '\n' <"/proc/$pid/environ" | grep -q '^HERDR_SOCKET_PATH='; then
         echo "Refusing to stop pid $pid: it is not the Herdr Clankerhouse daemon" >&2
         exit 1
     fi

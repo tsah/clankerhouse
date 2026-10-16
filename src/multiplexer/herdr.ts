@@ -8,7 +8,7 @@ import { join } from "node:path"
 import {
   claimScopeOf, locationScope,
   MultiplexerUnavailableError,
-  type AttachedClient, type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
+  type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
   type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type MultiplexerWindow, type NativeLocation, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
 
@@ -111,7 +111,7 @@ export class HerdrAdapter implements Multiplexer {
   }
 
   capabilities(): MultiplexerCapabilities {
-    return { processInfo: true, agentStatus: true, agentPrompt: true, sessionRefs: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, clientRouting: false, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }
+    return { processInfo: true, agentStatus: true, agentPrompt: true, sessionRefs: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }
   }
 
   paneAddressEnv() { return HERDR_PANE_ADDRESS_ENV }
@@ -286,13 +286,11 @@ export class HerdrAdapter implements Multiplexer {
     }
   }
 
-  async currentLocation(_client?: string): Promise<CurrentLocation | undefined> {
+  async currentLocation(): Promise<CurrentLocation | undefined> {
     const snapshot = await this.snapshot()
     if (!snapshot.focused_workspace_id) return undefined
     return { kind: "herdr", instanceId: await this.instanceId(), nativeSessionId: snapshot.focused_workspace_id, nativeWindowId: snapshot.focused_tab_id ?? null, nativePaneId: snapshot.focused_pane_id ?? null }
   }
-
-  async listClients(): Promise<AttachedClient[]> { return [] }
 
   async spawn(request: SpawnRequest): Promise<SpawnResult> {
     const env = request.env ?? {}
@@ -330,7 +328,7 @@ export class HerdrAdapter implements Multiplexer {
     else await this.request("workspace.rename", { workspace_id: location.nativeSessionId, label: name })
   }
 
-  async focus(location: NativeLocation, _client?: string) {
+  async focus(location: NativeLocation) {
     await this.request("workspace.focus", { workspace_id: location.nativeSessionId })
     if (location.nativeWindowId) await this.request("tab.focus", { tab_id: location.nativeWindowId })
     if (location.nativePaneId) await this.request("pane.focus", { pane_id: location.nativePaneId })

@@ -1,7 +1,7 @@
 ---
 name: troubleshoot
 description: Diagnose the current Clankerhouse TUI and runtime when rows, question marks, names, hierarchy, sorting, selection, actions, Recovery, or navigation look wrong. Starts read-only, captures semantic evidence, reproduces defects in isolation, and requires confirmation before live mutations.
-compatibility: Linux with a running Clankerhouse installation, Bun, tmux, jq, Python, and repository access for fixes.
+compatibility: Linux with a running Clankerhouse installation, Bun, Herdr, jq, Python, and repository access for fixes.
 ---
 
 # Troubleshoot Clankerhouse
@@ -11,10 +11,10 @@ Treat the visible symptom as evidence, not the root cause. Begin strictly read-o
 ## Safety
 
 - Read `CONTEXT.md` and the ADRs before interpreting identity or ownership.
-- Do not send to Clankers, press keys in their panes, stop processes, modify tmux metadata, write databases, restart services, reload bindings, or deploy fixes during diagnosis.
+- Do not send to Clankers, press keys in their panes, stop processes, modify Herdr pane metadata, write databases, restart services, reload bindings, or deploy fixes during diagnosis.
 - Do not delete stale-looking state.
 - Before any live mutation, present the exact commands, affected stable IDs, expected effect, and rollback, then obtain explicit confirmation.
-- Reproduce and test fixes in isolated XDG/HOME/tmux environments first.
+- Reproduce and test fixes in isolated XDG/HOME/Herdr environments first.
 
 ## 1. Capture current evidence
 
@@ -29,33 +29,31 @@ clankerhouse-native --check
 clankers list
 clankers recovery status
 systemctl --user --no-pager status clankerhouse-recovery.service clankerhouse-resource-guard.service clankerhouse-spot-watch.service
-tmux list-clients -F '#{client_name}|#{session_id}|#{session_name}'
-tmux list-sessions -F '#{session_id}|#{session_name}|#{session_path}|#{@clankerhouse_workshop_id}|#{@clankerhouse_session_id}'
-tmux list-windows -a -F '#{session_id}|#{window_id}|#{window_name}|#{@clankerhouse_window_id}'
-tmux list-panes -a -F '#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}|#{@clankerhouse_terminal_id}|#{@clankerhouse_clanker_id}|#{@dotfiles_harness}'
+clankers mux observe
+herdr api snapshot
 ```
 
 Query the daemon socket directly only with read methods such as `server.health` and `snapshot.get`. Open SQLite databases read-only and run `integrity_check` and `foreign_key_check`.
 
 ### Audit every projected row against reality
 
-Do this exhaustive audit for every investigation, not only when the reported symptom mentions stale rows. Capture one daemon snapshot and the surrounding tmux/process evidence close enough together to describe one observation interval. If the projection revision or tmux topology changes during collection, discard the comparison and retry. Produce a row-by-row matrix with the projected key, claimed kind/state/identity, authoritative evidence, and result: `pass`, `expected discrepancy`, or `defect`. Never validate only a sample.
+Do this exhaustive audit for every investigation, not only when the reported symptom mentions stale rows. Capture one daemon snapshot and the surrounding multiplexer/process evidence close enough together to describe one observation interval. If the projection revision or multiplexer topology changes during collection, discard the comparison and retry. Produce a row-by-row matrix with the projected key, claimed kind/state/identity, authoritative evidence, and result: `pass`, `expected discrepancy`, or `defect`. Never validate only a sample.
 
 For every top-level row:
 
-- `tmux_session`: require the exact native session ID to exist in the selected tmux server. Compare its current native name and path as observations. For managed rows, require the projected resource ID and complete Multiplexer Location to match the currently active authority store. During the `legacy-mutable` gate this is `resources.sqlite3`; after authority activation use `registry.sqlite3`. Do not treat a deleted current directory as a nonexistent session: require tmux to report the `(deleted)` path and explain any incident state.
+- `session`: require the exact native session ID to exist in the Herdr server. Compare its current native name and path as observations. For managed rows, require the projected resource ID and complete Multiplexer Location to match the currently active authority store. During the `legacy-mutable` gate this is `resources.sqlite3`; after authority activation use `registry.sqlite3`. Do not treat a deleted current directory as a nonexistent session: require the Multiplexer to report the `(deleted)` path and explain any incident state.
 - `directory`: require the canonical path to exist. Prove `worktree` source through `git worktree list --porcelain`, `zoxide` source through `zoxide query -ls`, and `activity` source through the durable activity ledger. A durable Workshop record alone is not current directory evidence.
 - Require unique top-level target keys, resource IDs, Workshop IDs where applicable, and canonical directory paths. Explain every projected orphan parent by finding its durable parent record and proving why that parent has no current row.
 
 For every detail row:
 
-- `window`: require the exact session/window/pane tuple in tmux and compare current command, title, path, and managed Terminal Location.
-- process `observation`: inspect the pane TTY foreground process group in `/proc`; require the reported harness executable or recognized package entrypoint. A tmux title or stale command label alone is insufficient.
+- `window`: require the exact session/window/pane tuple in the Multiplexer and compare current command, title, path, and managed Terminal Location.
+- process `observation`: inspect the pane TTY foreground process group in `/proc`; require the reported harness executable or recognized package entrypoint. A pane title or stale command label alone is insufficient.
 - lifecycle `observation`: require the source report and compare pane, Clanker ID, harness, state, observed time, harness-session ID, and recovery-attempt ID. Recompute the projected rejection reason. Incomplete and rejected reports must remain visible but must not drive aggregate runtime state.
 - `clanker`: require owned Clanker identity from pane metadata/registry plus current process evidence. An attested state additionally requires exact lifecycle identity correlation. If correlation fails, require unknown runtime state and a separate rejected observation rather than the report's claimed state.
 - `incident`: require an open durable incident with the same Clanker, kind/status, target scope, and timestamp. Historical incidents that no longer attach to a current target must not manufacture rows.
 
-Finally assert set equality between all live tmux panes and unique projected pane targets, allowing multiple evidence details to reference one target but no live pane to disappear. Recompute each session aggregate from details, verify current-session status changes only ordering/metadata, and compare the complete projection with `clankerhouse-native --dump-tree`. Report exact counts for sessions, directories, unique panes, managed Locations, Clankers, observations by source/confidence, incidents, mismatches, and omissions.
+Finally assert set equality between all live multiplexer panes and unique projected pane targets, allowing multiple evidence details to reference one target but no live pane to disappear. Recompute each session aggregate from details, verify current-session status changes only ordering/metadata, and compare the complete projection with `clankerhouse-native --dump-tree`. Report exact counts for sessions, directories, unique panes, managed Locations, Clankers, observations by source/confidence, incidents, mismatches, and omissions.
 
 ## 2. Inspect symptoms systematically
 
@@ -74,7 +72,7 @@ Never hide a question mark merely by guessing state from process names or titles
 
 Compare exact target keys, stable resource IDs, Workshop IDs, canonical paths, and rendered tree keys. Distinguish:
 
-- legitimate distinct tmux sessions sharing a path
+- legitimate distinct multiplexer sessions sharing a path
 - a live session plus a compatibility directory alias
 - duplicate stable identity claims
 - native tree multiplication through an ambiguous parent
@@ -85,15 +83,15 @@ Compare the daemon projection with the functional-core comparator and native `--
 
 ### Weird naming
 
-Separate durable Display Names from native tmux labels. Check whitespace/control characters, path-like managed names, stale compatibility names, incorrect Absorption seeds, and renamed resources whose stable IDs or locations changed unexpectedly.
+Separate durable Display Names from native multiplexer labels. Check whitespace/control characters, path-like managed names, stale compatibility names, incorrect Absorption seeds, and renamed resources whose stable IDs or locations changed unexpectedly.
 
 ### Navigation and actions
 
-Trace selected rendered key → typed target → socket intent → durable operation → validated Multiplexer Location → requesting tmux client. Confirm the action is advertised and affects only that stable target/client.
+Trace selected rendered key → typed target → socket intent → durable operation → validated Multiplexer Location → focused target. Confirm the action is advertised and affects only that stable target.
 
 ### Recovery drift
 
-Compare recorded and current Clanker inventories. Inspect active campaigns, pending candidates, recent attempts, desired states, tmux/boot epochs, and whether activation resumed work that was previously stopped.
+Compare recorded and current Clanker inventories. Inspect active campaigns, pending candidates, recent attempts, desired states, multiplexer/boot epochs, and whether activation resumed work that was previously stopped.
 
 ## 3. Form and test hypotheses
 

@@ -39,7 +39,7 @@ if [[ "$assume_yes" == false ]]; then
   fi
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo "Aborted."; exit 1; }
 fi
-progress "Finding linked $(ch_mux_kind) sessions"
+progress "Finding linked herdr sessions"
 session_ids=()
 # Runtime snapshots can exceed the per-environment-variable exec limit. Stream
 # JSON through stdin, and finish parsing before any removal: failures hidden in
@@ -93,7 +93,7 @@ else
   progress "Removing worktree with Worktrunk"
   wt -C "$root" -y remove --foreground --force --no-delete-branch
 fi
-progress "Closing linked $(ch_mux_kind) sessions"
+progress "Closing linked herdr sessions"
 kill_failed=false
 remaining_session_ids=$(_ch_mux_run_clankers mux observe | python3 -c '
 import json, sys
@@ -105,7 +105,7 @@ for session in sessions:
 ')
 for session_id in "${session_ids[@]}"; do
   if grep -Fxq -- "$session_id" <<<"$remaining_session_ids" && ! ch_mux_kill session "$session_id"; then
-    printf 'Worktree was removed, but %s session %s could not be closed\n' "$(ch_mux_kind)" "$session_id" >&2
+    printf 'Worktree was removed, but herdr session %s could not be closed\n' "$session_id" >&2
     kill_failed=true
   fi
 done

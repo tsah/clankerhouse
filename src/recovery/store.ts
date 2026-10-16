@@ -29,8 +29,8 @@ interface DesiredRow {
   harness: DesiredClankerRecord["harness"]
   workshop_id: string
   workshop_path: string
-  tmux_session_name: string
-  tmux_window_name: string
+  preferred_session_label: string
+  preferred_window_label: string
   cwd: string
   harness_session_id: string | null
   launch_spec: string
@@ -69,15 +69,17 @@ interface AttemptRow {
   boot_epoch: number | null
 }
 
-const desiredColumns = "clanker_id, harness, workshop_id, workshop_path, tmux_session_name, tmux_window_name, cwd, harness_session_id, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at"
+/** Column list before schema 4 renamed the tmux label columns. */
+const v3DesiredColumns = "clanker_id, harness, workshop_id, workshop_path, tmux_session_name, tmux_window_name, cwd, harness_session_id, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at"
+const desiredColumns = "clanker_id, harness, workshop_id, workshop_path, preferred_session_label, preferred_window_label, cwd, harness_session_id, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at"
 
 const desiredFromRow = (row: DesiredRow): DesiredClankerRecord => ({
   clankerId: row.clanker_id,
   harness: row.harness,
   workshopId: row.workshop_id,
   workshopPath: row.workshop_path,
-  tmuxSessionName: row.tmux_session_name,
-  tmuxWindowName: row.tmux_window_name,
+  preferredSessionLabel: row.preferred_session_label,
+  preferredWindowLabel: row.preferred_window_label,
   cwd: row.cwd,
   harnessSessionId: row.harness_session_id,
   launchSpec: JSON.parse(row.launch_spec),
@@ -155,7 +157,7 @@ const initialize = (db: Database) => {
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        INSERT INTO desired_clankers_v3 (${desiredColumns}) SELECT ${desiredColumns} FROM desired_clankers;
+        INSERT INTO desired_clankers_v3 (${v3DesiredColumns}) SELECT ${v3DesiredColumns} FROM desired_clankers;
         DROP TABLE desired_clankers;
         ALTER TABLE desired_clankers_v3 RENAME TO desired_clankers;
         CREATE INDEX desired_clankers_workshop_idx ON desired_clankers(workshop_id);
@@ -170,6 +172,19 @@ const initialize = (db: Database) => {
     } finally {
       db.exec("PRAGMA foreign_keys = ON")
     }
+    current = 3
+  }
+  if (current === 3) {
+    // Runtime-neutral labels and epoch names replace the retired tmux vocabulary.
+    db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE desired_clankers RENAME COLUMN tmux_session_name TO preferred_session_label;
+      ALTER TABLE desired_clankers RENAME COLUMN tmux_window_name TO preferred_window_label;
+      UPDATE recovery_metadata SET key = 'runtime.server_epoch' WHERE key = 'runtime.tmux_server_epoch';
+      UPDATE recovery_metadata SET key = 'runtime.multiplexer_epoch' WHERE key = 'runtime.tmux_epoch';
+      PRAGMA user_version = 4;
+      COMMIT;
+    `)
     return
   }
   if (current !== 0) throw new Error(`Unsupported recovery store version ${current}`)
@@ -180,8 +195,8 @@ const initialize = (db: Database) => {
       harness TEXT NOT NULL CHECK (harness IN ('pi', 'claude', 'opencode')),
       workshop_id TEXT NOT NULL,
       workshop_path TEXT NOT NULL,
-      tmux_session_name TEXT NOT NULL,
-      tmux_window_name TEXT NOT NULL,
+      preferred_session_label TEXT NOT NULL,
+      preferred_window_label TEXT NOT NULL,
       cwd TEXT NOT NULL,
       harness_session_id TEXT,
       launch_spec TEXT NOT NULL,
@@ -244,7 +259,7 @@ const initialize = (db: Database) => {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    PRAGMA user_version = 3;
+    PRAGMA user_version = 4;
     COMMIT;
   `)
 }
@@ -308,7 +323,7 @@ export class RecoveryStore {
       const existing = this.getDesired(desired.clankerId)
       if (existing) throw new Error(existing.desiredState === "tombstoned" ? `Clanker ${desired.clankerId} is tombstoned` : `Clanker ${desired.clankerId} already exists`)
       this.db.query(`INSERT INTO desired_clankers (${desiredColumns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 2, ?11, 'healthy', NULL, 0, NULL, 1, ?12, ?12)`)
-        .run(desired.clankerId, desired.harness, desired.workshopId, desired.workshopPath, desired.tmuxSessionName, desired.tmuxWindowName, desired.cwd, desired.harnessSessionId, JSON.stringify(desired.launchSpec), desired.originalTask, desired.desiredState!, now)
+        .run(desired.clankerId, desired.harness, desired.workshopId, desired.workshopPath, desired.preferredSessionLabel, desired.preferredWindowLabel, desired.cwd, desired.harnessSessionId, JSON.stringify(desired.launchSpec), desired.originalTask, desired.desiredState!, now)
       const record = this.getDesired(desired.clankerId)!
       this.journal(record.clankerId, "desired.created", record.revision, { desiredState: record.desiredState, harness: record.harness }, now)
       return record
@@ -616,11 +631,11 @@ export class RecoveryStore {
     }).immediate()
   }
 
-  advanceTmuxEpoch(options: { now?: number } = {}) {
+  advanceMultiplexerEpoch(options: { now?: number } = {}) {
     const now = this.now(options.now)
     return this.db.transaction(() => {
       const epochs = this.runtimeEpochs()
-      this.setMetadata("runtime.tmux_epoch", epochs.tmuxEpoch + 1, { now })
+      this.setMetadata("runtime.multiplexer_epoch", epochs.multiplexerEpoch + 1, { now })
       this.setMetadata("runtime.updated_at", now, { now })
       return this.runtimeEpochs()
     }).immediate()
@@ -630,7 +645,7 @@ export class RecoveryStore {
     return {
       bootId: this.getMetadata<string>("runtime.boot_id") ?? null,
       bootEpoch: this.getMetadata<number>("runtime.boot_epoch") ?? 0,
-      tmuxEpoch: this.getMetadata<number>("runtime.tmux_epoch") ?? 0,
+      multiplexerEpoch: this.getMetadata<number>("runtime.multiplexer_epoch") ?? 0,
       updatedAt: this.getMetadata<number>("runtime.updated_at") ?? null,
     }
   }

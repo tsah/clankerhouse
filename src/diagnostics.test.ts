@@ -17,7 +17,7 @@ const row = (name: string, target: Target, overrides: Partial<SessionRow> = {}):
   ...overrides,
 })
 
-const session = (name: string, overrides: Partial<SessionRow> = {}) => row(name, { type: "tmux_session", session: name }, overrides)
+const session = (name: string, overrides: Partial<SessionRow> = {}) => row(name, { type: "session", session: name }, overrides)
 
 describe("projection diagnostics functional core", () => {
   test("accepts a unique, sorted tree and classifies neutral unknown resources as expected", () => {
@@ -28,7 +28,7 @@ describe("projection diagnostics functional core", () => {
 
     expect(report.healthy).toBe(true)
     expect(report.issues).toEqual([])
-    expect(report.counts).toMatchObject({ resources: 3, tmuxSessions: 2, directories: 1, expectedUnknownResources: 3, renderedSessionRows: 3 })
+    expect(report.counts).toMatchObject({ resources: 3, sessions: 2, directories: 1, expectedUnknownResources: 3, renderedSessionRows: 3 })
   })
 
   test("detects duplicate target and Workshop identities in projection and rendering", () => {
@@ -49,7 +49,7 @@ describe("projection diagnostics functional core", () => {
     const managed = row(" strange\n", { type: "directory", path: "/target" }, {
       path: "/displayed",
       management: "managed",
-      details: [{ kind: "clanker", harness: "pi", status: "", detail: "", title: "worker", age: "", state: "unknown", target: { type: "tmux_window", session: "work", windowId: "@1", pane: "%1" }, updatedAt: 0 }],
+      details: [{ kind: "clanker", harness: "pi", status: "", detail: "", title: "worker", age: "", state: "unknown", target: { type: "window", session: "work", windowId: "@1", pane: "%1" }, updatedAt: 0 }],
     })
     const report = diagnoseProjection([managed])
     const codes = report.issues.map((entry) => entry.code)
@@ -62,7 +62,7 @@ describe("projection diagnostics functional core", () => {
     const observed = session("observed", {
       details: [{
         kind: "observation", harness: "pi", status: "reported working", detail: "rejected lifecycle identity: clanker-id-mismatch", title: "stale report", age: "1m", state: "unknown",
-        target: { type: "tmux_window", session: "observed", windowId: "@1", pane: "%1" }, updatedAt: 10,
+        target: { type: "window", session: "observed", windowId: "@1", pane: "%1" }, updatedAt: 10,
         observation: { source: "lifecycle", confidence: "rejected", state: "working", observedAt: 10, reason: "clanker-id-mismatch" },
       }],
     })

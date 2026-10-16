@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync 
 import { dirname, join, resolve } from "node:path"
 
 /** The expanded, single durable registry described by ADR-0002. Legacy stores are import inputs only. */
-export const REGISTRY_SCHEMA_VERSION = 2 as const
+export const REGISTRY_SCHEMA_VERSION = 3 as const
 
 export const registryStatePath = (stateHome = Bun.env.XDG_STATE_HOME || join(Bun.env.HOME || "", ".local/state"), env: Record<string, string | undefined> = Bun.env) =>
   join(stateHome, `clankerhouse${instanceSlug(env)}`, "registry.sqlite3")
@@ -106,7 +106,7 @@ const ensurePermissions = (dbPath: string) => {
 }
 
 const initialize = (db: Database) => {
-  const current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
+  let current = Number((db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0)
   if (current > REGISTRY_SCHEMA_VERSION) throw new Error(`Unsupported durable registry version ${current}`)
   if (current === REGISTRY_SCHEMA_VERSION) return
   if (current === 1) {
@@ -114,6 +114,17 @@ const initialize = (db: Database) => {
       BEGIN IMMEDIATE;
       ALTER TABLE operations ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0);
       PRAGMA user_version = 2;
+      COMMIT;
+    `)
+    current = 2
+  }
+  if (current === 2) {
+    // Recovery stores runtime-neutral preferred labels instead of tmux names.
+    db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE desired_recovery RENAME COLUMN tmux_session_name TO preferred_session_label;
+      ALTER TABLE desired_recovery RENAME COLUMN tmux_window_name TO preferred_window_label;
+      PRAGMA user_version = 3;
       COMMIT;
     `)
     return
@@ -242,8 +253,8 @@ const initialize = (db: Database) => {
     CREATE TABLE desired_recovery (
       clanker_id TEXT PRIMARY KEY REFERENCES clankers(id) ON DELETE RESTRICT,
       workshop_path TEXT NOT NULL,
-      tmux_session_name TEXT NOT NULL,
-      tmux_window_name TEXT NOT NULL,
+      preferred_session_label TEXT NOT NULL,
+      preferred_window_label TEXT NOT NULL,
       cwd TEXT NOT NULL,
       launch_spec TEXT NOT NULL CHECK (json_valid(launch_spec)),
       original_task TEXT NOT NULL,
@@ -325,7 +336,7 @@ const initialize = (db: Database) => {
       UNIQUE (source_kind, source_path, source_table, source_key)
     );
     CREATE INDEX import_provenance_target_idx ON import_provenance(target_table, target_key);
-    PRAGMA user_version = 2;
+    PRAGMA user_version = 3;
     COMMIT;
   `)
 }
@@ -550,7 +561,7 @@ export class DurableRegistry {
   }
 
   importRecovery(sourcePath: string, options: { interruptBeforeCommit?: () => void } = {}) {
-    const opened = this.source("recovery", sourcePath, [1, 2, 3])
+    const opened = this.source("recovery", sourcePath, [1, 2, 3, 4])
     try {
       const tables = tablesFor(opened.db)
       if (!tables.has("desired_clankers")) throw new Error("Malformed recovery store")
@@ -564,9 +575,9 @@ export class DurableRegistry {
           const condition = hasColumn(desiredColumns, "recovery_condition") ? requiredText(row.recovery_condition, "recovery condition") : row.desired_state === "running" ? "pending" : "healthy"
           this.db.query("INSERT INTO clankers (id, workshop_id, terminal_id, harness, harness_session_id, created_at, updated_at) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6)")
             .run(id, workshopId, requiredText(row.harness, "Clanker harness"), nullableText(row.harness_session_id), integer(row.created_at), integer(row.updated_at))
-          this.db.query(`INSERT INTO desired_recovery (clanker_id, workshop_path, tmux_session_name, tmux_window_name, cwd, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at)
+          this.db.query(`INSERT INTO desired_recovery (clanker_id, workshop_path, preferred_session_label, preferred_window_label, cwd, launch_spec, original_task, policy_version, desired_state, recovery_condition, quarantine_reason, consecutive_failures, owner_unit, revision, created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`)
-            .run(id, requiredText(row.workshop_path, "Workshop path"), requiredText(row.tmux_session_name, "tmux session name"), requiredText(row.tmux_window_name, "tmux window name"), requiredText(row.cwd, "Clanker cwd"), jsonText(row.launch_spec), String(row.original_task ?? ""), integer(row.policy_version, 1), requiredText(row.desired_state, "desired state"), condition, hasColumn(desiredColumns, "quarantine_reason") ? nullableText(row.quarantine_reason) : null, hasColumn(desiredColumns, "consecutive_failures") ? integer(row.consecutive_failures) : 0, hasColumn(desiredColumns, "owner_unit") ? nullableText(row.owner_unit) : null, Math.max(1, integer(row.revision, 1)), integer(row.created_at), integer(row.updated_at))
+            .run(id, requiredText(row.workshop_path, "Workshop path"), requiredText(row.preferred_session_label ?? row.tmux_session_name, "preferred session label"), requiredText(row.preferred_window_label ?? row.tmux_window_name, "preferred window label"), requiredText(row.cwd, "Clanker cwd"), jsonText(row.launch_spec), String(row.original_task ?? ""), integer(row.policy_version, 1), requiredText(row.desired_state, "desired state"), condition, hasColumn(desiredColumns, "quarantine_reason") ? nullableText(row.quarantine_reason) : null, hasColumn(desiredColumns, "consecutive_failures") ? integer(row.consecutive_failures) : 0, hasColumn(desiredColumns, "owner_unit") ? nullableText(row.owner_unit) : null, Math.max(1, integer(row.revision, 1)), integer(row.created_at), integer(row.updated_at))
           count++
         }
         if (tables.has("recovery_attempts")) {

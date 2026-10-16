@@ -82,7 +82,7 @@ class FakeSystem:
         return self.process_io.get(pid, 0)
 
 
-class FakeTmux:
+class FakeMultiplexer:
     def __init__(self, listing=""):
         self.listing = listing
         self.identities = {}
@@ -106,7 +106,7 @@ class ResourceGuardTests(unittest.TestCase):
             runtime_dir=root / "run",
         )
         self.system = FakeSystem()
-        self.tmux = FakeTmux()
+        self.multiplexer = FakeMultiplexer()
         self.clock = 1_700_000_000.0
         self.commands = []
 
@@ -117,7 +117,7 @@ class ResourceGuardTests(unittest.TestCase):
         return ResourceGuard(
             config or self.config,
             system=self.system,
-            tmux=self.tmux,
+            multiplexer=self.multiplexer,
             sleep=lambda _seconds: None,
             now=lambda: self.clock,
             run_command=lambda argv: self.commands.append(argv) or 0,
@@ -151,7 +151,7 @@ class ResourceGuardTests(unittest.TestCase):
 
     def report(self, pane, harness, clanker_id, state):
         safe = pane.replace("%", "%")
-        directory = self.config.runtime_dir / f"clankerhouse-{os.getuid()}" / "clanker-state"
+        directory = self.config.runtime_root / "clanker-state"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{safe}.json").write_text(json.dumps({
             "pane": pane, "harness": harness, "clankerId": clanker_id, "state": state,
@@ -166,63 +166,41 @@ class ResourceGuardTests(unittest.TestCase):
         self.assertEqual((config.samples - 1) * config.interval, 300)
         self.assertEqual(config.cooldown, 120)
 
-    def test_managed_herdr_uses_an_instance_scoped_state_directory(self):
+    def test_default_instance_uses_the_herdr_state_directory(self):
         config = Config.from_env({
             "HOME": str(pathlib.Path(self.temporary.name) / "home"),
             "XDG_STATE_HOME": str(self.config.state_home),
-            "HERDR_ENV": "1",
-            "HERDR_PANE_ID": "w2:p1",
         })
         self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse-herdr")
-
-    def test_explicit_tmux_beats_managed_herdr_markers(self):
-        config = Config.from_env({
-            "XDG_STATE_HOME": str(self.config.state_home),
-            "CLANKERHOUSE_MULTIPLEXER": " tmux ",
-            "HERDR_ENV": "1",
-            "HERDR_PANE_ID": "w2:p1",
-        })
-        self.assertEqual(config.multiplexer, "tmux")
-        self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse")
 
     def test_explicit_instance_changes_only_the_path_suffix(self):
         config = Config.from_env({
             "XDG_STATE_HOME": str(self.config.state_home),
             "CLANKERHOUSE_INSTANCE": " staging ",
-            "HERDR_ENV": "1",
-            "HERDR_PANE_ID": "w2:p1",
         })
-        self.assertEqual(config.multiplexer, "herdr")
         self.assertEqual(config.state_dir, self.config.state_home / "clankerhouse-staging")
+        self.assertEqual(Config.from_env({"XDG_STATE_HOME": str(self.config.state_home), "CLANKERHOUSE_INSTANCE": "default"}).state_dir, self.config.state_home / "clankerhouse")
         with self.assertRaisesRegex(ValueError, "invalid CLANKERHOUSE_INSTANCE"):
             Config.from_env({"CLANKERHOUSE_INSTANCE": "../other"})
 
-    def test_managed_herdr_selects_the_multiplexer_client(self):
-        config = Config.from_env({
-            "XDG_STATE_HOME": str(self.config.state_home),
-            "XDG_RUNTIME_DIR": str(self.config.runtime_dir),
-            "HERDR_ENV": "1",
-            "HERDR_PANE_ID": "w2:p1",
-        })
-        guard = ResourceGuard(config, system=self.system, now=lambda: self.clock)
-        self.assertIsInstance(guard.tmux, MultiplexerClient)
+    def test_guard_discovers_panes_through_the_multiplexer_client(self):
+        guard = ResourceGuard(self.config, system=self.system, now=lambda: self.clock)
+        self.assertIsInstance(guard.multiplexer, MultiplexerClient)
 
-    def test_managed_herdr_reads_reports_from_its_runtime_root(self):
+    def test_reads_reports_from_the_instance_runtime_root(self):
         config = Config.from_env({
             "XDG_STATE_HOME": str(self.config.state_home),
             "XDG_RUNTIME_DIR": str(self.config.runtime_dir),
-            "HERDR_ENV": "1",
-            "HERDR_PANE_ID": "w2:p1",
         })
         self.add_process(101, 11, "pi")
-        self.tmux.listing = "w2:p1\tpi\tid-1\t101\t11\t0\t1\t1\ts1\t/cwd1\t/wt1"
+        self.multiplexer.listing = "w2:p1\tpi\tid-1\t101\t11\t0\t1\t1\ts1\t/cwd1\t/wt1"
         report_dir = self.config.runtime_dir / f"clankerhouse-{os.getuid()}-herdr" / "clanker-state"
         report_dir.mkdir(parents=True)
         (report_dir / "w2_p1.json").write_text(json.dumps({
             "pane": "w2:p1", "harness": "pi", "clankerId": "id-1", "state": "working",
         }), encoding="utf-8")
 
-        candidates = ResourceGuard(config, system=self.system, tmux=self.tmux, now=lambda: self.clock).discover()
+        candidates = ResourceGuard(config, system=self.system, multiplexer=self.multiplexer, now=lambda: self.clock).discover()
 
         self.assertEqual(candidates[0].state, "working")
 
@@ -299,7 +277,7 @@ class ResourceGuardTests(unittest.TestCase):
         self.add_process(102, 12, "claude")
         self.add_process(103, 13, "opencode")
         self.add_process(104, 14, "pi-helper")
-        self.tmux.listing = "\n".join((
+        self.multiplexer.listing = "\n".join((
             "%1\tpi\tid-1\t101\t11\t0\t1\t1\ts1\t/cwd1\t/wt1",
             "%2\tclaude\tid-2\t0\t12\t1\t1\t1\ts2\t/cwd2\t/wt2",
             "%3\topencode\tid-3\t103\t13\t0\t1\t0\ts3\t/cwd3\t/wt3",
@@ -322,7 +300,7 @@ class ResourceGuardTests(unittest.TestCase):
             self.add_process(pid, parent, harness)
             panes.append(f"{pane}\t{harness}\t{clanker_id}\t{pid}\t{parent}\t0\t1\t1\tsession-{index}\t/cwd-{index}\t/wt-{index}")
             self.report(pane, harness, clanker_id, state)
-        self.tmux.listing = "\n".join(panes)
+        self.multiplexer.listing = "\n".join(panes)
         selected = guard.select(guard.discover())
         self.assertEqual(selected.state, "idle")  # pane id tie-break within done/idle
         self.assertEqual(selected.pane, "%4")
@@ -335,12 +313,12 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.comms[282] = "worker"
         self.system.rss[282] = 512 * 1024 * 1024
         self.system.child_map[281] = [282]
-        self.tmux.listing = "\n".join((
+        self.multiplexer.listing = "\n".join((
             "%1\tpi\tdone-id\t271\t27\t0\t1\t1\tdone\t/cwd1\t/wt1",
             "%2\tpi\tworking-id\t281\t28\t0\t1\t1\tworking\t/cwd2\t/wt2",
         ))
-        self.tmux.identities["%1"] = ("pi", "done-id", 271, 27, False)
-        self.tmux.identities["%2"] = ("pi", "working-id", 281, 28, False)
+        self.multiplexer.identities["%1"] = ("pi", "done-id", 271, 27, False)
+        self.multiplexer.identities["%2"] = ("pi", "working-id", 281, 28, False)
         self.report("%1", "pi", "done-id", "done")
         self.report("%2", "pi", "working-id", "working")
         self.memory(available_kib=100_000, some=20)
@@ -354,7 +332,7 @@ class ResourceGuardTests(unittest.TestCase):
         self.add_process(291, 29, "claude")
         self.system.rss[281] = 100
         self.system.rss[291] = 500
-        self.tmux.listing = "\n".join((
+        self.multiplexer.listing = "\n".join((
             "%1\tpi\tid-1\t281\t28\t0\t1\t1\ts1\t/cwd1\t/wt1",
             "%2\tclaude\tid-2\t291\t29\t0\t1\t1\ts2\t/cwd2\t/wt2",
         ))
@@ -366,7 +344,7 @@ class ResourceGuardTests(unittest.TestCase):
     def test_duplicate_clanker_ids_are_rejected(self):
         self.add_process(281, 28, "pi")
         self.add_process(291, 29, "claude")
-        self.tmux.listing = "\n".join((
+        self.multiplexer.listing = "\n".join((
             "%1\tpi\tduplicate\t281\t28\t0\t1\t1\ts1\t/cwd1\t/wt1",
             "%2\tclaude\tduplicate\t291\t29\t0\t1\t1\ts2\t/cwd2\t/wt2",
         ))
@@ -374,14 +352,14 @@ class ResourceGuardTests(unittest.TestCase):
 
     def test_revalidation_checks_start_ticks_identity_ancestry_and_uid(self):
         self.add_process(301, 31, "pi", start=500)
-        self.tmux.listing = "%1\tpi\tid\t301\t31\t0\t1\t1\tsession\t/cwd\t/worktree"
-        self.tmux.identities["%1"] = ("pi", "id", 301, 31, False)
+        self.multiplexer.listing = "%1\tpi\tid\t301\t31\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.identities["%1"] = ("pi", "id", 301, 31, False)
         guard = self.guard()
         candidate = guard.discover()[0]
         self.assertTrue(guard.validate(candidate))
-        self.tmux.identities["%1"] = ("pi", "id", 301, 31, True)
+        self.multiplexer.identities["%1"] = ("pi", "id", 301, 31, True)
         self.assertFalse(guard.validate(candidate))
-        self.tmux.identities["%1"] = ("pi", "id", 301, 31, False)
+        self.multiplexer.identities["%1"] = ("pi", "id", 301, 31, False)
         self.system.stats[301] = (31, 501)
         self.assertFalse(guard.validate(candidate))
         self.system.stats[301] = (99, 500)
@@ -398,8 +376,8 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.comms[402] = "cargo"
         self.system.rss[402] = 512 * 1024 * 1024
         self.system.child_map[401] = [402]
-        self.tmux.listing = "%1\tpi\tid\t401\t41\t0\t1\t1\tsession\t/cwd\t/worktree"
-        self.tmux.identities["%1"] = ("pi", "id", 401, 41, False)
+        self.multiplexer.listing = "%1\tpi\tid\t401\t41\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.identities["%1"] = ("pi", "id", 401, 41, False)
         self.report("%1", "pi", "id", "working")
         self.memory(available_kib=100_000, some=20)
 
@@ -423,8 +401,8 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.rss[463] = 512 * 1024 * 1024
         self.system.child_map[461] = [462]
         self.system.child_map[462] = [463]
-        self.tmux.listing = "%6\tpi\tclanker-6\t461\t46\t0\t1\t1\ts6\t/cwd6\t/wt6"
-        self.tmux.identities["%6"] = ("pi", "clanker-6", 461, 46, False)
+        self.multiplexer.listing = "%6\tpi\tclanker-6\t461\t46\t0\t1\t1\ts6\t/cwd6\t/wt6"
+        self.multiplexer.identities["%6"] = ("pi", "clanker-6", 461, 46, False)
         self.memory(available_kib=100_000, some=20)
 
         self.guard(replace(self.config, samples=1)).run_once()
@@ -443,8 +421,8 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.comms[412] = "cargo"
         self.system.rss[412] = 512 * 1024 * 1024
         self.system.child_map[411] = [412]
-        self.tmux.listing = "%1\tpi\tclanker-1\t411\t41\t0\t1\t1\tsession\t/cwd\t/worktree"
-        self.tmux.identities["%1"] = ("pi", "clanker-1", 411, 41, False)
+        self.multiplexer.listing = "%1\tpi\tclanker-1\t411\t41\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.identities["%1"] = ("pi", "clanker-1", 411, 41, False)
         self.memory(available_kib=100_000, some=20)
 
         self.guard(replace(self.config, samples=1)).run_once()
@@ -464,8 +442,8 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.comms[422] = "rg"
         self.system.child_map[421] = [422]
         self.system.process_io[422] = 0
-        self.tmux.listing = "%2\tpi\tclanker-2\t421\t42\t0\t1\t1\tsession\t/cwd\t/worktree"
-        self.tmux.identities["%2"] = ("pi", "clanker-2", 421, 42, False)
+        self.multiplexer.listing = "%2\tpi\tclanker-2\t421\t42\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.identities["%2"] = ("pi", "clanker-2", 421, 42, False)
         self.memory(available_kib=7 * 1024 * 1024, some=0)
         guard = self.guard(replace(self.config, samples=1))
         guard.run_once()
@@ -489,8 +467,8 @@ class ResourceGuardTests(unittest.TestCase):
             self.system.comms[child_pid] = "worker"
             self.system.rss[child_pid] = 512 * 1024 * 1024
             self.system.child_map[harness_pid] = [child_pid]
-            self.tmux.identities[pane] = ("pi", clanker_id, harness_pid, pane_pid, False)
-        self.tmux.listing = "\n".join((
+            self.multiplexer.identities[pane] = ("pi", clanker_id, harness_pid, pane_pid, False)
+        self.multiplexer.listing = "\n".join((
             "%3\tpi\tclanker-3\t431\t43\t0\t1\t1\ts3\t/cwd3\t/wt3",
             "%4\tpi\tclanker-4\t441\t44\t0\t1\t1\ts4\t/cwd4\t/wt4",
         ))
@@ -518,8 +496,8 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.comms[472] = "worker"
         self.system.rss[472] = 512 * 1024 * 1024
         self.system.child_map[471] = [472]
-        self.tmux.listing = "%8\tpi\tclanker-8\t471\t47\t0\t1\t1\ts8\t/cwd8\t/wt8"
-        self.tmux.identities["%8"] = ("pi", "clanker-8", 471, 47, False)
+        self.multiplexer.listing = "%8\tpi\tclanker-8\t471\t47\t0\t1\t1\ts8\t/cwd8\t/wt8"
+        self.multiplexer.identities["%8"] = ("pi", "clanker-8", 471, 47, False)
         self.memory(available_kib=100_000, some=20)
         config = replace(self.config, samples=1, cooldown=120)
         self.guard(config).run_once()
@@ -534,8 +512,8 @@ class ResourceGuardTests(unittest.TestCase):
 
     def test_pressure_durably_stops_a_tracked_clanker_when_no_workload_is_attributable(self):
         self.add_process(451, 45, "pi")
-        self.tmux.listing = "%5\tpi\tclanker-5\t451\t45\t0\t1\t1\ts5\t/cwd5\t/wt5"
-        self.tmux.identities["%5"] = ("pi", "clanker-5", 451, 45, False)
+        self.multiplexer.listing = "%5\tpi\tclanker-5\t451\t45\t0\t1\t1\ts5\t/cwd5\t/wt5"
+        self.multiplexer.identities["%5"] = ("pi", "clanker-5", 451, 45, False)
         self.config.state_dir.mkdir(parents=True)
         with sqlite3.connect(self.config.state_dir / "recovery.sqlite3") as connection:
             connection.execute("CREATE TABLE desired_clankers (clanker_id TEXT PRIMARY KEY, desired_state TEXT NOT NULL, owner_unit TEXT)")
@@ -558,16 +536,16 @@ class ResourceGuardTests(unittest.TestCase):
         self.system.rss[502] = 512 * 1024 * 1024
         self.system.child_map[501] = [502]
         self.system.dead_after_term = True
-        self.tmux.listing = "%1\tclaude\tid\t501\t51\t0\t1\t1\tsession\t/cwd\t/worktree"
-        self.tmux.identities["%1"] = ("claude", "id", 501, 51, False)
+        self.multiplexer.listing = "%1\tclaude\tid\t501\t51\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.identities["%1"] = ("claude", "id", 501, 51, False)
         self.memory(available_kib=100_000, some=20)
         self.guard(replace(self.config, samples=1)).run_once()
         self.assertEqual(self.system.signals, [(502, signal.SIGTERM)])
 
     def test_untracked_clanker_without_an_attributable_workload_is_not_signalled(self):
         self.add_process(551, 55, "pi")
-        self.tmux.listing = "%7\tpi\tuntracked\t551\t55\t0\t1\t1\ts7\t/cwd7\t/wt7"
-        self.tmux.identities["%7"] = ("pi", "untracked", 551, 55, False)
+        self.multiplexer.listing = "%7\tpi\tuntracked\t551\t55\t0\t1\t1\ts7\t/cwd7\t/wt7"
+        self.multiplexer.identities["%7"] = ("pi", "untracked", 551, 55, False)
         self.memory(available_kib=100_000, some=20)
 
         guard = self.guard(replace(self.config, samples=1))
@@ -580,7 +558,7 @@ class ResourceGuardTests(unittest.TestCase):
 
     def test_dry_run_records_without_signalling_or_consuming_boot(self):
         self.add_process(601, 61, "opencode")
-        self.tmux.listing = "%1\topencode\tid\t601\t61\t0\t1\t1\tsession\t/cwd\t/worktree"
+        self.multiplexer.listing = "%1\topencode\tid\t601\t61\t0\t1\t1\tsession\t/cwd\t/worktree"
         self.memory(available_kib=100_000, some=20)
         guard = self.guard(replace(self.config, samples=1, dry_run=True))
         guard.run_once()

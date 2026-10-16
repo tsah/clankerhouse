@@ -9,7 +9,7 @@ progress() {
 kind="${1:-}"
 target="${2:-}"
 [[ "$kind" == pane || "$kind" == session || "$kind" == mark-session ]] && [[ -n "$target" ]] || {
-    echo "Usage: clankerhouse-tmux-stop pane|session|mark-session TARGET" >&2
+    echo "Usage: clankerhouse-mux-stop pane|session|mark-session TARGET" >&2
     exit 2
 }
 
@@ -29,7 +29,7 @@ fi
 while IFS= read -r clanker_id; do
     [[ -n "$clanker_id" ]] || continue
     progress "Persisting stop intent for $clanker_id"
-    if ! stop_output=$(CLANKERHOUSE_MULTIPLEXER="$(ch_mux_kind)" "$clankers_cli" recovery stop "$clanker_id" --reason intentional-multiplexer-stop --no-pane-kill --if-present 2>&1); then
+    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-multiplexer-stop --no-pane-kill --if-present 2>&1); then
         printf 'Unable to persist stop intent for %s: %s\n' "$clanker_id" "$stop_output" >&2
         exit 1
     fi

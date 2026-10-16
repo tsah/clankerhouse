@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Partly superseded by ADR-0008: the tmux Adapter has since been retired and Herdr is the only Adapter. The Interface and Capability split below remain in force; the runtime selection rules and the tmux column of the Capability table are historical.
 
 ## Context
 
@@ -65,7 +65,7 @@ herdr terms (`workspace`, `tab`, `tokens`, `w1:p3`, `agent.wait`) appear only in
 
 ### Sequencing
 
-The Interface is extracted and every out-of-Adapter tmux invocation is routed through it while tmux is still the only Adapter, validated against the existing QA suites. The herdr Adapter is added afterwards. Details are in `docs/herdr-adapter-migration.md`.
+The Interface is extracted and every out-of-Adapter tmux invocation is routed through it while tmux is still the only Adapter, validated against the existing QA suites. The herdr Adapter is added afterwards.
 
 ## Consequences
 
@@ -80,18 +80,4 @@ The Interface is extracted and every out-of-Adapter tmux invocation is routed th
 
 ## Implementation status
 
-Phases 0–4 and the Alt-K/Alt-B/Alt-D portion of Phase 5 in `docs/herdr-adapter-migration.md` are implemented. The Interface lives in
-`src/multiplexer/interface.ts`; the tmux Adapter in `src/multiplexer/tmux.ts` (behaviour and
-`@option` names unchanged); the registry-backed managed layer in `src/multiplexer/managed.ts`;
-the herdr Adapter in `src/multiplexer/herdr.ts`; selection in `src/multiplexer/select.ts`.
-`src/multiplexer.ts` re-exports the tmux composition as `TmuxMultiplexer` for existing callers.
-Every former out-of-Adapter tmux call in `workflow.ts`, `clanker-api.ts`, `recovery/controller.ts`,
-`cli.ts`, and the `daemon.ts` mutation stages now go through the Interface. Herdr's `agentPrompt`
-Capability maps only inside its Adapter to `agent.prompt`; Claude send revalidates the Clanker claim
-before using it, while tmux declares the Capability absent. Shell and Python callers
-use `clankers mux` via `libexec/clankerhouse-mux`; the Pi extension, OpenCode plugin, and the
-`clankerhouse-clanker-state-report`/`-tmux-stop`/`-harness-lifecycle`/`-opencode2` scripts write
-claims runtime-neutrally. tmux stays the default outside a managed Herdr pane; explicit selection remains available for parallel administration.
-`scripts/qa-herdr` exercises implicit managed-pane inference and the herdr Adapter end to end against an explicitly socket-scoped isolated herdr server, with tmux replaced by a rejecting probe. The installer writes Herdr popup bindings for Alt-K, Alt-B, and Alt-D; their launcher selects the Herdr instance, checks daemon health through the native client without starting Bun on the hot path, and opens the instance-scoped native picker. Alt-D pins the invoking popup's workspace and opens explicit native deletion confirmation; missing invocation context or a missing live daemon snapshot fails closed. Native mutation progress does not lock navigation: accepted operations remain daemon-owned after a user jumps elsewhere. Generic picker/native commands dispatch to that launcher under Herdr. Runtime agent status is projected as observed evidence while exact lifecycle attestation remains authoritative.
-
-Still incomplete in Phases 5–6: the Herdr Alt-X binding and user unit, retirement of the tmux popup compatibility helpers, and contraction of the dual-emitted `tmux_*` target kinds.
+Complete. The Interface lives in `src/multiplexer/interface.ts`, the registry-backed managed layer in `src/multiplexer/managed.ts`, and the Herdr Adapter in `src/multiplexer/herdr.ts`. The remaining contraction (target kinds, stage names, recovery columns, popup helpers) was carried out when ADR-0008 retired the tmux Adapter.

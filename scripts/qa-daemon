@@ -9,7 +9,6 @@ if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
     exit 1
 fi
 marker="$root.clankerhouse-qa-owned"
-socket="$root/tmux.sock"
 runtime="$root/runtime"
 state_home="$root/state"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -17,13 +16,15 @@ cargo_bin=$(command -v cargo)
 cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
 rustup_home=${RUSTUP_HOME:-"$HOME/.rustup"}
 server_pid=""
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 
 cleanup() {
     if [[ -n "$server_pid" ]]; then
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
-    tmux -S "$socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     if [[ -f "$marker" ]]; then rm -rf "$root"; fi
 }
 trap cleanup EXIT INT TERM
@@ -35,14 +36,14 @@ fi
 rm -rf "$root"
 mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/work"
 touch "$marker"
-export CLANKERHOUSE_MULTIPLEXER=tmux
 export HERDR_ENV=
 export HERDR_PANE_ID=
-tmux -S "$socket" new-session -d -s qa-daemon -n main -x 100 -y 30 -c "$root/work" "sleep 300"
+qa_herdr_start "$root/herdr"
+# The isolated server opens one workspace at its startup cwd; make it the QA workshop.
+qa_herdr workspace rename w1 qa-daemon >/dev/null
 
 env \
     HOME="$root/home" \
-    TMUX="$socket,0,0" \
     XDG_RUNTIME_DIR="$runtime" \
     XDG_STATE_HOME="$state_home" \
     XDG_DATA_HOME="$root/data" \
@@ -51,8 +52,8 @@ env \
     bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
 server_pid=$!
 
-daemon_socket="$runtime/clankerhouse-$uid/daemon.sock"
-cache="$runtime/clankerhouse-$uid/state.json"
+daemon_socket="$runtime/clankerhouse-$uid-herdr/daemon.sock"
+cache="$runtime/clankerhouse-$uid-herdr/state.json"
 # Cold Bun startup can exceed five seconds on contended builders. Keep the
 # wait bounded, but continue to fail immediately if the child exits.
 for _ in {1..600}; do
@@ -75,7 +76,7 @@ transport_result=$(bun --eval '
   const refreshed = await refreshProjection(socketPath)
   const after = await getSnapshot(socketPath)
   if (status.protocolVersion !== 1) throw new Error("unexpected protocol version")
-  if (before.version !== 10 || after.version !== 10) throw new Error("unexpected cache version")
+  if (before.version !== 11 || after.version !== 11) throw new Error("unexpected cache version")
   if (refreshed.revision.source !== after.revision.source || refreshed.revision.sequence !== after.revision.sequence) throw new Error("refresh receipt mismatch")
   if (before.revision.source === after.revision.source && after.revision.sequence !== before.revision.sequence) throw new Error("semantic no-op refresh advanced the revision")
   console.log(JSON.stringify({ protocol: status.protocolVersion, revision: after.revision }))
@@ -83,10 +84,10 @@ transport_result=$(bun --eval '
 [[ "$transport_result" == *'"protocol":1'* ]] || { printf 'Unexpected daemon response: %s\n' "$transport_result" >&2; exit 1; }
 
 diagnostics=$(env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CLANKERHOUSE_HOME="$repo" "$repo/bin/clankers" diagnose --json)
-jq -e '.healthy == true and .counts.tmuxSessions == 1 and .counts.renderedSessionRows == 1' <<<"$diagnostics" >/dev/null
+jq -e '.healthy == true and .counts.sessions == 1 and .counts.renderedSessionRows == 1' <<<"$diagnostics" >/dev/null
 native_tree=$(env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" \
     "$cargo_bin" run --quiet --manifest-path "$repo/native-client/Cargo.toml" -- --dump-tree)
-jq -e '.version == 1 and (.rows | length) == 1 and .rows[0].target.type == "tmux_session"' <<<"$native_tree" >/dev/null
+jq -e '.version == 1 and (.rows | length) == 1 and .rows[0].target.type == "session"' <<<"$native_tree" >/dev/null
 
 SOCKET_PATH="$daemon_socket" python3 - <<'PY'
 import json
@@ -108,6 +109,8 @@ PY
 kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=""
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 [[ -s "$cache" ]] || { printf 'Expected JSON fallback cache to remain after shutdown\n' >&2; exit 1; }
 [[ ! -e "$daemon_socket" ]] || { printf 'Expected daemon socket cleanup after shutdown\n' >&2; exit 1; }
 

@@ -1,21 +1,22 @@
 #!/bin/bash
 
-# Orchestration API end to end in an isolated tmux server, state, and runtime: a child
+# Orchestration API end to end in an isolated Herdr server, state, and runtime: a child
 # clanker reports to its parent Workshop, the parent's resumable watch wakes on reports,
 # settles, staleness, spawns, and exits exactly once, and Reports survive a daemon restart.
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
 uid=$(id -u)
 root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-orchestration-$uid-$$"}")
 [[ "$root" =~ ^/tmp/qa-clankerhouse-orchestration-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe QA root: $root" >&2; exit 2; }
 marker="$root.clankerhouse-qa-owned"
 if [[ -e "$root" && ! -f "$marker" ]]; then echo "Refusing unowned QA root: $root" >&2; exit 2; fi
 rm -rf -- "$root"
-socket="$root/tmux.sock"
 runtime="$root/runtime"
 state_home="$root/state"
-mkdir -p "$runtime" "$state_home" "$root/home" "$root/data" "$root/config"
+mkdir -p "$runtime" "$state_home" "$root/home" "$root/data"
 touch "$marker"
 server_pid=""
 watch_pid=""
@@ -24,20 +25,27 @@ cleanup() {
     for pid in "$watch_pid" "$server_pid"; do
         if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
-    tmux -S "$socket" kill-server 2>/dev/null || true
+    qa_herdr_stop
     if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
 }
 trap cleanup EXIT INT TERM
+unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
+herdr_status=0
+qa_herdr_start "$root/herdr" || herdr_status=$?
+[[ "$herdr_status" != 77 ]] || exit 0
+[[ "$herdr_status" == 0 ]] || exit "$herdr_status"
 
 fail() { echo "Clankerhouse orchestration QA failed: $*" >&2; exit 1; }
 json_assert() {
     python3 -c 'import json,sys; text=sys.stdin.read(); data=[json.loads(line) for line in text.splitlines() if line.strip()] if sys.argv[2:]==["lines"] else json.loads(text); assert eval(sys.argv[1], {"data": data}), (sys.argv[1], data)' "$@"
 }
 
-qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$root/data" "XDG_CONFIG_HOME=$root/config"
-    "TMUX=$socket,1,0" "HERDR_ENV=" "HERDR_PANE_ID=" "HERDR_SOCKET_PATH=" "CLANKERHOUSE_MULTIPLEXER=tmux" "CLANKERHOUSE_INSTANCE=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=")
+qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$root/data"
+    "HERDR_ENV=" "HERDR_PANE_ID=" "CLANKERHOUSE_INSTANCE=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
-hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env TMUX_PANE="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
+mux() { api mux "$@"; }
+json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env HERDR_PANE_ID="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
 
 # One repository with three Workshops: parent -> child -> grandchild.
 parent="$root/repo"
@@ -58,16 +66,16 @@ read -r parent_id child_id grandchild_id <<<"$lineage"
 
 claude_pane() {
     local session=$1 path=$2 clanker=$3
-    tmux -S "$socket" new-session -d -s "$session" -n claude -c "$path" "sleep 600"
-    tmux -S "$socket" set-option -t "$session" @dotfiles_worktree_path "$path"
-    local pane
-    pane=$(tmux -S "$socket" display-message -p -t "$session:claude" '#{pane_id}')
-    tmux -S "$socket" set-option -p -t "$pane" @dotfiles_harness claude
-    tmux -S "$socket" set-option -p -t "$pane" @clankerhouse_clanker_id "$clanker"
+    local spawned pane
+    spawned=$(mux spawn --new-session "$session" --name claude --cwd "$path" -- sleep 600)
+    mux claim --session "$(json_field nativeSessionId <<<"$spawned")" worktreePath "$path"
+    pane=$(json_field nativePaneId <<<"$spawned")
+    mux claim --pane "$pane" harness claude
+    mux claim --pane "$pane" clankerId "$clanker"
     printf '%s' "$pane"
 }
-tmux -S "$socket" new-session -d -s qa-parent -n main -c "$parent" "sleep 600"
-tmux -S "$socket" set-option -t qa-parent @dotfiles_worktree_path "$parent"
+parent_session=$(mux spawn --new-session qa-parent --name main --cwd "$parent" -- sleep 600 | json_field nativeSessionId)
+mux claim --session "$parent_session" worktreePath "$parent"
 child_pane=$(claude_pane qa-child "$root/child" clanker-qa-child)
 hook "$child_pane" clanker-qa-child idle '{"hook_event_name":"SessionStart"}'
 
@@ -76,7 +84,7 @@ start_daemon() {
         bun run "$repo/src/daemon.ts" --server >>"$root/server.log" 2>&1 &
     server_pid=$!
     for _ in {1..600}; do
-        [[ -S "$runtime/clankerhouse-$uid/daemon.sock" ]] && return 0
+        [[ -S "$runtime/clankerhouse-$uid-herdr/daemon.sock" ]] && return 0
         kill -0 "$server_pid" 2>/dev/null || { cat "$root/server.log" >&2; fail "daemon exited during startup"; }
         sleep 0.05
     done
@@ -163,8 +171,8 @@ set +e; output=$(shallow); code=$?; set -e
 echo "PASS: A3 spawned for a new descendant Workshop's clanker"
 
 # A3 exited: the child pane goes away.
-[[ "$(tmux -S "$socket" show-option -p -qv -t "$child_pane" @clankerhouse_clanker_id)" == clanker-qa-child ]] || fail "refusing to kill an unexpected pane"
-tmux -S "$socket" kill-pane -t "$child_pane"
+[[ "$(mux read-claim --pane "$child_pane" clankerId)" == clanker-qa-child ]] || fail "refusing to kill an unexpected pane"
+mux kill --pane "$child_pane"
 watch_once --timeout 5 | json_assert "len(data) == 1 and data[0]['type'] == 'exited' and data[0]['clankerId'] == 'clanker-qa-child' and data[0]['workshopId'] == '$child_id'" lines
 expect_timeout 1
 echo "PASS: A3 exited once"

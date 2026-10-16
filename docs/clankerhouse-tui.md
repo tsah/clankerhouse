@@ -3,29 +3,29 @@
 ## Purpose
 
 Clankerhouse is the interactive navigator for workshops, clankers, worktrees,
-tmux windows, and configured directories. `Alt-K`, shell function `s`, and the
-`clankerhouse` command open the same TUI.
+multiplexer windows, and configured directories. Herdr's `Alt-K` popup, shell
+function `s`, and the `clankerhouse` command open the same TUI.
 
 ## Domain model
 
 - A **workshop** is a durable Worktrunk worktree plus its canonical, lazily
-  materialized tmux session.
+  materialized Herdr workspace.
 - A **clanker** is one visible harness session inside a workshop.
 - A **harness** is the program hosting a clanker: Pi, Claude, OpenCode, or
   Codex. Harness-native in-process subagents are not clankers.
-- A plain tmux window is detail within a workshop, but is not a clanker.
+- A plain multiplexer window is detail within a workshop, but is not a clanker.
 - A sessionless worktree and a configured directory remain navigation targets;
   they are not displayed as live workshops.
 
 Workshop identity comes from the canonical worktree path and durable workshop
-ID, never from the mutable tmux session name. Clanker identity comes from its
-opaque `CLANKER_ID`, never from a tmux pane or window name.
+ID, never from the mutable workspace name. Clanker identity comes from its
+opaque `CLANKER_ID`, never from a pane or tab name.
 
 ## Information model
 
 Workshop rows include:
 
-- tmux display name and canonical path
+- display name and canonical path
 - branch and Git status
 - activity age/source
 - durable workshop and parent-workshop IDs
@@ -38,7 +38,7 @@ Clanker detail rows include:
 - harness
 - state and lifecycle status
 - title/activity
-- exact tmux target
+- exact multiplexer target
 
 Pi, Claude, OpenCode, and Codex are always represented as harness values rather
 than entity kinds.
@@ -75,7 +75,7 @@ matches by concatenating unrelated fields.
 - `Enter`: open the exact workshop, clanker, window, worktree, or directory
 - `Alt-K`: open the repository/branch flow when already inside Clankerhouse
 - `Alt-B`: open directly at repository selection
-- `Alt-R`: rename a tmux session without changing workshop identity
+- `Alt-R`: rename a multiplexer session without changing workshop identity
 - `Alt-A`: attach a workshop to another valid parent
 - `Alt-L`: detach a workshop from its parent
 - `Alt-D`: explicitly confirm, then destroy the exact selected pane or session as safely projected; remain in Clankerhouse afterward
@@ -87,17 +87,17 @@ The implementation is split between a Bun/TypeScript/Effect daemon and the sole
 Rust/ratatui renderer in `native-client/`. Collection adapters produce
 multiplexer, Git, lifecycle, directory, and lineage observations; a deterministic
 projection turns them into typed rows and explicit persistence effects. The daemon
-atomically commits revisioned version-10 snapshots and publishes them over a
+atomically commits revisioned snapshots and publishes them over a
 private Unix socket. The native client reads JSON only once as a startup/crash
 fallback and uses the socket for live synchronization. Typed rows carry concrete
 multiplexer/worktree actions; hierarchy is never inferred from rendered strings.
-Clanker communication uses the native `clankers` API and never tmux input or
-pane capture. Linux foreground-process discovery reads process metadata only and
+Clanker communication uses the native `clankers` API and never raw pane input
+or pane capture. Linux foreground-process discovery reads process metadata only and
 cannot assign clanker identity or authorize destructive actions.
 
 A separate durable recovery control plane stores desired Pi, Claude, and
 OpenCode clankers, exact harness session identities, attempts, leases, and
-append-only journal events under `$XDG_STATE_HOME/clankerhouse`. Its persistent
+append-only journal events under `$XDG_STATE_HOME/clankerhouse-herdr`. Its persistent
 controller creates an automatic campaign only after a Linux boot-ID change. It
 admits one missing clanker after a quiet healthy boot, waits for stable liveness,
 and then admits the next. Same-boot pane loss is not enrolled automatically.
@@ -115,7 +115,7 @@ See `clankerhouse/README.md` for the CLI and runtime contract and
 ## Native client
 
 The Alt-K jump client is the Rust/ratatui application in `native-client/`, the
-sole interactive renderer. It receives version-10 observations from the
+sole interactive renderer. It receives observations from the
 authoritative Bun/TypeScript daemon; JSON is only a one-time startup/crash
 fallback. Build and validate the native client with:
 
@@ -124,12 +124,8 @@ scripts/build-native
 bin/clankerhouse-native --check
 ```
 
-To open it directly in a popup:
-
-```sh
-tmux display-popup -E -w 90% -h 80% \
-  "CLANKERHOUSE_CURRENT_SESSION='#{session_name}' '$PWD/bin/clankerhouse-native'"
-```
+Inside Herdr, `bin/clankerhouse` ensures the daemon and opens the native client;
+`clankerhouse-install-herdr` binds it to an Alt-K popup.
 
 The native client supports jump search, navigation, lineage/detail expansion,
 live snapshot reloads, exact target opening, repository/branch creation, rename,

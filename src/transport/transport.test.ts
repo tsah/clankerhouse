@@ -206,7 +206,7 @@ describe("Unix snapshot transport", () => {
   test("rejects a stale producer after its epoch lease is replaced", async () => {
     const { directory, socketPath } = await fixture()
     const leasePath = join(directory, "producer.lease")
-    const lease = await acquireProducerLease(leasePath, "tmux:test")
+    const lease = await acquireProducerLease(leasePath, "herdr:test")
     const initial = advanceProjection(undefined, [{ name: "initial" }], 3, lease.epoch)
     const server = await startSnapshotServer({ socketPath, initialSnapshot: initial, epoch: lease.epoch, owner: lease.owner, assertAuthoritative: lease.assertCurrentSync })
     servers.push(server)

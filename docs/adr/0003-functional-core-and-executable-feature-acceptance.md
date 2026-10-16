@@ -5,7 +5,7 @@
 
 ## Context
 
-Clankerhouse crosses durable state, multiplexers, processes, Git, systemd, a Unix socket, a TypeScript daemon, a native TUI, and several harness integrations. Component tests can all pass while product behavior is wrong at a boundary: a projection can render one Workshop twice, or a daemon can open the correct target for the wrong tmux client.
+Clankerhouse crosses durable state, multiplexers, processes, Git, systemd, a Unix socket, a TypeScript daemon, a native TUI, and several harness integrations. Component tests can all pass while product behavior is wrong at a boundary: a projection can render one Workshop twice, or a daemon can open the correct target for the wrong client.
 
 Effect provides typed composition, services, Layers, scopes, retries, and test clocks, but Effect alone does not make code functional or testable. Domain decisions must not depend on live commands, ambient environment, wall-clock time, or mutable singleton state.
 
@@ -13,7 +13,7 @@ Effect provides typed composition, services, Layers, scopes, retries, and test c
 
 Clankerhouse uses a functional core with an Effect-based imperative shell.
 
-The functional core consists of ordinary deterministic TypeScript functions. Inputs are validated observations, intents, and durable state. Outputs are decisions, plans, events, invariant violations, or new state. Core functions do not execute tmux, filesystem, Git, process, socket, database, or clock effects.
+The functional core consists of ordinary deterministic TypeScript functions. Inputs are validated observations, intents, and durable state. Outputs are decisions, plans, events, invariant violations, or new state. Core functions do not execute multiplexer, filesystem, Git, process, socket, database, or clock effects.
 
 New or materially refactored orchestration uses Effect services and Layers for those capabilities. Production Layers call real adapters. Unit tests call the core directly and use deterministic test Layers/TestClock for Effect use-case orchestration. Adapter contract tests validate translation at each boundary. Existing async adapters are migrated incrementally; accepting this ADR does not claim that every legacy shell, notably the current Recovery controller, has already been converted to Effect.
 
@@ -31,7 +31,7 @@ Project Agent Skills under `.agents/skills/` provide complete manual QA and read
 
 ## Standalone environment rule
 
-End-to-end scenarios isolate `HOME`, all XDG directories, tmux sockets, installation prefixes, Git repositories, databases, runtime sockets, and harness fixtures. They may fake external harness programs and host signals, but not the Clankerhouse seam under test. A host-adapter scenario may use a uniquely named disposable systemd scope in the current user manager when systemd itself is the seam under test; it must not address any installed Clankerhouse unit. No standalone scenario may inspect or mutate the live installation.
+End-to-end scenarios isolate `HOME`, all XDG directories, multiplexer server sockets, installation prefixes, Git repositories, databases, runtime sockets, and harness fixtures. They may fake external harness programs and host signals, but not the Clankerhouse seam under test. A host-adapter scenario may use a uniquely named disposable systemd scope in the current user manager when systemd itself is the seam under test; it must not address any installed Clankerhouse unit. No standalone scenario may inspect or mutate the live installation.
 
 ## Consequences
 

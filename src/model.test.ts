@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { buildTreeRows, compareProjectedSessions, defaultExpandedLineageSessions, normalizeReportedState, sessionState, stateWithSeen, structuredSearch } from "./model"
 import type { DetailRow, SessionRow, Target, TreeRow } from "./model"
 
-const sessionTarget = (session: string): Target => ({ type: "tmux_session", session })
-const windowTarget = (session: string, suffix: string): Target => ({ type: "tmux_window", session, windowId: `@${suffix}`, pane: `%${suffix}` })
+const sessionTarget = (session: string): Target => ({ type: "session", session })
+const windowTarget = (session: string, suffix: string): Target => ({ type: "window", session, windowId: `@${suffix}`, pane: `%${suffix}` })
 
 const detail = (session: string, title: string, suffix: string, state: TreeRow["state"] = "unknown", kind = "window"): DetailRow => ({
   kind: ["pi", "claude", "opencode", "codex"].includes(kind) ? "clanker" : kind,

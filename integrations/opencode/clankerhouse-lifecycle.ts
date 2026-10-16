@@ -2,12 +2,9 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 
-const inferredHerdr = process.env.HERDR_ENV?.trim() === "1" && Boolean(process.env.HERDR_PANE_ID?.trim())
-const requestedMultiplexer = process.env.CLANKERHOUSE_MULTIPLEXER?.trim().toLowerCase()
-if (requestedMultiplexer && requestedMultiplexer !== "tmux" && requestedMultiplexer !== "herdr") throw new Error(`Unsupported CLANKERHOUSE_MULTIPLEXER: ${requestedMultiplexer}`)
-const multiplexerKind = (requestedMultiplexer || (inferredHerdr ? "herdr" : "tmux")) as "tmux" | "herdr"
-const pane = (multiplexerKind === "herdr" ? process.env.HERDR_PANE_ID?.trim() : process.env.TMUX_PANE?.trim()) || ""
-const clankersEnv = { ...process.env, CLANKERHOUSE_MULTIPLEXER: multiplexerKind }
+const pane = process.env.HERDR_PANE_ID?.trim() || ""
+const clankersEnv = process.env
+const clankersCli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
 const clankerId = process.env.CLANKER_ID?.trim() || ""
 const expectedSessionId = process.env.CLANKER_SESSION_ID?.trim() || ""
 const recoveryAttemptId = process.env.CLANKER_RECOVERY_ATTEMPT?.trim() || ""
@@ -27,42 +24,29 @@ type ClankerState = "blocked" | "working" | "done" | "idle" | "unknown"
 const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || ""
 if (requestedInstance && (requestedInstance === "." || requestedInstance === ".." || !/^[A-Za-z0-9._-]+$/.test(requestedInstance))) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${requestedInstance}`)
 const instanceSlug = requestedInstance
-  ? (["default", "tmux"].includes(requestedInstance) ? "" : `-${requestedInstance}`)
-  : (multiplexerKind === "tmux" ? "" : `-${multiplexerKind}`)
+  ? (requestedInstance === "default" ? "" : `-${requestedInstance}`)
+  : "-herdr"
 const runtime = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}${instanceSlug}`
 const reportPath = `${runtime}/clanker-state/${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`
 const daemonSocketPath = `${runtime}/daemon.sock`
 const daemonAvailable = Boolean(pane && existsSync(daemonSocketPath))
 
-const claimKeyForOption: Record<string, string> = {
-  "@clankerhouse_clanker_id": "clankerId",
-  "@dotfiles_harness": "harness",
-  "@clankerhouse_harness_session_id": "harnessSessionId",
-  "@clankerhouse_recovery_attempt": "recoveryAttemptId",
-}
-
-/** Pane-option claims: direct tmux on tmux, `clankers mux` on any other runtime. */
-const tmux = (args: string[]) => {
-  if (!pane) return undefined
-  if (multiplexerKind === "tmux") return spawnSync("tmux", args, { encoding: "utf8" })
-  const cli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
-  const target = args.indexOf("-t")
-  const option = args[target + 2] ?? ""
-  const key = claimKeyForOption[option] ?? option
-  if (args[0] === "show-option") return spawnSync(cli, ["mux", "read-claim", "--pane", pane, key], { env: clankersEnv, encoding: "utf8" })
-  const unset = args.some((arg) => /^-p?u$/.test(arg))
-  return spawnSync(cli, ["mux", "claim", "--pane", pane, key, unset ? "--unset" : args[target + 3] ?? ""], { env: clankersEnv, encoding: "utf8" })
+/** Pane claims written through `clankers mux`. */
+const claims = {
+  read: (key: string) => pane ? spawnSync(clankersCli, ["mux", "read-claim", "--pane", pane, key], { env: clankersEnv, encoding: "utf8" }) : undefined,
+  set: (key: string, value: string) => { if (pane) spawnSync(clankersCli, ["mux", "claim", "--pane", pane, key, value], { env: clankersEnv, encoding: "utf8" }) },
+  unset: (key: string) => { if (pane) spawnSync(clankersCli, ["mux", "claim", "--pane", pane, key, "--unset"], { env: clankersEnv, encoding: "utf8" }) },
 }
 
 const attest = (sessionId: string) => {
   if (!tracked || !sessionId || attestedSessionId === sessionId) return
   if (attestedSessionId && attestedSessionId !== sessionId) return
   if (expectedSessionId && expectedSessionId !== sessionId) return
-  tmux(["set-option", "-p", "-t", pane, "@clankerhouse_clanker_id", clankerId])
-  tmux(["set-option", "-p", "-t", pane, "@dotfiles_harness", "opencode"])
-  tmux(["set-option", "-p", "-t", pane, "@clankerhouse_harness_session_id", sessionId])
-  if (recoveryAttemptId) tmux(["set-option", "-p", "-t", pane, "@clankerhouse_recovery_attempt", recoveryAttemptId])
-  const cli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
+  claims.set("clankerId", clankerId)
+  claims.set("harness", "opencode")
+  claims.set("harnessSessionId", sessionId)
+  if (recoveryAttemptId) claims.set("recoveryAttemptId", recoveryAttemptId)
+  const cli = clankersCli
   const args = ["recovery", "attest", clankerId, "--session-id", sessionId]
   if (recoveryAttemptId) args.push("--attempt", recoveryAttemptId)
   const result = spawnSync(cli, args, { env: clankersEnv, stdio: "ignore" })
@@ -160,11 +144,9 @@ const report = (state: ClankerState, hookEvent: string) => {
 }
 
 const withdraw = () => {
-  const currentId = tmux(["show-option", "-pqv", "-t", pane, "@clankerhouse_clanker_id"])?.stdout.trim()
+  const currentId = claims.read("clankerId")?.stdout.trim()
   if (currentId !== clankerId) return
-  for (const option of ["@clankerhouse_clanker_id", "@dotfiles_harness", "@clankerhouse_harness_session_id", "@clankerhouse_recovery_attempt"]) {
-    tmux(["set-option", "-pu", "-t", pane, option])
-  }
+  for (const key of ["clankerId", "harness", "harnessSessionId", "recoveryAttemptId"]) claims.unset(key)
 }
 
 if (expectedSessionId) try {

@@ -29,7 +29,7 @@ const session = (): SessionRow => ({
   markers: ["pi"],
   age: "1m",
   recency: 1,
-  target: { type: "tmux_session", session: "repo@work" },
+  target: { type: "session", session: "repo@work" },
   details: [],
   searchText: "repo work",
 })
@@ -77,7 +77,7 @@ describe("resource incidents", () => {
 
   test("attaches a red-x detail to the original session at the prepared observation time", () => {
     const [row] = applyResourceIncidents([session()], [incident()], 62_000)
-    expect(row?.details[0]).toMatchObject({ kind: "incident", status: "terminated", age: "1m", state: "failed", target: { type: "tmux_session", session: "repo@work" } })
+    expect(row?.details[0]).toMatchObject({ kind: "incident", status: "terminated", age: "1m", state: "failed", target: { type: "session", session: "repo@work" } })
     expect(row?.searchText).toContain("sustained_memory_pressure")
   })
 

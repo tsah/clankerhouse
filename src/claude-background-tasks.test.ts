@@ -1,30 +1,59 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const roots: string[] = []
+const servers: Array<{ stop: (force?: boolean) => void }> = []
 afterEach(() => {
+  for (const server of servers.splice(0)) server.stop(true)
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
+
+/** Minimal Herdr socket: one NDJSON request per connection, pane tokens kept in memory. */
+const fakeHerdr = (socketPath: string, reportFile: string, cwd: string) => {
+  const methods: string[] = []
+  const claims: string[] = []
+  const tokens: Record<string, string> = {}
+  const server = Bun.listen({
+    unix: socketPath,
+    socket: {
+      data(socket, chunk) {
+        const request = JSON.parse(chunk.toString().trim()) as { id: string; method: string; params: { pane_id?: string; tokens?: Record<string, string | null> } }
+        methods.push(request.method)
+        let result: unknown = {}
+        if (request.method === "pane.get") result = { pane: { pane_id: request.params.pane_id, cwd, tokens } }
+        if (request.method === "pane.report_metadata") {
+          // Record each written token beside the durable state the hook had already persisted.
+          const state = (() => { try { return `"state":"${JSON.parse(readFileSync(reportFile, "utf8")).state}"` } catch { return "" } })()
+          for (const [token, value] of Object.entries(request.params.tokens ?? {})) {
+            claims.push(`${token} ${state}`)
+            if (value === null) delete tokens[token]
+            else tokens[token] = value
+          }
+        }
+        socket.end(`${JSON.stringify({ id: request.id, result })}\n`)
+      },
+    },
+  })
+  servers.push(server)
+  return { methods, claims }
+}
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "clankerhouse-claude-background-"))
   roots.push(root)
   for (const dir of ["bin", "home", "runtime", "state", "config", "data"]) mkdirSync(join(root, dir))
-  const tmux = join(root, "bin/tmux")
-  writeFileSync(tmux, '#!/bin/sh\nprintf "%s\\n" "$1" >> "$SPAWN_LOG"\ncase "$1" in show-option) exit 1 ;; set-option) printf "%s %s\\n" "$5" "$(grep -o "\\"state\\": *\\"[a-z]*\\"" "$REPORT_FILE" 2>/dev/null)" >> "$CLAIM_LOG"; exit 0 ;; display-message) printf "%s\\n" "$FIXTURE_CWD" ;; *) exit 1 ;; esac\n')
-  chmodSync(tmux, 0o755)
   // The hook must never start an interpreter; these stubs record any attempt.
   for (const interpreter of ["python3", "python", "bun", "node"]) {
     writeFileSync(join(root, "bin", interpreter), `#!/bin/sh\nprintf "%s\\n" ${interpreter} >> "$SPAWN_LOG"\nexit 1\n`)
     chmodSync(join(root, "bin", interpreter), 0o755)
   }
   const spawns = join(root, "spawns")
-  const claims = join(root, "claims")
-  const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() || 0}`)
-  const report = join(runtime, "clanker-state/%99.json")
-  const attestation = join(runtime, "hook-events/%99.json")
+  const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() || 0}-herdr`)
+  const report = join(runtime, "clanker-state/w1_p9.json")
+  const attestation = join(runtime, "hook-events/w1_p9.json")
+  const herdr = fakeHerdr(join(root, "herdr.sock"), report, root)
   const env = {
     ...process.env,
     PATH: `${join(root, "bin")}:${process.env.PATH || ""}`,
@@ -33,32 +62,28 @@ function fixture() {
     XDG_STATE_HOME: join(root, "state"),
     XDG_CONFIG_HOME: join(root, "config"),
     XDG_DATA_HOME: join(root, "data"),
-    CLANKERHOUSE_MULTIPLEXER: "tmux",
     CLANKERHOUSE_INSTANCE: "",
     CLANKER_ID: "clanker-background-test",
     CLANKER_SESSION_ID: "claude-test-session",
     CLANKER_RECOVERY_ATTEMPT: "",
-    HERDR_ENV: "",
-    HERDR_PANE_ID: "",
-    HERDR_SOCKET_PATH: "",
-    TMUX: "",
-    TMUX_PANE: "%99",
-    FIXTURE_CWD: root,
+    HERDR_ENV: "1",
+    HERDR_PANE_ID: "w1:p9",
+    HERDR_SESSION: "",
+    HERDR_SOCKET_PATH: join(root, "herdr.sock"),
     SPAWN_LOG: spawns,
-    CLAIM_LOG: claims,
-    REPORT_FILE: report,
   }
   const hook = join(import.meta.dir, "../native-client/target/release/clankerhouse-hook")
   return {
     attestation: () => JSON.parse(readFileSync(attestation, "utf8")),
-    spawned: () => readFileSync(spawns, "utf8").trim().split("\n").filter(Boolean),
+    spawned: () => existsSync(spawns) ? readFileSync(spawns, "utf8").trim().split("\n").filter(Boolean) : [],
+    herdrRequests: () => [...herdr.methods],
     emitTimed: (state: string, payload: Record<string, unknown>) => {
       const started = Bun.nanoseconds()
       const result = Bun.spawnSync([hook, "claude", state], { env, stdin: Buffer.from(JSON.stringify({ session_id: "claude-test-session", ...payload })) })
       expect(result.exitCode).toBe(0)
       return (Bun.nanoseconds() - started) / 1e6
     },
-    claims: () => readFileSync(claims, "utf8").trim().split("\n"),
+    claims: () => [...herdr.claims],
     emit: async (state: string, payload: Record<string, unknown>, harness = "claude") => {
       const child = Bun.spawn([join(import.meta.dir, "../bin/clankerhouse-clanker-state-report"), harness, state], {
         env, stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -91,22 +116,23 @@ describe("Claude background-task lifecycle", () => {
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })
     await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })
     expect(f.claims().sort()).toEqual([
-      '@clankerhouse_clanker_id "state":"idle"',
-      '@clankerhouse_harness_session_id "state":"idle"',
-      '@dotfiles_harness "state":"idle"',
+      'ch_clanker_id "state":"idle"',
+      'ch_harness "state":"idle"',
+      'ch_harness_session "state":"idle"',
     ])
   })
 
   test("steady-state reports start no processes and spool Recovery attestation only on change", async () => {
     const f = fixture()
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })
-    const spawned = f.spawned()
+    const requests = f.herdrRequests()
     const requested = f.attestation()
     for (let call = 0; call < 5; call++) await f.emit("working", { hook_event_name: "PreToolUse" })
-    expect(f.spawned()).toEqual(spawned)
-    expect(spawned).toEqual(["show-option", "set-option", "set-option", "set-option"])
+    expect(f.herdrRequests()).toEqual(requests)
+    expect(requests).toEqual(["pane.get", "pane.report_metadata"])
+    expect(f.spawned()).toEqual([])
     expect(f.attestation()).toEqual(requested)
-    expect(f.attestation()).toMatchObject({ pane: "%99", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working", recoveryAttemptId: null })
+    expect(f.attestation()).toMatchObject({ pane: "w1:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working", recoveryAttemptId: null })
   })
 
   test("Stop defers completion and Recovery settlement until background work has finished", async () => {

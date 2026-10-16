@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import type { ForegroundAgentDiscovery } from "./process-discovery"
-import type { OpencodeStatus, TmuxWindow } from "./resources"
+import type { OpencodeStatus, MuxWindow } from "./resources"
 
 interface OpenCodeSession {
   id: string
@@ -48,7 +48,7 @@ const titleMatches = (sessionTitle: string, title: string) => sessionTitle === t
   || (title.endsWith("...") && sessionTitle.startsWith(title.slice(0, -3)))
 
 export const projectOpenCodeService = (
-  windows: readonly TmuxWindow[],
+  windows: readonly MuxWindow[],
   discoveries: ReadonlyMap<string, ForegroundAgentDiscovery>,
   snapshot: OpenCodeServiceSnapshot,
 ): OpencodeStatus[] => {
@@ -88,7 +88,7 @@ const responseData = (value: unknown) => value && typeof value === "object" && "
   : value
 
 export const collectOpenCodeService = async (
-  windows: readonly TmuxWindow[],
+  windows: readonly MuxWindow[],
   discoveries: ReadonlyMap<string, ForegroundAgentDiscovery>,
   stateHome = process.env.XDG_STATE_HOME || `${process.env.HOME || ""}/.local/state`,
 ): Promise<OpencodeStatus[]> => {

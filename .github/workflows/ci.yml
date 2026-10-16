@@ -13,7 +13,17 @@ jobs:
         with:
           bun-version: "1.3.14"
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y tmux python3 jq zoxide util-linux
+      - run: sudo apt-get update && sudo apt-get install -y python3 jq zoxide util-linux
+      - name: Install Herdr
+        env:
+          # Must speak the protocol pinned by HERDR_PROTOCOL in src/multiplexer/herdr.ts.
+          HERDR_VERSION: "0.9.3"
+          HERDR_SHA256: 18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/herdr" "https://github.com/herdrdev/herdr/releases/download/v$HERDR_VERSION/herdr-linux-x86_64"
+          echo "$HERDR_SHA256  $RUNNER_TEMP/herdr" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/herdr" /usr/local/bin/herdr
+          herdr --version
       - name: Install Worktrunk
         env:
           WORKTRUNK_VERSION: "0.79.0"
@@ -43,5 +53,5 @@ jobs:
       - run: scripts/qa-orchestration
       - run: scripts/qa-daemon
       - run: scripts/qa-recovery
-      - run: scripts/qa-stop-popup
+      - run: scripts/qa-herdr
       - run: bash -x scripts/qa-install

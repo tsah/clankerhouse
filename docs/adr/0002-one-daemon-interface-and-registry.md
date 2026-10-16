@@ -6,9 +6,9 @@ Accepted
 
 ## Context
 
-Clankerhouse distributed correctness across a Bash supervisor, TypeScript projection process, Rust and TypeScript picker policy, JSON snapshots, a Unix socket, several SQLite databases, manifests, lifecycle files, tmux options, and direct workflow side effects. On one host this creates distributed-system failure modes without useful isolation: multiple authorities, partial mutations, stale producers, incompatible schemas, and live files replaced beneath old processes.
+Clankerhouse distributed correctness across a Bash supervisor, TypeScript projection process, Rust and TypeScript picker policy, JSON snapshots, a Unix socket, several SQLite databases, manifests, lifecycle files, multiplexer claims, and direct workflow side effects. On one host this creates distributed-system failure modes without useful isolation: multiple authorities, partial mutations, stale producers, incompatible schemas, and live files replaced beneath old processes.
 
-ADR-0001 requires the Multiplexer to remain a replaceable runtime and makes durable Clankerhouse identity authoritative over tmux names and claims.
+ADR-0001 requires the Multiplexer to remain a replaceable runtime and makes durable Clankerhouse identity authoritative over multiplexer names and claims.
 
 ## Decision
 
@@ -16,9 +16,9 @@ One long-lived daemon Module owns observation, projection, durable state, mutati
 
 Its small Unix-socket Interface provides health/ensure-running, observe/subscribe, refresh, and typed idempotent mutation intents. Socket observations are authoritative for live clients. An atomic JSON snapshot may remain only as a one-time startup/crash fallback.
 
-One SQLite registry owns Workshops, Terminals, Clankers, desired recovery state, an append-only journal, leases, and Multiplexer Locations. Legacy databases are imported through an expand/migrate/contract sequence and retained read-only during a compatibility window. Manifests, lifecycle reports, and tmux options are projections or claims, not authorities.
+One SQLite registry owns Workshops, Terminals, Clankers, desired recovery state, an append-only journal, leases, and Multiplexer Locations. Legacy databases are imported through an expand/migrate/contract sequence and retained read-only during a compatibility window. Manifests, lifecycle reports, and multiplexer claims are projections or claims, not authorities.
 
-One deep mutation Module durably stages and reconciles create, absorb, open, rename, reparent, detach, delete, start, stop, and recovery. Clients do not sequence Worktrunk, SQLite, tmux, systemd, or manifest changes.
+One deep mutation Module durably stages and reconciles create, absorb, open, rename, reparent, detach, delete, start, stop, and recovery. Clients do not sequence Worktrunk, SQLite, the Multiplexer, systemd, or manifest changes.
 
 A daemon epoch and exclusive producer lease scope authoritative revisions to a runtime/Multiplexer instance. Launchers may ensure a daemon exists but PID files and source modification times do not own correctness.
 
@@ -31,4 +31,4 @@ Installation stages and validates a versioned application, atomically activates 
 - State-changing legacy commands become socket clients while preserving command shapes during the compatibility window.
 - Recovery and workflow retries can reconcile partial external effects from durable operation stages.
 - SQLite migration and daemon handoff add implementation complexity, but that complexity gains locality behind small Interfaces.
-- The tmux Adapter remains the only Multiplexer Adapter. Durable IDs and validated Multiplexer Locations remain authoritative as required by ADR-0001.
+- The Multiplexer Adapter stays behind the Interface (ADR-0007, ADR-0008). Durable IDs and validated Multiplexer Locations remain authoritative as required by ADR-0001.

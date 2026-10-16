@@ -26,6 +26,7 @@ const settled = async (journal: OperationJournal, id: string) => {
 
 describe("staged daemon mutation durability", () => {
   test("a label change is persisted before its hook is dispatched, and the done key refreshes the projection it may have labelled", () => {
+    expect(mutationStages({ type: "create", repository: "/repo", branch: "feature", create: true })).toEqual(["identity.validated", "worktree.ready", "tmux.ready", "hook.dispatched", "projection.refreshed"])
     expect(mutationStages({ type: "label", path: "/repo/feature", key: "stage", value: "retro" })).toEqual(["identity.validated", "labels.updated", "title.mirrored", "hook.dispatched", "projection.refreshed"])
     expect(mutationStages({ type: "done", path: "/repo/feature" })).toEqual(["identity.validated", "hook.completed", "projection.refreshed"])
   })

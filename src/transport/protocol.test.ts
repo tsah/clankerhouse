@@ -29,6 +29,7 @@ describe("mutation protocol target set", () => {
       { type: "done", path: "/repo/feature" },
       { type: "label", path: "/repo/feature", key: "title", value: "Migrate the adapter" },
       { type: "create", repository: "/repo", branch: "migrate-the-adapter", create: true, title: "Migrate the adapter" },
+      { type: "create", repository: "/repo", branch: "spawned", create: true, deferSession: true },
     ]) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
     expect(mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" })).toMatchObject({ params: { intent: { type: "create", branch: "b" } } })
     expect((mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" }) as { params: { intent: object } }).params.intent).not.toHaveProperty("title")

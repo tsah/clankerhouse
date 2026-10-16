@@ -1,5 +1,5 @@
 export type WorkshopLabels = Readonly<Record<string, string>>
-export type WorkshopHookEvent = "labels-changed" | "done"
+export type WorkshopHookEvent = "labels-changed" | "done" | "post-create"
 
 export interface LabelChange {
   previous: WorkshopLabels

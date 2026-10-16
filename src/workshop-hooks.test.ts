@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { workshopLabels, workshopsWithLabel } from "./workshop"
-import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, runDoneHook, userHookPath, workshopHookPath } from "./workshop-hooks"
+import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, postCreateLogPath, runDoneHook, userHookPath, workshopHookPath } from "./workshop-hooks"
 
 const roots: string[] = []
 afterEach(() => {
@@ -25,7 +25,7 @@ const fixture = () => {
   return { root, repo, worktree, dbPath: join(root, "state", "workshops.sqlite3") }
 }
 
-const writeHook = (repo: string, event: "done" | "labels-changed", body: string, mode = 0o755) => {
+const writeHook = (repo: string, event: "done" | "labels-changed" | "post-create", body: string, mode = 0o755) => {
   const path = workshopHookPath(repo, event)
   mkdirSync(join(repo, ".clankerhouse", "hooks"), { recursive: true })
   writeFileSync(path, `#!/bin/sh\n${body}\n`)
@@ -48,6 +48,24 @@ describe("workshop repository hooks", () => {
     expect(workshopLabels(applied.workshop.workshopId, dbPath)).toEqual({ stage: "merged" })
     expect(dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)).toBe(true)
     expect(await waitForFile(output)).toBe(`${applied.workshop.canonicalPath}|{}|merged|main`)
+  })
+
+  test("a post-create hook prepares the new workshop in the background and logs its exit status", async () => {
+    const { worktree, dbPath } = fixture()
+    const previousOwner = Bun.env.CLANKERHOUSE_PROCESS_OWNER
+    Bun.env.CLANKERHOUSE_PROCESS_OWNER = "disabled"
+    try {
+      const workshop = ensureWorkshopForLabels(worktree, dbPath)
+      expect(dispatchPostCreateHook(workshop, dbPath)).toBe(false)
+      writeHook(worktree, "post-create", `printf '%s|%s|%s\\n' "$PWD" "$CLANKERHOUSE_HOOK_EVENT" "$CLANKERHOUSE_WORKSHOP_BRANCH"; exit 3`)
+      expect(dispatchPostCreateHook(workshop, dbPath)).toBe(true)
+      const log = postCreateLogPath(workshop)
+      for (let attempt = 0; attempt < 200 && !(existsSync(log) && readFileSync(log, "utf8").includes("exited")); attempt += 1) await Bun.sleep(10)
+      expect(readFileSync(log, "utf8")).toMatch(new RegExp(`^${workshop.canonicalPath}\\|post-create\\|feature\\n\\S+ post-create exited 3\\n$`))
+    } finally {
+      if (previousOwner === undefined) delete Bun.env.CLANKERHOUSE_PROCESS_OWNER
+      else Bun.env.CLANKERHOUSE_PROCESS_OWNER = previousOwner
+    }
   })
 
   test("a missing or non-executable hook is skipped rather than failing the label change", () => {

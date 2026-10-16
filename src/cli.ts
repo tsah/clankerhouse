@@ -39,7 +39,10 @@ export const mutationProgressSteps = (intent: MutationIntent): readonly string[]
   return ["Validating tmux identity", `Deleting tmux ${intent.kind}`, "Refreshing Clankerhouse"]
 }
 
-const routeCompatibilityMutation = async (intent: MutationIntent) => {
+// Fetching the base and checking out a large repository takes longer than an ordinary mutation.
+const workshopCreateTimeoutMs = 10 * 60_000
+
+const routeCompatibilityMutation = async (intent: MutationIntent, options: { timeoutMs?: number } = {}) => {
   if (Bun.env.CLANKERHOUSE_DAEMON_INTERNAL === "1" || Bun.env.CLANKERHOUSE_LEGACY_MUTATIONS === "1" || !existsSync(daemonSocketPath)) return undefined
   const progressSteps = Bun.env.CLANKERHOUSE_PROGRESS === "1" ? mutationProgressSteps(intent) : []
   let reported = -1
@@ -50,6 +53,7 @@ const routeCompatibilityMutation = async (intent: MutationIntent) => {
   const submitted = await submitMutation(daemonSocketPath, randomUUID(), intent)
   const stages = mutationStages(intent)
   const operation = await waitForOperation(daemonSocketPath, submitted.operation.operationId, {
+    timeoutMs: options.timeoutMs,
     onStatus: (current) => {
       const completed = current.stage === "completed" ? stages.length : stages.indexOf(current.stage)
       reportThrough(completed + 1)
@@ -209,7 +213,7 @@ const adoptLivePiSessions = async (store: RecoveryStore) => {
 
 const usage = `Usage:
   clankerhouse
-  clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--copy PATH] [--profile NAME] [--model MODEL] [--prompt TEXT]
+  clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]
@@ -483,12 +487,11 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       if (!name) throw new Error("--name or --title is required")
       const selectedHarness = harness(parsed.take("--harness"))
       const model = parsed.take("--model")
-      const base = parsed.take("--base"); const copy = parsed.take("--copy"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
+      const base = parsed.take("--base"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
       if (parentWorkshopId && noParent) throw new Error("--parent and --no-parent are mutually exclusive")
       const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
       const result = await spawnWorkshop(selectedHarness, name, prompt, {
         base,
-        copy,
         window,
         profile,
         model,
@@ -497,6 +500,16 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         parentWorkshopId,
         noParent,
         title,
+        daemonCreate: async (branch, base, title) => {
+          const repository = (await identity()).path
+          // The daemon's create opens a branch's existing worktree; spawn only ever makes a new one, as `wt switch --create` does.
+          if (Bun.spawnSync(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).exitCode === 0) throw new Error(`Branch '${branch}' already exists`)
+          const routed = await routeCompatibilityMutation({ type: "create", repository, branch, create: true, base, title, deferSession: true }, { timeoutMs: workshopCreateTimeoutMs })
+          if (!routed) return undefined
+          const path = (routed.result as { path?: unknown } | undefined)?.path
+          if (typeof path !== "string" || !path) throw new Error(`Daemon created '${branch}' but did not return a worktree path`)
+          return path
+        },
       })
       return console.log(JSON.stringify(result))
     }

@@ -12,7 +12,7 @@ export const mutationStages = (intent: MutationIntent): readonly string[] => {
     case "delete": return intent.kind === "worktree"
       ? ["identity.validated", "tmux.marked", "worktree.deleted", "lineage.spliced", "tmux-children.updated", "tmux.deleted", "projection.refreshed"]
       : ["identity.validated", "target.deleted", "projection.refreshed"]
-    case "create": return ["identity.validated", "worktree.ready", "tmux.ready", "projection.refreshed"]
+    case "create": return ["identity.validated", "worktree.ready", "tmux.ready", "hook.dispatched", "projection.refreshed"]
     case "start": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]
     case "stop": return ["identity.validated", "desired-state.updated", "harness.stopped", "projection.refreshed"]
     case "recovery": return ["identity.validated", "desired-state.updated", "recovery.reconciled", "projection.refreshed"]

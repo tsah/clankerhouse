@@ -5,9 +5,12 @@ const safeUnitPart = (value: string) => value.replace(/[^A-Za-z0-9_.-]+/g, "-").
 export const recoveryUnitName = (clankerId: string, attemptId: string) =>
   `clankerhouse-${safeUnitPart(clankerId)}-${safeUnitPart(attemptId)}.scope`
 
-export const ownedHarnessCommand = (command: string[], clankerId: string, attemptId: string, resourceClass: RecoveryResourceClass = "untrusted") => {
+export const ownedHarnessCommand = (command: string[], clankerId: string, attemptId: string, resourceClass: RecoveryResourceClass = "untrusted") =>
+  ownedScopeCommand(command, recoveryUnitName(clankerId, attemptId), resourceClass)
+
+/** Runs a command in its own transient scope under the clanker budget, never in the caller's cgroup. */
+export const ownedScopeCommand = (command: string[], unit: string, resourceClass: RecoveryResourceClass = "untrusted") => {
   if (Bun.env.CLANKERHOUSE_PROCESS_OWNER === "disabled") return command
-  const unit = recoveryUnitName(clankerId, attemptId)
   const budget = resourceClass === "interactive"
     ? { cpuQuota: "200%", ioWeight: 20, memoryHigh: "4G" }
     : resourceClass === "validation-heavy"

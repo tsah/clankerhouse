@@ -27,7 +27,7 @@ import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
-import { completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
+import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
@@ -1184,15 +1184,20 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
         if (local.exitCode === 0) throw new Error(`Local branch ${intent.branch} appeared after remote selection`)
       }
       const path = createWorktreeSync(repository, intent.branch, intent.create, intent.base, intent.remoteRef)
-      return { checkpoint: { ...checkpoint, path } }
+      return { checkpoint: { ...checkpoint, path, created: true } }
     }
     if (stage === "tmux.ready") {
       const path = realpathSync(String(checkpoint.path))
       // Titled before its session exists, so the session is born with the human name.
       if (intent.title) changeWorkshopLabel(ensureWorkshopForLabels(path).workshopId, TITLE_KEY, intent.title)
-      const session = await ensureWorktreeSession(path)
       rememberDirectory({ path, source: "worktree", branch: intent.branch, activityAt: Date.now(), activitySource: "opened" })
+      if (intent.deferSession) return { checkpoint: { ...checkpoint, outcome: { path } } }
+      const session = await ensureWorktreeSession(path)
       return { checkpoint: { ...checkpoint, session, outcome: { target: { type: "tmux_session", session } } } }
+    }
+    if (stage === "hook.dispatched") {
+      if (checkpoint.created) dispatchPostCreateHook(ensureWorkshopForLabels(realpathSync(String(checkpoint.path))))
+      return { checkpoint }
     }
   }
 

@@ -12,7 +12,7 @@ import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { workshopBase } from "./workshop-base"
 import { TITLE_KEY } from "./labels"
-import { ensureWorkshopForLabels } from "./workshop-hooks"
+import { dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hooks"
 
 export type Harness = "pi" | "claude" | "opencode" | "codex"
 export interface WorktreeIdentity { path: string; commonDir: string; repo: string; branch: string }
@@ -196,14 +196,24 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   return spawned
 }
 
-export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; copy?: string; deferSession?: boolean; multiplexer?: ManagedMultiplexer } = {}) {
+/** Creates the worktree through the daemon, or returns undefined when no daemon serves this client. */
+export type DaemonWorktreeCreate = (branch: string, base?: string, title?: string) => Promise<string | undefined>
+
+const createWorktreeDirectly = async (branch: string, base?: string) => {
   const start = workshopBase(process.cwd(), base)
-  const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(start ? ["--base", start] : []), ...(options.copy ? ["--copy", options.copy] : [])])
+  const result = await command(["wt", "switch", "--create", branch, "--no-cd", "--format", "json", ...(start ? ["--base", start] : [])])
   let worktree: { path?: string }
   try { worktree = JSON.parse(result.stdout) }
   catch { throw new Error(`Worktrunk returned invalid JSON while creating '${branch}'`) }
   if (!worktree.path) throw new Error(`Worktrunk created '${branch}', but did not return its path`)
-  const id = await identity(worktree.path)
+  dispatchPostCreateHook(ensureWorkshopForLabels(worktree.path))
+  return worktree.path
+}
+
+export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; deferSession?: boolean; multiplexer?: ManagedMultiplexer; daemonCreate?: DaemonWorktreeCreate; title?: string } = {}) {
+  // The daemon's create claims a warm spare and runs the post-create hook; without it Worktrunk creates the worktree here.
+  const path = await options.daemonCreate?.(branch, base, options.title) ?? await createWorktreeDirectly(branch, base)
+  const id = await identity(path)
   if (options.deferSession) {
     // The first Clanker creates the runtime session with its own initial tab.
     persistWorkshopLineage(id, options)
@@ -268,11 +278,11 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 
-export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: SpawnClankerOptions & { base?: string; copy?: string; window?: string; parentWorkshopId?: string; noParent?: boolean; title?: string } = {}) {
+export async function spawnWorkshop(harness: Harness, branch: string, prompt: string, options: SpawnClankerOptions & { base?: string; window?: string; parentWorkshopId?: string; noParent?: boolean; title?: string; daemonCreate?: DaemonWorktreeCreate } = {}) {
   harnessModelArgs(harness, options.model)
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const parent = await resolveWorkshopParent(options, undefined, multiplexer)
-  const created = await createWorkshop(branch, options.base, { ...parent, copy: options.copy, deferSession: true, multiplexer })
+  const created = await createWorkshop(branch, options.base, { ...parent, deferSession: true, multiplexer, daemonCreate: options.daemonCreate, title: options.title })
   // Titled before the first Clanker creates the session, so the session is named by the title.
   if (options.title) changeWorkshopLabel(ensureWorkshopForLabels(created.identity.path).workshopId, TITLE_KEY, options.title)
   return completeWorkshopRegistration(created, () => spawnClanker(harness, created.identity.path, prompt, { ...options, name: options.window, multiplexer }), (workshop) => rollbackCreatedWorkshop(workshop, { multiplexer }))

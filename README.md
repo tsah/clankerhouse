@@ -194,12 +194,13 @@ clankers workshop label unset stage
 clankers workshop label list
 ```
 
-A repository gives labels meaning with two optional tracked executables, run with the Workshop as working directory:
+A repository gives labels meaning, and prepares new Workshops, with optional tracked executables run with the Workshop as working directory:
 
 - `.clankerhouse/hooks/labels-changed` runs detached after a label really changes. It cannot fail the change.
 - `.clankerhouse/hooks/done` replaces the built-in `Alt-D` rule for that repository. Exit `0` means the repository handled the key. Exit `1` falls through to the destroy confirmation. Any other exit, or a run longer than 30 seconds, is shown as an error and nothing is destroyed.
+- `.clankerhouse/hooks/post-create` runs detached once a new worktree Workshop exists, for example to install dependencies and seed caches while the first clanker starts. It runs in its own systemd scope under the clanker resource budget. Its output, ending with its exit status, goes to `<git common dir>/clankerhouse/hooks/post-create/<workshop id>.log`.
 
-Both receive `CLANKERHOUSE_HOOK_EVENT`, `CLANKERHOUSE_WORKSHOP_ID`, `CLANKERHOUSE_WORKSHOP_PATH`, `CLANKERHOUSE_WORKSHOP_BRANCH`, `CLANKERHOUSE_LABELS` (JSON), and one `CLANKERHOUSE_LABEL_<KEY>` per label; `labels-changed` also receives `CLANKERHOUSE_PREVIOUS_LABELS` and `CLANKERHOUSE_PREVIOUS_LABEL_<KEY>`. `clankers` is on their `PATH`. A repository usually needs only `labels-changed`. For example, to start a retro when a Workshop is marked done:
+All receive `CLANKERHOUSE_HOOK_EVENT`, `CLANKERHOUSE_WORKSHOP_ID`, `CLANKERHOUSE_WORKSHOP_PATH`, `CLANKERHOUSE_WORKSHOP_BRANCH`, `CLANKERHOUSE_LABELS` (JSON), and one `CLANKERHOUSE_LABEL_<KEY>` per label; `labels-changed` also receives `CLANKERHOUSE_PREVIOUS_LABELS` and `CLANKERHOUSE_PREVIOUS_LABEL_<KEY>`. `clankers` is on their `PATH`. A repository usually needs only `labels-changed`. For example, to start a retro when a Workshop is marked done:
 
 ```sh
 #!/bin/sh

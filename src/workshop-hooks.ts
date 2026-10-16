@@ -1,6 +1,7 @@
-import { accessSync, constants, statSync } from "node:fs"
+import { accessSync, closeSync, constants, mkdirSync, openSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 import { binPath } from "./installation"
+import { ownedScopeCommand } from "./recovery/process-owner"
 import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, projectName, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
 import { changeWorkshopLabel, identifyWorkshopSync, registerWorkshop, workshopForPath, workshopLabels, workshopStatePath, type WorkshopRecord } from "./workshop"
 
@@ -54,6 +55,30 @@ export const dispatchLabelsChangedHook = (workshop: WorkshopRecord, previousLabe
   if (!hook) return false
   try {
     Bun.spawn([hook], { cwd: workshop.canonicalPath, env: processEnvironment(contextFor(workshop, "labels-changed", labels, previousLabels)), stdin: "ignore", stdout: "ignore", stderr: "ignore" }).unref()
+    return true
+  } catch { return false }
+}
+
+/** Where a Workshop's post-create hook writes its output, ending with the hook's exit status. */
+export const postCreateLogPath = (workshop: Pick<WorkshopRecord, "commonDir" | "workshopId">) => `${workshop.commonDir}/clankerhouse/hooks/post-create/${workshop.workshopId}.log`
+
+/**
+ * Fire-and-forget after a new worktree exists: the repository prepares it (installs, cache seeding)
+ * while its first Clanker starts. The hook runs in its own scope under the clanker budget, so a heavy
+ * install never lands in the caller's cgroup, and outlives the caller.
+ */
+export const dispatchPostCreateHook = (workshop: WorkshopRecord, dbPath = workshopStatePath) => {
+  const hook = executableHook(workshop.canonicalPath, workshop.commonDir, "post-create")
+  if (!hook) return false
+  const log = postCreateLogPath(workshop)
+  try {
+    mkdirSync(dirname(log), { recursive: true })
+    const fd = openSync(log, "a")
+    try {
+      const report = `"$0"; status=$?; printf '%s post-create exited %s\\n' "$(date -u +%FT%TZ)" "$status"; exit "$status"`
+      const unit = `clankerhouse-hook-${workshop.workshopId.replace(/[^A-Za-z0-9_.-]+/g, "-")}-${Date.now().toString(36)}.scope`
+      Bun.spawn(ownedScopeCommand(["sh", "-c", report, hook], unit), { cwd: workshop.canonicalPath, env: processEnvironment(contextFor(workshop, "post-create", workshopLabels(workshop.workshopId, dbPath))), stdin: "ignore", stdout: fd, stderr: fd }).unref()
+    } finally { closeSync(fd) }
     return true
   } catch { return false }
 }

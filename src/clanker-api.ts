@@ -4,9 +4,10 @@ import { createConnection } from "node:net"
 import { resolve } from "node:path"
 import type { ClankerState } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
-import { paneLocation } from "./multiplexer/interface"
+import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
 import { OrchestrationStore, clankerBusy, generatedMessageId, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type PromptObservation, type SendStatus } from "./orchestration"
 import { runtimeDirFor } from "./paths"
+import { getHerd } from "./transport/client"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
 export type ClankerDelivery = "steer" | "followUp"
@@ -170,10 +171,9 @@ export async function ensurePaneClankerId(pane: string, preferredId?: string, mu
   })
 }
 
-/** Pane metadata rows discovered through the Multiplexer Interface (harness-bearing panes only). */
-export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[]> => {
-  const snapshot = await multiplexer.observe()
-  return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.flatMap((pane) => {
+/** Pane metadata rows of one Multiplexer observation (harness-bearing panes only). */
+export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMetadata[] =>
+  snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.flatMap((pane) => {
     const claims = pane.claims ?? {}
     const harness = claims.harness || pane.harness || ""
     if (!harness) return []
@@ -191,17 +191,52 @@ export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Pro
       focused: pane.focused === true,
     }]
   })))
+
+/** Pane metadata rows discovered through the Multiplexer Interface. Clanker rows need no process facts. */
+export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[]> =>
+  paneMetadataFromSnapshot(await multiplexer.observe({ processInfo: false }))
+
+// The daemon observes on every Multiplexer change and at least every refresh interval, so an
+// older herd means it is stuck and the caller observes for itself.
+const DAEMON_HERD_MAX_AGE_MS = 60_000
+const DAEMON_HERD_TIMEOUT_MS = 2_000
+
+/**
+ * The daemon's newest herd, or undefined when no daemon for this Multiplexer instance answers.
+ * Polling callers read it so that many waiters cost the Multiplexer nothing.
+ */
+const daemonPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[] | undefined> => {
+  const socketPath = `${runtimeRoot()}/daemon.sock`
+  if (!existsSync(socketPath)) return undefined
+  try {
+    const [herd, instanceId] = await Promise.all([getHerd<PaneMetadata>(socketPath, { timeoutMs: DAEMON_HERD_TIMEOUT_MS }), multiplexer.instanceId()])
+    if (herd.instanceId !== instanceId || Date.now() - herd.observedAt > DAEMON_HERD_MAX_AGE_MS || !Array.isArray(herd.panes)) return undefined
+    return herd.panes
+  } catch { return undefined }
 }
 
-const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer(), strict = false): Promise<ClankerRecord[]> => {
-  let rows: PaneMetadata[]
-  try { rows = await discoverPaneMetadata(multiplexer) }
-  catch (error) {
-    if (strict) throw error
-    return []
+/**
+ * Where clanker rows come from. A caller that injects no Multiplexer reads the daemon's herd
+ * when one answers; `multiplexer` observes directly, for a caller whose target the daemon has
+ * not seen yet.
+ */
+type RecordSource = "daemon" | "multiplexer"
+
+interface DiscoveredRecords { records: ClankerRecord[]; source: RecordSource }
+
+const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, strict: boolean, allowDaemon: boolean): Promise<DiscoveredRecords> => {
+  const multiplexer = injected ?? openManagedMultiplexer()
+  let rows: PaneMetadata[] | undefined = allowDaemon && !injected ? await daemonPaneMetadata(multiplexer) : undefined
+  const source: RecordSource = rows ? "daemon" : "multiplexer"
+  if (!rows) {
+    try { rows = await discoverPaneMetadata(multiplexer) }
+    catch (error) {
+      if (strict) throw error
+      return { records: [], source }
+    }
   }
   const agentPrompt = multiplexer.capabilities().agentPrompt
-  return Promise.all(rows.map(async (row) => {
+  const records = await Promise.all(rows.map(async (row): Promise<ClankerRecord> => {
     const candidateReport = readReportSync(row.pane)
     const reportedId = typeof candidateReport?.clankerId === "string" && candidateReport.clankerId ? candidateReport.clankerId : undefined
     const id = row.id || await ensurePaneClankerId(row.pane, reportedId, multiplexer)
@@ -238,6 +273,17 @@ const discoverRecords = async (multiplexer: ManagedMultiplexer = openManagedMult
       report,
     }
   }))
+  return { records, source }
+}
+
+const discoverRecords = async (multiplexer?: ManagedMultiplexer, strict = false) =>
+  (await discoverRecordsFrom(multiplexer, strict, true)).records
+
+/** Records that satisfy `found`, observing the Multiplexer directly when the daemon's herd does not have them yet. */
+const discoverRecordsWhere = async (multiplexer: ManagedMultiplexer | undefined, strict: boolean, found: (records: ClankerRecord[]) => boolean) => {
+  const discovered = await discoverRecordsFrom(multiplexer, strict, true)
+  if (discovered.source === "multiplexer" || found(discovered.records)) return discovered.records
+  return (await discoverRecordsFrom(multiplexer, strict, false)).records
 }
 
 const publicInfo = ({ socketPath: _socketPath, focused: _focused, report: _report, ...clanker }: ClankerRecord): ClankerInfo => clanker
@@ -255,15 +301,15 @@ export async function listClankers(options: { cwd?: string; multiplexer?: Manage
   return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd).map(publicInfo)
 }
 
-const findRecord = async (id: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) => {
-  const matches = (await discoverRecords(multiplexer)).filter((candidate) => candidate.id === id)
+const findRecord = async (id: string, multiplexer?: ManagedMultiplexer) => {
+  const matches = (await discoverRecordsWhere(multiplexer, false, (records) => records.some((candidate) => candidate.id === id))).filter((candidate) => candidate.id === id)
   if (matches.length === 0) throw new ClankerApiError("NOT_FOUND", `Unknown clanker id: ${id}`, 3)
   if (matches.length > 1) throw new ClankerApiError("AMBIGUOUS", `Ambiguous clanker id ${id}; ${matches.length} live panes advertise it`, 3)
   return matches[0]!
 }
 
 export async function clankerForPane(pane: string) {
-  const clanker = (await discoverRecords()).find((candidate) => candidate.pane === pane)
+  const clanker = (await discoverRecordsWhere(undefined, false, (records) => records.some((candidate) => candidate.pane === pane))).find((candidate) => candidate.pane === pane)
   if (!clanker) throw new Error(`Pane ${pane} is not a discovered clanker`)
   return publicInfo(clanker)
 }
@@ -343,7 +389,7 @@ const promptClaimedPane = async (multiplexer: ManagedMultiplexer, clanker: Clank
   }
 }
 
-export async function sendClanker(id: string, text: string, options: { delivery?: ClankerDelivery } = {}, multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<SendReceipt> {
+export async function sendClanker(id: string, text: string, options: { delivery?: ClankerDelivery } = {}, multiplexer?: ManagedMultiplexer): Promise<SendReceipt> {
   const clanker = await findRecord(id, multiplexer)
   if (!text.trim()) throw new Error("Clanker message must not be empty")
   if (clanker.capabilities.send === "multiplexer-prompt") {
@@ -355,7 +401,7 @@ export async function sendClanker(id: string, text: string, options: { delivery?
       const message = store.admitMessage({ clankerId: id, text, busy: clankerBusy(clanker), afterGeneration: clanker.generation, now: acceptedAt })
       const receipt = { clankerId: id, acceptedAt, afterGeneration: clanker.generation, observedGeneration: clanker.generation, messageId: message.messageId }
       if (message.state === "queued") return { ...receipt, delivery: "queued" }
-      try { await promptClaimedPane(multiplexer, clanker, text) }
+      try { await promptClaimedPane(multiplexer ?? openManagedMultiplexer(), clanker, text) }
       catch (error) { store.deleteMessage(message.messageId); throw error }
       return { ...receipt, delivery: "immediate" }
     } finally { store.close() }
@@ -385,7 +431,7 @@ export async function sendClanker(id: string, text: string, options: { delivery?
  * settled, unfocused clanker. The daemon runs this continuously; waiting CLI commands run it
  * too, so queues drain without a daemon. The store's claim keeps deliveries one at a time.
  */
-export async function deliverQueuedMessages(multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
   const delivered: string[] = []
   const acked: string[] = []
   const failed: Array<{ messageId: string; error: string }> = []
@@ -402,7 +448,7 @@ export async function deliverQueuedMessages(multiplexer: ManagedMultiplexer = op
       const claimed = store.claimNextDelivery(clankerId, clanker.generation)
       if (!claimed) continue
       try {
-        await promptClaimedPane(multiplexer, clanker, claimed.text)
+        await promptClaimedPane(multiplexer ?? openManagedMultiplexer(), clanker, claimed.text)
         delivered.push(claimed.messageId)
       } catch (error) {
         store.requeue(claimed.messageId)
@@ -413,21 +459,27 @@ export async function deliverQueuedMessages(multiplexer: ManagedMultiplexer = op
   } finally { store.close() }
 }
 
-const messageStatus = async (messageId: string, multiplexer: ManagedMultiplexer): Promise<{ status: SendStatus; record?: ClankerRecord; afterGeneration: number }> => {
+const messageStatus = async (messageId: string, multiplexer: ManagedMultiplexer | undefined): Promise<{ status: SendStatus; record?: ClankerRecord; afterGeneration: number }> => {
   await deliverQueuedMessages(multiplexer).catch(() => undefined)
   const message = withOrchestrationStore((store) => store.message(messageId))
   if (!message) throw new ClankerApiError("NOT_FOUND", `Unknown message id: ${messageId}`, 3)
-  const matches = (await discoverRecords(multiplexer, true)).filter((record) => record.id === message.clankerId)
+  // A clanker missing from the daemon's herd is checked against the Multiplexer before its message is called orphaned.
+  const matches = (await discoverRecordsWhere(multiplexer, true, (records) => records.some((record) => record.id === message.clankerId))).filter((record) => record.id === message.clankerId)
   return { status: sendStatusOf(message, matches.length > 0), record: matches.length === 1 ? matches[0] : undefined, afterGeneration: message.afterGeneration }
 }
 
-export async function sendStatus(messageId: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<SendStatus> {
+export async function sendStatus(messageId: string, multiplexer?: ManagedMultiplexer): Promise<SendStatus> {
   return (await messageStatus(messageId, multiplexer)).status
 }
 
+// A wait starts polling at its pollMs and doubles toward this, so a short turn is noticed quickly
+// and a long one costs little.
+const MAX_POLL_MS = 2_000
+const backedOff = (pollMs: number) => Math.max(pollMs, Math.min(pollMs * 2, MAX_POLL_MS))
+
 export async function waitForClanker(id: string, options: { afterGeneration?: number; timeoutMs?: number; pollMs?: number } = {}, multiplexer?: ManagedMultiplexer) {
   const timeoutMs = options.timeoutMs ?? 600_000
-  const pollMs = options.pollMs ?? 200
+  let pollMs = options.pollMs ?? 200
   const started = Date.now()
   const initial = await clankerStatus(id, multiplexer)
   if (!initial.capabilities.wait) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support wait: ${initial.harness} has no lifecycle report producer`, 4)
@@ -442,6 +494,7 @@ export async function waitForClanker(id: string, options: { afterGeneration?: nu
     if (settled) return status
     if (Date.now() - started >= timeoutMs) throw new ClankerApiError("TIMEOUT", `Timed out waiting for clanker ${id}; clanker remains available`, 124)
     await Bun.sleep(pollMs)
+    pollMs = backedOff(pollMs)
   }
 }
 
@@ -450,10 +503,10 @@ export async function waitForClanker(id: string, options: { afterGeneration?: nu
  * its hook acknowledgement, which names the generation it started; a Pi message, acknowledged
  * by its socket, settles past the generation it was sent after.
  */
-export async function waitForMessage(id: string, messageId: string, options: { timeoutMs?: number; pollMs?: number } = {}, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
+export async function waitForMessage(id: string, messageId: string, options: { timeoutMs?: number; pollMs?: number } = {}, multiplexer?: ManagedMultiplexer) {
   const timeoutMs = options.timeoutMs ?? 600_000
-  // Each poll may observe the herd twice (delivery pass and status), so it polls less often than `wait`.
-  const pollMs = options.pollMs ?? 500
+  // Each poll may read the herd twice (delivery pass and status), so it starts slower than `wait`.
+  let pollMs = options.pollMs ?? 500
   const started = Date.now()
   while (true) {
     const { status, record, afterGeneration } = await messageStatus(messageId, multiplexer)
@@ -467,6 +520,7 @@ export async function waitForMessage(id: string, messageId: string, options: { t
     }
     if (Date.now() - started >= timeoutMs) throw new ClankerApiError("TIMEOUT", `Timed out waiting for message ${messageId} (${status.state}); clanker remains available`, 124)
     await Bun.sleep(pollMs)
+    pollMs = backedOff(pollMs)
   }
 }
 

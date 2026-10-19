@@ -3,7 +3,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import type { ProjectionSnapshot } from "../projection"
 import type { DurableRegistry } from "../registry"
 import { OperationJournal, type MutationExecutor } from "./operations"
-import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION, type ObservationReport } from "./protocol"
+import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION, type HerdResult, type ObservationReport } from "./protocol"
 
 export interface SnapshotServerOptions<T> {
   socketPath: string
@@ -17,6 +17,8 @@ export interface SnapshotServerOptions<T> {
   refresh?: () => Promise<ProjectionSnapshot<T>>
   reportObservation?: (report: ObservationReport) => boolean | Promise<boolean>
   executeMutation?: MutationExecutor
+  /** The newest observed herd, so clients need not observe the Multiplexer themselves. */
+  herd?: () => HerdResult | undefined
   /** Read-only detail for one Workshop path, fetched on demand rather than carried in every snapshot. */
   /** Omit only for explicitly test-injected in-memory operation mode. */
   operationRegistry?: DurableRegistry
@@ -121,7 +123,11 @@ export const startSnapshotServer = async <T>(options: SnapshotServerOptions<T>):
         if (request.method === "server.status" || request.method === "server.health") {
           succeed({ protocolVersion: SNAPSHOT_PROTOCOL_VERSION, startedAt, subscribers: subscribers.size, healthy: true, epoch, owner, revision: latest.revision })
         } else if (request.method === "snapshot.get") succeed(latest)
-        else if (request.method === "projection.refresh") {
+        else if (request.method === "herd.get") {
+          const herd = options.herd?.()
+          if (herd) succeed(herd)
+          else send(socket, protocolError(request.id, "not_found", "no herd has been observed"))
+        } else if (request.method === "projection.refresh") {
           if (!options.refresh) { send(socket, protocolError(request.id, "method_not_found", "projection refresh is unavailable")); continue }
           void options.refresh().then((snapshot) => { publish(snapshot); succeed({ revision: snapshot.revision }) }).catch(() => send(socket, protocolError(request.id, "server_busy", "projection refresh failed")))
         } else if (request.method === "mutation.submit") {

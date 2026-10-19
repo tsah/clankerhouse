@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
 import { parseProjectionSnapshot, type ProjectionSnapshot } from "../projection"
-import { encodeMessage, SNAPSHOT_PROTOCOL_VERSION, type MutationIntent, type MutationSubmitResult, type OperationRecord, type ProjectionRefreshResult, type ServerStatus } from "./protocol"
+import { encodeMessage, SNAPSHOT_PROTOCOL_VERSION, type HerdResult, type MutationIntent, type MutationSubmitResult, type OperationRecord, type ProjectionRefreshResult, type ServerStatus } from "./protocol"
 
 export interface SnapshotSubscription {
   close(): void
@@ -14,6 +14,8 @@ export interface SubscribeCallbacks<T> {
 
 export interface SnapshotClientOptions {
   maxMessageBytes?: number
+  /** Fail a request the daemon has not answered within this long. Unset waits indefinitely. */
+  timeoutMs?: number
 }
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value))
@@ -35,16 +37,18 @@ const parseSnapshot = <T>(value: unknown): ProjectionSnapshot<T> | undefined => 
   return parseProjectionSnapshot<T>(value, version)
 }
 
-const request = async <T>(socketPath: string, method: "server.status" | "server.health" | "snapshot.get" | "projection.refresh" | "mutation.submit" | "operation.status", options: SnapshotClientOptions = {}, params?: object): Promise<T> => {
+const request = async <T>(socketPath: string, method: "server.status" | "server.health" | "snapshot.get" | "herd.get" | "projection.refresh" | "mutation.submit" | "operation.status", options: SnapshotClientOptions = {}, params?: object): Promise<T> => {
   const socket = await connect(socketPath)
   const id = randomUUID()
   const maxMessageBytes = options.maxMessageBytes ?? 4 * 1024 * 1024
   return await new Promise<T>((resolve, reject) => {
     let input = Buffer.alloc(0)
     let settled = false
+    const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => fail(new Error(`snapshot transport ${method} timed out after ${options.timeoutMs}ms`)), options.timeoutMs)
     const fail = (error: unknown) => {
       if (settled) return
       settled = true
+      clearTimeout(timer)
       socket.destroy()
       reject(asError(error))
     }
@@ -64,6 +68,7 @@ const request = async <T>(socketPath: string, method: "server.status" | "server.
       if (message?.version !== SNAPSHOT_PROTOCOL_VERSION || message?.id !== id || typeof message?.ok !== "boolean") return fail(new Error("snapshot transport returned an invalid response"))
       if (!message.ok) return fail(new Error(`${message.error?.code ?? "error"}: ${message.error?.message ?? "request failed"}`))
       settled = true
+      clearTimeout(timer)
       socket.end()
       resolve(message.result as T)
     })
@@ -73,6 +78,7 @@ const request = async <T>(socketPath: string, method: "server.status" | "server.
 
 export const getServerStatus = (socketPath: string, options?: SnapshotClientOptions) => request<ServerStatus>(socketPath, "server.status", options)
 export const getServerHealth = (socketPath: string, options?: SnapshotClientOptions) => request<ServerStatus>(socketPath, "server.health", options)
+export const getHerd = <T>(socketPath: string, options?: SnapshotClientOptions) => request<HerdResult<T>>(socketPath, "herd.get", options)
 export const refreshProjection = (socketPath: string, options?: SnapshotClientOptions) => request<ProjectionRefreshResult>(socketPath, "projection.refresh", options)
 export const submitMutation = (socketPath: string, idempotencyKey: string, intent: MutationIntent, options?: SnapshotClientOptions) => request<MutationSubmitResult>(socketPath, "mutation.submit", options, { idempotencyKey, intent })
 export const getOperationStatus = (socketPath: string, operationId: string, options?: SnapshotClientOptions) => request<OperationRecord>(socketPath, "operation.status", options, { operationId })

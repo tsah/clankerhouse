@@ -9,7 +9,7 @@ import {
   claimScopeOf, locationScope,
   MultiplexerUnavailableError,
   type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
-  type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type MultiplexerWindow, type NativeLocation, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
+  type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type MultiplexerWindow, type NativeLocation, type ObserveOptions, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
 
 export const HERDR_PROTOCOL = 20
@@ -147,10 +147,11 @@ export class HerdrAdapter implements Multiplexer {
     return result.snapshot as HerdrSnapshot
   }
 
-  async observe(): Promise<MultiplexerSnapshot> {
+  async observe(options: ObserveOptions = {}): Promise<MultiplexerSnapshot> {
     const [instanceId, snapshot] = await Promise.all([this.instanceId(), this.snapshot()])
     const processInfo = new Map<string, HerdrProcessInfo>()
-    await Promise.all(snapshot.panes.map(async (pane) => {
+    // Process facts cost one request per pane, so callers that only need topology and claims skip them.
+    if (options.processInfo !== false) await Promise.all(snapshot.panes.map(async (pane) => {
       try {
         const info = await this.request("pane.process_info", { pane_id: pane.pane_id })
         processInfo.set(pane.pane_id, (info.process_info ?? {}) as HerdrProcessInfo)

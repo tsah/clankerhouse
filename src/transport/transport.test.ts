@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { createConnection, createServer } from "node:net"
 import { advanceProjection, type ProjectionSnapshot } from "../projection"
 import { openDurableRegistry } from "../registry"
-import { acquireProducerLease, getOperationStatus, getServerStatus, getSnapshot, refreshProjection, replaceProducerLeaseRecord, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, submitMutation, subscribeSnapshots, type SnapshotServer } from "./index"
+import { acquireProducerLease, getHerd, getOperationStatus, getServerStatus, getSnapshot, refreshProjection, replaceProducerLeaseRecord, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, submitMutation, subscribeSnapshots, type SnapshotServer } from "./index"
 
 interface Row { name: string }
 
@@ -71,6 +71,27 @@ describe("Unix snapshot transport", () => {
     const next = snapshot("second", initial)
     server.publish(next)
     expect(await getSnapshot<Row>(socketPath)).toEqual(next)
+  })
+
+  test("serves the producer's newest herd, and not_found before one is observed", async () => {
+    const { socketPath } = await fixture()
+    let herd: { instanceId: string; observedAt: number; panes: Row[] } | undefined
+    await start(socketPath, snapshot("initial"), { herd: () => herd })
+    await expect(getHerd<Row>(socketPath)).rejects.toThrow("not_found")
+    herd = { instanceId: "herdr:/tmp/x.sock", observedAt: 1, panes: [{ name: "pane" }] }
+    expect(await getHerd<Row>(socketPath)).toEqual(herd)
+  })
+
+  test("times out a request the daemon never answers", async () => {
+    const { socketPath } = await fixture()
+    const accepted: Array<{ destroy(): void }> = []
+    const silent = createServer((socket) => { accepted.push(socket) })
+    await listen(silent, socketPath)
+    try { await expect(getHerd(socketPath, { timeoutMs: 50 })).rejects.toThrow("timed out") }
+    finally {
+      for (const socket of accepted) socket.destroy()
+      await closeNetServer(silent)
+    }
   })
 
   test("subscribes with the current snapshot immediately and receives future publishes", async () => {

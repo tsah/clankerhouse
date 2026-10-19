@@ -40,11 +40,11 @@ export interface ObservationReport {
   results?: unknown[]
 }
 
-export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status"
+export type SnapshotMethod = "server.status" | "server.health" | "snapshot.get" | "herd.get" | "snapshots.subscribe" | "projection.refresh" | "observation.report" | "mutation.submit" | "operation.status"
 
 interface RequestBase { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string }
 export type SnapshotRequest =
-  | (RequestBase & { method: "server.status" | "server.health" | "snapshot.get" | "snapshots.subscribe" | "projection.refresh" })
+  | (RequestBase & { method: "server.status" | "server.health" | "snapshot.get" | "herd.get" | "snapshots.subscribe" | "projection.refresh" })
   | (RequestBase & { method: "observation.report"; params: ObservationReport })
   | (RequestBase & { method: "mutation.submit"; params: { idempotencyKey: string; intent: MutationIntent } })
   | (RequestBase & { method: "operation.status"; params: { operationId: string } })
@@ -62,6 +62,8 @@ export interface ServerStatus {
 export interface SubscriptionResult { subscribed: true; epoch: string }
 export interface ProjectionRefreshResult { revision: ProjectionSnapshot<unknown>["revision"] }
 export interface ObservationReportResult { accepted: boolean }
+/** The daemon's newest Multiplexer observation, reduced to the panes that carry a harness. */
+export interface HerdResult<T = unknown> { instanceId: string; observedAt: number; panes: T[] }
 
 export type OperationState = "queued" | "running" | "succeeded" | "failed"
 export interface OperationRecord {
@@ -78,7 +80,7 @@ export interface OperationRecord {
 }
 
 export interface MutationSubmitResult { operation: OperationRecord; replayed: boolean }
-export type SnapshotResult<T> = ServerStatus | ProjectionSnapshot<T> | SubscriptionResult | ProjectionRefreshResult | ObservationReportResult | MutationSubmitResult | OperationRecord
+export type SnapshotResult<T> = ServerStatus | ProjectionSnapshot<T> | SubscriptionResult | ProjectionRefreshResult | ObservationReportResult | HerdResult | MutationSubmitResult | OperationRecord
 
 export interface SuccessResponse<T = unknown> { version: typeof SNAPSHOT_PROTOCOL_VERSION; id: string; ok: true; result: T }
 export interface ErrorResponse {
@@ -153,7 +155,7 @@ export const parseRequest = (value: unknown): SnapshotRequest | ErrorResponse =>
   const id = validText(request.id, 128) ? request.id : null
   if (!id) return protocolError(null, "bad_request", "request id must be a non-empty string of at most 128 characters")
   if (request.version !== SNAPSHOT_PROTOCOL_VERSION) return protocolError(id, "unsupported_version", `protocol version ${SNAPSHOT_PROTOCOL_VERSION} is required`)
-  const simple = ["server.status", "server.health", "snapshot.get", "snapshots.subscribe", "projection.refresh"] as const
+  const simple = ["server.status", "server.health", "snapshot.get", "herd.get", "snapshots.subscribe", "projection.refresh"] as const
   if (simple.includes(request.method as typeof simple[number])) return { version: SNAPSHOT_PROTOCOL_VERSION, id, method: request.method as typeof simple[number] }
   if (request.method === "observation.report") {
     const params = parseObservationReport(request.params)

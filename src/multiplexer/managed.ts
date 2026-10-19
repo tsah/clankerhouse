@@ -10,7 +10,7 @@ import { openResourceRegistry, type MultiplexerLocation, type ResourceRecord } f
 import { identifyWorkshopSync, persistWorkshopLineage, workshopForPath } from "../workshop"
 import {
   paneLocation, sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
-  type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type SpawnRequest,
+  type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type SpawnRequest,
 } from "./interface"
 
 export interface MultiplexerTarget {
@@ -52,7 +52,7 @@ export class ManagedMultiplexer {
 
   capabilities() { return this.adapter.capabilities() }
   instanceId() { return this.adapter.instanceId() }
-  observe() { return this.adapter.observe() }
+  observe(options?: ObserveOptions) { return this.adapter.observe(options) }
   currentLocation() { return this.adapter.currentLocation() }
   spawn(request: SpawnRequest) { return this.adapter.spawn(request) }
   kill(location: NativeLocation) { return this.adapter.kill(location) }

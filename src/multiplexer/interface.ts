@@ -129,6 +129,11 @@ export interface MultiplexerSnapshot {
   sessions: MultiplexerSession[]
 }
 
+export interface ObserveOptions {
+  /** Defaults to true. */
+  processInfo?: boolean
+}
+
 export type NativeLocation = Pick<MultiplexerLocation, "nativeSessionId" | "nativeWindowId" | "nativePaneId">
 export type CurrentLocation = Omit<MultiplexerLocation, "observedAt">
 
@@ -152,7 +157,8 @@ export interface Multiplexer {
   capabilities(): MultiplexerCapabilities
   /** Identity of the running runtime instance; a restart may or may not change it depending on `durableIds`. */
   instanceId(): Promise<string>
-  observe(): Promise<MultiplexerSnapshot>
+  /** `processInfo: false` lets a runtime that pays per pane for process facts skip them; pane `processInfo`, `pid`, and `command` may then be empty. */
+  observe(options?: ObserveOptions): Promise<MultiplexerSnapshot>
   /** Change Stream. May be synthesized by polling. Ends when the signal aborts. */
   changes(signal: AbortSignal): AsyncIterable<MultiplexerChange>
   /** Location the runtime is currently focused on. */

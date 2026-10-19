@@ -3,9 +3,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { deliverQueuedMessages, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
+import { clankerStatus, deliverQueuedMessages, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
 import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
+import { advanceProjection } from "./projection"
+import { startSnapshotServer } from "./transport"
 
 const roots: string[] = []
 const servers: Array<{ stop: (force?: boolean) => void }> = []
@@ -546,4 +548,70 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
     await new Promise<void>((resolve) => server.close(() => resolve()))
   })
 
+})
+
+describe("clanker discovery through the daemon's herd", () => {
+  const restores: Array<() => void> = []
+  afterEach(() => { for (const restore of restores.splice(0)) restore() })
+
+  // A herdr server that counts requests and knows one workspace with one Claude pane.
+  const fakeHerdrServer = async (path: string, clankerId: string, paneId: string) => {
+    const methods: string[] = []
+    const snapshot = {
+      focused_workspace_id: "w1",
+      workspaces: [{ workspace_id: "w1", number: 1, label: "repo@main", focused: true, active_tab_id: "w1:t1", agent_status: "idle", tokens: { ch_worktree_path: "/repo" } }],
+      tabs: [{ tab_id: "w1:t1", workspace_id: "w1", number: 1, label: "claude", focused: true, agent_status: "idle" }],
+      panes: [{ pane_id: paneId, terminal_id: "term-1", workspace_id: "w1", tab_id: "w1:t1", focused: false, cwd: "/repo", agent_status: "idle", revision: 1, tokens: { ch_clanker_id: clankerId, ch_harness: "claude" } }],
+    }
+    const server = createServer((socket) => {
+      socket.on("data", (chunk) => {
+        const request = JSON.parse(chunk.toString().split("\n")[0]!) as { id: string; method: string }
+        methods.push(request.method)
+        socket.end(`${JSON.stringify({ id: request.id, result: request.method === "session.snapshot" ? { snapshot } : {} })}\n`)
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(path, resolve))
+    restores.push(() => server.close())
+    return methods
+  }
+
+  const isolate = async (herdPanes: unknown[]) => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herd-"))
+    roots.push(root)
+    const herdrSocket = join(root, "herdr.sock")
+    const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH }
+    process.env.XDG_STATE_HOME = join(root, "state")
+    process.env.XDG_RUNTIME_DIR = join(root, "runtime")
+    process.env.CLANKERHOUSE_INSTANCE = "unit"
+    process.env.HERDR_SOCKET_PATH = herdrSocket
+    restores.push(() => { for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value })
+    const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() ?? "user"}-unit`)
+    mkdirSync(join(runtime, "clanker-state"), { recursive: true })
+    const daemon = await startSnapshotServer({
+      socketPath: join(runtime, "daemon.sock"),
+      initialSnapshot: advanceProjection(undefined, [], 10, "test", Date.now()),
+      herd: () => ({ instanceId: `herdr:${herdrSocket}`, observedAt: Date.now(), panes: herdPanes }),
+    })
+    restores.push(() => { void daemon.close() })
+    return herdrSocket
+  }
+
+  const herdPane = (id: string, pane: string) => ({ harness: "claude", id, socketPath: "", sessionId: "w1", session: "repo@main", window: "w1:t1", name: "claude", pane, cwd: "/repo", worktreePath: "/repo", focused: false })
+
+  test("lists and polls clankers from the daemon without asking the Multiplexer", async () => {
+    const herdrSocket = await isolate([herdPane("clanker-herd", "w1:p1")])
+    const methods = await fakeHerdrServer(herdrSocket, "clanker-herd", "w1:p1")
+
+    expect((await listClankers()).map((clanker) => clanker.id)).toEqual(["clanker-herd"])
+    expect(await clankerStatus("clanker-herd")).toMatchObject({ id: "clanker-herd", pane: "w1:p1", harness: "claude" })
+    expect(methods).toEqual([])
+  })
+
+  test("observes the Multiplexer, without process facts, for a clanker the daemon has not seen yet", async () => {
+    const herdrSocket = await isolate([])
+    const methods = await fakeHerdrServer(herdrSocket, "clanker-new", "w1:p2")
+
+    expect(await clankerStatus("clanker-new")).toMatchObject({ id: "clanker-new", pane: "w1:p2" })
+    expect(methods).toEqual(["session.snapshot"])
+  })
 })

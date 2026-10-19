@@ -57,6 +57,15 @@ describe("herdr multiplexer adapter", () => {
     expect(calls.filter((call) => call.method === "pane.process_info")).toHaveLength(2)
   })
 
+  test("observes topology and claims without per-pane process requests when asked", async () => {
+    const calls: Call[] = []
+    const snapshot = await new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) }).observe({ processInfo: false })
+    expect(calls.filter((call) => call.method === "pane.process_info")).toHaveLength(0)
+    const worker = snapshot.sessions[0]!.windows[1]!.panes[0]!
+    expect(worker).toMatchObject({ id: "w1:p2", pid: "", command: "", clankerId: "clanker-1", harness: "pi" })
+    expect(worker.processInfo).toBeUndefined()
+  })
+
   test("spawns sessions and windows with env, using layout.apply for argv launches", async () => {
     const calls: Call[] = []
     const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })

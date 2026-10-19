@@ -6,7 +6,7 @@ import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestAct
 import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
-import { deliverQueuedMessages, listClankers } from "./clanker-api"
+import { deliverQueuedMessages, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
 import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
@@ -40,7 +40,7 @@ import { isCodexWindow, projectResources } from "./server/project"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
 import { acquireProducerLease, startSnapshotServer } from "./transport"
-import type { MutationIntent, ProducerLease, SnapshotServer } from "./transport"
+import type { HerdResult, MutationIntent, ProducerLease, SnapshotServer } from "./transport"
 
 const repoRoot = applicationRoot
 const runtimeDir = runtimeDirFor()
@@ -66,6 +66,8 @@ let snapshotServer: SnapshotServer<SessionRow> | undefined
 let durableRegistry: DurableRegistry | undefined
 let recoveryController: RecoveryController | undefined
 const liveLifecycleReports = new Map<string, LifecycleObservation>()
+// The herd as of the newest observation, served to clanker API callers so they need not observe.
+let latestHerd: HerdResult<PaneMetadata> | undefined
 const lifecycleSequences = new Map<string, number>()
 let projectionRefreshScheduled = false
 let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; incidents: ReturnType<typeof readResourceIncidents>; managedResources: ReturnType<typeof readManagedResources> } | undefined
@@ -103,11 +105,14 @@ const daemonMultiplexer = () => (daemonMultiplexerInstance ??= openManagedMultip
 const collectMultiplexerResources = Effect.tryPromise({
   try: async () => {
     const multiplexer = daemonMultiplexer()
+    let observedAt = Date.now()
     let snapshot = await multiplexer.observe()
     if (await multiplexer.reconcileAbsorbedTopology(snapshot)) {
       invalidateProjectionEnrichment()
+      observedAt = Date.now()
       snapshot = await multiplexer.observe()
     }
+    latestHerd = { instanceId: snapshot.instanceId, observedAt, panes: paneMetadataFromSnapshot(snapshot) }
     const sessions: MuxSession[] = snapshot.sessions.map((session) => ({
       id: session.id,
       name: session.nativeName,
@@ -649,6 +654,7 @@ const serverProgram = Effect.gen(function* () {
             refresh: refreshProjectionSnapshot,
             reportObservation: ingestLifecycleObservation,
             executeMutation: executeDaemonMutation,
+            herd: () => latestHerd,
             operationRegistry: durableRegistry!,
           }),
           catch: (error) => error instanceof Error ? error : new Error(String(error)),

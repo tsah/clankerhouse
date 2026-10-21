@@ -120,8 +120,9 @@ finished:
 clankers workshop label set status=done
 ```
 
-An orchestrator labels a child Workshop by its ID, which works even after the
-child's worktree was deleted: `clankers workshop label set stage=merged --workshop "$workshop_id"`.
+An orchestrator labels a child Workshop with `--workshop ID|BRANCH|PATH`, which
+works even after the child's worktree was deleted:
+`clankers workshop label set status=done --workshop "$workshop_id"`.
 
 The Label itself changes nothing external, but a project's `labels-changed` hook
 may stop the Workshop when it is marked done, which closes this session. So make

@@ -200,7 +200,7 @@ A Workshop can carry `key=value` labels. Clankerhouse stores them, shows their v
 `Alt-D` on a worktree Workshop marks it done instead of deleting it. Nothing else changes: its clankers, session, and worktree stay. `Alt-D` on a done Workshop asks whether to destroy it (`y`) or reopen it (`u`, which clears the label). A done Workshop that is then left alone for seven days is deleted automatically; using it again restarts the seven days. The reaper never deletes a worktree with uncommitted changes or with a clanker that is working, waiting, or finished but unseen, and it keeps the branch. Set `CLANKERHOUSE_DONE_TTL_DAYS` for the daemon to change the retention, or to `0` to turn automatic deletion off.
 
 ```bash
-clankers workshop label set stage=implementing   # current Workshop; --cwd PATH for another, --workshop ID even after its worktree is gone
+clankers workshop label set stage=implementing   # current Workshop; --cwd PATH for another, --workshop ID|BRANCH|PATH even after its worktree is gone
 clankers workshop label unset stage
 clankers workshop label list
 clankers workshop stop                            # release the live session; keep the worktree

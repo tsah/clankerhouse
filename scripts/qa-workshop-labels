@@ -185,6 +185,17 @@ unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
 if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
 
+# A merged Workshop's worktree may already be deleted; it is still labelled by branch or ID.
+merged_path="$root/dev/merged"
+git -C "$origin" worktree add -q -b merged "$merged_path"
+merged_id=$(clankers workshop label set stage=review --cwd "$merged_path" | jq -r .workshopId)
+git -C "$origin" worktree remove --force "$merged_path"
+if clankers workshop label set status=done --cwd "$merged_path" >/dev/null 2>&1; then fail "Expected --cwd to need the deleted worktree"; fi
+merged_result=$(cd "$origin" && clankers workshop label set status=done --workshop merged)
+[[ "$(jq -c '[.workshopId, .labels]' <<<"$merged_result")" == "[\"$merged_id\",{\"stage\":\"review\",\"status\":\"done\"}]" ]] || fail "Unexpected label-by-branch result: $merged_result"
+[[ "$(clankers workshop label unset stage --workshop "$merged_id" | jq -c .labels)" == '{"status":"done"}' ]] || fail "Expected a label change by Workshop ID"
+[[ "$(clankers workshop label list --workshop "$merged_id")" == '{"status":"done"}' ]] || fail "Expected labels listed by Workshop ID"
+
 # Stopping a Workshop releases what is live and keeps what is durable: its session closes, its
 # clanker is no longer wanted running, its pending message is orphaned, and the worktree, branch,
 # and labels stay. The clanker is registered suspended so Recovery never launches it here.

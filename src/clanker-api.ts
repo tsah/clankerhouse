@@ -34,7 +34,8 @@ export interface ClankerCapabilities {
   status: true
   wait: "reports" | false
   send: "unix-socket" | "multiplexer-prompt" | false
-  result: "reports" | false
+  /** `transcript`: read from the harness's own session transcript (Claude). */
+  result: "reports" | "transcript" | false
   /** `clankers report` runs from any harness that can run a shell. */
   report: true
   deliveryModes: ClankerDeliveryMode[]
@@ -72,6 +73,8 @@ interface ClankerReport {
   result?: unknown
   results?: unknown
   prompts?: unknown
+  turns?: unknown
+  transcriptPath?: unknown
 }
 
 interface ClankerRecord extends ClankerInfo {
@@ -126,9 +129,9 @@ const capabilitiesFor = (harness: ClankerHarness, online: boolean, agentPrompt: 
   status: true,
   wait: harness === "opencode" ? false : "reports",
   send: harness === "pi" && online ? "unix-socket" : harness === "claude" && agentPrompt ? "multiplexer-prompt" : false,
-  result: harness === "pi" ? "reports" : false,
+  result: harness === "pi" ? "reports" : harness === "claude" ? "transcript" : false,
   report: true,
-  deliveryModes: harness === "pi" ? ["steer", "followUp"] : harness === "claude" && agentPrompt ? ["queued"] : [],
+  deliveryModes: harness === "pi" ? ["steer", "followUp"] : harness === "claude" && agentPrompt ? ["queued", "followUp"] : [],
 })
 
 export interface PaneMetadata {
@@ -394,7 +397,8 @@ export async function sendClanker(id: string, text: string, options: { delivery?
   const clanker = await findRecord(id, multiplexer)
   if (!text.trim()) throw new Error("Clanker message must not be empty")
   if (clanker.capabilities.send === "multiplexer-prompt") {
-    if (options.delivery) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support ${options.delivery} delivery through the Multiplexer prompt transport`, 4)
+    // Follow-up is what the prompt transport already does: queue until the current turn ends.
+    if (options.delivery === "steer") throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support ${options.delivery} delivery through the Multiplexer prompt transport`, 4)
     const acceptedAt = Date.now()
     const store = OrchestrationStore.open()
     try {
@@ -541,13 +545,69 @@ const normalizeResult = (value: unknown): ClankerResult | undefined => {
   }
 }
 
-export async function resultForClanker(id: string, generation?: number) {
-  const clanker = await findRecord(id)
+interface TranscriptEntry {
+  type?: string
+  timestamp?: string
+  isSidechain?: boolean
+  message?: { id?: string; stop_reason?: string | null; content?: unknown }
+}
+
+const transcriptText = (entry: TranscriptEntry) => Array.isArray(entry.message?.content)
+  ? entry.message.content.flatMap((block) => block?.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n\n")
+  : ""
+
+/**
+ * The final assistant message of each settled Claude turn, read from the session transcript.
+ * The hook records each turn's start and settle times; the reply is the last text-bearing
+ * assistant message written between them (one message may span several transcript lines).
+ */
+const claudeResults = (report: ClankerReport | undefined): ClankerResult[] => {
+  const turns = (Array.isArray(report?.turns) ? report.turns as Array<Record<string, unknown>> : [])
+    .map((turn) => ({ generation: number(turn?.generation), startedAt: number(turn?.startedAt), settledAt: number(turn?.settledAt) }))
+    .filter((turn) => turn.generation > 0 && turn.settledAt > 0)
+    .sort((a, b) => a.generation - b.generation)
+  const path = typeof report?.transcriptPath === "string" ? report.transcriptPath : ""
+  if (!turns.length || !path) return []
+  let lines: string[]
+  try { lines = readFileSync(path, "utf8").split("\n") }
+  catch (error) { throw new ClankerApiError("UNAVAILABLE", `Claude transcript ${path} is unreadable: ${error instanceof Error ? error.message : String(error)}`, 5) }
+  const assistant = lines.flatMap((line) => {
+    if (!line.includes('"assistant"')) return []
+    try {
+      const entry = JSON.parse(line) as TranscriptEntry
+      return entry.type === "assistant" && !entry.isSidechain ? [{ entry, at: Date.parse(entry.timestamp || "") || 0 }] : []
+    } catch { return [] }
+  })
+  return turns.flatMap((turn, index) => {
+    // A turn recorded before the hook kept start times begins where the previous one settled.
+    const from = turn.startedAt || (index > 0 ? turns[index - 1]!.settledAt : 0)
+    const window = assistant.filter(({ at }) => at > from && at <= turn.settledAt)
+    const last = window.findLast(({ entry }) => transcriptText(entry))
+    if (!last) return []
+    const message = window.filter(({ entry }) => last.entry.message?.id ? entry.message?.id === last.entry.message.id : entry === last.entry)
+    return [{
+      generation: turn.generation,
+      timestamp: last.at,
+      status: 0,
+      stopReason: String(message.findLast(({ entry }) => entry.message?.stop_reason)?.entry.message?.stop_reason || ""),
+      errorMessage: "",
+      reply: message.map(({ entry }) => transcriptText(entry)).filter(Boolean).join("\n\n"),
+    }]
+  })
+}
+
+export async function resultForClanker(id: string, generation?: number, multiplexer?: ManagedMultiplexer) {
+  const clanker = await findRecord(id, multiplexer)
+  if (clanker.capabilities.result === "transcript") return pickResult(id, claudeResults(clanker.report), generation)
   if (clanker.capabilities.result !== "reports") unsupported(clanker, "result")
   const report = clanker.report
   const results = Array.isArray(report?.results) ? report.results.map(normalizeResult).filter((result): result is ClankerResult => !!result) : []
   const latest = normalizeResult(report?.result)
   if (latest && !results.some((result) => result.generation === latest.generation)) results.push(latest)
+  return pickResult(id, results, generation)
+}
+
+const pickResult = (id: string, results: ClankerResult[], generation?: number) => {
   const result = generation === undefined
     ? results.sort((a, b) => b.generation - a.generation)[0]
     : results.find((candidate) => candidate.generation === generation)

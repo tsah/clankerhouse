@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { clankerStatus, deliverQueuedMessages, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
+import { clankerStatus, deliverQueuedMessages, resultForClanker, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
 import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import { advanceProjection } from "./projection"
@@ -196,7 +196,7 @@ describe("Herdr semantic prompt transport", () => {
 
     const listed = await listClankers({ multiplexer })
     expect(listed).toHaveLength(1)
-    expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: false, report: true, deliveryModes: ["queued"] } })
+    expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: "transcript", report: true, deliveryModes: ["queued", "followUp"] } })
 
     const receipt = await sendClanker(clankerId, "review this exact change", {}, multiplexer)
     expect(prompts).toEqual([{ pane: paneId, text: "review this exact change" }])
@@ -205,7 +205,54 @@ describe("Herdr semantic prompt transport", () => {
     expect(receipt.acceptedAt).toBeGreaterThan(0)
     expect(await sendStatus(receipt.messageId, multiplexer)).toEqual({ messageId: receipt.messageId, clankerId, state: "delivered", startedGeneration: null })
 
-    await expect(sendClanker(clankerId, "queue this", { delivery: "followUp" }, multiplexer)).rejects.toMatchObject({ code: "UNSUPPORTED", exitCode: 4 })
+    await expect(sendClanker(clankerId, "steer this", { delivery: "steer" }, multiplexer)).rejects.toMatchObject({ code: "UNSUPPORTED", exitCode: 4 })
+  })
+
+  test("queues a Claude follow-up until the current turn ends", async () => {
+    const reports = isolate()
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = "clanker-claude-follow-up"
+    const multiplexer = fakeHerdr(clankerId, "w1:p9", prompts)
+    const report = (state: string, generation: number, settledGeneration: number) => writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: "w1:p9", state, generation, settledGeneration, updatedAt: Date.now(),
+    }))
+    report("working", 1, 0)
+    const queued = await sendClanker(clankerId, "after this turn", { delivery: "followUp" }, multiplexer)
+    expect(queued.delivery).toBe("queued")
+    expect(prompts).toEqual([])
+    report("done", 1, 1)
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts.map((prompt) => prompt.text)).toEqual(["after this turn"])
+    expect((await sendClanker(clankerId, "now", { delivery: "followUp" }, multiplexer)).delivery).toBe("queued")
+  })
+
+  test("returns each settled Claude generation's final assistant message from the transcript", async () => {
+    const reports = isolate()
+    const clankerId = "clanker-claude-result"
+    const multiplexer = fakeHerdr(clankerId, "w1:p9", [])
+    const transcript = join(reports, "..", "session.jsonl")
+    const at = (ms: number) => new Date(ms).toISOString()
+    const assistant = (ms: number, id: string, content: unknown[], stop: string | null, extra: object = {}) =>
+      JSON.stringify({ type: "assistant", timestamp: at(ms), message: { id, role: "assistant", stop_reason: stop, content }, ...extra })
+    writeFileSync(transcript, [
+      JSON.stringify({ type: "user", timestamp: at(1_000), message: { role: "user", content: "first" } }),
+      assistant(1_100, "m1", [{ type: "text", text: "Looking." }], "tool_use"),
+      assistant(1_200, "m1", [{ type: "tool_use", id: "t", name: "Bash", input: {} }], "tool_use"),
+      assistant(1_300, "m2", [{ type: "thinking", thinking: "hm" }], null),
+      assistant(1_301, "m2", [{ type: "text", text: "First answer." }], null),
+      assistant(1_302, "m2", [{ type: "text", text: "Done." }], "end_turn"),
+      assistant(1_350, "side", [{ type: "text", text: "subagent" }], "end_turn", { isSidechain: true }),
+      "not json",
+      assistant(2_100, "m3", [{ type: "text", text: "Second answer." }], "end_turn"),
+      assistant(3_100, "m4", [{ type: "text", text: "still running" }], null),
+    ].join("\n"))
+    writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: "w1:p9", state: "working", generation: 3, settledGeneration: 2, updatedAt: Date.now(), transcriptPath: transcript,
+      turns: [{ generation: 1, startedAt: 1_000, settledAt: 1_400 }, { generation: 2, startedAt: null, settledAt: 2_200 }],
+    }))
+    expect(await resultForClanker(clankerId, 1, multiplexer)).toEqual({ clankerId, generation: 1, timestamp: 1_302, status: 0, stopReason: "end_turn", errorMessage: "", reply: "First answer.\n\nDone." })
+    expect(await resultForClanker(clankerId, undefined, multiplexer)).toMatchObject({ generation: 2, reply: "Second answer." })
+    await expect(resultForClanker(clankerId, 3, multiplexer)).rejects.toThrow(/no result for generation 3/)
   })
 
   test("queues for a busy or focused Claude, delivers in order after it settles, and acknowledges by hook hash", async () => {

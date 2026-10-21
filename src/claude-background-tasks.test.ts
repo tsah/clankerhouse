@@ -189,6 +189,26 @@ describe("Claude background-task lifecycle", () => {
 })
 
 describe("Claude prompt acknowledgement and event recency", () => {
+  test("records the transcript path and each settled turn's time window for results", async () => {
+    const f = fixture()
+    const transcript_path = "/home/claude/projects/repo/session.jsonl"
+    const before = Date.now()
+    const started = await f.emit("working", { hook_event_name: "UserPromptSubmit", transcript_path })
+    expect(started.generationStartedAt).toBeGreaterThanOrEqual(before)
+    expect(await f.emit("working", { hook_event_name: "PreToolUse" })).toMatchObject({ transcriptPath: transcript_path, generationStartedAt: started.generationStartedAt, turns: [] })
+    const first = await f.emit("done", { hook_event_name: "Stop", background_tasks: [], transcript_path })
+    expect(first.turns).toEqual([{ generation: 1, startedAt: started.generationStartedAt, settledAt: expect.any(Number) }])
+    expect(first.turns[0].settledAt).toBeGreaterThanOrEqual(started.generationStartedAt)
+    // A repeated Stop for the same generation moves its settle time instead of adding a turn.
+    expect((await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })).turns).toHaveLength(1)
+    for (let turn = 0; turn < 9; turn++) {
+      await f.emit("working", { hook_event_name: "UserPromptSubmit" })
+      await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })
+    }
+    const kept = await f.emit("idle", { hook_event_name: "SessionStart" })
+    expect(kept.turns.map((turn: { generation: number }) => turn.generation)).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
+  })
+
   test("records each submitted prompt's hash with the generation it started, across later hooks", async () => {
     const f = fixture()
     const { promptSha256 } = await import("./orchestration")

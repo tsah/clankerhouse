@@ -220,10 +220,13 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     if (!wait) return console.log(JSON.stringify(receipt))
     const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
     const status = await clankerCapabilities(id)
-    if (status.capabilities.result !== "reports") {
-      // Report-only harnesses have no result text; the turn's own Report stands in for it.
-      const { lastReport, message: _message, ...settled } = await waitForMessage(id, receipt.messageId, { timeoutMs })
-      return console.log(JSON.stringify({ ...receipt, settled, lastReport }))
+    if (status.capabilities.send === "multiplexer-prompt") {
+      // A prompt-transport message may queue, so wait for the turn it started; the turn's
+      // Report stands in for a result where the harness keeps no reply.
+      const { lastReport, message, ...settled } = await waitForMessage(id, receipt.messageId, { timeoutMs })
+      const generation = message.startedGeneration ?? settled.settledGeneration
+      const result = status.capabilities.result ? await resultForClanker(id, generation).catch(() => null) : undefined
+      return console.log(JSON.stringify({ ...receipt, settled, lastReport, ...(result === undefined ? {} : { result }) }))
     }
     const settled = await waitForClanker(id, { afterGeneration: receipt.afterGeneration, timeoutMs })
     return console.log(JSON.stringify({ ...receipt, settled, result: await resultForClanker(id, settled.settledGeneration) }))

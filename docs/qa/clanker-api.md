@@ -25,7 +25,7 @@ The scripts must create their own `/tmp/qa-clanker-*` roots, mark ownership befo
 3. Duplicate IDs fail as ambiguous; unknown IDs fail as not found.
 4. `status` and `capabilities` return harness, workshop location, lifecycle generations, and verified native transport capabilities.
 5. Pi `send`, `wait`, and `result` use its mode-0600 Unix socket and clanker-state reports. They never mutate or capture terminal content.
-6. Under Herdr, Claude advertises immediate send through the Adapter's semantic `agentPrompt` Capability. Clankerhouse revalidates the exact pane claim before Herdr validates the recognized foreground agent; blocked prompts fail without input. Codex rejects unavailable send/result operations. OpenCode remains monitor-only.
+6. Under Herdr, Claude advertises immediate, queued, and follow-up send through the Adapter's semantic `agentPrompt` Capability, and `result` from its session transcript. Clankerhouse revalidates the exact pane claim before Herdr validates the recognized foreground agent; blocked prompts fail without input. Codex rejects unavailable send/result operations. OpenCode remains monitor-only.
 7. Timeout is nondestructive and leaves the clanker and workshop intact.
 8. Reports contain only harness/clanker/native-session identity, recovery attempt, pane, lifecycle, state, and result fields under `clanker-state/`.
 9. Revisioned snapshots are committed before publication over the mode-`0600` daemon socket; socket failure leaves version-10 JSON polling operational.

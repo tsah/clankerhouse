@@ -252,7 +252,7 @@ filtered_again=$(api list --cwd "$fixture")
 # Status and capability matrix.
 api status clanker-qa-pi | json_assert 'data["id"] == "clanker-qa-pi" and data["state"] == "done"'
 api capabilities clanker-qa-pi | json_assert 'data["capabilities"]["send"] == "unix-socket" and data["capabilities"]["wait"] == "reports" and data["capabilities"]["result"] == "reports"'
-api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] == "multiplexer-prompt" and data["capabilities"]["result"] is False'
+api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] == "multiplexer-prompt" and data["capabilities"]["result"] == "transcript" and data["capabilities"]["deliveryModes"] == ["queued", "followUp"]'
 api capabilities clanker-qa-opencode | json_assert 'data["capabilities"]["wait"] is False and data["capabilities"]["send"] is False and data["capabilities"]["result"] is False'
 set +e
 unknown_error=$(api status clanker-missing 2>&1 >/dev/null); unknown_code=$?
@@ -307,8 +307,12 @@ set -e
 printf '%s' "$background_error" | json_assert 'data["error"]["code"] == "TIMEOUT"'
 printf '%s' '{"hook_event_name":"Stop","background_tasks":[{"id":"queued-task","type":"subagent","status":"pending"}]}' | "${claude_reporter[@]}" done
 api status clanker-qa-claude | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
-printf '%s' '{"hook_event_name":"Stop","background_tasks":[]}' | "${claude_reporter[@]}" done
+# The settled turn's reply is read from the transcript the hook names.
+claude_transcript="$fixture/claude-session.jsonl"
+printf '{"type":"assistant","timestamp":"%s","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"claude reply"}]}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > "$claude_transcript"
+printf '%s' '{"hook_event_name":"Stop","background_tasks":[],"transcript_path":"'"$claude_transcript"'"}' | "${claude_reporter[@]}" done
 api wait clanker-qa-claude --after 1 --timeout 2 | json_assert 'data["state"] == "done" and data["generation"] == 2 and data["settledGeneration"] == 2'
+api result clanker-qa-claude --generation 2 | json_assert 'data["generation"] == 2 and data["reply"] == "claude reply" and data["stopReason"] == "end_turn"'
 
 printf '%s' '{"harness":"claude","clankerId":"clanker-qa-claude","pane":"'"$claude_pane"'","state":"working","generation":3,"settledGeneration":2,"updatedAt":3,"hookEvent":"UserPromptSubmit"}' > "$claude_report"
 (
@@ -333,7 +337,7 @@ set -e
 [[ "$(qa_herdr pane read "$claude_pane" --source recent)" == "$claude_before" ]] || fail "rejected Claude send modified the pane"
 
 # Unsupported capability errors.
-for command in "result clanker-qa-claude" "wait clanker-qa-opencode" "send clanker-qa-opencode" "result clanker-qa-opencode"; do
+for command in "send clanker-qa-claude --delivery steer" "wait clanker-qa-opencode" "send clanker-qa-opencode" "result clanker-qa-opencode"; do
     read -r -a args <<<"$command"
     set +e
     if [[ ${args[0]} == send ]]; then error=$(printf x | api "${args[@]}" 2>&1 >/dev/null); else error=$(api "${args[@]}" 2>&1 >/dev/null); fi

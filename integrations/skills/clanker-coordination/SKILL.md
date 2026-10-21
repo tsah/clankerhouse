@@ -40,13 +40,15 @@ Rules:
    communication or monitoring.
 4. If several clankers match, show harness, name, workshop, state, and ID; do not
    guess. Reuse an ID returned by a workshop/clanker spawn.
-5. Pi supports native send/result and report waits. Claude supports queued
-   send and report waits but not result; use its `lastReport`. Codex supports
+5. Pi supports native send/result and report waits. Claude supports queued and
+   follow-up send, report waits, and result (the final assistant message of
+   that generation, from its transcript); `steer` is unsupported. Codex supports
    report waits only. OpenCode is monitor-only until its native contract is
    verified. Capabilities remain authoritative.
 6. One unsettled external Pi message is admitted at a time. Wait for it before
    retrying.
-7. A send to a busy, blocked, or focused Claude returns `"delivery": "queued"`.
+7. A send to a busy, blocked, or focused Claude returns `"delivery": "queued"`,
+   with or without `--delivery follow-up`.
    Do not resend: it is delivered in order after the clanker settles. Every send
    returns a `messageId`; wait for exactly that turn with `wait --message`, which
    avoids returning on the turn that was already running.
@@ -97,6 +99,10 @@ answer a question:
 id=$(printf '%s' "$answer" | clankers send "$clanker" | jq -r .messageId)
 clankers wait "$clanker" --message "$id" --timeout 3600
 ```
+
+To see what a worker last said (for example on a `settled` event), read its
+reply: `clankers result "$clanker" --generation "$generation" | jq -r .reply`.
+`send --wait` includes the result of the turn the message started.
 
 API errors use exit 3 for unknown/ambiguous IDs, 4 for unsupported capabilities,
 5 for unavailable endpoints (code `RESOURCE_EXHAUSTED` when the Multiplexer server

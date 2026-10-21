@@ -20,6 +20,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(2);
 /// Submitted-prompt hashes kept in the pane record for delivery acknowledgement.
 const PROMPT_HISTORY: usize = 8;
+/// Settled turns kept in the pane record so `clankers result` can find a generation's reply.
+const TURN_HISTORY: usize = 8;
 /// A claim is a rare, best-effort write; a stalled Herdr must not stall the harness.
 const HERDR_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -178,10 +180,12 @@ fn run(args: &[String]) -> Result<(), String> {
     let previous_state = text(&previous, "state");
     let mut generation = previous.get("generation").and_then(Value::as_u64).unwrap_or(0);
     let mut settled = previous.get("settledGeneration").and_then(Value::as_u64).unwrap_or(0);
+    let mut started_at = previous.get("generationStartedAt").cloned().unwrap_or(Value::Null);
     if hook_event.as_deref() == Some("UserPromptSubmit")
         || (state == "working" && previous_state != "working" && previous_state != "blocked")
     {
         generation += 1;
+        started_at = json!(now_ms());
     }
     if generation == 0 && state != "idle" && state != "unknown" {
         generation = 1;
@@ -200,6 +204,16 @@ fn run(args: &[String]) -> Result<(), String> {
             prompts.drain(..excess);
         }
     }
+    // A Claude reply lives in its session transcript; each settled turn's time window
+    // locates it there without the hook reading the transcript.
+    let transcript = text(&payload, "transcript_path");
+    let mut turns: Vec<Value> = previous.get("turns").and_then(Value::as_array).cloned().unwrap_or_default();
+    if state == "done" && generation > 0 {
+        turns.retain(|turn| turn.get("generation").and_then(Value::as_u64) != Some(generation));
+        turns.push(json!({ "generation": generation, "startedAt": started_at, "settledAt": now_ms() }));
+        let excess = turns.len().saturating_sub(TURN_HISTORY);
+        turns.drain(..excess);
+    }
     let record = json!({
         "harness": harness,
         "clankerId": clanker_id,
@@ -214,6 +228,9 @@ fn run(args: &[String]) -> Result<(), String> {
         "promptSha256": prompts.last().and_then(|prompt| prompt.get("sha256")).cloned().unwrap_or(Value::Null),
         "promptGeneration": prompts.last().and_then(|prompt| prompt.get("generation")).cloned().unwrap_or(Value::Null),
         "prompts": prompts,
+        "generationStartedAt": started_at,
+        "turns": turns,
+        "transcriptPath": or_previous(&transcript, "transcriptPath"),
     });
     write_atomic(&target, record.to_string().as_bytes())?;
 

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
+import { clankerHealth, type ClankerHealth } from "./clanker-health"
 import type { ClankerState } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
@@ -318,10 +319,10 @@ export async function clankerStatus(id: string, multiplexer?: ManagedMultiplexer
   return publicInfo(await findRecord(id, multiplexer))
 }
 
-/** Lifecycle status plus the clanker's newest Report, a Declaration that never replaces `state`. */
-export async function clankerStatusWithReport(id: string, multiplexer?: ManagedMultiplexer): Promise<ClankerInfo & { lastReport: ClankerReportRecord | null }> {
+/** Lifecycle status plus the clanker's newest Report, a Declaration that never replaces `state`, and its scope's health. */
+export async function clankerStatusWithReport(id: string, multiplexer?: ManagedMultiplexer): Promise<ClankerInfo & { lastReport: ClankerReportRecord | null; health: ClankerHealth }> {
   const status = await clankerStatus(id, multiplexer)
-  return { ...status, lastReport: withOrchestrationStore((store) => store.lastReportFor(id)) }
+  return { ...status, lastReport: withOrchestrationStore((store) => store.lastReportFor(id)), health: clankerHealth(id) }
 }
 
 export async function clankerCapabilities(id: string) {

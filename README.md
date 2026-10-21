@@ -110,7 +110,7 @@ clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--c
 
 Successful responses are JSON. Errors are versioned JSON on stderr; unknown or ambiguous ids exit `3`, unsupported capabilities exit `4`, unavailable native endpoints exit `5`, and nondestructive wait timeouts exit `124`. A Multiplexer server that has run out of file descriptors is reported as `RESOURCE_EXHAUSTED` (exit `5`) with the remedy, and a `workshop spawn` that fails before its clanker exists removes the Workshop it just created.
 
-`status` includes `lastEventAt`, the time of the clanker's newest lifecycle hook event, and `lastReport`, its newest Report. Every clanker Clankerhouse launches, including a Recovery relaunch, gets `CLANKER_ID`, `CLANKERHOUSE_WORKSHOP_ID`, and `CLANKERHOUSE_PARENT_WORKSHOP_ID` (empty for a root Workshop) in its environment.
+`status` includes `lastEventAt`, the time of the clanker's newest lifecycle hook event, `lastReport`, its newest Report, and `health`, read-only facts about the clanker's systemd scope on Linux: `memory` (`current` and `high` bytes, `high` null when unlimited), `dState` (pids in the scope in uninterruptible sleep), and `longestChild` (`pid`, `cmd`, and `elapsed` seconds of the harness's longest-running descendant). Each field is absent when it cannot be read, for example for a clanker Clankerhouse did not launch in a scope. Every clanker Clankerhouse launches, including a Recovery relaunch, gets `CLANKER_ID`, `CLANKERHOUSE_WORKSHOP_ID`, and `CLANKERHOUSE_PARENT_WORKSHOP_ID` (empty for a root Workshop) in its environment.
 
 ### Orchestration: reports and watches
 

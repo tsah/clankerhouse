@@ -1,6 +1,6 @@
 import type { RecoveryResourceClass } from "./model"
 
-const safeUnitPart = (value: string) => value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 160) || "unknown"
+export const safeUnitPart = (value: string) => value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 160) || "unknown"
 
 export const recoveryUnitName = (clankerId: string, attemptId: string) =>
   `clankerhouse-${safeUnitPart(clankerId)}-${safeUnitPart(attemptId)}.scope`

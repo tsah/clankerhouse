@@ -50,6 +50,11 @@ Rules:
    Do not resend: it is delivered in order after the clanker settles. Every send
    returns a `messageId`; wait for exactly that turn with `wait --message`, which
    avoids returning on the turn that was already running.
+8. To diagnose a stuck or stale clanker, read `health` from `clankers status`
+   instead of /proc or cgroup files: `memory.current` near `memory.high` means
+   it is being throttled, `dState` lists pids in uninterruptible sleep, and
+   `longestChild` names the command it has been running longest. Absent fields
+   mean the fact is unavailable, not healthy.
 
 ## Reporting to your parent
 

@@ -30,7 +30,10 @@ export interface ClankerReportRecord {
 }
 
 export type MessageState = "queued" | "delivered" | "acked" | "orphaned"
-export type StoredMessageState = Exclude<MessageState, "orphaned">
+export type StoredMessageState = MessageState
+
+/** A message whose recipient stays missing this long is orphaned for good and no longer waited for. */
+export const ORPHAN_AFTER_MS = 30 * 60_000
 
 export interface StoredMessage {
   messageId: string
@@ -167,6 +170,9 @@ export class OrchestrationStore {
       );
       CREATE INDEX IF NOT EXISTS messages_pending_idx ON messages(state, clanker_id, created_at);
     `)
+    // When the recipient was first found missing; cleared when it is seen again.
+    const columns = db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === "missing_since")) db.exec("ALTER TABLE messages ADD COLUMN missing_since INTEGER")
     return new OrchestrationStore(db)
   }
 
@@ -260,6 +266,36 @@ export class OrchestrationStore {
       this.db.query("UPDATE messages SET state = 'delivered', delivered_at = ?2, after_generation = ?3 WHERE message_id = ?1").run(row.message_id, now, afterGeneration)
       return messageFromRow({ ...row, state: "delivered", delivered_at: now, after_generation: afterGeneration })
     }).immediate()
+  }
+
+  /**
+   * Track pending messages' recipients against a complete observation of the live clankers. A
+   * recipient missing for `orphanAfterMs` orphans its pending messages; one seen again restarts
+   * the clock, so a clanker that Recovery brings back still gets its queue.
+   */
+  reconcileRecipients(present: ReadonlySet<string>, now = Date.now(), orphanAfterMs = ORPHAN_AFTER_MS): StoredMessage[] {
+    return this.db.transaction(() => {
+      const orphaned: StoredMessage[] = []
+      const pending = this.db.query("SELECT * FROM messages WHERE state IN ('queued', 'delivered')").all() as Array<MessageRow & { missing_since: number | null }>
+      for (const row of pending) {
+        if (present.has(row.clanker_id)) {
+          if (row.missing_since !== null) this.db.query("UPDATE messages SET missing_since = NULL WHERE message_id = ?1").run(row.message_id)
+        } else if (row.missing_since === null) {
+          this.db.query("UPDATE messages SET missing_since = ?2 WHERE message_id = ?1").run(row.message_id, now)
+        } else if (now - row.missing_since >= orphanAfterMs) {
+          this.db.query("UPDATE messages SET state = 'orphaned' WHERE message_id = ?1").run(row.message_id)
+          orphaned.push({ ...messageFromRow(row), state: "orphaned" })
+        }
+      }
+      return orphaned
+    }).immediate()
+  }
+
+  /** Orphan every pending message to these clankers at once, because they were stopped on purpose. */
+  orphanMessagesFor(clankerIds: readonly string[]): StoredMessage[] {
+    if (!clankerIds.length) return []
+    const rows = this.db.query(`UPDATE messages SET state = 'orphaned' WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
+    return rows.map(messageFromRow)
   }
 
   /** Return a claimed message to the head of its queue after a failed hand-off. */

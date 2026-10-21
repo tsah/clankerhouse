@@ -20,6 +20,8 @@ export type MutationIntent =
   | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
   | { type: "label"; path: string; key: string; value: string | null }
   | { type: "done"; path: string }
+  /** Releases a Workshop's live resources: its clankers stop for good and its sessions close. */
+  | { type: "workshop.stop"; path: string }
   | { type: "repository.refresh" }
 
 export type ObservationState = "failed" | "blocked" | "working" | "done" | "idle" | "unknown"
@@ -144,6 +146,7 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "label": return validText(intent.path) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value, intent.key)) ? { type: "label", path: intent.path, key: intent.key, value: intent.value } : undefined
     case "done": return validText(intent.path) ? { type: "done", path: intent.path } : undefined
+    case "workshop.stop": return validText(intent.path) ? { type: "workshop.stop", path: intent.path } : undefined
     case "repository.refresh": return { type: "repository.refresh" }
     default: return undefined
   }

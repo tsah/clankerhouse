@@ -31,6 +31,10 @@ describe("staged daemon mutation durability", () => {
     expect(mutationStages({ type: "done", path: "/repo/feature" })).toEqual(["identity.validated", "hook.completed", "projection.refreshed"])
   })
 
+  test("stopping a Workshop retires its clankers before closing the sessions they run in", () => {
+    expect(mutationStages({ type: "workshop.stop", path: "/repo/feature" })).toEqual(["identity.validated", "desired-state.updated", "messages.orphaned", "harness.stopped", "sessions.closed", "projection.refreshed"])
+  })
+
   test("splices deleted Workshop lineage before closing its multiplexer session", () => {
     expect(mutationStages({ type: "delete", kind: "worktree", session: "middle", path: "/repo/middle", confirmed: true })).toEqual([
       "identity.validated",

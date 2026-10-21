@@ -119,11 +119,9 @@ export interface SpawnClankerOptions {
   multiplexer?: ManagedMultiplexer
 }
 
-export async function spawnClanker(harness: Harness, cwd: string, prompt: string, options: SpawnClankerOptions = {}) {
-  const { profile, model, name: requestedName, wait = false, resourceClass } = options
-  harnessModelArgs(harness, model)
-  if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
-  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
+/** Everything up to the clanker's pane existing; a failure here means no clanker was created. */
+async function launchClanker(harness: Harness, cwd: string, prompt: string, clankerId: string, options: { profile?: string; model?: string; requestedName?: string; resourceClass?: RecoveryResourceClass }, multiplexer: ManagedMultiplexer, progress: { registered: boolean }) {
+  const { profile, model, requestedName, resourceClass } = options
   const id = await identity(cwd)
   const workshop = persistWorkshopLineage(id, { preserveParent: true })
   const current = await sessionForPath(id.path, multiplexer)
@@ -135,7 +133,6 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   const existing = live?.windows.map((window) => window.nativeName) ?? []
   let name = prefix; let n = 2
   while (existing.includes(name)) name = `${prefix}-${n++}`
-  const clankerId = generatedClankerId()
   const recoverable = harness !== "codex"
   const harnessSessionId = harness === "pi" || harness === "claude" ? randomUUID() : null
   const recoveryWorkshop = workshop ?? workshopForPath(id.path)
@@ -162,15 +159,12 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
         launchSpec,
         originalTask: prompt,
       })
+      progress.registered = true
       const attempt = store.beginAttempt(clankerId, "initial")
       const attemptId = String(attempt.id)
       store.setRecoveryOwner(clankerId, recoveryUnitName(clankerId, attemptId))
       argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId, workshop: launchWorkshop })
     } catch (error) {
-      try {
-        const registered = store?.getDesired(clankerId)
-        if (registered && registered.desiredState !== "tombstoned") store!.tombstone(clankerId, { reason: "initial registration failed" })
-      } catch {}
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { store?.close() }
   }
@@ -178,6 +172,31 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   const spawnedLocation = await multiplexer.spawn(live
     ? { ...launch, scope: "window", nativeSessionId: live.id, name }
     : { ...launch, scope: "session", name: session, windowName: name })
+  return { id, workshop, session, name, recoverable, harnessSessionId, spawnedLocation }
+}
+
+/** Tombstones the Recovery record of a clanker whose launch failed, if one was written. */
+const retireRegistration = (clankerId: string) => {
+  const store = openRecoveryStore()
+  try {
+    const registered = store.getDesired(clankerId)
+    if (registered && registered.desiredState !== "tombstoned") store.tombstone(clankerId, { reason: "initial launch failed" })
+  } finally { store.close() }
+}
+
+export async function spawnClanker(harness: Harness, cwd: string, prompt: string, options: SpawnClankerOptions = {}) {
+  const { profile, model, name: requestedName, wait = false, resourceClass } = options
+  harnessModelArgs(harness, model)
+  if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
+  const multiplexer = options.multiplexer ?? openManagedMultiplexer()
+  const clankerId = generatedClankerId()
+  const progress = { registered: false }
+  const launched = await launchClanker(harness, cwd, prompt, clankerId, { profile, model, requestedName, resourceClass }, multiplexer, progress).catch((error) => {
+    // Nothing runs yet, so retire the Recovery record rather than leave Recovery to launch it.
+    if (progress.registered) try { retireRegistration(clankerId) } catch {}
+    throw error instanceof ClankerRegistrationError ? error : new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
+  })
+  const { id, workshop, session, name, recoverable, harnessSessionId, spawnedLocation } = launched
   const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = spawnedLocation
   await applyWorkshopClaims(multiplexer, nativeSessionId, id, workshop)
   const at = paneLocation(nativeSessionId, window, pane)

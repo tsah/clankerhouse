@@ -94,7 +94,9 @@ clankers wait "$clanker" --message "$id" --timeout 3600
 ```
 
 API errors use exit 3 for unknown/ambiguous IDs, 4 for unsupported capabilities,
-5 for unavailable endpoints, and 124 for a nondestructive timeout.
+5 for unavailable endpoints (code `RESOURCE_EXHAUSTED` when the Multiplexer server
+ran out of file descriptors; the message names the remedy), and 124 for a
+nondestructive timeout.
 
 ## Marking this Workshop Done
 
@@ -106,4 +108,6 @@ finished:
 clankers workshop label set status=done
 ```
 
-It changes nothing external: clankers, sessions, and the worktree stay.
+The Label itself changes nothing external, but a project's `labels-changed` hook
+may stop the Workshop when it is marked done, which closes this session. So make
+it your last action: report your result first, then mark done.

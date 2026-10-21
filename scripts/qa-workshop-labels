@@ -185,4 +185,46 @@ unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
 if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
 
-printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, and the reaper removes only idle, clean done worktrees.\n'
+# Stopping a Workshop releases what is live and keeps what is durable: its session closes, its
+# clanker is no longer wanted running, its pending message is orphaned, and the worktree, branch,
+# and labels stay. The clanker is registered suspended so Recovery never launches it here.
+stopped_path="$root/dev/stopped"
+git -C "$origin" worktree add -q -b stopped "$stopped_path"
+qa_herdr workspace create --cwd "$stopped_path" --label qa-stopped --no-focus >/dev/null
+has_workspace() { qa_herdr workspace list | jq -e --arg label "$1" '.result.workspaces | any(.label == $label)' >/dev/null; }
+clankers workshop label set status=done --cwd "$stopped_path" >/dev/null
+stopped_state() {
+    env XDG_STATE_HOME="$state_home" XDG_RUNTIME_DIR="$runtime" HOME="$root/home" STOPPED_PATH="$stopped_path" STEP="$1" bun --eval '
+      const [storePath, orchestrationPath] = process.argv.slice(1)
+      const { openRecoveryStore } = await import(storePath)
+      const { OrchestrationStore } = await import(orchestrationPath)
+      const recovery = openRecoveryStore()
+      const messages = OrchestrationStore.open()
+      if (process.env.STEP === "seed") {
+        recovery.createDesired({ clankerId: "clanker-qa-stopped", harness: "claude", workshopId: "path-qa-stopped", workshopPath: process.env.STOPPED_PATH, preferredSessionLabel: "qa-stopped", preferredWindowLabel: "claude", cwd: process.env.STOPPED_PATH, harnessSessionId: null, launchSpec: { version: 1, profile: null }, originalTask: "qa", desiredState: "suspended_resource_pressure" })
+        messages.insertMessage({ messageId: "msg-qa-stopped", clankerId: "clanker-qa-stopped", text: "later", delivery: "queued", state: "queued", afterGeneration: 0 })
+      }
+      console.log(JSON.stringify([recovery.getDesired("clanker-qa-stopped")?.desiredState, messages.message("msg-qa-stopped")?.state]))
+      recovery.close(); messages.close()
+    ' "$repo/src/recovery/store.ts" "$repo/src/orchestration.ts"
+}
+[[ "$(stopped_state seed)" == '["suspended_resource_pressure","queued"]' ]] || fail "Could not seed the Workshop to stop"
+stop_result=$(clankers workshop stop --cwd "$stopped_path")
+[[ "$(jq -c '[.stopped, .clankerIds, (.sessionIds | length)]' <<<"$stop_result")" == '[true,["clanker-qa-stopped"],1]' ]] || fail "Unexpected workshop stop result: $stop_result"
+if has_workspace qa-stopped; then fail "Expected the stopped Workshop's workspace to close"; fi
+[[ "$(stopped_state check)" == '["stopped","orphaned"]' ]] || fail "Expected the clanker stopped and its message orphaned, got $(stopped_state check)"
+[[ -d "$stopped_path" ]] || fail "Stopping must keep the worktree"
+git -C "$origin" show-ref --verify --quiet refs/heads/stopped || fail "Stopping must keep the branch"
+[[ "$(clankers workshop label list --cwd "$stopped_path")" == '{"status":"done"}' ]] || fail "Stopping must keep the Workshop's labels"
+stopped_row=$(SOCKET_PATH="$daemon_socket" STOPPED_PATH="$stopped_path" bun --eval '
+  const [transportPath] = process.argv.slice(1)
+  const { getSnapshot } = await import(transportPath)
+  const row = (await getSnapshot(process.env.SOCKET_PATH)).sessions.find((candidate) => candidate.path === process.env.STOPPED_PATH)
+  console.log(JSON.stringify([row?.target.type ?? null, row?.labels ?? null]))
+' "$repo/src/transport/index.ts")
+[[ "$stopped_row" == '["directory",["done"]]' ]] || fail "Expected the stopped Workshop to stay listed as a sessionless row, got $stopped_row"
+again=$(clankers workshop stop --cwd "$stopped_path")
+[[ "$(jq -c '[.stopped, (.sessionIds | length)]' <<<"$again")" == '[true,0]' ]] || fail "Expected stopping a stopped Workshop to be a no-op: $again"
+has_workspace "Rework the parser" || fail "Stopping one Workshop must leave other sessions alone"
+
+printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, the reaper removes only idle, clean done worktrees, and stopping a Workshop closes its session and retires its clankers while keeping its worktree, branch, and labels.\n'

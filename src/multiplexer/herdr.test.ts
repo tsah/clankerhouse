@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { HerdrAdapter, herdrSocketPath } from "./herdr"
-import { paneLocation, sessionLocation, windowLocation } from "./interface"
+import { HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrRequest, herdrSocketPath } from "./herdr"
+import { MultiplexerResourceExhaustedError, paneLocation, sessionLocation, windowLocation } from "./interface"
 
 interface Call { method: string; params: Record<string, unknown> }
 
@@ -64,6 +64,66 @@ describe("herdr multiplexer adapter", () => {
     const worker = snapshot.sessions[0]!.windows[1]!.panes[0]!
     expect(worker).toMatchObject({ id: "w1:p2", pid: "", command: "", clankerId: "clanker-1", harness: "pi" })
     expect(worker.processInfo).toBeUndefined()
+  })
+
+  test("keeps at most a bounded number of per-pane requests in flight however many panes exist", async () => {
+    const panes = Array.from({ length: 50 }, (_, index) => ({ pane_id: `w1:p${index + 1}`, terminal_id: `term_${index}`, workspace_id: "w1", tab_id: "w1:t1", focused: false, agent_status: "unknown", revision: 0 }))
+    let inFlight = 0
+    let peak = 0
+    const request = async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "session.snapshot") return { snapshot: { workspaces: [{ workspace_id: "w1", number: 1, label: "big", focused: false, active_tab_id: "w1:t1", agent_status: "unknown" }], tabs: [{ tab_id: "w1:t1", workspace_id: "w1", number: 1, label: "main", focused: false, agent_status: "unknown" }], panes } }
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await Bun.sleep(1)
+      inFlight -= 1
+      return { process_info: { pane_id: params.pane_id, shell_pid: 1 } }
+    }
+    const snapshot = await new HerdrAdapter({ socketPath: "/tmp/x.sock", request }).observe()
+    expect(snapshot.sessions[0]!.windows[0]!.panes).toHaveLength(50)
+    expect(snapshot.sessions[0]!.windows[0]!.panes.every((pane) => pane.pid === "1")).toBe(true)
+    expect(peak).toBe(HERDR_PROCESS_INFO_CONCURRENCY)
+  })
+
+  test("callers during an observation share one later observation instead of running their own", async () => {
+    const calls: Call[] = []
+    const base = fakeHerdr(calls)
+    let release: () => void = () => {}
+    let gate: Promise<void> | undefined = new Promise((resolve) => { release = resolve })
+    const request = async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "session.snapshot" && gate) { const waiting = gate; gate = undefined; await waiting }
+      return base(method, params)
+    }
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request })
+    const first = adapter.observe()
+    await Bun.sleep(0)
+    const joined = [adapter.observe(), adapter.observe(), adapter.observe()]
+    release()
+    const [firstSnapshot, ...joinedSnapshots] = await Promise.all([first, ...joined])
+    // One observation for the first caller, one after it for everyone who arrived meanwhile.
+    expect(calls.filter((call) => call.method === "session.snapshot")).toHaveLength(2)
+    expect(joinedSnapshots.map((snapshot) => snapshot.sessions[0]!.id)).toEqual(["w1", "w1", "w1"])
+    expect(joinedSnapshots[0]).not.toBe(joinedSnapshots[1])
+    expect(firstSnapshot.sessions).toHaveLength(1)
+    await adapter.observe()
+    expect(calls.filter((call) => call.method === "session.snapshot")).toHaveLength(3)
+  })
+
+  test("reports herdr running out of file descriptors as resource exhaustion with the remedy", async () => {
+    const path = `/tmp/clankerhouse-herdr-emfile-${process.pid}.sock`
+    const server = Bun.listen({
+      unix: path,
+      socket: {
+        data(socket) {
+          socket.write(`${JSON.stringify({ id: "1", error: { code: "INVALID_REQUEST", message: "workspace.create: dup of fd 815 failed" } })}\n`)
+        },
+      },
+    })
+    try {
+      const failure = await herdrRequest(path)("workspace.create", {}).catch((error) => error)
+      expect(failure).toBeInstanceOf(MultiplexerResourceExhaustedError)
+      expect(failure.code).toBe("RESOURCE_EXHAUSTED")
+      expect(failure.message).toMatch(/ran out of file descriptors.*prlimit/)
+    } finally { server.stop(true) }
   })
 
   test("spawns sessions and windows with env, using layout.apply for argv launches", async () => {

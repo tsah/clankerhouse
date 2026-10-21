@@ -7,10 +7,12 @@ import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
 import { deliverQueuedMessages, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
+import { withOrchestrationStore } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopStatePath, workshopsWithLabel } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
+import { workshopStopPlan } from "./workshop-stop"
 import { sessionState } from "./model"
 import type { DetailRow, SessionRow } from "./model"
 import { advanceProjection, parseProjectionSnapshot } from "./projection"
@@ -482,9 +484,11 @@ const scheduleProjectionRefresh = () => {
 const hookAttestFailures = new Map<string, string>()
 let stopHookAttestRequests: (() => void) | undefined
 
-// Queued Claude messages: a cheap store check every tick, and a delivery pass when a clanker's
-// state changes. Each failure is logged once until it changes.
-const QUEUED_DELIVERY_MS = 2_000
+// Queued Claude messages: a delivery pass when a clanker with pending messages changes state or
+// the operator's focus moves, and a slow fallback pass while anything is pending. Every pass
+// observes the whole Multiplexer, so none runs on a fast timer. Each failure is logged once
+// until it changes.
+const QUEUED_DELIVERY_MS = 30_000
 let queuedDeliveryRunning = false
 let queuedDeliveryFailure = ""
 let stopQueuedDelivery: (() => void) | undefined
@@ -504,6 +508,10 @@ const runQueuedDelivery = () => {
     })
     .finally(() => { queuedDeliveryRunning = false })
 }
+const hasPendingMessagesFor = (clankerId?: string) => {
+  try { return withOrchestrationStore((store) => clankerId ? store.pendingMessages(clankerId).length > 0 : store.hasPendingMessages()) }
+  catch { return true }
+}
 const startQueuedDelivery = () => {
   const timer = setInterval(runQueuedDelivery, QUEUED_DELIVERY_MS)
   return () => clearInterval(timer)
@@ -512,7 +520,7 @@ const startQueuedDelivery = () => {
 const applyHookAttestRequest = async (request: HookAttestRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
-  runQueuedDelivery()
+  if (hasPendingMessagesFor(request.clankerId)) runQueuedDelivery()
   const store = openRecoveryStore()
   try {
     await attestHarnessSession(store, request)
@@ -621,6 +629,8 @@ const serverProgram = Effect.gen(function* () {
         for await (const change of daemonMultiplexer().changes(changeSignal.signal)) {
           if (change.kind === "reconnect") invalidateProjectionEnrichment()
           scheduleProjectionRefresh()
+          // A message held while the operator typed into its clanker goes out once focus moves on.
+          if (change.kind === "focus" && hasPendingMessagesFor()) runQueuedDelivery()
         }
       } catch (error) {
         console.error(`Multiplexer change stream stopped: ${error instanceof Error ? error.message : String(error)}`)
@@ -1193,6 +1203,63 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     if (stage === "hook.completed") {
       const outcome = await completeDone(String(checkpoint.path))
       return { checkpoint: { ...checkpoint, outcome } }
+    }
+  }
+
+  if (intent.type === "workshop.stop") {
+    if (stage === "identity.validated") {
+      const path = realpathSync(expandHome(intent.path))
+      return { checkpoint: { ...checkpoint, path, workshopId: workshopForPath(path)?.workshopId } }
+    }
+    const path = String(checkpoint.path)
+    const clankerIds = Array.isArray(checkpoint.clankerIds) ? checkpoint.clankerIds.map(String) : []
+    if (stage === "desired-state.updated") {
+      const canonical = (candidate: string) => { try { return realpathSync(candidate) } catch { return candidate } }
+      const snapshot = await daemonMultiplexer().observe()
+      const store = openRecoveryStore()
+      try {
+        const plan = workshopStopPlan({
+          path,
+          workshopId: typeof checkpoint.workshopId === "string" ? checkpoint.workshopId : undefined,
+          sessions: snapshot.sessions.map((session) => ({
+            id: session.id,
+            workshopId: session.workshopId,
+            paths: [session.worktreePath, session.directoryPath, session.path].filter(Boolean).map(canonical),
+            clankerIds: session.windows.flatMap((window) => window.panes.flatMap((pane) => pane.clankerId ? [pane.clankerId] : [])),
+          })),
+          desired: store.listDesired().map((row) => ({ clankerId: row.clankerId, workshopId: row.workshopId, workshopPath: canonical(row.workshopPath), desiredState: row.desiredState })),
+        })
+        for (const clankerId of plan.stop) store.setDesiredState(clankerId, "stopped", { reason: "workshop-stopped" })
+        return { checkpoint: { ...checkpoint, clankerIds: plan.clankerIds, sessionIds: plan.sessionIds } }
+      } finally { store.close() }
+    }
+    if (stage === "messages.orphaned") {
+      withOrchestrationStore((store) => store.orphanMessagesFor(clankerIds))
+      return { checkpoint }
+    }
+    if (stage === "harness.stopped") {
+      const store = openRecoveryStore()
+      try {
+        for (const clankerId of clankerIds) {
+          const ownerUnit = store.getDesired(clankerId)?.ownerUnit
+          if (!ownerUnit) continue
+          const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+          if (active) stopOwnedHarness(ownerUnit)
+        }
+      } finally { store.close() }
+      return { checkpoint }
+    }
+    if (stage === "sessions.closed") {
+      const sessionIds = Array.isArray(checkpoint.sessionIds) ? checkpoint.sessionIds.map(String) : []
+      for (const nativeSessionId of sessionIds) {
+        if (await exactSession({ nativeSessionId })) await daemonMultiplexer().kill(sessionLocation(nativeSessionId))
+      }
+      // The Workshop stays listed without its session, as a row that opens a fresh one.
+      if (existsSync(path) && !directoryCache?.rows.some((row) => row.path === canonicalActivityPath(path))) {
+        const branch = Bun.spawnSync(["git", "-C", path, "branch", "--show-current"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim()
+        rememberDirectory({ path, source: isLinkedWorktreeSync(path) ? "worktree" : "activity", branch, activityAt: Date.now(), activitySource: "opened" })
+      }
+      return { checkpoint: { ...checkpoint, outcome: { path, workshopId: checkpoint.workshopId ?? null, stopped: true, clankerIds, sessionIds } } }
     }
   }
 

@@ -74,6 +74,10 @@ The built-in Label `status=done`: the operator's statement that active work in a
 
 The daemon process that deletes a Done Workshop once it has been left alone for the retention period (seven days by default). Any observed use of the Workshop restarts the period. The Reaper removes only linked worktrees with no uncommitted changes and no clanker that is working, waiting, or finished-but-unseen, and it deletes through the ordinary delete mutation, which keeps the branch.
 
+## Stopped
+
+A Workshop whose live resources were released on purpose with `clankers workshop stop`. Its clankers' recoverable intent becomes stopped, so Recovery leaves them alone; their waiting messages are orphaned; and its Multiplexer sessions close. The worktree, branch, Labels, and lineage remain, and the Workshop stays listed as a sessionless row; opening it starts a plain shell, not the old harness. Stopped is not a Label and Clankerhouse never stops a Workshop by itself: a Workshop Hook decides when, typically on Done.
+
 ## Workshop Hook
 
 An executable Clankerhouse runs inside the Workshop: either tracked in the target repository at `.clankerhouse/hooks/<event>`, or kept by the operator per project at `~/.config/clankerhouse/hooks/<project>/<event>`. The repository's hook wins when both exist. `labels-changed` runs detached after a Label actually changes and cannot fail that change. `done` replaces the built-in delete-key rule for that repository: exit `0` means the repository handled the key, exit `1` leaves Clankerhouse's destroy confirmation, and any other exit is reported as a failure. `post-create` runs detached in its own resource-limited scope once a new worktree Workshop exists, so the repository can prepare it; its output and exit status go to a log, never to the create. Repository-specific workflow lives in these scripts, never in Clankerhouse.

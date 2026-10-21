@@ -209,7 +209,8 @@
         "Kill and re-run a watch with the same cursor file; confirm no event repeats and none is lost, including children spawned in between",
         "Under Herdr, send to a working Claude clanker; confirm `delivery: queued`, one delivery after it stops, `send-status` acked with a startedGeneration, and that `wait --message` returns on that turn",
         "Inside a spawned and a recovered clanker, confirm CLANKERHOUSE_WORKSHOP_ID and CLANKERHOUSE_PARENT_WORKSHOP_ID",
-        "During a tool-heavy Claude turn, confirm `status.lastEventAt` advances on each tool call"
+        "During a tool-heavy Claude turn, confirm `status.lastEventAt` advances on each tool call",
+        "Queue a message to a clanker, then close its pane; confirm `send-status` reports orphaned at once and that the stored message turns orphaned after 30 minutes, after which the daemon stops its 30-second delivery pass"
       ]
     },
     {
@@ -389,12 +390,13 @@
     },
     {
       "id": "workshop-labels",
-      "title": "Workshop labels and titles, repository hooks, the built-in done mark and reaper",
+      "title": "Workshop labels and titles, repository hooks, the built-in done mark, reaper, and Workshop stop",
       "core": true,
       "unit": [
         "src/labels.test.ts",
         "src/workshop-hooks.test.ts",
         "src/workshop.test.ts",
+        "src/workshop-stop.test.ts",
         "src/transport/protocol.test.ts",
         "src/daemon-mutations.test.ts",
         "src/server/project.test.ts",
@@ -413,7 +415,8 @@
         "Create a Workshop by typing a title, confirm the derived branch shown before creation, and confirm the row and the multiplexer session carry the title",
         "Edit a title with Alt-R, clear it with an empty title, and confirm the branch never changes",
         "Judge that rows untouched for days are visibly dimmer, that state glyphs keep full colour, and that only the working glyph animates",
-        "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state"
+        "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state",
+        "Under Herdr, run `clankers workshop stop` in a done Workshop with a live clanker; confirm its workspace closes, the herdr server's open fds drop by about three per pane, the row stays in the picker without a session, Recovery does not relaunch the clanker, and opening the row starts a plain shell"
       ]
     }
   ]

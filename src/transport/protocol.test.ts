@@ -26,6 +26,7 @@ describe("mutation protocol target set", () => {
       { type: "label", path: "/repo/feature", key: "stage", value: "retro" },
       { type: "label", path: "/repo/feature", key: "stage", value: null },
       { type: "done", path: "/repo/feature" },
+      { type: "workshop.stop", path: "/repo/feature" },
       { type: "label", path: "/repo/feature", key: "title", value: "Migrate the adapter" },
       { type: "create", repository: "/repo", branch: "migrate-the-adapter", create: true, title: "Migrate the adapter" },
       { type: "create", repository: "/repo", branch: "spawned", create: true, deferSession: true },
@@ -38,6 +39,7 @@ describe("mutation protocol target set", () => {
       { type: "label", path: "/repo/feature", key: "stage" },
       { type: "label", key: "stage", value: "retro" },
       { type: "done" },
+      { type: "workshop.stop" },
     ]) expect(mutation(intent)).toMatchObject({ ok: false, error: { code: "bad_request" } })
   })
 

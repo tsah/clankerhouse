@@ -439,6 +439,7 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
   try {
     if (!store.hasPendingMessages()) return { delivered, acked, failed }
     const records = await discoverRecords(multiplexer, true)
+    store.reconcileRecipients(new Set(records.map((record) => record.id)))
     for (const clankerId of new Set(store.pendingMessages().map((message) => message.clankerId))) {
       const matches = records.filter((record) => record.id === clankerId)
       if (matches.length !== 1) continue

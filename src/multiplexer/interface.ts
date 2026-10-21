@@ -194,6 +194,15 @@ export class MultiplexerUnavailableError extends Error {
   }
 }
 
+/** The Multiplexer server refused work because it ran out of a host resource, such as file descriptors. */
+export class MultiplexerResourceExhaustedError extends Error {
+  readonly code = "RESOURCE_EXHAUSTED"
+  constructor(message: string) {
+    super(message)
+    this.name = "MultiplexerResourceExhaustedError"
+  }
+}
+
 export class UnsupportedMultiplexerOperation extends Error {
   constructor(kind: MultiplexerKind, operation: string) {
     super(`${kind} adapter does not support ${operation}`)

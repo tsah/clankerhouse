@@ -12,7 +12,7 @@ import type { RecoveryResourceClass } from "./recovery/model"
 import { harnessModelArgs } from "./recovery/harness"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { openManagedMultiplexer } from "./multiplexer"
-import { paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
+import { MultiplexerResourceExhaustedError, paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
@@ -304,6 +304,7 @@ const usage = `Usage:
   clankers workshop identity [--cwd PATH]
   clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]
   clankers workshop done [--cwd PATH]
+  clankers workshop stop [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
@@ -400,6 +401,15 @@ const runMultiplexerCli = async (parsed: ParsedArgs) => {
     return console.log(JSON.stringify(result))
   }
   throw new Error("Usage: clankers mux kind|capabilities|pane-address-env|observe|current-location|claim|read-claim|kill|focus|spawn ...")
+}
+
+/** The versioned error code and exit status for a failure, looking through wrapped causes. */
+export const cliErrorCode = (error: unknown): { code: string; exitCode: number } => {
+  for (let current = error; current instanceof Error; current = current.cause) {
+    if (current instanceof ClankerApiError) return { code: current.code, exitCode: current.exitCode }
+    if (current instanceof MultiplexerResourceExhaustedError) return { code: current.code, exitCode: 5 }
+  }
+  return { code: "INVALID_REQUEST", exitCode: 2 }
 }
 
 export async function runClankersCli(argv = process.argv.slice(2)) {
@@ -622,12 +632,17 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       const routed = await routeCompatibilityMutation({ type: "done", path: resolve(cwd) })
       return console.log(JSON.stringify(routed ? routed.result : await completeDone(cwd)))
     }
+    if (subcommand === "stop") {
+      const routed = await routeCompatibilityMutation({ type: "workshop.stop", path: resolve(cwd) })
+      if (!routed) throw new Error("Clankerhouse daemon is required to stop a Workshop")
+      return console.log(JSON.stringify(routed.result))
+    }
     if (subcommand === "show") return console.log(JSON.stringify(workshopDetails(cwd, { id: parsed.take("--id"), path: parsed.take("--path") }) ?? null, null, 2))
     if (subcommand === "tree") return console.log(JSON.stringify(workshopTree(cwd), null, 2))
     if (subcommand === "project") return console.log(JSON.stringify(projectSnapshot(cwd), null, 2))
     if (subcommand === "reconcile") return console.log(JSON.stringify(reconcileRepositoryWorkshops(cwd), null, 2))
     if (subcommand === "bootstrap") return console.log(JSON.stringify(bootstrapRepositoryFromManifests(cwd), null, 2))
-    throw new Error("Usage: clankers workshop spawn|ensure|identity|label|done|show|tree|project|reconcile|bootstrap ...")
+    throw new Error("Usage: clankers workshop spawn|ensure|identity|label|done|stop|show|tree|project|reconcile|bootstrap ...")
   }
 
   if (command === "spawn") {
@@ -646,8 +661,8 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
 
 if (import.meta.main) {
   runClankersCli().catch((error) => {
-    const apiError = error instanceof ClankerApiError ? error : undefined
-    console.error(JSON.stringify({ apiVersion: 1, error: { code: apiError?.code || "INVALID_REQUEST", message: error instanceof Error ? error.message : String(error) } }))
-    process.exit(apiError?.exitCode || 2)
+    const { code, exitCode } = cliErrorCode(error)
+    console.error(JSON.stringify({ apiVersion: 1, error: { code, message: error instanceof Error ? error.message : String(error) } }))
+    process.exit(exitCode)
   })
 }

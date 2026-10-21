@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  MAX_PAYLOAD_BYTES, OrchestrationStore, advanceWatchCursor, computeWatchEvents, initialWatchCursor, parseReportPayload, parseReportState, promptSha256,
+  MAX_PAYLOAD_BYTES, ORPHAN_AFTER_MS, OrchestrationStore, advanceWatchCursor, computeWatchEvents, initialWatchCursor, parseReportPayload, parseReportState, promptSha256,
   readWatchCursor, readyForDelivery, reportAddressee, sendStatusOf, settleWatchCursor, writeWatchCursor, clankerBusy,
   type WatchCursor, type WatchEvent, type WatchView, type WatchedClanker,
 } from "./orchestration"
@@ -114,6 +115,43 @@ describe("queued prompt delivery", () => {
     expect(sendStatusOf(queued, false).state).toBe("orphaned")
     store.acknowledge("clanker-gone", [])
     expect(store.claimNextDelivery("clanker-other", 1)).toBeUndefined()
+    store.close()
+  })
+
+  test("stops waiting for a recipient that stays missing, but not for one that comes back", () => {
+    const path = join(temporary(), "orchestration.sqlite3")
+    const store = OrchestrationStore.open(path)
+    const gone = store.admitMessage({ clankerId: "clanker-gone", text: "hello", busy: true, afterGeneration: 1, now: 0 })
+    const unacked = store.admitMessage({ clankerId: "clanker-gone-2", text: "sent", busy: false, afterGeneration: 1, now: 0 })
+    const back = store.admitMessage({ clankerId: "clanker-back", text: "later", busy: true, afterGeneration: 1, now: 0 })
+
+    expect(store.reconcileRecipients(new Set(), 1_000)).toEqual([])
+    // Missing for less than the grace period, then present again: the clock restarts.
+    expect(store.reconcileRecipients(new Set(["clanker-back"]), 1_000 + ORPHAN_AFTER_MS / 2)).toEqual([])
+    const orphaned = store.reconcileRecipients(new Set(), 1_000 + ORPHAN_AFTER_MS)
+    expect(orphaned.map((message) => message.messageId).sort()).toEqual([gone.messageId, unacked.messageId].sort())
+    expect(store.message(gone.messageId)).toMatchObject({ state: "orphaned" })
+    expect(sendStatusOf(store.message(unacked.messageId)!, true).state).toBe("orphaned")
+    expect(store.pendingMessages().map((message) => message.messageId)).toEqual([back.messageId])
+    store.close()
+
+    // The state survives reopening, and nothing claims an orphaned message.
+    const reopened = OrchestrationStore.open(path)
+    expect(reopened.claimNextDelivery("clanker-gone", 2)).toBeUndefined()
+    expect(reopened.orphanMessagesFor(["clanker-back"]).map((message) => message.messageId)).toEqual([back.messageId])
+    expect(reopened.hasPendingMessages()).toBe(false)
+    reopened.close()
+  })
+
+  test("adds the missing-recipient clock to a store created before it existed", () => {
+    const path = join(temporary(), "orchestration.sqlite3")
+    const legacy = new Database(path, { create: true })
+    legacy.exec(`CREATE TABLE messages (message_id TEXT PRIMARY KEY, clanker_id TEXT NOT NULL, text TEXT NOT NULL, sha256 TEXT NOT NULL, delivery TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, after_generation INTEGER NOT NULL, delivered_at INTEGER, acked_at INTEGER, started_generation INTEGER)`)
+    legacy.exec(`INSERT INTO messages VALUES ('msg-old', 'clanker-gone', 'x', 'h', 'queued', 'queued', 0, 1, NULL, NULL, NULL)`)
+    legacy.close()
+    const store = OrchestrationStore.open(path)
+    store.reconcileRecipients(new Set(), 0)
+    expect(store.reconcileRecipients(new Set(), ORPHAN_AFTER_MS).map((message) => message.messageId)).toEqual(["msg-old"])
     store.close()
   })
 })

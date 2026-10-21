@@ -1,5 +1,25 @@
-import { describe, expect, test } from "bun:test"
-import { mutationProgressSteps, parseArgs } from "./cli"
+import { afterEach, describe, expect, test } from "bun:test"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { cliErrorCode, mutationProgressSteps, parseArgs } from "./cli"
+import { ClankerApiError } from "./clanker-api"
+import { MultiplexerResourceExhaustedError } from "./multiplexer/interface"
+import { ClankerRegistrationError } from "./workflow"
+
+const roots: string[] = []
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+
+describe("cli error codes", () => {
+  test("names resource exhaustion even when a spawn wraps it", () => {
+    const exhausted = new MultiplexerResourceExhaustedError("herdr workspace.create: the herdr server ran out of file descriptors")
+    expect(cliErrorCode(exhausted)).toEqual({ code: "RESOURCE_EXHAUSTED", exitCode: 5 })
+    expect(cliErrorCode(new ClankerRegistrationError(exhausted.message, { cause: exhausted }))).toEqual({ code: "RESOURCE_EXHAUSTED", exitCode: 5 })
+    expect(cliErrorCode(new ClankerApiError("NOT_FOUND", "gone", 3))).toEqual({ code: "NOT_FOUND", exitCode: 3 })
+    expect(cliErrorCode(new Error("bad flag"))).toEqual({ code: "INVALID_REQUEST", exitCode: 2 })
+    expect(cliErrorCode("text")).toEqual({ code: "INVALID_REQUEST", exitCode: 2 })
+  })
+})
 
 describe("cli argument parsing", () => {
   test("takes flag values without consuming later flags", () => {

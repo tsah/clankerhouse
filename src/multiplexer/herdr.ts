@@ -7,13 +7,15 @@ import { createConnection } from "node:net"
 import { join } from "node:path"
 import {
   claimScopeOf, locationScope,
-  MultiplexerUnavailableError,
+  MultiplexerResourceExhaustedError, MultiplexerUnavailableError,
   type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
   type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type MultiplexerWindow, type NativeLocation, type ObserveOptions, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
 
 export const HERDR_PROTOCOL = 20
 export const HERDR_PANE_ADDRESS_ENV = "HERDR_PANE_ID"
+/** Most per-pane requests one observation keeps in flight. */
+export const HERDR_PROCESS_INFO_CONCURRENCY = 8
 
 /** Claim key → herdr token name (`^[A-Za-z0-9_-]{1,32}$`, values ≤ 80 chars). */
 const tokenNames: Partial<Record<ClaimKey, string>> = {
@@ -46,6 +48,18 @@ export type HerdrRequest = (method: string, params?: Record<string, unknown>) =>
 
 interface HerdrError extends Error { code?: string }
 
+// herdr reports its own EMFILE as an ordinary request error; these are the messages it uses.
+const fdExhaustion = /os error 24|No file descriptors available|Too many open files|dup of fd \d+ failed|failed to openpty/i
+
+const herdrError = (method: string, detail: string, code?: string): Error => {
+  if (fdExhaustion.test(detail)) {
+    return new MultiplexerResourceExhaustedError(`herdr ${method}: the herdr server ran out of file descriptors (${detail}). Close finished workspaces, or raise the server's open-file limit, e.g. prlimit --pid <herdr server pid> --nofile=65536:524288`)
+  }
+  const error: HerdrError = new Error(`herdr ${method}: ${detail}`)
+  error.code = code
+  return error
+}
+
 export const herdrRequest = (socketPath: string, timeoutMs = 10_000): HerdrRequest => (method, params = {}) => new Promise((resolveRequest, reject) => {
   const socket = createConnection(socketPath)
   let buffer = ""
@@ -67,11 +81,7 @@ export const herdrRequest = (socketPath: string, timeoutMs = 10_000): HerdrReque
     if (newline < 0) return
     try {
       const payload = JSON.parse(buffer.slice(0, newline)) as { result?: Record<string, unknown>; error?: { code?: string; message?: string } }
-      if (payload.error) {
-        const error: HerdrError = new Error(`herdr ${method}: ${payload.error.message || payload.error.code || "error"}`)
-        error.code = payload.error.code
-        return finish(error)
-      }
+      if (payload.error) return finish(herdrError(method, payload.error.message || payload.error.code || "error", payload.error.code))
       finish(undefined, payload.result ?? {})
     } catch (error) { finish(error instanceof Error ? error : new Error(String(error))) }
   })
@@ -103,6 +113,8 @@ export class HerdrAdapter implements Multiplexer {
   private readonly activity = new Map<string, number>()
   private readonly revisions = new Map<string, number>()
   private readonly source: string
+  private readonly observing = new Map<"full" | "topology", Promise<MultiplexerSnapshot>>()
+  private readonly nextObservation = new Map<"full" | "topology", Promise<MultiplexerSnapshot>>()
 
   constructor(options: { socketPath?: string; request?: HerdrRequest; source?: string } = {}) {
     this.socketPath = options.socketPath ?? herdrSocketPath()
@@ -147,15 +159,45 @@ export class HerdrAdapter implements Multiplexer {
     return result.snapshot as HerdrSnapshot
   }
 
-  async observe(options: ObserveOptions = {}): Promise<MultiplexerSnapshot> {
+  /**
+   * Callers that arrive while an observation of the same kind runs share the next one, which starts
+   * after it finishes: each still sees topology from after its call, and a process never runs two at once.
+   */
+  observe(options: ObserveOptions = {}): Promise<MultiplexerSnapshot> {
+    const mode = options.processInfo === false ? "topology" : "full"
+    const observing = this.observing.get(mode)
+    if (!observing) return this.startObservation(mode)
+    let next = this.nextObservation.get(mode)
+    if (!next) {
+      next = observing.catch(() => undefined).then(() => {
+        this.nextObservation.delete(mode)
+        return this.startObservation(mode)
+      })
+      this.nextObservation.set(mode, next)
+    }
+    return next.then((snapshot) => structuredClone(snapshot))
+  }
+
+  private startObservation(mode: "full" | "topology") {
+    const observation = this.observeOnce(mode === "full").finally(() => { if (this.observing.get(mode) === observation) this.observing.delete(mode) })
+    this.observing.set(mode, observation)
+    return observation
+  }
+
+  private async observeOnce(withProcessInfo: boolean): Promise<MultiplexerSnapshot> {
     const [instanceId, snapshot] = await Promise.all([this.instanceId(), this.snapshot()])
     const processInfo = new Map<string, HerdrProcessInfo>()
     // Process facts cost one request per pane, so callers that only need topology and claims skip them.
-    if (options.processInfo !== false) await Promise.all(snapshot.panes.map(async (pane) => {
-      try {
-        const info = await this.request("pane.process_info", { pane_id: pane.pane_id })
-        processInfo.set(pane.pane_id, (info.process_info ?? {}) as HerdrProcessInfo)
-      } catch {}
+    // herdr takes one request per connection, and each open connection holds a server file descriptor.
+    let next = 0
+    if (withProcessInfo) await Promise.all(Array.from({ length: Math.min(HERDR_PROCESS_INFO_CONCURRENCY, snapshot.panes.length) }, async () => {
+      while (next < snapshot.panes.length) {
+        const pane = snapshot.panes[next++]!
+        try {
+          const info = await this.request("pane.process_info", { pane_id: pane.pane_id })
+          processInfo.set(pane.pane_id, (info.process_info ?? {}) as HerdrProcessInfo)
+        } catch {}
+      }
     }))
     const sessions: MultiplexerSession[] = []
     for (const workspace of snapshot.workspaces) {

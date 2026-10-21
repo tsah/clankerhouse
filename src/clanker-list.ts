@@ -8,6 +8,7 @@ import { homedir } from "node:os"
 import { basename, join } from "node:path"
 import { listClankerReportFacts, type ClankerInfo, type ClankerReportFacts } from "./clanker-api"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
+import type { ClankerState } from "./model"
 import type { MultiplexerSnapshot } from "./multiplexer/interface"
 import { clankerWorkshopPaths, watchedWorkshopIds } from "./watch"
 import { listWorkshopRecords, type WorkshopRecord } from "./workshop"
@@ -25,6 +26,18 @@ export interface ClankerListOptions {
   cwd?: string
   /** Only clankers in the children (or all descendants) of this Workshop, resolved as `clankers watch` does. */
   childrenOf?: { workshopId: string; descendants: boolean }
+  /** Only clankers in one of these lifecycle states. */
+  states?: readonly ClankerState[]
+}
+
+export const CLANKER_STATES: readonly ClankerState[] = ["working", "blocked", "done", "idle", "unknown"]
+
+/** `--state working,blocked`: a comma-separated list of lifecycle states. */
+export const parseStates = (value: string): ClankerState[] => {
+  const states = value.split(",").map((state) => state.trim()).filter(Boolean)
+  const unknown = states.find((state) => !CLANKER_STATES.includes(state as ClankerState))
+  if (unknown !== undefined || !states.length) throw new Error(`--state takes a comma-separated list of ${CLANKER_STATES.join(", ")}${unknown ? `; got ${unknown}` : ""}`)
+  return states as ClankerState[]
 }
 
 export interface ClankerListDependencies {
@@ -132,6 +145,7 @@ export async function listClankerRows(options: ClankerListOptions = {}, dependen
   const selected = (await listFacts(options.cwd)).flatMap((facts) => {
     const workshop = byPath.get(pathOf(facts.clanker))
     if (scope && (!workshop || !scope.has(workshop.workshopId))) return []
+    if (options.states && !options.states.includes(facts.clanker.state)) return []
     return [{ ...facts, workshop }]
   })
   const alive = await harnessesAlive(selected.map((row) => row.clanker)).catch(() => undefined)

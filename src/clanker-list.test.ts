@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { ClankerInfo, ClankerReportFacts } from "./clanker-api"
-import { LAST_TEXT_LIMIT, claudeTranscriptPath, harnessAliveIn, lastClaudeTranscriptText, listClankerRows, truncateText } from "./clanker-list"
+import { LAST_TEXT_LIMIT, claudeTranscriptPath, parseStates, harnessAliveIn, lastClaudeTranscriptText, listClankerRows, truncateText } from "./clanker-list"
 import type { MultiplexerSnapshot } from "./multiplexer/interface"
 import type { WorkshopRecord } from "./workshop"
 
@@ -57,6 +57,8 @@ describe("clankers list", () => {
     expect(descendants.map((row) => row.id)).toEqual(["a", "a1", "gone"])
     expect(descendants[1]).toMatchObject({ harness: "pi", parentWorkshopId: "w-a", alive: true, lastText: "pi reply" })
     expect((await listClankerRows({}, dependencies)).map((row) => row.id)).toEqual(["parent", "a", "a1", "gone", "x"])
+    facts[1]!.clanker.state = "blocked"
+    expect((await listClankerRows({ childrenOf: { workshopId: "w-p", descendants: true }, states: ["blocked", "done"] }, dependencies)).map((row) => row.id)).toEqual(["a"])
   })
 
   test("reads a Claude transcript's newest assistant text", () => {
@@ -89,6 +91,12 @@ describe("clankers list", () => {
     ] }] }] } as unknown as MultiplexerSnapshot
     const alive = harnessAliveIn(snapshot, [clanker("a", "/a"), clanker("b", "/b"), clanker("c", "/c", "pi"), clanker("d", "/d")])
     expect([...alive]).toEqual([["pane-a", true], ["pane-b", false], ["pane-c", true]])
+  })
+
+  test("parses a comma-separated state filter and rejects unknown states", () => {
+    expect(parseStates("working, blocked")).toEqual(["working", "blocked"])
+    expect(() => parseStates("working,stuck")).toThrow("got stuck")
+    expect(() => parseStates(",")).toThrow("--state takes")
   })
 
   test("truncates long text", () => {

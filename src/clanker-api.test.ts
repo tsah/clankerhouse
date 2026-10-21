@@ -125,6 +125,10 @@ describe("report generations", () => {
     const unknownFlag = await run(["list", "--childs-of"])
     expect(unknownFlag.exitCode).toBe(2)
     expect(unknownFlag.stderr).toContain("Unexpected argument: --childs-of")
+    const done = await run(["list", "--cwd", root, "--state", "done"])
+    expect(done.exitCode, done.stderr).toBe(0)
+    expect(JSON.parse(done.stdout).map((row: { id: string }) => row.id)).toEqual(["clanker-codex"])
+    expect((await run(["list", "--state", "stuck"])).exitCode).toBe(2)
     writeFileSync(join(reportDirectory, "w1_p8.json"), JSON.stringify({
       harness: "pi", clankerId: "clanker-pi", pane: "w1:p8", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "agent_settled",
       results: [

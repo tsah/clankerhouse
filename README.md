@@ -97,7 +97,7 @@ Those hooks write per-pane state into the same runtime cache directory, addresse
 Every clanker has a stable generated ID stored as a Multiplexer pane claim. The Multiplexer supplies discovery and metadata only; the API never types into, pastes into, or reads the screen of a pane for clanker communication. Herdr advertises a semantic agent-prompt capability: before submission Clankerhouse revalidates the exact pane's Clanker ID, and Herdr verifies that a recognized interactive agent still owns the pane and is not blocked.
 
 ```bash
-clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]]
+clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
 clankers status CLANKER_ID
 clankers capabilities CLANKER_ID
 clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
@@ -110,7 +110,7 @@ clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--c
 
 Successful responses are JSON. Errors are versioned JSON on stderr; unknown or ambiguous ids exit `3`, unsupported capabilities exit `4`, unavailable native endpoints exit `5`, and nondestructive wait timeouts exit `124`. A Multiplexer server that has run out of file descriptors is reported as `RESOURCE_EXHAUSTED` (exit `5`) with the remedy, and a `workshop spawn` that fails before its clanker exists removes the Workshop it just created.
 
-`list` rows add `parentWorkshopId`, `workshop` (`id`, `path`, `branch`, and whether the path `exists`; null outside a registered Workshop), `alive` (the harness is still a foreground process of its pane; null when the Multiplexer gives no process facts), and `lastText` (the clanker's newest assistant text, at most 500 characters: Claude's from its session transcript, Pi's from its newest result; null otherwise). `--children-of` and `--descendants` select clankers exactly as `watch` does; unknown flags are errors.
+`list` rows add `parentWorkshopId`, `workshop` (`id`, `path`, `branch`, and whether the path `exists`; null outside a registered Workshop), `alive` (the harness is still a foreground process of its pane; null when the Multiplexer gives no process facts), and `lastText` (the clanker's newest assistant text, at most 500 characters: Claude's from its session transcript, Pi's from its newest result; null otherwise). `--children-of` and `--descendants` select clankers exactly as `watch` does, and `--state working,blocked` keeps only clankers in those states (`working`, `blocked`, `done`, `idle`, `unknown`); unknown flags and states are errors.
 
 `status` includes `lastEventAt`, the time of the clanker's newest lifecycle hook event, `lastReport`, its newest Report, and `health`, read-only facts about the clanker's systemd scope on Linux: `memory` (`current` and `high` bytes, `high` null when unlimited), `dState` (pids in the scope in uninterruptible sleep), and `longestChild` (`pid`, `cmd`, and `elapsed` seconds of the harness's longest-running descendant). Each field is absent when it cannot be read, for example for a clanker Clankerhouse did not launch in a scope. Every clanker Clankerhouse launches, including a Recovery relaunch, gets `CLANKER_ID`, `CLANKERHOUSE_WORKSHOP_ID`, and `CLANKERHOUSE_PARENT_WORKSHOP_ID` (empty for a root Workshop) in its environment.
 

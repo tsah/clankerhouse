@@ -5,7 +5,7 @@ import { join, resolve } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, listClankers, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
 import { submitReport } from "./report"
-import { listClankerRows } from "./clanker-list"
+import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
 import { recordRecoveryIncident } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
@@ -193,10 +193,12 @@ const runListCommand = async (parsed: ParsedArgs) => {
   const cwd = parsed.take("--cwd")
   const childrenOf = takeOptionalValue(parsed, "--children-of")
   const descendants = parsed.has("--descendants")
-  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\nUsage: clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]]`)
+  const state = parsed.take("--state")
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\nUsage: clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]`)
   if (descendants && childrenOf === undefined) throw new Error("--descendants requires --children-of")
   const scope = childrenOf === undefined ? undefined : { workshopId: resolveWorkshopSelector(childrenOf).workshopId, descendants }
-  return console.log(JSON.stringify(await listClankerRows({ cwd, childrenOf: scope })))
+  const states = state === undefined ? undefined : parseStates(state)
+  return console.log(JSON.stringify(await listClankerRows({ cwd, childrenOf: scope, states })))
 }
 
 const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) => {
@@ -322,7 +324,7 @@ const usage = `Usage:
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
-  clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]]
+  clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
   clankers send CLANKER_ID [--delivery steer|follow-up] [--wait] [--text TEXT]

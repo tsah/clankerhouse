@@ -6,7 +6,7 @@
  * written and flushed before the cursor records it, so a crash between the two repeats
  * that event on resume and never loses one.
  */
-import { realpathSync, writeSync } from "node:fs"
+import { existsSync, realpathSync, writeSync } from "node:fs"
 import { resolve } from "node:path"
 import { ClankerApiError, deliverQueuedMessages, listClankers, type ClankerInfo } from "./clanker-api"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
@@ -79,6 +79,8 @@ export const emitJsonLine = (event: WatchEvent) => { writeSync(1, `${JSON.string
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return resolve(path) } }
 
 const gitTopLevel = (cwd: string) => {
+  // A pane whose directory was deleted has no checkout to ask.
+  if (!existsSync(cwd)) return resolve(cwd)
   const git = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd, stdout: "pipe", stderr: "ignore" })
   return realpathSafe(git.exitCode === 0 ? git.stdout.toString().trim() : cwd)
 }
@@ -124,6 +126,16 @@ export const watchedWorkshopIds = (workshops: readonly WorkshopRecord[], parentI
   return watched
 }
 
+/** The checkout each clanker runs in, keyed like `WorkshopRecord.canonicalPath`; git lookups are cached per cwd. */
+export const clankerWorkshopPaths = () => {
+  const topLevels = new Map<string, string>()
+  return (clanker: Pick<ClankerInfo, "cwd" | "worktreePath">) => {
+    if (clanker.worktreePath) return realpathSafe(clanker.worktreePath)
+    if (!topLevels.has(clanker.cwd)) topLevels.set(clanker.cwd, gitTopLevel(clanker.cwd))
+    return topLevels.get(clanker.cwd)!
+  }
+}
+
 export interface LiveWatchDependencies {
   multiplexer?: ManagedMultiplexer
   listClankers?: () => Promise<ClankerInfo[]>
@@ -140,12 +152,7 @@ export const liveWatchView = (scope: WatchScope, dependencies: LiveWatchDependen
   const openStore = dependencies.openStore ?? (() => OrchestrationStore.open())
   const deliver = dependencies.deliver ?? (() => deliverQueuedMessages(multiplexer))
   const now = dependencies.now ?? Date.now
-  const topLevels = new Map<string, string>()
-  const pathOf = (clanker: ClankerInfo) => {
-    if (clanker.worktreePath) return realpathSafe(clanker.worktreePath)
-    if (!topLevels.has(clanker.cwd)) topLevels.set(clanker.cwd, gitTopLevel(clanker.cwd))
-    return topLevels.get(clanker.cwd)!
-  }
+  const pathOf = clankerWorkshopPaths()
   return async (seq: number | undefined): Promise<WatchView> => {
     // Queued Claude messages drain here too, so an orchestrator needs no daemon to be answered.
     await deliver().catch(() => undefined)

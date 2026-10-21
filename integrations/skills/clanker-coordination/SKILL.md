@@ -20,6 +20,7 @@ and pane names are display metadata, not orchestration identity.
 
 ```bash
 clankers list --cwd "$PWD"                 # omit --cwd for global discovery
+clankers list --children-of . --descendants   # my workers: workshop, alive, lastText
 clankers status "$clanker_id"
 clankers capabilities "$clanker_id"
 clankers wait "$clanker_id" --after "$settled_generation" --timeout 600

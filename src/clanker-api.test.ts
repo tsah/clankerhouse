@@ -120,6 +120,11 @@ describe("report generations", () => {
     expect(listed).toHaveLength(2)
     expect(listed[0]).toMatchObject({ id: "clanker-codex", harness: "codex", state: "done", settledGeneration: 2, capabilities: { wait: "reports", send: false, result: false } })
     expect(listed[1]).toMatchObject({ id: "clanker-pi", generation: 0, settledGeneration: 0 })
+    // The fake Herdr reports each pane's harness as its foreground process; no Workshop is registered.
+    expect(listed[0]).toMatchObject({ alive: true, workshop: null, parentWorkshopId: null, lastText: null })
+    const unknownFlag = await run(["list", "--childs-of"])
+    expect(unknownFlag.exitCode).toBe(2)
+    expect(unknownFlag.stderr).toContain("Unexpected argument: --childs-of")
     writeFileSync(join(reportDirectory, "w1_p8.json"), JSON.stringify({
       harness: "pi", clankerId: "clanker-pi", pane: "w1:p8", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "agent_settled",
       results: [

@@ -173,6 +173,7 @@
       "core": true,
       "unit": [
         "src/clanker-api.test.ts",
+        "src/clanker-list.test.ts",
         "src/claude-background-tasks.test.ts",
         "src/hook-events.test.ts",
         "src/multiplexer/herdr.test.ts",

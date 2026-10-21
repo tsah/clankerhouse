@@ -75,6 +75,7 @@ interface ClankerReport {
   prompts?: unknown
   turns?: unknown
   transcriptPath?: unknown
+  harnessSessionId?: unknown
 }
 
 interface ClankerRecord extends ClankerInfo {
@@ -305,12 +306,40 @@ const canonicalFilterPath = (cwd: string) => {
   return realpathSafe(git.exitCode === 0 ? git.stdout.toString().trim() : cwd)
 }
 
-/** `strict` reports an unreachable Multiplexer instead of an empty herd. */
-export async function listClankers(options: { cwd?: string; multiplexer?: ManagedMultiplexer; strict?: boolean } = {}) {
+type ListOptions = { cwd?: string; multiplexer?: ManagedMultiplexer; strict?: boolean }
+
+const listRecords = async (options: ListOptions) => {
   const records = await discoverRecords(options.multiplexer, options.strict)
-  if (!options.cwd) return records.map(publicInfo)
+  if (!options.cwd) return records
   const cwd = canonicalFilterPath(options.cwd)
-  return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd).map(publicInfo)
+  return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd)
+}
+
+/** `strict` reports an unreachable Multiplexer instead of an empty herd. */
+export async function listClankers(options: ListOptions = {}) {
+  return (await listRecords(options)).map(publicInfo)
+}
+
+export interface ClankerReportFacts {
+  clanker: ClankerInfo
+  /** The harness's own session id from its hook reports, empty before the first one. */
+  harnessSessionId: string
+  /** Claude's session transcript as its hook last reported it, empty from hooks that predate it. */
+  transcriptPath: string
+  /** Reply of the newest settled result, for harnesses that report results. */
+  latestReply: string | null
+}
+
+/** Rows with the report facts `clankers list` derives its detail from. */
+export async function listClankerReportFacts(options: ListOptions = {}): Promise<ClankerReportFacts[]> {
+  return (await listRecords(options)).map((record) => {
+    const results = Array.isArray(record.report?.results) ? record.report.results.map(normalizeResult) : []
+    const latest = [...results, normalizeResult(record.report?.result)]
+      .filter((result): result is ClankerResult => !!result)
+      .sort((a, b) => b.generation - a.generation)[0]
+    const text = (value: unknown) => typeof value === "string" ? value : ""
+    return { clanker: publicInfo(record), harnessSessionId: text(record.report?.harnessSessionId), transcriptPath: text(record.report?.transcriptPath), latestReply: latest?.reply ?? null }
+  })
 }
 
 const findRecord = async (id: string, multiplexer?: ManagedMultiplexer) => {

@@ -24,7 +24,7 @@ import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue } from "./labels"
-import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, ensureWorkshopForLabels } from "./workshop-hooks"
+import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
 
 const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
@@ -305,7 +305,7 @@ const usage = `Usage:
   clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
-  clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]
+  clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH | --workshop ID]
   clankers workshop done [--cwd PATH]
   clankers workshop stop [--cwd PATH]
   clankers target open --json TARGET
@@ -604,7 +604,8 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       })
       return console.log(JSON.stringify(result))
     }
-    const cwd = parsed.take("--cwd") || process.cwd()
+    const cwdOption = parsed.take("--cwd")
+    const cwd = cwdOption || process.cwd()
     if (subcommand === "ensure") {
       let worktree
       try { worktree = await identity(cwd) }
@@ -619,15 +620,19 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     }
     if (subcommand === "identity") return console.log(JSON.stringify(await identity(cwd)))
     if (subcommand === "label") {
+      const workshopId = parsed.take("--workshop")
+      if (workshopId !== undefined && cwdOption !== undefined) throw new Error("--workshop and --cwd are mutually exclusive")
+      // By durable ID the Workshop's worktree may already be gone, as after a merge.
+      const target: LabelTarget = workshopId !== undefined ? { workshopId } : { path: resolve(cwd) }
       const action = parsed.shift()
-      if (action === "list") return console.log(JSON.stringify(workshopLabels(ensureWorkshopForLabels(cwd).workshopId)))
+      if (action === "list") return console.log(JSON.stringify(workshopLabels(workshopForLabelTarget(target).workshopId)))
       const argument = parsed.shift()
-      if ((action !== "set" && action !== "unset") || !argument) throw new Error("Usage: clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH]")
+      if ((action !== "set" && action !== "unset") || !argument) throw new Error("Usage: clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH | --workshop ID]")
       if (action === "unset" && !validLabelKey(argument)) throw new Error(`Invalid label key '${argument}'`)
       const { key, value } = action === "set" ? parseLabelAssignment(argument) : { key: argument, value: null }
-      const routed = await routeCompatibilityMutation({ type: "label", path: resolve(cwd), key, value })
+      const routed = await routeCompatibilityMutation({ type: "label", ...target, key, value })
       if (routed) return console.log(JSON.stringify(routed.result))
-      const applied = applyWorkshopLabel(cwd, key, value)
+      const applied = applyWorkshopLabel(target, key, value)
       if (applied.changed) dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)
       return console.log(JSON.stringify({ workshopId: applied.workshop.workshopId, labels: applied.labels, changed: applied.changed }))
     }

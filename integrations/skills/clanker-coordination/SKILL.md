@@ -90,8 +90,8 @@ clankers watch --children-of . --descendants \
 ```
 
 It prints one JSON event per line: `reported`, `settled`, `stale` (working
-with no hook event for `--stale-after` seconds, default 1800), `exited`, and
-`spawned`. `--once` exits 0 after the first batch; a timeout exits 124 and is
+with no hook event for `--stale-after` seconds, default 1800), `exited` (its
+pane closed or its harness process ended), and `spawned`. `--once` exits 0 after the first batch; a timeout exits 124 and is
 nondestructive. Use `--clanker ID...` to watch named clankers instead. To
 answer a question:
 
@@ -118,6 +118,9 @@ finished:
 ```bash
 clankers workshop label set status=done
 ```
+
+An orchestrator labels a child Workshop by its ID, which works even after the
+child's worktree was deleted: `clankers workshop label set stage=merged --workshop "$workshop_id"`.
 
 The Label itself changes nothing external, but a project's `labels-changed` hook
 may stop the Workshop when it is marked done, which closes this session. So make

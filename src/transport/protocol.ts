@@ -18,7 +18,8 @@ export type MutationIntent =
   | { type: "start"; clankerId: string; force?: boolean }
   | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
   | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
-  | { type: "label"; path: string; key: string; value: string | null }
+  /** The Workshop is named by its worktree path, or by workshopId when the worktree may already be gone. */
+  | { type: "label"; path?: string; workshopId?: string; key: string; value: string | null }
   | { type: "done"; path: string }
   /** Releases a Workshop's live resources: its clankers stop for good and its sessions close. */
   | { type: "workshop.stop"; path: string }
@@ -144,7 +145,7 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
     case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
-    case "label": return validText(intent.path) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value, intent.key)) ? { type: "label", path: intent.path, key: intent.key, value: intent.value } : undefined
+    case "label": return validText(intent.path) !== validText(intent.workshopId) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value, intent.key)) ? { type: "label", ...(validText(intent.path) ? { path: intent.path } : { workshopId: intent.workshopId as string }), key: intent.key, value: intent.value } : undefined
     case "done": return validText(intent.path) ? { type: "done", path: intent.path } : undefined
     case "workshop.stop": return validText(intent.path) ? { type: "workshop.stop", path: intent.path } : undefined
     case "repository.refresh": return { type: "repository.refresh" }

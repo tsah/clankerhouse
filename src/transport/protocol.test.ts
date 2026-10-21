@@ -25,6 +25,7 @@ describe("mutation protocol target set", () => {
     for (const intent of [
       { type: "label", path: "/repo/feature", key: "stage", value: "retro" },
       { type: "label", path: "/repo/feature", key: "stage", value: null },
+      { type: "label", workshopId: "ws-merged", key: "stage", value: "retro" },
       { type: "done", path: "/repo/feature" },
       { type: "workshop.stop", path: "/repo/feature" },
       { type: "label", path: "/repo/feature", key: "title", value: "Migrate the adapter" },
@@ -38,6 +39,7 @@ describe("mutation protocol target set", () => {
       { type: "label", path: "/repo/feature", key: "stage", value: "two words" },
       { type: "label", path: "/repo/feature", key: "stage" },
       { type: "label", key: "stage", value: "retro" },
+      { type: "label", path: "/repo/feature", workshopId: "ws-merged", key: "stage", value: "retro" },
       { type: "done" },
       { type: "workshop.stop" },
     ]) expect(mutation(intent)).toMatchObject({ ok: false, error: { code: "bad_request" } })

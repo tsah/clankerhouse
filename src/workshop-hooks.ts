@@ -1,9 +1,9 @@
-import { accessSync, closeSync, constants, mkdirSync, openSync, statSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 import { binPath } from "./installation"
 import { ownedScopeCommand } from "./recovery/process-owner"
 import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, projectName, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
-import { changeWorkshopLabel, identifyWorkshopSync, registerWorkshop, workshopForPath, workshopLabels, workshopStatePath, type WorkshopRecord } from "./workshop"
+import { changeWorkshopLabel, identifyWorkshopSync, registerWorkshop, workshopForId, workshopForPath, workshopLabels, workshopStatePath, type WorkshopRecord } from "./workshop"
 
 const doneHookTimeoutMs = 30_000
 
@@ -45,6 +45,23 @@ export const ensureWorkshopForLabels = (path: string, dbPath = workshopStatePath
   return workshopForPath(identity.path, dbPath) ?? registerWorkshop(identity, { dbPath })
 }
 
+/** A Workshop to label: by path, registering it on first use, or by durable ID, which outlives its worktree. */
+export type LabelTarget = { path: string; workshopId?: undefined } | { workshopId: string; path?: undefined }
+
+export const workshopForLabelTarget = (target: LabelTarget, dbPath = workshopStatePath): WorkshopRecord => {
+  if (target.path !== undefined) return ensureWorkshopForLabels(target.path, dbPath)
+  const workshop = workshopForId(target.workshopId, dbPath)
+  if (!workshop) throw new Error(`Unknown workshop: ${target.workshopId}`)
+  return workshop
+}
+
+/** Hooks run in the worktree; once it is deleted, in its repository, so a merged Workshop still reaches them. */
+const hookDirectory = (workshop: WorkshopRecord) => {
+  if (existsSync(workshop.canonicalPath)) return workshop.canonicalPath
+  const repository = dirname(workshop.commonDir)
+  return existsSync(repository) ? repository : workshop.commonDir
+}
+
 const contextFor = (workshop: WorkshopRecord, event: WorkshopHookEvent, labels: WorkshopLabels, previousLabels?: WorkshopLabels): HookContext => ({
   event, workshopId: workshop.workshopId, path: workshop.canonicalPath, branch: workshop.branch, project: projectName(workshop.commonDir), labels, previousLabels,
 })
@@ -54,7 +71,7 @@ export const dispatchLabelsChangedHook = (workshop: WorkshopRecord, previousLabe
   const hook = executableHook(workshop.canonicalPath, workshop.commonDir, "labels-changed")
   if (!hook) return false
   try {
-    Bun.spawn([hook], { cwd: workshop.canonicalPath, env: processEnvironment(contextFor(workshop, "labels-changed", labels, previousLabels)), stdin: "ignore", stdout: "ignore", stderr: "ignore" }).unref()
+    Bun.spawn([hook], { cwd: hookDirectory(workshop), env: processEnvironment(contextFor(workshop, "labels-changed", labels, previousLabels)), stdin: "ignore", stdout: "ignore", stderr: "ignore" }).unref()
     return true
   } catch { return false }
 }
@@ -83,8 +100,8 @@ export const dispatchPostCreateHook = (workshop: WorkshopRecord, dbPath = worksh
   } catch { return false }
 }
 
-export const applyWorkshopLabel = (path: string, key: string, value: string | null, dbPath = workshopStatePath) => {
-  const workshop = ensureWorkshopForLabels(path, dbPath)
+export const applyWorkshopLabel = (target: string | LabelTarget, key: string, value: string | null, dbPath = workshopStatePath) => {
+  const workshop = workshopForLabelTarget(typeof target === "string" ? { path: target } : target, dbPath)
   const change = changeWorkshopLabel(workshop.workshopId, key, value, dbPath)
   return { workshop, ...change }
 }

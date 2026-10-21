@@ -95,6 +95,8 @@ export interface SendReceipt {
 const runtimeRoot = () => runtimeDirFor()
 const safePane = (pane: string) => pane.replace(/[^A-Za-z0-9_.%-]/g, "_")
 const reportPath = (pane: string) => `${runtimeRoot()}/clanker-state/${safePane(pane)}.json`
+/** Written by the harness lifecycle wrapper when the harness ends, naming the clanker that ran there. */
+const exitMarkPath = (pane: string) => `${runtimeRoot()}/clanker-state/${safePane(pane)}.exited`
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return resolve(path) } }
 
 export const generatedClankerId = () => `clanker-${randomUUID()}`
@@ -110,6 +112,12 @@ const normalizedState = (value: unknown): ClankerState =>
 const terminalReport = (report: ClankerReport, state: ClankerState) => {
   if (number(report.settledGeneration) > 0) return true
   return report.generation === undefined && (state === "done" || report.hookEvent === "agent_settled")
+}
+
+/** The pane may outlive its harness, held open by a leftover child; the clanker is gone all the same. */
+const harnessExited = (pane: string, id: string) => {
+  try { return readFileSync(exitMarkPath(pane), "utf8").trim() === id }
+  catch { return false }
 }
 
 const readReportSync = (pane: string): ClankerReport | undefined => {
@@ -277,7 +285,7 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
       report,
     }
   }))
-  return { records, source }
+  return { records: records.filter((record) => !harnessExited(record.pane, record.id)), source }
 }
 
 const discoverRecords = async (multiplexer?: ManagedMultiplexer, strict = false) =>

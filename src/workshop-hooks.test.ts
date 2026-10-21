@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { workshopLabels, workshopsWithLabel } from "./workshop"
@@ -49,6 +49,32 @@ describe("workshop repository hooks", () => {
     expect(workshopLabels(applied.workshop.workshopId, dbPath)).toEqual({ stage: "merged" })
     expect(dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)).toBe(true)
     expect(await waitForFile(output)).toBe(`${applied.workshop.canonicalPath}|{}|merged|main`)
+  })
+
+  test("a Workshop is labelled by its ID after its worktree is gone, and the project hook runs in the repository", async () => {
+    const { root, repo, worktree, dbPath } = fixture()
+    const workshop = ensureWorkshopForLabels(worktree, dbPath)
+    Bun.spawnSync(["git", "-C", repo, "worktree", "remove", "--force", worktree])
+    expect(() => applyWorkshopLabel(worktree, "stage", "merged", dbPath)).toThrow()
+    expect(() => applyWorkshopLabel({ workshopId: "ws-unknown" }, "stage", "merged", dbPath)).toThrow("Unknown workshop: ws-unknown")
+
+    const previousConfig = Bun.env.XDG_CONFIG_HOME
+    Bun.env.XDG_CONFIG_HOME = join(root, "config")
+    try {
+      const output = join(root, "hook.out")
+      mkdirSync(join(root, "config", "clankerhouse", "hooks", "repo"), { recursive: true })
+      writeFileSync(userHookPath("repo", "labels-changed"), `#!/bin/sh\nprintf '%s|%s|%s' "$PWD" "$CLANKERHOUSE_WORKSHOP_ID" "$CLANKERHOUSE_LABEL_STAGE" > '${output}'\n`)
+      chmodSync(userHookPath("repo", "labels-changed"), 0o755)
+
+      const applied = applyWorkshopLabel({ workshopId: workshop.workshopId }, "stage", "merged", dbPath)
+      expect(applied).toMatchObject({ changed: true, labels: { stage: "merged" } })
+      expect(workshopLabels(workshop.workshopId, dbPath)).toEqual({ stage: "merged" })
+      expect(dispatchLabelsChangedHook(applied.workshop, applied.previous, applied.labels)).toBe(true)
+      expect(await waitForFile(output)).toBe(`${realpathSync(repo)}|${workshop.workshopId}|merged`)
+    } finally {
+      if (previousConfig === undefined) delete Bun.env.XDG_CONFIG_HOME
+      else Bun.env.XDG_CONFIG_HOME = previousConfig
+    }
   })
 
   test("a post-create hook prepares the new workshop in the background and logs its exit status", async () => {

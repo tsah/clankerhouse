@@ -255,6 +255,28 @@ describe("Herdr semantic prompt transport", () => {
     await expect(resultForClanker(clankerId, 3, multiplexer)).rejects.toThrow(/no result for generation 3/)
   })
 
+  test("drops a clanker whose harness exited while its pane lingers, and a relaunch in the pane restores it", async () => {
+    const reports = isolate()
+    const clankerId = "clanker-claude-exited"
+    const paneId = "w1:p31"
+    const multiplexer = fakeHerdr(clankerId, paneId, [])
+    const mark = join(reports, "w1_p31.exited")
+    const lifecycle = (...command: string[]) => Bun.spawnSync([join(import.meta.dir, "../bin/clankerhouse-harness-lifecycle"), "--", ...command], {
+      env: { ...process.env, HERDR_PANE_ID: paneId, CLANKER_ID: clankerId, CLANKER_RECOVERY_TRACKED: "" }, stdout: "pipe", stderr: "pipe",
+    }).exitCode
+
+    expect((await listClankers({ multiplexer })).map((clanker) => clanker.id)).toEqual([clankerId])
+    expect(lifecycle("sh", "-c", "exit 3")).toBe(3)
+    expect(readFileSync(mark, "utf8")).toBe(`${clankerId}\n`)
+    expect(await listClankers({ multiplexer })).toEqual([])
+    await expect(clankerStatus(clankerId, multiplexer)).rejects.toMatchObject({ code: "NOT_FOUND" })
+
+    // The relaunched harness runs without the mark; only its exit writes it again.
+    expect(lifecycle("sh", "-c", 'test ! -e "$1"', "_", mark)).toBe(0)
+    writeFileSync(mark, "clanker-someone-else\n")
+    expect((await listClankers({ multiplexer })).map((clanker) => clanker.id)).toEqual([clankerId])
+  })
+
   test("queues for a busy or focused Claude, delivers in order after it settles, and acknowledges by hook hash", async () => {
     const reports = isolate()
     const prompts: Array<{ pane: string; text: string }> = []

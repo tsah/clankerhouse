@@ -29,7 +29,7 @@ import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
-import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hooks"
+import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
@@ -1179,7 +1179,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
 
   if (intent.type === "label") {
     if (stage === "identity.validated") {
-      const workshop = ensureWorkshopForLabels(expandHome(intent.path))
+      const workshop = workshopForLabelTarget(intent.path !== undefined ? { path: expandHome(intent.path) } : { workshopId: intent.workshopId! })
       return { checkpoint: { ...checkpoint, workshopId: workshop.workshopId } }
     }
     const workshop = workshopForId(String(checkpoint.workshopId))

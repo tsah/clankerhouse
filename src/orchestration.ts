@@ -368,7 +368,8 @@ export type WatchEvent =
   | { type: "exited"; at: number; clankerId: string; workshopId: string }
   | { type: "spawned"; at: number; clankerId: string; workshopId: string; parentWorkshopId: string | null }
 
-export interface WatchCursorEntry { workshopId: string; settled: number; stale: number }
+/** `staleAt` is the `lastEventAt` the last `stale` fired for; cursors written before it existed omit it. */
+export interface WatchCursorEntry { workshopId: string; settled: number; stale: number; staleAt?: number }
 export interface WatchCursor { version: 1; seq: number; clankers: Record<string, WatchCursorEntry> }
 
 export interface WatchedClanker {
@@ -419,7 +420,9 @@ export const computeWatchEvents = (cursor: WatchCursor, view: WatchView, options
     if (clanker.settledGeneration > seenSettled) {
       events.push({ type: "settled", at: view.now, clankerId: clanker.clankerId, workshopId: clanker.workshopId, generation: clanker.settledGeneration, state: clanker.state })
     }
-    if (clanker.state === "working" && clanker.lastEventAt > 0 && view.now - clanker.lastEventAt > staleAfterMs && clanker.generation !== entry.stale) {
+    // Once per silent stretch: any hook event after the last stale re-arms it, even within one generation.
+    const staleSeen = entry.staleAt === undefined ? clanker.generation === entry.stale : clanker.lastEventAt <= entry.staleAt
+    if (clanker.state === "working" && clanker.lastEventAt > 0 && view.now - clanker.lastEventAt > staleAfterMs && !staleSeen) {
       events.push({ type: "stale", at: view.now, clankerId: clanker.clankerId, workshopId: clanker.workshopId, generation: clanker.generation, lastEventAt: clanker.lastEventAt })
     }
   }
@@ -437,7 +440,7 @@ export const advanceWatchCursor = (cursor: WatchCursor, event: WatchEvent): Watc
     case "reported": return { ...cursor, seq: Math.max(cursor.seq, event.seq) }
     case "spawned": clankers[event.clankerId] = { workshopId: event.workshopId, settled: 0, stale: 0 }; break
     case "settled": clankers[event.clankerId] = { ...(entry ?? { workshopId: event.workshopId, stale: 0 }), settled: event.generation }; break
-    case "stale": clankers[event.clankerId] = { ...(entry ?? { workshopId: event.workshopId, settled: 0 }), stale: event.generation }; break
+    case "stale": clankers[event.clankerId] = { ...(entry ?? { workshopId: event.workshopId, settled: 0 }), stale: event.generation, staleAt: event.lastEventAt }; break
     case "exited": delete clankers[event.clankerId]; break
   }
   return { ...cursor, clankers }

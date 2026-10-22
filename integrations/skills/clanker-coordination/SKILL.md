@@ -92,7 +92,8 @@ clankers watch --children-of . --descendants \
 ```
 
 It prints one JSON event per line: `reported`, `settled`, `stale` (working
-with no hook event for `--stale-after` seconds, default 1800), `exited` (its
+with no hook event for `--stale-after` seconds, default 1800; once per
+silent stretch, re-armed by any later hook event), `exited` (its
 pane closed or its harness process ended), and `spawned`. `--once` exits 0 after the first batch; a timeout exits 124 and is
 nondestructive. Use `--clanker ID...` to watch named clankers instead. To
 answer a question:

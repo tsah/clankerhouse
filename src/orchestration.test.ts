@@ -198,6 +198,34 @@ describe("watch events", () => {
     expect(step.cursor.clankers["clanker-a"]).toBeUndefined()
   })
 
+  test("emits stale once per silent stretch and re-arms after activity within one generation", () => {
+    const hour = 3_600_000
+    let step = apply(initialWatchCursor({ clankers: [clanker()], latestSeq: 0 }), view({ clankers: [clanker()] }))
+    step = apply(step.cursor, view({ now: 1_000 + hour, clankers: [clanker()] }), { staleAfterMs: 10 })
+    expect(step.events).toEqual([{ type: "stale", at: 1_000 + hour, clankerId: "clanker-a", workshopId: "w-a", generation: 1, lastEventAt: 1_000 }])
+    expect(step.cursor.clankers["clanker-a"]).toMatchObject({ stale: 1, staleAt: 1_000 })
+    // Still silent: a long quiet wait does not repeat the event.
+    for (const now of [2 * hour, 3 * hour]) {
+      step = apply(step.cursor, view({ now, clankers: [clanker()] }), { staleAfterMs: 10 })
+      expect(step.events).toEqual([])
+    }
+    // Activity later in the same generation, then fresh silence: stale fires again.
+    const active = clanker({ lastEventAt: 3 * hour })
+    step = apply(step.cursor, view({ now: 3 * hour + 5, clankers: [active] }), { staleAfterMs: 10 })
+    expect(step.events).toEqual([])
+    step = apply(step.cursor, view({ now: 4 * hour, clankers: [active] }), { staleAfterMs: 10 })
+    expect(step.events).toEqual([{ type: "stale", at: 4 * hour, clankerId: "clanker-a", workshopId: "w-a", generation: 1, lastEventAt: 3 * hour }])
+    expect(apply(step.cursor, view({ now: 5 * hour, clankers: [active] }), { staleAfterMs: 10 }).events).toEqual([])
+  })
+
+  test("loads a cursor written before staleAt without repeating its stale", () => {
+    const legacy: WatchCursor = { version: 1, seq: 0, clankers: { "clanker-a": { workshopId: "w-a", settled: 0, stale: 1 } } }
+    expect(apply(legacy, view({ now: 9_000, clankers: [clanker()] }), { staleAfterMs: 10 }).events).toEqual([])
+    const resumed = apply(legacy, view({ now: 9_000, clankers: [clanker({ lastEventAt: 5_000 })] }), { staleAfterMs: 10 })
+    expect(resumed.events).toEqual([])
+    expect(apply(legacy, view({ now: 9_000, clankers: [clanker({ generation: 2, lastEventAt: 5_000 })] }), { staleAfterMs: 10 }).events.map((event) => event.type)).toEqual(["stale"])
+  })
+
   test("announces the first settle of a relaunched clanker whose generations restarted", () => {
     let cursor: WatchCursor = { version: 1, seq: 0, clankers: { "clanker-a": { workshopId: "w-a", settled: 5, stale: 0 } } }
     let step = apply(cursor, view({ clankers: [clanker({ generation: 1, settledGeneration: 0 })] }))

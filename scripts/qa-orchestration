@@ -158,8 +158,8 @@ hook "$child_pane" clanker-qa-child working '{"hook_event_name":"UserPromptSubmi
 sleep 1.2
 watch_once --timeout 5 --stale-after 1 | json_assert "len(data) == 1 and data[0]['type'] == 'stale' and data[0]['generation'] == 3" lines
 set +e; output=$(watch_once --timeout 1 --stale-after 1 2>/dev/null); code=$?; set -e
-[[ $code -eq 124 && -z "$output" ]] || fail "stale was emitted twice for one working generation: $output"
-echo "PASS: A3 stale emitted once per working generation"
+[[ $code -eq 124 && -z "$output" ]] || fail "stale was emitted twice for one silent stretch: $output"
+echo "PASS: A3 stale emitted once per silent stretch"
 
 # A3 spawned: a clanker in a new grandchild Workshop appears under --descendants.
 shallow() { (cd "$parent" && api watch --children-of "$parent_id" --cursor-file "$root/shallow.cursor" --once --timeout 1 2>/dev/null); }

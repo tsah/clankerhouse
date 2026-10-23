@@ -42,8 +42,6 @@ const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   lineage: emptyLineage(),
   incidents: [],
   gitMetaByPath: new Map(),
-  detectedHarnessByPane: new Map(),
-  codexPanes: new Set(),
   managedResources: new Map(),
   observedAt,
   instanceId,
@@ -186,21 +184,30 @@ describe("session resource projection", () => {
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 
-  test("reports process resemblance without creating Clanker identity", () => {
+  test("reports a Herdr-detected harness without creating Clanker identity", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow({ title: "✓ complete" })],
-      detectedHarnessByPane: new Map([["%1", "codex"]]),
+      windows: [muxWindow({ title: "✓ complete", agentStatus: { agent: "codex", status: "idle" } })],
     }))
     expect(result.sessions[0]?.markers).toEqual(["codex"])
     expect(result.sessions[0]?.details[0]).toMatchObject({
       kind: "observation",
       harness: "codex",
-      status: "process observed",
-      state: "unknown",
-      observation: { source: "process", confidence: "observed", state: "present", observedAt },
+      status: "runtime idle",
+      state: "idle",
+      observation: { source: "runtime", confidence: "observed", state: "idle", observedAt },
     })
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
+  })
+
+  test("does not observe a harness from a pane name or title without Herdr detection", () => {
+    const result = projectResources(inputs({
+      sessions: [muxSession()],
+      windows: [muxWindow({ name: "codex", title: "codex" })],
+    }))
+    expect(result.sessions[0]?.markers).toEqual(["codex"])
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "window", state: "unknown" })
+    expect(result.sessions[0]?.details[0]?.harness).toBeUndefined()
   })
 
   test("projects Herdr agent status as observed working state without creating Clanker identity", () => {
@@ -240,8 +247,7 @@ describe("session resource projection", () => {
   test("projects matching identity-free OpenCode lifecycle as observed working state", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow({ command: "opencode2", harnessSessionId: "session-root" })],
-      detectedHarnessByPane: new Map([["%1", "opencode"]]),
+      windows: [muxWindow({ command: "opencode2", harnessSessionId: "session-root", agentStatus: { agent: "opencode", status: "idle" } })],
       clankerReports: [{ pane: "%1", harness: "opencode", harnessSessionId: "session-root", state: "working", updatedAt: 3_690_000 }],
     }))
 
@@ -259,12 +265,11 @@ describe("session resource projection", () => {
   test("rejects a service-global OpenCode report without exact selected-session evidence", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow({ command: "opencode2" })],
-      detectedHarnessByPane: new Map([["%1", "opencode"]]),
+      windows: [muxWindow({ command: "opencode2", agentStatus: { agent: "opencode", status: "idle" } })],
       clankerReports: [{ pane: "%1", harness: "opencode", harnessSessionId: "session-from-another-pane", state: "blocked", updatedAt: 3_690_000 }],
     }))
 
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "observation", state: "unknown", observation: { source: "process" } })
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "observation", state: "idle", observation: { source: "runtime" } })
     expect(result.sessions[0]?.details[1]).toMatchObject({ state: "unknown", observation: { confidence: "rejected", reason: "incomplete-observation" } })
   })
 

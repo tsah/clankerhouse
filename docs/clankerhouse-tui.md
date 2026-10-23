@@ -92,7 +92,7 @@ private Unix socket. The native client reads JSON only once as a startup/crash
 fallback and uses the socket for live synchronization. Typed rows carry concrete
 multiplexer/worktree actions; hierarchy is never inferred from rendered strings.
 Clanker communication uses the native `clankers` API and never raw pane input
-or pane capture. Linux foreground-process discovery reads process metadata only and
+or pane capture. Harness detection comes from Herdr's per-pane agent detection and
 cannot assign clanker identity or authorize destructive actions.
 
 A separate durable recovery control plane stores desired Pi, Claude, and

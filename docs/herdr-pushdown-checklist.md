@@ -48,8 +48,9 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   `resume_argv: ["clankerhouse-resume", "<clankerId>"]`; the gate command enforces
   Clankerhouse admission policy and then runs the harness. Re-enable
   `resume_agents_on_restore`. Caveat: Herdr resumes only after a client attaches.
-- [ ] **P6** `/proc` harness discovery (`src/server/process-discovery.ts`) → pane
-  `agent` field and `pane.agent_detected`.
+- [x] **P6** `/proc` harness discovery (`src/server/process-discovery.ts`) → pane
+  `agent` field and `pane.agent_detected`. Projection reads `agentStatus.agent` from the
+  snapshot; pane names and titles only feed session markers, never observations.
 - [x] **P7** OpenCode service polling (`src/server/opencode.ts`) → Herdr's OpenCode
   integration (pane-local lifecycle, V2 support). State is Herdr runtime status; the
   Clankerhouse plugin keeps identity/Recovery binding and attested owned-session reports.

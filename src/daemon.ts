@@ -33,11 +33,9 @@ import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensure
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
-import { createProcessDiscoveryProvider } from "./server/process-discovery"
-import type { ForegroundAgentHarness } from "./server/process-discovery"
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
-import { isCodexWindow, projectResources } from "./server/project"
+import { projectResources } from "./server/project"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
 import { acquireProducerLease, startSnapshotServer } from "./transport"
@@ -377,46 +375,24 @@ const collectSessions = Effect.all([
 ], { concurrency: "unbounded" }).pipe(
   Effect.flatMap(([multiplexer, directories, clankerReports, seen, enrichment]) => {
     const { lineage, incidents, managedResources } = enrichment
-    const processDiscovery = createProcessDiscoveryProvider()
-    return Effect.all([
-      Effect.succeed(multiplexer),
-      Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }),
-      Effect.forEach(
-        multiplexer.windows,
-        (window): Effect.Effect<readonly [string, ForegroundAgentHarness | undefined], Error> => {
-          const discovery = processDiscovery.discover(Number(window.pid))
-          if (discovery) return Effect.succeed([window.pane, discovery.harness] as const)
-          if (isCodexWindow(window)) return Effect.succeed([window.pane, "codex"] as const)
-          return Effect.succeed([window.pane, undefined] as const)
-        },
-        { concurrency: 8 },
-      ),
-    ], { concurrency: "unbounded" }).pipe(Effect.flatMap(([resources, gitMetas, harnessDetections]) => {
-      const detectedHarnessByPane = new Map<string, ForegroundAgentHarness>()
-      for (const [pane, harness] of harnessDetections) {
-        if (harness) detectedHarnessByPane.set(pane, harness)
-      }
-      return Effect.sync(() => {
-        const projection = projectResources({
-          sessions: resources.sessions,
-          windows: resources.windows,
-          directories,
-          clankerReports,
-          seen,
-          lineage,
-          incidents,
-          gitMetaByPath: new Map(gitMetas),
-          detectedHarnessByPane,
-          codexPanes: new Set([...detectedHarnessByPane].flatMap(([pane, harness]) => harness === "codex" ? [pane] : [])),
-          managedResources,
-          observedAt: Date.now(),
-          instanceId: resources.instanceId,
-          multiplexerKind: resources.kind,
-          home: Bun.env.HOME,
-        })
-        for (const effect of projection.effects) applyProjectEffect(effect)
-        return projection.sessions
+    return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
+      const projection = projectResources({
+        sessions: multiplexer.sessions,
+        windows: multiplexer.windows,
+        directories,
+        clankerReports,
+        seen,
+        lineage,
+        incidents,
+        gitMetaByPath: new Map(gitMetas),
+        managedResources,
+        observedAt: Date.now(),
+        instanceId: multiplexer.instanceId,
+        multiplexerKind: multiplexer.kind,
+        home: Bun.env.HOME,
       })
+      for (const effect of projection.effects) applyProjectEffect(effect)
+      return projection.sessions
     }))
   }),
 )

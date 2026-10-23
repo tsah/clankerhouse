@@ -18,8 +18,7 @@
         "src/activity.test.ts",
         "src/directory-discovery.test.ts",
         "src/incidents.test.ts",
-        "src/repository-cache.test.ts",
-        "src/server/process-discovery.test.ts"
+        "src/repository-cache.test.ts"
       ],
       "standalone": [
         "scripts/qa",
@@ -32,7 +31,7 @@
         "Confirm status-bearing rows (including blue idle checkmarks) rank ahead of neutral grey-orb rows, with last-seen ordering within each group, contiguous lineage, and the current session pinned nearest the prompt",
         "Give a directory or shell newer activity than an idle Clanker; confirm its grey orb remains farther from the prompt, including among siblings and when a status-bearing lineage is collapsed",
         "Confirm OpenCode panes reflect Herdr's runtime agent status, including blocked on forms and permissions when Herdr's OpenCode integration is installed",
-        "Confirm detected processes and rejected lifecycle reports remain visible without becoming managed Clankers"
+        "Confirm Herdr-detected harnesses and rejected lifecycle reports remain visible without becoming managed Clankers"
       ]
     },
     {

@@ -26,8 +26,6 @@ export interface ProjectInputs {
   lineage: LineageSnapshot
   incidents: readonly ResourceIncident[]
   gitMetaByPath: ReadonlyMap<string, GitMeta>
-  detectedHarnessByPane: ReadonlyMap<string, "pi" | "claude" | "codex" | "opencode">
-  codexPanes: ReadonlySet<string>
   managedResources: ReadonlyMap<string, ResourceRecord>
   observedAt: number
   instanceId: string
@@ -69,7 +67,7 @@ const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | nul
 }
 
 export const projectResources = (inputs: ProjectInputs): ProjectResult => {
-  const { sessions, windows, directories, clankerReports, lineage, incidents, gitMetaByPath, detectedHarnessByPane, codexPanes, observedAt, instanceId, home } = inputs
+  const { sessions, windows, directories, clankerReports, lineage, incidents, gitMetaByPath, observedAt, instanceId, home } = inputs
   const multiplexerKind = inputs.multiplexerKind ?? "herdr"
   const seen = new Map(inputs.seen)
   const effects: ProjectEffect[] = []
@@ -122,20 +120,19 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const location = { kind: multiplexerKind, instanceId: instanceId, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: window.pane }
       const registeredIdentity = ownedClankerIdentity(window)
       const registeredHarness = registeredIdentity?.harness
-      const runtimeHarness = window.agentStatus?.agent && supportedHarnesses.has(window.agentStatus.agent) ? window.agentStatus.agent : undefined
-      const detectedHarness = detectedHarnessByPane.get(window.pane)
-      const observedHarness = runtimeHarness ?? detectedHarness
+      // The Multiplexer's agent detection is the harness process Observation for this pane.
+      const observedHarness = window.agentStatus?.agent && supportedHarnesses.has(window.agentStatus.agent) ? window.agentStatus.agent : undefined
       const matchingReport = registeredHarness ? observationReconciliation.matchedByPane.get(window.pane) : undefined
       const observedReportCandidate = !registeredHarness && observedHarness ? observationReconciliation.observedByPane.get(window.pane) : undefined
       const observedReport = observedReportCandidate && observedReportCandidate.harness === observedHarness
         && (observedHarness !== "opencode" || window.harnessSessionId === observedReportCandidate.harnessSessionId)
         ? observedReportCandidate
         : undefined
-      // Runtime and process evidence remain visible without manufacturing Clanker identity.
+      // Runtime evidence remains visible without manufacturing Clanker identity.
       const projectedKind = registeredHarness ? "clanker" : observedHarness ? "observation" : "window"
       const projectedHarness = registeredHarness ?? observedHarness
       if (matchingReport?.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: matchingReport.updatedAt, minIntervalMs: 0 })
-      const runtimeState = runtimeHarness ? window.agentStatus?.status : undefined
+      const runtimeState = observedHarness ? window.agentStatus?.status : undefined
       const sourceState = matchingReport?.state ?? observedReport?.state ?? runtimeState ?? "unknown"
       const updatedAt = matchingReport?.updatedAt ?? observedReport?.updatedAt ?? window.activity * 1000
       const completionKey = projectedKind === "window" ? windowCompletionKey(instanceId, window.id) : paneCompletionKey(instanceId, window.pane)
@@ -150,10 +147,8 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
           ? { source: "lifecycle", confidence: "observed", state: sourceState, observedAt: observedReport.updatedAt }
           : runtimeState !== undefined
             ? { source: "runtime", confidence: "observed", state: sourceState, observedAt }
-            : detectedHarness
-              ? { source: "process", confidence: "observed", state: "present", observedAt }
-              : { source: "runtime", confidence: "observed", state: "present", observedAt }
-      const status = projectedKind === "window" ? window.command : observedReport ? `reported ${sourceState}` : runtimeState !== undefined ? `runtime ${sourceState}` : projectedKind === "observation" ? "process observed" : ""
+            : { source: "runtime", confidence: "observed", state: "present", observedAt }
+      const status = projectedKind === "window" ? window.command : observedReport ? `reported ${sourceState}` : runtimeState !== undefined ? `runtime ${sourceState}` : ""
       details.push({ kind: projectedKind, harness: projectedHarness, status, detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, completionKey, updatedAt, terminalId: managedTerminal?.id, clankerId: registeredHarness ? window.clankerId : undefined, observation })
       for (const unmatched of observationReconciliation.unmatchedByPane.get(window.pane) ?? []) {
         const report = unmatched.observation
@@ -177,10 +172,10 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: sessionPath, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: sessionManaged ? session.resourceId : undefined, location: sessionLocation }, updatedAt: 0 })
 
     const markers = [
-      sessionWindows.some((window) => window.agentStatus?.agent === "opencode" || detectedHarnessByPane.get(window.pane) === "opencode") ? "oc" : "",
-      sessionWindows.some((window) => isPiWindow(window) || window.agentStatus?.agent === "pi" || detectedHarnessByPane.get(window.pane) === "pi") ? "pi" : "",
-      sessionWindows.some((window) => isClaudeWindow(window) || window.agentStatus?.agent === "claude" || detectedHarnessByPane.get(window.pane) === "claude") ? "C" : "",
-      sessionWindows.some((window) => codexPanes.has(window.pane) || window.agentStatus?.agent === "codex" || detectedHarnessByPane.get(window.pane) === "codex") ? "codex" : "",
+      sessionWindows.some((window) => window.agentStatus?.agent === "opencode") ? "oc" : "",
+      sessionWindows.some((window) => isPiWindow(window) || window.agentStatus?.agent === "pi") ? "pi" : "",
+      sessionWindows.some((window) => isClaudeWindow(window) || window.agentStatus?.agent === "claude") ? "C" : "",
+      sessionWindows.some((window) => isCodexWindow(window) || window.agentStatus?.agent === "codex") ? "codex" : "",
     ].filter(Boolean)
     const parentWorkshopId = preferredWorkshopId(workshop ? workshop.parentWorkshopId : session.parentWorkshopId)
     const childWorkshopCount = workshop ? projectedChildCount(workshop) : 0

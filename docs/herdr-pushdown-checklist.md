@@ -61,8 +61,15 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   trails it by the daemon's mirror hop), at the price of one Herdr connection and server
   file descriptor per waiter for the whole wait; `--until done` never matches in the
   active tab. Waiters keep polling the daemon's herd, which costs Herdr nothing.
-- [ ] **P4** Send acknowledgement (prompt SHA-256 matching) → `agent.prompt` with
+- [-] **P4** Send acknowledgement (prompt SHA-256 matching) → `agent.prompt` with
   `wait:{until}`, `agent_blocked`, `agent_prompt_stalled`. The durable queue stays.
+  Declined: the hash match is what names the turn a message started (`startedGeneration`),
+  which `send --wait` and `wait --message` need to return that turn's result; Herdr's
+  prompt wait "does not track turns" and confirms only that some turn began.
+  `agent_blocked` already applies: Herdr refuses a blocked agent atomically and the message
+  is requeued. `agent_prompt_stalled` cannot tell whether the text sits unsubmitted in the
+  input, so retrying on it could submit a message twice, and a `wait` would hold the
+  delivery pass up to 5 s per message. The queue and the focus rule are unchanged.
 - [ ] **P5** Recovery relaunch mechanism → Herdr native restore with
   `resume_argv: ["clankerhouse-resume", "<clankerId>"]`; the gate command enforces
   Clankerhouse admission policy and then runs the harness. Re-enable

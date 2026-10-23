@@ -9,7 +9,6 @@ import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreeP
 import { deliverQueuedMessages, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
 import { withOrchestrationStore } from "./orchestration"
 import { workshopBase } from "./workshop-base"
-import { readResourceIncidents } from "./incidents"
 import { applicationRoot, binPath, libexecPath } from "./installation"
 import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
 import { workshopStopPlan } from "./workshop-stop"
@@ -69,7 +68,7 @@ const liveLifecycleReports = new Map<string, LifecycleObservation>()
 let latestHerd: HerdResult<PaneMetadata> | undefined
 const lifecycleSequences = new Map<string, number>()
 let projectionRefreshScheduled = false
-let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; incidents: ReturnType<typeof readResourceIncidents>; managedResources: ReturnType<typeof readManagedResources> } | undefined
+let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; managedResources: ReturnType<typeof readManagedResources> } | undefined
 const invalidateProjectionEnrichment = () => { projectionEnrichmentCache = undefined }
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
 const ensurePrivateRuntimeDirectory = () => {
@@ -167,7 +166,6 @@ const collectProjectionEnrichment = Effect.sync(() => {
   projectionEnrichmentCache = {
     refreshedAt: Date.now(),
     lineage: readLineageSnapshot(),
-    incidents: readResourceIncidents(),
     managedResources: readManagedResources(),
   }
   return projectionEnrichmentCache
@@ -351,7 +349,7 @@ const collectSessions = Effect.all([
   collectProjectionEnrichment,
 ], { concurrency: "unbounded" }).pipe(
   Effect.flatMap(([multiplexer, directories, clankerReports, enrichment]) => {
-    const { lineage, incidents, managedResources } = enrichment
+    const { lineage, managedResources } = enrichment
     return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
       const projection = projectResources({
         sessions: multiplexer.sessions,
@@ -359,7 +357,6 @@ const collectSessions = Effect.all([
         directories,
         clankerReports,
         lineage,
-        incidents,
         gitMetaByPath: new Map(gitMetas),
         managedResources,
         observedAt: Date.now(),

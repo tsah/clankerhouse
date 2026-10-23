@@ -17,7 +17,6 @@
         "src/diagnostics.test.ts",
         "src/activity.test.ts",
         "src/directory-discovery.test.ts",
-        "src/incidents.test.ts",
         "src/repository-cache.test.ts"
       ],
       "standalone": [
@@ -282,23 +281,18 @@
       ]
     },
     {
-      "id": "resource-safety",
-      "title": "Resource guard and process ownership",
+      "id": "process-ownership",
+      "title": "Process ownership",
       "core": true,
       "unit": [
-        "tests/test_resource_guard.py",
         "src/recovery/process-owner.test.ts"
       ],
       "standalone": [
         "scripts/qa-recovery",
-        "scripts/qa-resource-guard",
         "scripts/qa-process-owner"
       ],
       "manual": [
-        "Simulate five minutes of attributable child-process pressure and a two-minute cooldown",
-        "Confirm only the validated workload subtree stops and a steering-capable Clanker receives an incident message; verify durable delivery evidence for unsupported transports",
-        "Confirm an unattributable tracked Clanker is durably stopped with its pane preserved and an untracked harness is not signalled",
-        "Confirm a guard incident is recorded once and resolves after recovery"
+        "Confirm stopping a tracked Clanker removes every descendant from its owned scope while an untracked harness is not signalled"
       ]
     },
     {

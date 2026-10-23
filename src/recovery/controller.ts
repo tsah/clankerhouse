@@ -5,7 +5,6 @@ import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from
 import { initialHarnessCommand, recoveryHarnessCommand, workshopEnvironment } from "./harness"
 import { workshopLaunchIdentity } from "../workshop"
 import { openRecoveryStore, type RecoveryStore } from "./store"
-import { recordRecoveryIncident } from "../incidents"
 import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "../multiplexer"
 import { paneLocation, sessionLocation, windowLocation } from "../multiplexer/interface"
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
@@ -118,9 +117,6 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       let decision = decide()
       if (decision.type === "mark-pending") {
         desired = store.markRecoveryPending(desired.clankerId, decision.reason, { now })
-        if (desired.recoveryCondition === "interrupted_unknown") {
-          recordRecoveryIncident("interrupted_tool_requires_confirmation", { clankerId: desired.clankerId, harness: desired.harness, worktreePath: desired.workshopPath, cwd: desired.cwd }, { reason: "owned recovery process disappeared before a settled checkpoint" })
-        }
         decision = decide()
       }
       if (decision.type === "ignore") continue
@@ -158,10 +154,6 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       const previousSucceeded = store.attemptsFor(desired.clankerId).some((attempt) => attempt.status === "succeeded")
       const admission = store.admitRecovery(desired.clankerId, { automatic: Boolean(options.automatic), bootEpoch: options.bootEpoch ?? store.runtimeEpochs().bootEpoch, trigger: previousSucceeded ? options.trigger || "recovery" : "initial", now })
       if (!admission.admitted || !admission.attempt) {
-        const current = store.getDesired(desired.clankerId)
-        if (current?.recoveryCondition === "quarantined") {
-          recordRecoveryIncident("recovery_quarantined", { clankerId: current.clankerId, harness: current.harness, worktreePath: current.workshopPath, cwd: current.cwd }, { reason: admission.reason || "recovery policy circuit breaker" })
-        }
         result.skipped.push({ clankerId: desired.clankerId, reason: admission.reason || "recovery admission denied" })
         continue
       }

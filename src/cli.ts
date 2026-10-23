@@ -7,7 +7,6 @@ import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./
 import { submitReport } from "./report"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
-import { recordRecoveryIncident } from "./incidents"
 import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { harnessModelArgs } from "./recovery/harness"
@@ -380,7 +379,7 @@ const muxLocation = (parsed: ParsedArgs): NativeLocation => {
 
 /**
  * Runtime-neutral multiplexer operations for shell callers (lifecycle reporters, stop
- * scripts, resource guard). Every operation goes through the selected Adapter.
+ * scripts). Every operation goes through the selected Adapter.
  */
 const runMultiplexerCli = async (parsed: ParsedArgs) => {
   const subcommand = parsed.shift()
@@ -584,11 +583,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         const desired = store.setDesiredState(id, state, { reason })
         if (!noKill && (subcommand === "stop" || subcommand === "suspend" || subcommand === "tombstone")) {
           if (desired.ownerUnit) {
-            try { stopOwnedHarness(desired.ownerUnit) }
-            catch (error) {
-              recordRecoveryIncident("recovery_descendant_cleanup_failed", { clankerId: desired.clankerId, harness: desired.harness, worktreePath: desired.workshopPath, cwd: desired.cwd }, { reason: error instanceof Error ? error.message : String(error), ownerUnit: desired.ownerUnit })
-              throw error
-            }
+            stopOwnedHarness(desired.ownerUnit)
           }
           if (!noPaneKill) {
             const matches = (await listClankers()).filter((row) => row.id === id)

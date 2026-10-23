@@ -22,7 +22,6 @@ From `clankerhouse/`:
 ```bash
 bun run check
 bun test
-PYTHONPATH=.. python3 -m unittest tests.test_resource_guard
 scripts/qa-clanker-api
 scripts/qa-daemon
 scripts/qa-recovery
@@ -44,11 +43,10 @@ scripts/qa
 8. Repeated automatic failure, same-boot retry, and unresolved running attempts enter durable quarantine.
 9. Competing controllers and simultaneous manual requests cannot exceed the global admission limit.
 10. Killing a pane followed by stop removes wrapper, harness, `setsid`, and double-fork descendants from the owned cgroup.
-11. Healthy memory with pure I/O pressure blocks admission immediately; mitigation requires five sustained minutes, stops one attributable child workload, attempts capability-aware steering with durable incident context, and enforces a two-minute cooldown before resampling.
-12. Circuit-breaker, incident, attempt, and pressure snapshots survive a simulated reboot.
-13. When no child workload is safely attributable, a tracked Clanker is durably stopped with its pane preserved; untracked harness processes are never signalled as a fallback. Intentional stop, resource stop, quarantine, and tombstones prevent resurrection.
-14. Dirty/untracked Git state and native harness session files remain preserved.
-15. No operation touches the user's real Herdr socket, cgroups, or harness stores.
+11. Circuit-breaker and attempt state survive a simulated reboot.
+12. Intentional stop, quarantine, and tombstones prevent resurrection.
+13. Dirty/untracked Git state and native harness session files remain preserved.
+14. No operation touches the user's real Herdr socket, cgroups, or harness stores.
 
 Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, and command construction.
 
@@ -59,7 +57,6 @@ Before migrating, verify on the target image:
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now clankerhouse-recovery.service
-systemctl --user enable --now clankerhouse-resource-guard.service
 clankers recovery status
 loginctl show-user "$USER" -p Linger
 ```

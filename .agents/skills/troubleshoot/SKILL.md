@@ -28,7 +28,7 @@ clankerhouse-native --dump-tree
 clankerhouse-native --check
 clankers list
 clankers recovery status
-systemctl --user --no-pager status clankerhouse-recovery.service clankerhouse-resource-guard.service
+systemctl --user --no-pager status clankerhouse-recovery.service
 clankers mux observe
 herdr api snapshot
 ```
@@ -41,7 +41,7 @@ Do this exhaustive audit for every investigation, not only when the reported sym
 
 For every top-level row:
 
-- `session`: require the exact native session ID to exist in the Herdr server. Compare its current native name and path as observations. For managed rows, require the projected resource ID and complete Multiplexer Location to match the currently active authority store. During the `legacy-mutable` gate this is `resources.sqlite3`; after authority activation use `registry.sqlite3`. Do not treat a deleted current directory as a nonexistent session: require the Multiplexer to report the `(deleted)` path and explain any incident state.
+- `session`: require the exact native session ID to exist in the Herdr server. Compare its current native name and path as observations. For managed rows, require the projected resource ID and complete Multiplexer Location to match the currently active authority store. During the `legacy-mutable` gate this is `resources.sqlite3`; after authority activation use `registry.sqlite3`. Do not treat a deleted current directory as a nonexistent session: require the Multiplexer to report the `(deleted)` path.
 - `directory`: require the canonical path to exist. Prove `worktree` source through `git worktree list --porcelain`, `zoxide` source through `zoxide query -ls`, and `activity` source through the durable activity ledger. A durable Workshop record alone is not current directory evidence.
 - Require unique top-level target keys, resource IDs, Workshop IDs where applicable, and canonical directory paths. Explain every projected orphan parent by finding its durable parent record and proving why that parent has no current row.
 
@@ -51,9 +51,8 @@ For every detail row:
 - process `observation`: inspect the pane TTY foreground process group in `/proc`; require the reported harness executable or recognized package entrypoint. A pane title or stale command label alone is insufficient.
 - lifecycle `observation`: require the source report and compare pane, Clanker ID, harness, state, observed time, harness-session ID, and recovery-attempt ID. Recompute the projected rejection reason. Incomplete and rejected reports must remain visible but must not drive aggregate runtime state.
 - `clanker`: require owned Clanker identity from pane metadata/registry plus current process evidence. An attested state additionally requires exact lifecycle identity correlation. If correlation fails, require unknown runtime state and a separate rejected observation rather than the report's claimed state.
-- `incident`: require an open durable incident with the same Clanker, kind/status, target scope, and timestamp. Historical incidents that no longer attach to a current target must not manufacture rows.
 
-Finally assert set equality between all live multiplexer panes and unique projected pane targets, allowing multiple evidence details to reference one target but no live pane to disappear. Recompute each session aggregate from details, verify current-session status changes only ordering/metadata, and compare the complete projection with `clankerhouse-native --dump-tree`. Report exact counts for sessions, directories, unique panes, managed Locations, Clankers, observations by source/confidence, incidents, mismatches, and omissions.
+Finally assert set equality between all live multiplexer panes and unique projected pane targets, allowing multiple evidence details to reference one target but no live pane to disappear. Recompute each session aggregate from details, verify current-session status changes only ordering/metadata, and compare the complete projection with `clankerhouse-native --dump-tree`. Report exact counts for sessions, directories, unique panes, managed Locations, Clankers, observations by source/confidence, mismatches, and omissions.
 
 ## 2. Inspect symptoms systematically
 

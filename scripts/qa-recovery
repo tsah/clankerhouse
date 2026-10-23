@@ -24,8 +24,6 @@ if grep -Eq '^Restart=(always|on-abnormal|on-abort|on-watchdog)$' "$recovery_uni
     echo "Recovery service has an unsafe restart policy" >&2
     exit 1
 fi
-grep -F 'After=default.target network-online.target clankerhouse-resource-guard.service' "$recovery_unit" >/dev/null || { echo "Recovery must start after the resource guard" >&2; exit 1; }
-grep -F 'Before=clankerhouse-recovery.service' "$repo/share/systemd/user/clankerhouse-resource-guard.service.in" >/dev/null || { echo "Resource guard must start before recovery" >&2; exit 1; }
 
 cleanup() {
     qa_herdr_stop

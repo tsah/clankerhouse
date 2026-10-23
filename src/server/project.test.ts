@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test"
-import type { ResourceIncident } from "../incidents"
 import type { LineageSnapshot, WorkshopRecord } from "../workshop"
 import { sessionState } from "../model"
 import { projectResources, type ProjectInputs } from "./project"
@@ -39,7 +38,6 @@ const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   directories: [],
   clankerReports: [],
   lineage: emptyLineage(),
-  incidents: [],
   gitMetaByPath: new Map(),
   managedResources: new Map(),
   observedAt,
@@ -61,15 +59,6 @@ const workshop = (overrides: Partial<WorkshopRecord & { childWorkshopCount: numb
   updatedAt: 1,
   childWorkshopCount: 2,
   ...overrides,
-})
-
-const incident = (): ResourceIncident => ({
-  version: 1,
-  id: "pressure-1",
-  kind: "resource_pressure_termination",
-  occurredAt: 100_000,
-  status: "open",
-  clanker: { clankerId: "clanker-dead", harness: "pi", sessionName: "lost", worktreePath: "/tmp/lost" },
 })
 
 describe("session resource projection", () => {
@@ -475,15 +464,6 @@ describe("session resource projection", () => {
 
     expect(result.sessions).toHaveLength(1)
     expect(result.sessions[0]).toMatchObject({ name: "managed", path: record.canonicalPath, branch: "canonical", workshopId: record.workshopId, target: { type: "session" } })
-  })
-
-  test("applies and sorts incidents using the prepared observation time", () => {
-    const result = projectResources(inputs({
-      directories: [{ path: "/tmp/lost", source: "worktree", branch: "" }],
-      incidents: [incident()],
-    }))
-    expect(result.sessions[0]).toMatchObject({ name: "/tmp/lost", recency: 100 })
-    expect(result.sessions[0]?.details.find((detail) => detail.kind === "incident")).toMatchObject({ age: "1h", state: "failed" })
   })
 
   test("separates owned display names from scoped multiplexer identity", () => {

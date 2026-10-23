@@ -178,21 +178,7 @@ clankers recovery suspend CLANKER_ID --reason resource-pressure
 
 The state database, native harness session stores, repositories, and worktrees must reside on retained encrypted storage mounted at the same paths before the user service starts. Spot termination is not recoverable from a root volume configured for deletion. See `docs/qa/clankerhouse-recovery.md` for the isolated QA and migration acceptance plan.
 
-## Resource-pressure guard
-
-On Linux, `clankerhouse-resource-guard` samples guest-kernel memory, CPU, and I/O PSI plus `MemAvailable` and root-device read throughput every five seconds. It publishes a durable recovery-admission health record before the recovery reconciler starts. Admission freezes immediately under pressure, but mitigation requires five minutes of sustained pressure. The guard first stops one validated, attributable child workload of a non-focused Clanker, preserves the harness and pane, and attempts a capability-aware steering notice naming the incident. The incident and delivery result remain durable when a harness has no steering transport. It then cools down for two minutes and begins a fresh sustained-pressure window. If no child workload can be attributed safely, a Recovery-tracked Clanker is durably stopped through its owner while preserving its pane; an untracked harness is never signalled as a fallback.
-
-Actions and a bounded pre-incident pressure history are persisted under `$XDG_STATE_HOME/clankerhouse-herdr/incidents` and appear in the TUI as a red `×`. The daemon atomically publishes `recovery-admission.json`, `resource-guard-snapshot.json`, and Prometheus text metrics in `resource-guard-metrics.prom`. If a hard reset changes the boot ID without a clean daemon shutdown, lost sessions reappear as red `×` entries labeled `lost on reboot`. An orderly reboot does not create crash incidents.
-
-EC2 needs no metrics API for enforcement: PSI, `/proc/meminfo`, `/proc/diskstats`, and cgroup statistics report guest pressure. On swapless EC2 instances the memory reserve is the larger of 512 MiB or 10% of RAM. The default configured storage ceiling is 125 MiB/s: admission stops at 50%, mitigation begins at 75%, and significant I/O PSI also trips protection. Set `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC` for other volumes. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit; the recovery slice always receives low CPU and I/O weights. New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. Historical pressure and admission metrics remain available for later budget tuning but never weaken hard safety limits.
-
-```sh
-systemctl --user status clankerhouse-resource-guard
-journalctl --user -u clankerhouse-resource-guard
-clankerhouse-resource-guard --once --dry-run
-```
-
-Thresholds can be overridden with `RESOURCE_GUARD_SAMPLES`, `RESOURCE_GUARD_INTERVAL`, `RESOURCE_GUARD_COOLDOWN`, `RESOURCE_GUARD_WORKLOAD_MIN_RSS_MIB`, `RESOURCE_GUARD_WORKLOAD_MIN_IO_MIB_PER_SEC`, `RESOURCE_GUARD_EC2_FLOOR_MIB`, `RESOURCE_GUARD_EC2_PERCENT`, `RESOURCE_GUARD_GENERIC_PERCENT`, `RESOURCE_GUARD_PSI_SOME`, `RESOURCE_GUARD_PSI_FULL`, `RESOURCE_GUARD_IO_PSI_SOME`, `RESOURCE_GUARD_IO_PSI_FULL`, `RESOURCE_GUARD_CPU_PSI_SOME`, `RESOURCE_GUARD_READ_LIMIT_MIB_PER_SEC`, and `RESOURCE_GUARD_TERM_GRACE`. Set `RESOURCE_GUARD_DRY_RUN=1` to audit selections without signaling processes. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
+Tracked harnesses run in per-Clanker systemd scopes under `clankerhouse-recovery.slice`, which always receives low CPU and I/O weights. New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
 
 ## Titles and fading
 

@@ -73,24 +73,13 @@ describe("clanker state", () => {
   test("sorts status-bearing projection rows before neutral rows, then by last seen", () => {
     const rows = [
       session("working", { recency: 10, details: [detail("working", "pi", "01", "working", "pi")] }),
-      session("failed", { recency: 20, details: [detail("failed", "terminated", "02", "failed", "incident")] }),
+      session("failed", { recency: 20, details: [detail("failed", "pi", "02", "failed", "pi")] }),
       session("ready", { recency: 30, details: [detail("ready", "pi", "03", "done", "pi")] }),
       session("idle", { recency: 40, details: [detail("idle", "pi", "04", "idle", "pi")] }),
       session("neutral", { recency: 50 }),
     ]
 
     expect([...rows].sort(compareProjectedSessions).map((row) => row.name)).toEqual(["idle", "ready", "failed", "working", "neutral"])
-  })
-
-  test("reports live replacement work instead of a prior reboot loss", () => {
-    const rebootLoss = { ...detail("recovered", "lost clanker", "06", "failed", "incident"), status: "lost on reboot" }
-    const live = detail("recovered", "pi", "07", "working", "pi")
-    const recovered = session("recovered", { details: [rebootLoss, live] })
-    expect(sessionState(recovered)).toBe("working")
-
-    const termination = { ...rebootLoss, status: "terminated" }
-    expect(sessionState(session("terminated", { details: [termination, live] }))).toBe("failed")
-    expect(sessionState(session("still-lost", { details: [rebootLoss] }))).toBe("failed")
   })
 })
 
@@ -215,7 +204,7 @@ describe("session tree", () => {
   test("puts the current session nearest the prompt without hiding active work", () => {
     const current = session("current", { details: [detail("current", "pi", "97", "done", "pi")] })
     const working = session("working", { details: [detail("working", "pi", "98", "working", "pi")] })
-    const failed = session("failed", { details: [detail("failed", "incident", "99", "failed", "incident")] })
+    const failed = session("failed", { details: [detail("failed", "pi", "99", "failed", "pi")] })
     const rows = sessionRows(buildTreeRows([failed, working, current], "", {
       prioritySessionKeys: new Set(["session:current"]),
       bottomUp: true,
@@ -332,7 +321,7 @@ describe("session tree", () => {
     expect(defaultExpandedLineageSessions(readyCrowded)).toEqual(new Set(["active-root"]))
 
     const failed = [
-      session("failed-root", { workshopId: "failed-root", details: [detail("failed-root", "incident", "54", "failed", "incident")] }),
+      session("failed-root", { workshopId: "failed-root", details: [detail("failed-root", "pi", "54", "failed", "pi")] }),
       session("neutral-child", { workshopId: "neutral-child", parentWorkshopId: "failed-root" }),
     ]
     expect(defaultExpandedLineageSessions(failed)).toEqual(new Set(["failed-root"]))

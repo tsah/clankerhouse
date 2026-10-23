@@ -28,7 +28,7 @@ def session(name, recency, state, kind="clanker"):
         "details": [{
             "kind": kind,
             "state": state,
-            "target": target if kind == "incident" else {
+            "target": target if kind == "window" else {
                 "type": "window", "session": name, "windowId": "w1:t1", "pane": "w1:p1",
             },
         }],
@@ -36,7 +36,7 @@ def session(name, recency, state, kind="clanker"):
 
 snapshot_sessions = [
     session("old-working", 10, "working"),
-    session("failed", 20, "failed", "incident"),
+    session("failed", 20, "failed"),
     session("ready", 30, "done"),
     session("idle", 40, "idle"),
     session("new-neutral", 50, "unknown", "window"),

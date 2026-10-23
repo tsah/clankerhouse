@@ -15,9 +15,9 @@ case "${1:-}" in
     --list)
         cat <<'EOF'
 unit/static:
-  feature-catalogue, TypeScript, Python, Rust
+  feature-catalogue, TypeScript, Rust
 standalone/end-to-end:
-  native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, Recovery, Resource Guard, process owner,
+  native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, Recovery, process owner,
   lineage actions, workshop labels, Herdr adapter, installer, full TUI
 EOF
         exit 0
@@ -41,8 +41,6 @@ if [[ "$mode" == all || "$mode" == unit ]]; then
     # Lifecycle tests execute the native hook, so build it first.
     run "native hook build" cargo build --manifest-path native-client/Cargo.toml --release --locked --bin clankerhouse-hook
     run "TypeScript unit and component tests" bun test
-    run "Python unit and component tests" env PYTHONPATH=.. python3 -m unittest \
-        tests.test_resource_guard
     run "Rust native-client unit tests" cargo test --manifest-path native-client/Cargo.toml
 fi
 
@@ -54,7 +52,6 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "spawn model override scenario" scripts/qa-spawn-model
     run "authoritative daemon scenario" scripts/qa-daemon
     run "Recovery campaign scenario" scripts/qa-recovery
-    run "Resource Guard workload mitigation scenario" scripts/qa-resource-guard
     run "process ownership scenario" scripts/qa-process-owner
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels

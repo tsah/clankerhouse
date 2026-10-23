@@ -1,5 +1,4 @@
 import type { ActivitySource } from "../activity"
-import { applyResourceIncidents, type ResourceIncident } from "../incidents"
 import { labelTags, projectName } from "../labels"
 import { compareProjectedSessions, stateWithSeen } from "../model"
 import type { DetailRow, RuntimeObservation, SessionRow } from "../model"
@@ -21,7 +20,6 @@ export interface ProjectInputs {
   directories: readonly DirectoryRow[]
   clankerReports: readonly LifecycleObservation[]
   lineage: LineageSnapshot
-  incidents: readonly ResourceIncident[]
   gitMetaByPath: ReadonlyMap<string, GitMeta>
   managedResources: ReadonlyMap<string, ResourceRecord>
   observedAt: number
@@ -61,7 +59,7 @@ const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | nul
 }
 
 export const projectResources = (inputs: ProjectInputs): ProjectResult => {
-  const { sessions, windows, directories, clankerReports, lineage, incidents, gitMetaByPath, observedAt, instanceId, home } = inputs
+  const { sessions, windows, directories, clankerReports, lineage, gitMetaByPath, observedAt, instanceId, home } = inputs
   const multiplexerKind = inputs.multiplexerKind ?? "herdr"
   const effects: ProjectEffect[] = []
   const windowsBySession = Map.groupBy(windows, (window) => window.sessionId)
@@ -208,7 +206,6 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     if (row.attachmentCandidateWorkshopIds.length === 0) row.availableActions = row.availableActions.filter((action) => action !== "attach")
   }
 
-  const projectedSessions = applyResourceIncidents(rows, [...incidents], observedAt)
-  projectedSessions.sort(compareProjectedSessions)
-  return { sessions: projectedSessions, effects }
+  rows.sort(compareProjectedSessions)
+  return { sessions: rows, effects }
 }

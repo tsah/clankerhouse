@@ -30,7 +30,7 @@ The scripts must create their own `/tmp/qa-clanker-*` roots, mark ownership befo
 8. Reports contain only harness/clanker/native-session identity, recovery attempt, pane, lifecycle, state, and result fields under `clanker-state/`.
 9. Revisioned snapshots are committed before publication over the mode-`0600` daemon socket; socket failure leaves version-10 JSON polling operational.
 10. The daemon accepts only status, snapshot, subscription, and non-destructive `projection.refresh` requests. Destructive or unknown actions fail without multiplexer/worktree mutation.
-11. Harness detection comes from Herdr's per-pane agent detection; it never assigns `CLANKER_ID` and never authorizes resource-guard signals.
+11. Harness detection comes from Herdr's per-pane agent detection; it never assigns `CLANKER_ID`.
 
 ## Workshop contract
 

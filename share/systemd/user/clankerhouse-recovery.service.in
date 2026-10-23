@@ -1,9 +1,8 @@
 [Unit]
 Description=Clankerhouse durable workshop and clanker boot recovery
 Documentation=file:@CLANKERHOUSE_HOME@/README.md
-After=default.target network-online.target clankerhouse-resource-guard.service
+After=default.target network-online.target
 Wants=network-online.target
-Requires=clankerhouse-resource-guard.service
 
 [Service]
 Type=simple

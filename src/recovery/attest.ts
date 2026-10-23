@@ -5,7 +5,6 @@
  */
 import { createHash } from "node:crypto"
 import { listClankers } from "../clanker-api"
-import { resolveRecoveredClankerIncidents } from "../incidents"
 import { workshopForPath } from "../workshop"
 import type { RecoveryStore } from "./store"
 
@@ -42,7 +41,6 @@ export const attestHarnessSession = async (store: RecoveryStore, { clankerId: id
     if (!attempt || attempt.clankerId !== id) throw new Error(`Recovery attempt ${attemptId} does not belong to ${id}`)
     store.finishAttempt(attemptId, "succeeded")
     if (state) store.markRecoverySettled(id, attemptId, state)
-    if (store.getDesired(id)?.recoveryCondition === "healthy") resolveRecoveredClankerIncidents(id)
   }
   return { clankerId: id, harnessSessionId: desired.harnessSessionId, attested: true }
 }

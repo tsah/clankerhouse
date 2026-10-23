@@ -1,6 +1,0 @@
-#!/bin/sh
-set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/../libexec/clankerhouse-env"
-exec python3 "$CLANKERHOUSE_HOME/resource_guard.py" "$@"

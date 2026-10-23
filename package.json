@@ -38,7 +38,6 @@
     "test:all": "./test",
     "test:unit": "./test --unit",
     "test:standalone": "./test --standalone",
-    "test:python": "PYTHONPATH=.. python3 -m unittest tests.test_resource_guard",
     "test:native": "cargo test --manifest-path native-client/Cargo.toml",
     "qa:native-hot": "scripts/qa-native-hot",
     "test:nvim": "scripts/qa-nvim",
@@ -63,7 +62,6 @@
     "docs",
     "scripts",
     "tests",
-    "resource_guard.py",
     "README.md",
     "LICENSE",
     "tsconfig.json"

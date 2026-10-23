@@ -471,19 +471,7 @@ fn aggregate(states: impl Iterator<Item = ClankerState>) -> ClankerState {
 }
 
 fn session_state(session: &SessionRow) -> ClankerState {
-    let has_live_clanker = session
-        .details
-        .iter()
-        .any(|detail| detail.kind == "clanker" && detail.state != ClankerState::Unknown);
-    aggregate(
-        session
-            .details
-            .iter()
-            .filter(|detail| {
-                !has_live_clanker || detail.kind != "incident" || detail.status != "lost on reboot"
-            })
-            .map(|detail| detail.state),
-    )
+    aggregate(session.details.iter().map(|detail| detail.state))
 }
 
 fn neutral_session(session: &SessionRow) -> bool {
@@ -3455,18 +3443,6 @@ mod tests {
     }
 
     #[test]
-    fn live_clankers_supersede_old_reboot_incidents() {
-        let session: SessionRow = serde_json::from_str(r#"{
-            "name": "workshop", "path": "/tmp/workshop", "target": {"type": "session", "session": "workshop"},
-            "details": [
-                {"kind": "clanker", "state": "idle", "target": {"type": "window", "session": "workshop", "windowId": "@1", "pane": "%1"}},
-                {"kind": "incident", "status": "lost on reboot", "state": "failed", "target": {"type": "session", "session": "workshop"}}
-            ]
-        }"#).unwrap();
-        assert_eq!(session_state(&session), ClankerState::Idle);
-    }
-
-    #[test]
     fn failed_lineage_with_fewer_than_ten_rows_starts_expanded() {
         let snapshot: Snapshot = serde_json::from_str(r#"{
             "version": 11,
@@ -3478,7 +3454,7 @@ mod tests {
                 {
                     "name": "failed-child", "path": "/tmp/failed", "workshopId": "failed-child", "parentWorkshopId": "root",
                     "target": {"type": "directory", "path": "/tmp/failed"},
-                    "details": [{"kind": "incident", "status": "terminated", "state": "failed", "target": {"type": "directory", "path": "/tmp/failed"}}]
+                    "details": [{"kind": "clanker", "status": "failed", "state": "failed", "target": {"type": "directory", "path": "/tmp/failed"}}]
                 },
                 {
                     "name": "neutral-child", "path": "/tmp/neutral", "workshopId": "neutral-child", "parentWorkshopId": "root",
@@ -3676,7 +3652,7 @@ mod tests {
         let app = app_with_sessions(
             r#"[
                 {"name":"working","path":"/working","recency":10,"target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@1","pane":"%1"}}]},
-                {"name":"failed","path":"/failed","recency":20,"target":{"type":"session","session":"failed"},"details":[{"kind":"incident","state":"failed","target":{"type":"session","session":"failed"}}]},
+                {"name":"failed","path":"/failed","recency":20,"target":{"type":"session","session":"failed"},"details":[{"kind":"clanker","state":"failed","target":{"type":"window","session":"failed","windowId":"@4","pane":"%4"}}]},
                 {"name":"ready","path":"/ready","recency":30,"target":{"type":"session","session":"ready"},"details":[{"kind":"clanker","state":"done","target":{"type":"window","session":"ready","windowId":"@2","pane":"%2"}}]},
                 {"name":"idle","path":"/idle","recency":40,"target":{"type":"session","session":"idle"},"details":[{"kind":"clanker","state":"idle","target":{"type":"window","session":"idle","windowId":"@3","pane":"%3"}}]},
                 {"name":"neutral","path":"/neutral","recency":50,"target":{"type":"session","session":"neutral"}}

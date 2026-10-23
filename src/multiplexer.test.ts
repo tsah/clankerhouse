@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ManagedMultiplexer } from "./multiplexer"
 import { polledChanges, type ClaimKey, type ClaimScope, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type SpawnRequest } from "./multiplexer/interface"
 import { openResourceRegistry } from "./resource-registry"
+import { registerWorkshop } from "./workshop"
 
 const roots: string[] = []
 afterEach(() => {
@@ -103,6 +104,36 @@ describe("managed multiplexer", () => {
     expect(adapter.claims.some(([at, key]) => key === "windowId" && at.nativeWindowId === "t9")).toBe(true)
     expect(adapter.claims.some(([at, key]) => key === "terminalId" && at.nativePaneId === "p9")).toBe(true)
     expect(adapter.claims.some(([, key]) => key === "sessionId")).toBe(false)
+  })
+
+  test("restores a registered session's claims after a durable runtime restart dropped them", async () => {
+    const registryPath = fixture()
+    const workshopStatePath = join(registryPath, "..", "workshops.sqlite3")
+    const parentPath = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-restart-parent-"))); roots.push(parentPath)
+    const path = `${parentPath}-feature`; roots.push(path)
+    for (const argv of [["init", "-q", "-b", "main"], ["-c", "user.email=qa@example.com", "-c", "user.name=qa", "commit", "-q", "--allow-empty", "-m", "init"], ["worktree", "add", "-q", "-b", "feature", path]]) Bun.spawnSync(["git", "-C", parentPath, ...argv])
+    const parent = registerWorkshop({ path: parentPath, commonDir: join(parentPath, ".git"), branch: "main" }, { dbPath: workshopStatePath })
+    const workshop = registerWorkshop({ path, commonDir: join(parentPath, ".git"), branch: "feature" }, { parentWorkshopId: parent.workshopId, dbPath: workshopStatePath })
+    class DurableAdapter extends FakeAdapter { override capabilities() { return { ...super.capabilities(), durableIds: true } } }
+    const sessions = topology().map((session) => ({ ...session, path, worktreePath: path, directoryPath: "", workshopId: workshop.workshopId }))
+    const adapter = new DurableAdapter(sessions, ["session", "pane"])
+    const managed = new ManagedMultiplexer(adapter, { registryPath, workshopStatePath })
+    const absorbed = await managed.absorb({ kind: "fake", instanceId: INSTANCE, nativeSessionId: "s1", nativeWindowId: "t1", nativePaneId: "p1" })
+
+    // A cold restart keeps native ids, names, and cwd, but every claim is gone.
+    const restarted = (path: string) => ({ kind: "fake", instanceId: INSTANCE, sessions: sessions.map((session) => ({ ...session, path, worktreePath: "", workshopId: undefined, resourceId: undefined, claims: {} })) })
+    adapter.claims.length = 0
+    expect(await managed.reconcileAbsorbedTopology(restarted(path))).toBe(true)
+    const claimed = (key: ClaimKey) => adapter.claims.filter(([, claim]) => claim === key).map(([at, , value]) => [at.nativePaneId ?? at.nativeSessionId, value])
+    expect(claimed("workshopId")).toEqual([["s1", workshop.workshopId]])
+    expect(claimed("sessionId")).toEqual([["s1", absorbed.session.id]])
+    expect(claimed("workshopParentId")).toEqual([["s1", parent.workshopId]])
+    expect(claimed("terminalId")).toEqual(absorbed.terminals.map((terminal) => [terminal.location!.nativePaneId, terminal.id]))
+
+    // A workspace whose path no longer is its Workshop's is left unmanaged.
+    adapter.claims.length = 0
+    expect(await managed.reconcileAbsorbedTopology(restarted("/elsewhere"))).toBe(false)
+    expect(adapter.claims).toEqual([])
   })
 
   test("resolves managed resources from the registry rather than stale target hints", async () => {

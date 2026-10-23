@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { resolve } from "node:path"
 import { openResourceRegistry, type MultiplexerLocation, type ResourceRecord } from "../resource-registry"
-import { identifyWorkshopSync, persistWorkshopLineage, workshopForPath } from "../workshop"
+import { identifyWorkshopSync, persistWorkshopLineage, workshopForId, workshopForPath } from "../workshop"
 import {
   paneLocation, sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
   type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type SpawnRequest,
@@ -43,11 +43,13 @@ export class ManagedMultiplexer {
   readonly kind: string
   readonly adapter: Multiplexer
   private readonly registryPath?: string
+  private readonly workshopStatePath?: string
 
-  constructor(adapter: Multiplexer, options: { registryPath?: string } = {}) {
+  constructor(adapter: Multiplexer, options: { registryPath?: string; workshopStatePath?: string } = {}) {
     this.adapter = adapter
     this.kind = adapter.kind
     this.registryPath = options.registryPath
+    this.workshopStatePath = options.workshopStatePath
   }
 
   capabilities() { return this.adapter.capabilities() }
@@ -172,10 +174,40 @@ export class ManagedMultiplexer {
     } finally { registry.close() }
   }
 
-  async reconcileAbsorbedTopology(snapshot: MultiplexerSnapshot): Promise<boolean> {
+  /**
+   * A cold runtime restart keeps durable native ids but can drop every claim (herdr does not restore tokens). A session
+   * the registry still locates is given its Workshop claims back, but only while its path is still its Workshop's.
+   */
+  private async restoreSessionClaims(session: MultiplexerSession, instanceId: string): Promise<MultiplexerSession | undefined> {
+    const registry = openResourceRegistry({ dbPath: this.registryPath })
+    let resource: ResourceRecord | undefined
+    try { resource = registry.findByNativeLocation({ kind: this.kind, instanceId, nativeSessionId: session.id }) }
+    finally { registry.close() }
+    if (resource?.kind !== "session") return undefined
+    const workshop = workshopForId(resource.workshopId, this.workshopStatePath)
+    if (!workshop || canonicalPath(session.worktreePath || session.path) !== workshop.canonicalPath) return undefined
+    const at = sessionLocation(session.id)
+    await this.adapter.claim(at, "workshopId", workshop.workshopId)
+    await this.adapter.claim(at, "sessionId", resource.id)
+    await this.adapter.claim(at, "worktreePath", workshop.canonicalPath)
+    await this.adapter.claim(at, "gitCommonDir", workshop.commonDir)
+    if (workshop.parentWorkshopId) await this.adapter.claim(at, "workshopParentId", workshop.parentWorkshopId)
+    const claims = { ...session.claims, workshopId: workshop.workshopId, sessionId: resource.id, worktreePath: workshop.canonicalPath, gitCommonDir: workshop.commonDir, ...(workshop.parentWorkshopId ? { workshopParentId: workshop.parentWorkshopId } : {}) }
+    return { ...session, claims, workshopId: workshop.workshopId, resourceId: resource.id, parentWorkshopId: workshop.parentWorkshopId, worktreePath: workshop.canonicalPath }
+  }
+
+  async reconcileAbsorbedTopology(observed: MultiplexerSnapshot): Promise<boolean> {
     let changed = false
+    let snapshot = observed
     const durable = this.adapter.capabilities().durableIds
-    for (const session of snapshot.sessions) {
+    for (let session of observed.sessions) {
+      if (durable && this.supportsClaims("session") && !session.workshopId && !session.resourceId) {
+        const restored = await this.restoreSessionClaims(session, snapshot.instanceId)
+        if (!restored) continue
+        session = restored
+        snapshot = { ...snapshot, sessions: snapshot.sessions.map((candidate) => candidate.id === restored.id ? restored : candidate) }
+        changed = true
+      }
       if (!session.workshopId || !session.resourceId) continue
       const incomplete = session.windows.some((window) => (this.supportsClaims("window") && !window.resourceId) || window.panes.some((pane) => !pane.terminalId))
       if (!incomplete && !durable) continue

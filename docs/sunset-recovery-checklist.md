@@ -6,7 +6,7 @@ the durable clanker ledger instead. Herdr restore stays off.
 
 Legend: `[ ]` open · `[x]` landed on main · `[-]` declined (with reason)
 
-- [ ] **S1 Ledger follows the live session.** The durable session id follows `/clear`, resume
+- [x] **S1 Ledger follows the live session.** The durable session id follows `/clear`, resume
   and new sessions instead of refusing to rebind, so the ledger names the conversation a pane is
   actually running.
 - [ ] **S2 Remove the Spot watcher.** `spot_watch.py`, its wrapper, unit, tests, installer and docs.

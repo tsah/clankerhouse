@@ -414,6 +414,19 @@ export const workshopLabels = (workshopId: string, dbPath = workshopStatePath): 
   finally { db.close() }
 }
 
+/** Every Workshop's labels in one read, for callers that present many Workshops at once. */
+export const allWorkshopLabels = (dbPath = workshopStatePath): Map<string, WorkshopLabels> => {
+  const labels = new Map<string, Record<string, string>>()
+  if (!existsSync(dbPath)) return labels
+  const db = openStore(dbPath)
+  try {
+    for (const row of db.query("SELECT workshop_id, key, value FROM workshop_labels ORDER BY key").all() as Array<{ workshop_id: string; key: string; value: string }>) {
+      labels.set(row.workshop_id, { ...labels.get(row.workshop_id), [row.key]: row.value })
+    }
+    return labels
+  } finally { db.close() }
+}
+
 /** Sets one label key, or removes it when value is null. Reports whether anything actually changed. */
 export const changeWorkshopLabel = (workshopId: string, key: string, value: string | null, dbPath = workshopStatePath): LabelChange => {
   const db = openStore(dbPath)

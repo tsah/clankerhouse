@@ -206,6 +206,17 @@ clankers workshop label list
 clankers workshop stop                            # release the live session; keep the worktree
 ```
 
+The daemon also shows each Workshop's visible labels on its Herdr workspaces as workspace tokens: `lbl_<key>` holds one label's value and `labels` holds all values in key order, space-separated. The workspace is the one carrying the Workshop's claim, or else one whose path is the Workshop's worktree, as for the row. The title is not repeated there, since it already names the workspace, and hidden keys are left out. Herdr caps a report at 16 tokens, so the first 15 keys by name get their own token; the rest, and any key longer than 28 characters, appear only in `labels`, which Herdr truncates at 80 characters. Changes reach Herdr on the daemon's next observation, and tokens are written again after a cold Herdr restart, which drops them. Clankerhouse never edits Herdr's configuration; to see the labels, add them to the Space sidebar rows in `~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+  ["$labels"],                 # or pick keys: ["$lbl_stage", "$lbl_status"]
+]
+```
+
 `clankers workshop stop` releases what a finished Workshop holds live and keeps what is durable. Its clankers are stopped for good, so Recovery does not relaunch them; their waiting messages are orphaned; and its multiplexer sessions or Herdr workspaces close. The worktree, branch, labels, and lineage stay, and the Workshop stays listed as a row without a session; opening it starts a plain shell. Stopping never happens on its own: a `labels-changed` hook decides when, for example when a Workshop is marked done. Stopping a stopped Workshop does nothing.
 
 A repository gives labels meaning, and prepares new Workshops, with optional tracked executables run with the Workshop as working directory:

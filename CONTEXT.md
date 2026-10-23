@@ -60,7 +60,7 @@ An internal record intentionally maintained by Clankerhouse: stable correlation 
 
 ## Label
 
-A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering, identity, or Recovery. Clankerhouse itself understands exactly one Label, Done.
+A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering, identity, or Recovery. Clankerhouse itself understands exactly one Label, Done.
 
 ## Title
 

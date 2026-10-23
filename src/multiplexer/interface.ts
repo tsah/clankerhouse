@@ -120,6 +120,8 @@ export interface MultiplexerSession {
   parentWorkshopId?: string | null
   resourceId?: string
   displayName?: string
+  /** What the runtime currently shows of the Workshop's Labels, in the Adapter's own form; handed back to `showLabels`, never interpreted. */
+  shownLabels?: Readonly<Record<string, string>>
   windows: MultiplexerWindow[]
 }
 
@@ -179,6 +181,11 @@ export interface Multiplexer {
   /** Write (or clear with null) an identity claim on the native object at `location`. */
   claim(location: NativeLocation, key: ClaimKey, value: string | null): Promise<void>
   readClaim(location: NativeLocation, key: ClaimKey): Promise<string | undefined>
+  /**
+   * Show a Workshop's visible Labels on its session, replacing what `shown` (the session's `shownLabels`) says is
+   * there. Presentation only; resolves false when nothing needed writing.
+   */
+  showLabels?(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined): Promise<boolean>
   /** Name of the environment variable a child process reads to learn its own pane address. */
   paneAddressEnv(): string
   /** Whether the current process is running inside this runtime. */

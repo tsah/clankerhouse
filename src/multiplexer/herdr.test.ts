@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { rmSync } from "node:fs"
-import { HERDR_MIN_PROTOCOL, HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrRequest, herdrSocketPath } from "./herdr"
+import { HERDR_MIN_PROTOCOL, HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrLabelTokens, herdrRequest, herdrSocketPath } from "./herdr"
 import { MultiplexerResourceExhaustedError, paneLocation, sessionLocation, windowLocation } from "./interface"
 
 interface Call { method: string; params: Record<string, unknown> }
@@ -292,6 +292,40 @@ describe("herdr multiplexer adapter", () => {
       server.stop(true)
       rmSync(path, { force: true })
     }
+  })
+
+  test("shows Workshop Labels as workspace tokens, patching only what differs", async () => {
+    const calls: Call[] = []
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })
+    const reports = () => calls.filter((call) => call.method === "workspace.report_metadata").map((call) => call.params)
+    expect(await adapter.showLabels(sessionLocation("w1"), { stage: "retro", status: "done" }, {})).toBe(true)
+    expect(reports()).toEqual([{ workspace_id: "w1", source: "clankerhouse", tokens: { lbl_stage: "retro", lbl_status: "done", labels: "retro done" } }])
+
+    // What is already shown is left alone; a removed label is cleared, and other reporters' tokens are untouched.
+    calls.length = 0
+    const shown = { lbl_stage: "retro", lbl_status: "done", labels: "retro done", jj_status: "2 changes" }
+    expect(await adapter.showLabels(sessionLocation("w1"), { stage: "retro", status: "done" }, shown)).toBe(false)
+    expect(await adapter.showLabels(sessionLocation("w1"), { stage: "retro" }, shown)).toBe(true)
+    expect(reports()).toEqual([{ workspace_id: "w1", source: "clankerhouse", tokens: { labels: "retro", lbl_status: null } }])
+
+    // Observation hands back only the label tokens.
+    const observed = await new HerdrAdapter({ socketPath: "/tmp/x.sock", request: async (method, params) => {
+      const result = await fakeHerdr([])(method, params)
+      if (method === "session.snapshot") (result.snapshot as { workspaces: Array<{ tokens: Record<string, string> }> }).workspaces[0]!.tokens = { ch_workshop_id: "workshop-1", lbl_stage: "retro", labels: "retro", jj_status: "x" }
+      return result
+    } }).observe({ processInfo: false })
+    expect(observed.sessions[0]!.shownLabels).toEqual({ lbl_stage: "retro", labels: "retro" })
+  })
+
+  test("keeps label tokens within herdr's token-name and per-report limits", () => {
+    const many = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`k${String(index).padStart(2, "0")}`, `v${index}`]))
+    const tokens = herdrLabelTokens({ ...many, ["x".repeat(30)]: "long-key" })
+    expect(Object.keys(tokens)).toHaveLength(16)
+    expect(tokens.lbl_k14).toBe("v14")
+    expect(tokens.lbl_k15).toBeUndefined()
+    expect(tokens[`lbl_${"x".repeat(30)}`]).toBeUndefined()
+    expect(tokens.labels!.length).toBeLessThanOrEqual(80)
+    expect(herdrLabelTokens({})).toEqual({})
   })
 
   test("resolves the socket path from the environment", () => {

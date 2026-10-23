@@ -65,7 +65,10 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   must still be edited; plugin popups lose `HERDR_ACTIVE_*` (context only in
   `HERDR_PLUGIN_CONTEXT_JSON`); `herdr plugin install` takes GitHub shorthand only and
   `plugin link` skips build steps. The plugin would add a layer without removing the edit.
-- [ ] **P10** Show Labels (`stage`, `title`, ...) in Herdr's sidebar via workspace tokens.
+- [x] **P10** Show Labels (`stage`, `title`, ...) in Herdr's sidebar via workspace tokens.
+  Landed: the daemon writes visible Labels as `lbl_<key>` plus an aggregate `labels` token on
+  every observation (diff only), so cold restarts are repaired; the title stays the workspace
+  name. The operator opts in with `$labels` / `$lbl_<key>` in `[ui.sidebar.spaces] rows`.
 - [ ] **P11** Attention: `notification.show` for blocked/question Reports and an
   `agent.view.set` view of a Workshop's children.
 - [-] **P12** `post-create` → plugin `worktree.created` event hook. Only with P13.

@@ -111,6 +111,8 @@ const collectMultiplexerResources = Effect.tryPromise({
       observedAt = Date.now()
       snapshot = await multiplexer.observe()
     }
+    // Presentation only: the runtime's own UI shows Workshop Labels; failures are logged by the managed layer.
+    await multiplexer.mirrorWorkshopLabels(snapshot).catch(() => 0)
     latestHerd = { instanceId: snapshot.instanceId, observedAt, panes: paneMetadataFromSnapshot(snapshot) }
     const sessions: MuxSession[] = snapshot.sessions.map((session) => ({
       id: session.id,

@@ -127,6 +127,28 @@ set_result=$(clankers workshop label set stage=implementing --cwd "$feature_path
 wait_for_hook_lines 1
 [[ "$(projected_labels)" == '["implementing"]' ]] || fail "Expected the projection to carry the label tag, got $(projected_labels)"
 
+# Labels are shown in Herdr as workspace tokens for `$lbl_<key>` / `$labels` sidebar rows.
+workspace_token() { qa_herdr workspace list | jq -r --arg label "$1" --arg token "$2" '[.result.workspaces[] | select(.label == $label) | .tokens[$token] // ""][0] // ""'; }
+wait_for_token() {
+    for _ in {1..200}; do
+        [[ "$(workspace_token "$1" "$2")" == "$3" ]] && return 0
+        sleep 0.05
+    done
+    fail "Expected Herdr workspace '$1' token $2='$3', got '$(workspace_token "$1" "$2")'"
+}
+wait_for_token qa-feature lbl_stage implementing
+wait_for_token qa-feature labels implementing
+
+# A cold Herdr restart drops every token; the daemon shows the labels again.
+qa_herdr_stop
+qa_herdr_start "$root/herdr"
+for _ in {1..200}; do
+    qa_herdr workspace list | jq -e '.result.workspaces | any(.label == "qa-feature")' >/dev/null 2>&1 && break
+    sleep 0.05
+done
+qa_herdr workspace list | jq -e '.result.workspaces | any(.label == "qa-feature")' >/dev/null || fail "Expected Herdr to restore the workspace after a restart"
+wait_for_token qa-feature lbl_stage implementing
+
 # Re-setting the same value is not a change, so the hook must stay quiet.
 repeat_result=$(clankers workshop label set stage=implementing --cwd "$feature_path")
 [[ "$(jq -r '.changed' <<<"$repeat_result")" == false ]] || fail "Expected an unchanged label to report changed=false: $repeat_result"
@@ -183,6 +205,8 @@ qa_herdr workspace list | jq -e '.result.workspaces | any(.label == "Rework the 
 unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(jq -c '[.changed, .labels]' <<<"$unset_result")" == '[true,{"title":"Rework the parser"}]' ]] || fail "Unexpected label unset result: $unset_result"
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
+wait_for_token "Rework the parser" lbl_stage ""
+wait_for_token "Rework the parser" labels ""
 if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
 
 # A merged Workshop's worktree may already be deleted; it is still labelled by branch or ID.
@@ -238,4 +262,4 @@ again=$(clankers workshop stop --cwd "$stopped_path")
 [[ "$(jq -c '[.stopped, (.sessionIds | length)]' <<<"$again")" == '[true,0]' ]] || fail "Expected stopping a stopped Workshop to be a no-op: $again"
 has_workspace "Rework the parser" || fail "Stopping one Workshop must leave other sessions alone"
 
-printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, the reaper removes only idle, clean done worktrees, and stopping a Workshop closes its session and retires its clankers while keeping its worktree, branch, and labels.\n'
+printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, labels are shown on Herdr workspaces and restored after a cold Herdr restart, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, the reaper removes only idle, clean done worktrees, and stopping a Workshop closes its session and retires its clankers while keeping its worktree, branch, and labels.\n'

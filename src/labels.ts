@@ -57,8 +57,11 @@ export const applyLabelChange = (current: WorkshopLabels, key: string, value: st
   return { previous, labels: sorted(next), changed: true }
 }
 
-/** Presentation tags: values only, ordered by key. The title is the row's name, never a tag, and hidden keys are left out. */
-export const labelTags = (labels: WorkshopLabels | undefined) => Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY && !hiddenLabelKey(key)).toSorted(([left], [right]) => left.localeCompare(right)).map(([, value]) => value)
+/** The labels shown as tags, ordered by key. The title is the row's name, never a tag, and hidden keys are left out. */
+export const visibleLabels = (labels: WorkshopLabels | undefined): WorkshopLabels => Object.fromEntries(Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY && !hiddenLabelKey(key)).toSorted(([left], [right]) => left.localeCompare(right)))
+
+/** Presentation tags: values only, ordered by key. */
+export const labelTags = (labels: WorkshopLabels | undefined) => Object.values(visibleLabels(labels))
 
 const environmentName = (prefix: string, key: string) => `${prefix}${key.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
 

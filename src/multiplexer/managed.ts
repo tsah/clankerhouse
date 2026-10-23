@@ -7,7 +7,8 @@ import { createHash, randomUUID } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { resolve } from "node:path"
 import { openResourceRegistry, type MultiplexerLocation, type ResourceRecord } from "../resource-registry"
-import { identifyWorkshopSync, persistWorkshopLineage, workshopForId, workshopForPath } from "../workshop"
+import { visibleLabels } from "../labels"
+import { allWorkshopLabels, identifyWorkshopSync, listWorkshopRecords, persistWorkshopLineage, workshopForId, workshopForPath } from "../workshop"
 import {
   paneLocation, sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
   type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type SpawnRequest,
@@ -44,6 +45,8 @@ export class ManagedMultiplexer {
   readonly adapter: Multiplexer
   private readonly registryPath?: string
   private readonly workshopStatePath?: string
+  /** Last label-mirroring failure per session, so a repeating one is logged once. */
+  private readonly labelFailures = new Map<string, string>()
 
   constructor(adapter: Multiplexer, options: { registryPath?: string; workshopStatePath?: string } = {}) {
     this.adapter = adapter
@@ -220,6 +223,35 @@ export class ManagedMultiplexer {
       changed = true
     }
     return changed
+  }
+
+  /**
+   * Shows each session's Workshop Labels in the runtime, so its own UI can render them. A session belongs to the
+   * Workshop its claim names, else to the Workshop at its path, as the session's row does. Idempotent: only
+   * differences are written, so it runs on every observation and repairs what a cold restart dropped. Presentation
+   * only; a session that fails is left for the next pass.
+   */
+  async mirrorWorkshopLabels(snapshot: MultiplexerSnapshot): Promise<number> {
+    if (!this.adapter.showLabels || !snapshot.sessions.length) return 0
+    const labels = allWorkshopLabels(this.workshopStatePath)
+    const byPath = new Map(listWorkshopRecords(this.workshopStatePath).map((workshop) => [workshop.canonicalPath, workshop.workshopId]))
+    let written = 0
+    for (const session of snapshot.sessions) {
+      const workshopId = session.workshopId ?? (session.path ? byPath.get(canonicalPath(session.path)) : undefined)
+      const wanted = visibleLabels(workshopId ? labels.get(workshopId) : undefined)
+      // A session that never showed labels and has none to show costs nothing.
+      if (!Object.keys(wanted).length && !Object.keys(session.shownLabels ?? {}).length) continue
+      try {
+        if (await this.adapter.showLabels(sessionLocation(session.id), wanted, session.shownLabels)) written += 1
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        if (this.labelFailures.get(session.id) !== detail) console.error(`Unable to show Workshop labels on ${this.kind} session ${session.id}: ${detail}`)
+        this.labelFailures.set(session.id, detail)
+        continue
+      }
+      this.labelFailures.delete(session.id)
+    }
+    return written
   }
 
   async resolve(target: MultiplexerTarget): Promise<MultiplexerLocation | undefined> {

@@ -45,6 +45,32 @@ const TOKEN_VALUE_LIMIT = 80
 const pathLikeKeys = new Set<ClaimKey>(["worktreePath", "directoryPath", "gitCommonDir", "clankerSocket"])
 const claimKeyByToken = new Map(Object.entries(tokenNames).map(([key, token]) => [token, key as ClaimKey]))
 
+/**
+ * Workshop Labels as workspace tokens, for `$lbl_<key>` and `$labels` in Herdr's Space sidebar rows. One report may
+ * mention 16 tokens and a workspace keeps 32, so at most 15 keys get their own token, beside `labels`, which holds
+ * every visible value. A key too long for a token name has only the aggregate.
+ */
+export const HERDR_LABEL_TOKEN_PREFIX = "lbl_"
+export const HERDR_LABELS_TOKEN = "labels"
+export const HERDR_LABEL_TOKEN_LIMIT = 15
+const tokenNamePattern = /^[A-Za-z0-9_-]{1,32}$/
+const isLabelToken = (token: string) => token === HERDR_LABELS_TOKEN || token.startsWith(HERDR_LABEL_TOKEN_PREFIX)
+
+export const herdrLabelTokens = (labels: Readonly<Record<string, string>>): Record<string, string> => {
+  const entries = Object.entries(labels).toSorted(([left], [right]) => left.localeCompare(right))
+  const tokens: Record<string, string> = {}
+  for (const [key, value] of entries) {
+    const token = `${HERDR_LABEL_TOKEN_PREFIX}${key}`
+    if (Object.keys(tokens).length >= HERDR_LABEL_TOKEN_LIMIT) break
+    if (tokenNamePattern.test(token) && value) tokens[token] = value.slice(0, TOKEN_VALUE_LIMIT)
+  }
+  const all = entries.map(([, value]) => value).filter(Boolean).join(" ").slice(0, TOKEN_VALUE_LIMIT).trim()
+  if (all) tokens[HERDR_LABELS_TOKEN] = all
+  return tokens
+}
+
+const labelTokensOf = (tokens: Record<string, string> | undefined) => Object.fromEntries(Object.entries(tokens ?? {}).filter(([token]) => isLabelToken(token)))
+
 export const herdrSocketPath = (env: Record<string, string | undefined> = Bun.env) => {
   if (env.HERDR_SOCKET_PATH) return env.HERDR_SOCKET_PATH
   const configHome = env.XDG_CONFIG_HOME || join(env.HOME || "", ".config")
@@ -298,6 +324,7 @@ export class HerdrAdapter implements Multiplexer {
         parentWorkshopId: claims.workshopParentId || undefined,
         resourceId: claims.sessionId,
         displayName: workspace.label || undefined,
+        shownLabels: labelTokensOf(workspace.tokens),
         windows,
       })
     }
@@ -522,6 +549,20 @@ export class HerdrAdapter implements Multiplexer {
     const info = await this.request("workspace.get", { workspace_id: location.nativeSessionId }) as { workspace: HerdrWorkspace }
     if (key === "sessionDisplayName") return info.workspace.label || undefined
     return claimsFromTokens(info.workspace.tokens)[key]
+  }
+
+  /** Patches only the label tokens that differ from `shown`, clearing the ones no longer wanted, at most 16 per report. */
+  async showLabels(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined) {
+    const wanted = herdrLabelTokens(labels)
+    const current = labelTokensOf(shown)
+    const patch: Array<[string, string | null]> = [
+      ...Object.entries(wanted).filter(([token, value]) => current[token] !== value),
+      ...Object.keys(current).filter((token) => !(token in wanted)).map((token): [string, null] => [token, null]),
+    ]
+    for (let start = 0; start < patch.length; start += 16) {
+      await this.request("workspace.report_metadata", { workspace_id: location.nativeSessionId, source: this.source, tokens: Object.fromEntries(patch.slice(start, start + 16)) })
+    }
+    return patch.length > 0
   }
 
   /** Mirror an attested Clankerhouse lifecycle state into herdr so its own UI agrees. */

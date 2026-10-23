@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { rmSync } from "node:fs"
 import { HERDR_MIN_PROTOCOL, HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrRequest, herdrSocketPath } from "./herdr"
 import { MultiplexerResourceExhaustedError, paneLocation, sessionLocation, windowLocation } from "./interface"
 
@@ -197,6 +198,28 @@ describe("herdr multiplexer adapter", () => {
       protocol = HERDR_MIN_PROTOCOL - 1
       await expect(adapter.available()).rejects.toThrow(/older than the supported minimum/)
     } finally { server.stop(true) }
+  })
+
+  test("keeps the instance id across a server restart but changes the server epoch", async () => {
+    const path = `/tmp/clankerhouse-herdr-epoch-${process.pid}.sock`
+    const listen = () => Bun.listen({ unix: path, socket: { data(socket) { socket.write(`${JSON.stringify({ id: "1", result: { type: "pong", protocol: 22 } })}\n`) } } })
+    const adapter = new HerdrAdapter({ socketPath: path })
+    let server = listen()
+    try {
+      const instance = await adapter.instanceId()
+      const first = await adapter.serverEpoch()
+      expect(first).toBeString()
+      expect(await adapter.serverEpoch()).toBe(first)
+      server.stop(true)
+      rmSync(path, { force: true })
+      expect(await adapter.serverEpoch()).toBeUndefined()
+      await Bun.sleep(5)
+      server = listen()
+      const second = await adapter.serverEpoch()
+      expect(second).toBeString()
+      expect(second).not.toBe(first)
+      expect(await adapter.instanceId()).toBe(instance)
+    } finally { server.stop(true); rmSync(path, { force: true }) }
   })
 
   test("resolves the socket path from the environment", () => {

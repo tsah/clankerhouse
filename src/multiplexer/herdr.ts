@@ -2,7 +2,7 @@
  * herdr Multiplexer Adapter. All herdr vocabulary (workspace, tab, pane, tokens, the
  * NDJSON socket) lives here. Mapping: workspace → session, tab → window, pane → pane.
  */
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
 import {
@@ -143,6 +143,15 @@ export class HerdrAdapter implements Multiplexer {
   }
 
   async instanceId() { return `herdr:${this.socketPath}` }
+
+  /** herdr reports no server pid or start time, but every server start binds its API socket afresh, so the socket file's identity marks the running server. */
+  async serverEpoch() {
+    if (!await this.available()) return undefined
+    try {
+      const socket = statSync(this.socketPath)
+      return `herdr:${this.socketPath}:${socket.dev}:${socket.ino}:${Math.round(socket.ctimeMs)}`
+    } catch { return undefined }
+  }
 
   private touch(id: string, revision?: number) {
     const now = Math.floor(Date.now() / 1000)

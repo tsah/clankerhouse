@@ -22,7 +22,7 @@ Clankerhouse adds herdr as a second Multiplexer Adapter. To make that possible a
 
 Every Adapter implements, in Clankerhouse domain operations and without exposing native command syntax:
 
-- `instance()` — a Multiplexer instance identity that changes when the runtime restarts.
+- `instance()` — the Multiplexer instance identity that scopes Multiplexer Locations; with `durableIds` it survives a runtime restart. A separate optional server epoch changes on every restart and drives Recovery's `multiplexer_restart` trigger; under herdr it is the identity of the freshly bound API socket file, since herdr reports no server pid or start time.
 - `observe()` — the current topology as opaque native session, window, and pane ids with cwd, foreground command, title, active flags, and the Adapter's identity-claim metadata.
 - `changes()` — a Change Stream of topology and focus events. An Adapter may synthesize it by polling; consumers never poll the runtime themselves.
 - `spawn({ scope, cwd, env, launch })` — create a session, window, or pane at a cwd with injected environment, returning native ids. `launch` is either an interactive shell or an argv; the Adapter reports which it supports.

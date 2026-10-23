@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { advanceRecoveryCampaign, reconcileRecovery, startRecoveryCampaign } from "./controller"
+import { advanceRecoveryCampaign, reconcileRecovery, RecoveryController, startRecoveryCampaign } from "./controller"
 import { openRecoveryStore } from "./store"
 import type { ManagedMultiplexer } from "../multiplexer"
 import type { ClaimKey, MultiplexerSession, NativeLocation, SpawnRequest } from "../multiplexer/interface"
@@ -75,5 +75,31 @@ describe("recovery reconciliation", () => {
     expect(result.skipped.every((row) => row.reason === "manual resume required")).toBe(true)
     expect(store.listDesired().every((row) => row.recoveryCondition === "pending")).toBe(true)
     store.close()
+  })
+
+  test("a Multiplexer server restart advances the multiplexer epoch once", async () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-server-epoch-")); roots.push(root)
+    const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })
+    let epoch: string | undefined = "server-a"
+    const multiplexer = {
+      kind: "herdr",
+      serverEpoch: async () => epoch,
+      observe: async () => ({ kind: "herdr", instanceId: "herdr:/stable.sock", sessions: [] }),
+    } as unknown as ManagedMultiplexer
+    const controller = new RecoveryController(store, 10, multiplexer)
+    try {
+      await controller.run({ once: true })
+      expect(store.getMetadata<string>("runtime.server_epoch")).toBe("server-a")
+      expect(store.runtimeEpochs().multiplexerEpoch).toBe(0)
+      epoch = undefined
+      await controller.run({ once: true })
+      expect(store.runtimeEpochs().multiplexerEpoch).toBe(0)
+      epoch = "server-b"
+      await controller.run({ once: true })
+      expect(store.getMetadata<string>("runtime.server_epoch")).toBe("server-b")
+      expect(store.runtimeEpochs().multiplexerEpoch).toBe(1)
+      await controller.run({ once: true })
+      expect(store.runtimeEpochs().multiplexerEpoch).toBe(1)
+    } finally { store.close() }
   })
 })

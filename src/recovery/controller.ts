@@ -208,12 +208,9 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
 
 export const controllerIdentity = (): ProcessIdentity => ({ bootId: linuxBootId(), pid: process.pid, processStartTicks: processStartTicks() })
 
-/** Runtime instance epoch: the Multiplexer instance id, which changes only when a different runtime instance serves Clankerhouse. */
+/** Multiplexer server epoch, which changes on every runtime restart even though durable native ids and Locations survive it. */
 const runtimeServerEpoch = async (multiplexer: ManagedMultiplexer) => {
-  try {
-    if (!await multiplexer.available()) return undefined
-    return await multiplexer.instanceId()
-  } catch { return undefined }
+  try { return await multiplexer.serverEpoch() } catch { return undefined }
 }
 
 export interface RecoveryCampaign {

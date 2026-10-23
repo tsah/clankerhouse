@@ -52,6 +52,10 @@ export class ManagedMultiplexer {
 
   capabilities() { return this.adapter.capabilities() }
   instanceId() { return this.adapter.instanceId() }
+  async serverEpoch() {
+    if (this.adapter.serverEpoch) return this.adapter.serverEpoch()
+    return await this.adapter.available() ? this.adapter.instanceId() : undefined
+  }
   observe(options?: ObserveOptions) { return this.adapter.observe(options) }
   currentLocation() { return this.adapter.currentLocation() }
   spawn(request: SpawnRequest) { return this.adapter.spawn(request) }

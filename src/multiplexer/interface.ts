@@ -155,8 +155,10 @@ export interface MultiplexerChange {
 export interface Multiplexer {
   readonly kind: MultiplexerKind
   capabilities(): MultiplexerCapabilities
-  /** Identity of the running runtime instance; a restart may or may not change it depending on `durableIds`. */
+  /** Identity of the runtime instance that scopes Multiplexer Locations; with `durableIds` it survives a restart. */
   instanceId(): Promise<string>
+  /** Identity of the running server process, which changes on every runtime restart; undefined when the runtime is unreachable. Defaults to `instanceId()`. */
+  serverEpoch?(): Promise<string | undefined>
   /** `processInfo: false` lets a runtime that pays per pane for process facts skip them; pane `processInfo`, `pid`, and `command` may then be empty. */
   observe(options?: ObserveOptions): Promise<MultiplexerSnapshot>
   /** Change Stream. May be synthesized by polling. Ends when the signal aborts. */

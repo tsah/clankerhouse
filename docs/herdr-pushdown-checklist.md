@@ -33,9 +33,10 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   restored after a cold server restart. Confirm Clankerhouse rewrites workspace and pane
   claims afterwards; fix if not. Confirmed lost; reconciliation now restores Workshop
   and Terminal claims from the registry. Clanker claims are left to Recovery.
-- [ ] **F8** Herdr 0.9.3 → 0.9.5 (survives process/thread exhaustion, atomic saves,
+- [x] **F8** Herdr 0.9.3 → 0.9.5 (survives process/thread exhaustion, atomic saves,
   SIGHUP no longer stops the server). Verify the suite against 0.9.5; upgrade the binary
-  only after F1 is deployed.
+  only after F1 is deployed. Verified: the full suite and qa-herdr/qa-recovery pass on
+  0.9.5. Upgrading the live binary is a deploy step for the operator.
 
 ## Push down into Herdr
 

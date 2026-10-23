@@ -8,25 +8,27 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
 
 ## Fixes
 
-- [ ] **F1** Herdr protocol gate. `HERDR_PROTOCOL = 20` but live Herdr answers 22, so
+- [x] **F1** Herdr protocol gate. `HERDR_PROTOCOL = 20` but live Herdr answers 22, so
   `available()` throws and `runtimeServerEpoch()` (`src/recovery/controller.ts`) always
   returns undefined. Gate on supported methods/capabilities or a protocol range instead of
   one exact number.
-- [ ] **F2** Real Multiplexer instance epoch. `instanceId()` is the socket path, which
+- [x] **F2** Real Multiplexer instance epoch. `instanceId()` is the socket path, which
   never changes across a Herdr restart, so the Recovery `multiplexer_restart` trigger and
   `advanceMultiplexerEpoch()` can never fire even with F1 fixed.
 - [ ] **F3** `HerdrAdapter.reportAgentState` is dead code while ADR-0007 says attested
   state is mirrored into Herdr. Resolved by P1 (wire it) or delete it and fix the ADR.
-- [ ] **F4** Herdr status changes do not reach the daemon: it never subscribes to
+- [x] **F4** Herdr status changes do not reach the daemon: it never subscribes to
   `pane.agent_status_changed`, and Herdr emits no `pane.updated` on status change, so
   unhooked panes (Codex) lag until the 15 s poll.
-- [ ] **F5** README says Codex reports through its own hooks; nothing installs them, so
+- [x] **F5** README says Codex reports through its own hooks; nothing installs them, so
   Codex state is Herdr screen detection only. Correct the docs.
+  Landed: Codex is documented as Herdr-observed; `wait`/`watch` have no Codex turns.
 - [ ] **F6** The installer sets `resume_agents_on_restore = false` globally, disabling
   Herdr restore for unmanaged panes too. Resolved by P5.
-- [ ] **F7** Verify: Herdr documents that token metadata (all `ch_*` claims) is not
+- [x] **F7** Verify: Herdr documents that token metadata (all `ch_*` claims) is not
   restored after a cold server restart. Confirm Clankerhouse rewrites workspace and pane
-  claims afterwards; fix if not.
+  claims afterwards; fix if not. Confirmed lost; reconciliation now restores Workshop
+  and Terminal claims from the registry. Clanker claims are left to Recovery.
 - [ ] **F8** Herdr 0.9.3 → 0.9.5 (survives process/thread exhaustion, atomic saves,
   SIGHUP no longer stops the server). Verify the suite against 0.9.5; upgrade the binary
   only after F1 is deployed.
@@ -57,13 +59,20 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   `scripts/install --integrations` installs the Herdr integration.
 - [ ] **P8** Exit detection (`.exited` marks, `alive`) → `pane.release_agent`, Herdr's
   shell-prompt release, `pane.exited`.
-- [ ] **P9** Herdr config surgery in `clankerhouse-install-herdr` → a Herdr plugin
+- [-] **P9** Herdr config surgery in `clankerhouse-install-herdr` → a Herdr plugin
   (`herdr-plugin.toml`: popup panes, actions bound with `plugin_action`, startup hook).
+  Declined (Herdr 0.9.5 spike): a manifest cannot declare keybindings, so `config.toml`
+  must still be edited; plugin popups lose `HERDR_ACTIVE_*` (context only in
+  `HERDR_PLUGIN_CONTEXT_JSON`); `herdr plugin install` takes GitHub shorthand only and
+  `plugin link` skips build steps. The plugin would add a layer without removing the edit.
 - [ ] **P10** Show Labels (`stage`, `title`, ...) in Herdr's sidebar via workspace tokens.
 - [ ] **P11** Attention: `notification.show` for blocked/question Reports and an
   `agent.view.set` view of a Workshop's children.
-- [ ] **P12** `post-create` → plugin `worktree.created` event hook. Only with P13.
-- [ ] **P13** Evaluate replacing Worktrunk + warm pool + `worktree-delete` with Herdr
-  `worktree.*`.
-- [ ] **P14** Stop fetching `pane.process_info` for every pane on every observation;
+- [-] **P12** `post-create` → plugin `worktree.created` event hook. Only with P13.
+  Declined with P13; Herdr event hooks are also unordered, unlimited and unapproved.
+- [-] **P13** Evaluate replacing Worktrunk + warm pool + `worktree-delete` with Herdr
+  `worktree.*`. Declined: `worktree.create` is a plain `git worktree add` with no
+  templated paths, no create hooks, and no warm checkout; `worktree.remove` lacks
+  `worktree-delete`'s safety and default-branch handling. Keep Worktrunk and the pool.
+- [x] **P14** Stop fetching `pane.process_info` for every pane on every observation;
   `session.snapshot` already carries `agent` and `foreground_cwd`.

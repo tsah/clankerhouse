@@ -38,6 +38,9 @@ cat > "$fake_bin/systemctl" <<'SH'
 printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
 exit 0
 SH
+# Herdr's OpenCode integration is installed only where OpenCode is on PATH.
+printf '#!/bin/sh\nexit 0\n' > "$fake_bin/opencode"
+chmod 755 "$fake_bin/opencode"
 chmod 755 "$fake_bin/systemctl"
 cat > "$root/fail-preflight" <<'SH'
 #!/bin/sh
@@ -153,6 +156,7 @@ new_pid=$(<"$state_dir/server.pid")
 [[ -L "$home/.pi/agent/extensions/clanker-lifecycle.ts" ]]
 [[ "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" == "$active/integrations/pi/clanker-lifecycle.ts" ]]
 [[ -L "$home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
+if command -v herdr >/dev/null 2>&1; then [[ -f "$home/.config/opencode/plugins/herdr-agent-state.js" ]]; fi
 [[ -L "$home/.agents/skills/clanker-coordination" ]]
 [[ -L "$home/.claude/skills/clanker-coordination" ]]
 [[ -L "$home/.codex/skills/clanker-coordination" ]]

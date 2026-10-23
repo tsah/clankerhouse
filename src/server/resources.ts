@@ -40,19 +40,6 @@ export interface MuxWindow {
   agentStatus?: { agent?: string; status: RuntimeAgentStatus }
 }
 
-export interface OpencodeStatus {
-  directory: string
-  status: string
-  detail: string
-  title: string
-  age: string
-  session: string
-  pane: string
-  updatedAt: number
-  stablePane: string
-  harnessSessionId?: string
-}
-
 export interface DirectoryRow {
   path: string
   source: DirectorySource

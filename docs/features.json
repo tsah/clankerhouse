@@ -13,7 +13,6 @@
       "unit": [
         "src/server/project.test.ts",
         "src/server/observations.test.ts",
-        "src/server/opencode.test.ts",
         "src/model.test.ts",
         "src/diagnostics.test.ts",
         "src/activity.test.ts",
@@ -32,7 +31,7 @@
         "Confirm each exact target and Workshop appears once",
         "Confirm status-bearing rows (including blue idle checkmarks) rank ahead of neutral grey-orb rows, with last-seen ordering within each group, contiguous lineage, and the current session pinned nearest the prompt",
         "Give a directory or shell newer activity than an idle Clanker; confirm its grey orb remains farther from the prompt, including among siblings and when a status-bearing lineage is collapsed",
-        "Confirm OpenCode panes reflect their exact selected service session, including active forms and permissions",
+        "Confirm OpenCode panes reflect Herdr's runtime agent status, including blocked on forms and permissions when Herdr's OpenCode integration is installed",
         "Confirm detected processes and rejected lifecycle reports remain visible without becoming managed Clankers"
       ]
     },

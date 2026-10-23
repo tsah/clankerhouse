@@ -50,8 +50,10 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   `resume_agents_on_restore`. Caveat: Herdr resumes only after a client attaches.
 - [ ] **P6** `/proc` harness discovery (`src/server/process-discovery.ts`) → pane
   `agent` field and `pane.agent_detected`.
-- [ ] **P7** OpenCode service polling (`src/server/opencode.ts`) → Herdr's OpenCode
-  integration (pane-local lifecycle, V2 support).
+- [x] **P7** OpenCode service polling (`src/server/opencode.ts`) → Herdr's OpenCode
+  integration (pane-local lifecycle, V2 support). State is Herdr runtime status; the
+  Clankerhouse plugin keeps identity/Recovery binding and attested owned-session reports.
+  `scripts/install --integrations` installs the Herdr integration.
 - [ ] **P8** Exit detection (`.exited` marks, `alive`) → `pane.release_agent`, Herdr's
   shell-prompt release, `pane.exited`.
 - [ ] **P9** Herdr config surgery in `clankerhouse-install-herdr` → a Herdr plugin

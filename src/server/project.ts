@@ -2,10 +2,10 @@ import type { ActivitySource } from "../activity"
 import { applyResourceIncidents, type ResourceIncident } from "../incidents"
 import { labelTags, projectName } from "../labels"
 import { compareProjectedSessions, stateWithSeen } from "../model"
-import type { ClankerState, DetailRow, RuntimeObservation, SessionRow } from "../model"
+import type { DetailRow, RuntimeObservation, SessionRow } from "../model"
 import type { ResourceRecord } from "../resource-registry"
 import { attachmentCandidatesFromWorkshops, type LineageSnapshot } from "../workshop"
-import type { ClankerReport, DirectoryRow, OpencodeStatus, MuxSession, MuxWindow } from "./resources"
+import type { ClankerReport, DirectoryRow, MuxSession, MuxWindow } from "./resources"
 import { reconcileClankerObservations, type LifecycleObservation, type OwnedClankerIdentity } from "./observations"
 
 export interface GitMeta {
@@ -20,7 +20,6 @@ export type ProjectEffect =
 export interface ProjectInputs {
   sessions: readonly MuxSession[]
   windows: readonly MuxWindow[]
-  opencodes: readonly OpencodeStatus[]
   directories: readonly DirectoryRow[]
   clankerReports: readonly LifecycleObservation[]
   seen: ReadonlyMap<string, number>
@@ -28,7 +27,6 @@ export interface ProjectInputs {
   incidents: readonly ResourceIncident[]
   gitMetaByPath: ReadonlyMap<string, GitMeta>
   detectedHarnessByPane: ReadonlyMap<string, "pi" | "claude" | "codex" | "opencode">
-  activeOpenCodeSessions?: ReadonlySet<string>
   codexPanes: ReadonlySet<string>
   managedResources: ReadonlyMap<string, ResourceRecord>
   observedAt: number
@@ -64,24 +62,6 @@ const ownedClankerIdentity = (window: MuxWindow): OwnedClankerIdentity | undefin
   ? { pane: window.pane, clankerId: window.clankerId, harness: window.explicitHarness!, harnessSessionId: window.harnessSessionId, recoveryAttemptId: window.recoveryAttemptId }
   : undefined
 
-const clankerStateFromStatus = (status: string, detail = ""): ClankerState => {
-  const normalized = status.trim().toLowerCase()
-  const normalizedDetail = detail.trim().toLowerCase()
-  if (!normalized) return "unknown"
-  if (["done", "complete", "completed", "success", "succeeded"].includes(normalized)) return "done"
-  if (normalized === "idle") return "idle"
-  if (normalized === "waiting question") return "blocked"
-  if (normalized.includes("tool running") && ["question", "permission", "approval"].some((word) => normalizedDetail.includes(word))) return "blocked"
-  if (["error", "failed", "failure", "blocked", "input", "attention", "confirm", "review", "question", "permission", "approval"].some((word) => normalized.includes(word))) return "blocked"
-  if (["running", "generating", "streaming", "working"].some((word) => normalized.includes(word))) return "working"
-  return "unknown"
-}
-
-const opencodeState = (opencode: OpencodeStatus) => {
-  const state = clankerStateFromStatus(opencode.status, opencode.detail)
-  return !opencode.updatedAt && state === "done" ? "idle" : state
-}
-
 const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | null, childWorkshopCount = 0) => {
   const label = [parentWorkshopId ? "↖" : "", childWorkshopCount > 0 ? `⇣${childWorkshopCount}` : ""].filter(Boolean).join(" ")
   const searchText = [workshopId, parentWorkshopId || "", childWorkshopCount > 0 ? `child-count-${childWorkshopCount}` : "root"].filter(Boolean).join(" ")
@@ -89,9 +69,8 @@ const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | nul
 }
 
 export const projectResources = (inputs: ProjectInputs): ProjectResult => {
-  const { sessions, windows, opencodes, directories, clankerReports, lineage, incidents, gitMetaByPath, detectedHarnessByPane, codexPanes, observedAt, instanceId, home } = inputs
+  const { sessions, windows, directories, clankerReports, lineage, incidents, gitMetaByPath, detectedHarnessByPane, codexPanes, observedAt, instanceId, home } = inputs
   const multiplexerKind = inputs.multiplexerKind ?? "herdr"
-  const activeOpenCodeSessions = inputs.activeOpenCodeSessions ?? new Set<string>()
   const seen = new Map(inputs.seen)
   const effects: ProjectEffect[] = []
   const windowsBySession = Map.groupBy(windows, (window) => window.sessionId)
@@ -125,8 +104,6 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
 
   for (const session of sessions) {
     const sessionWindows = windowsBySession.get(session.id) ?? []
-    const sessionPaneIds = new Set(sessionWindows.map((window) => window.pane))
-    const sessionOpencodes = opencodes.filter((row) => row.stablePane ? sessionPaneIds.has(row.stablePane) : row.session === session.name)
     const managedSession = managedAt(session.resourceId, "session", session.id)
     const sessionManaged = Boolean(managedSession)
     const workshop = managedSession?.workshopId
@@ -138,33 +115,11 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const meta = gitMetaByPath.get(sessionPath) ?? { branch: "", flags: "" }
     const details: DetailRow[] = []
 
-    const opencodesByWindow = Map.groupBy(sessionOpencodes, (opencode) => {
-      if (opencode.stablePane) return sessionWindows.find((window) => window.pane === opencode.stablePane)?.id ?? ""
-      const prefix = `${opencode.session}:`
-      const windowIndex = opencode.pane.startsWith(prefix) ? opencode.pane.slice(prefix.length).split(".")[0] : ""
-      return sessionWindows.find((window) => window.index === windowIndex)?.id ?? ""
-    })
-
     for (const window of sessionWindows) {
       const focused = session.attached && window.active
-      const windowOpencodes = opencodesByWindow.get(window.id) ?? []
       const managedTerminal = managedAt(window.terminalId, "terminal", session.id, window.id, window.pane)
       const terminalManaged = Boolean(managedTerminal)
       const location = { kind: multiplexerKind, instanceId: instanceId, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: window.pane }
-      for (const opencode of windowOpencodes) {
-        if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
-        const completionKey = paneCompletionKey(instanceId, opencode.stablePane || window.pane || opencode.pane)
-        const sourceState = opencodeState(opencode)
-        const state = stateWithSeen(sourceState, opencode.updatedAt, seen.get(completionKey), focused)
-        if (sourceState === "done" && focused) {
-          effects.push({ type: "markSeen", key: completionKey, seenAt: observedAt })
-          seen.set(completionKey, observedAt)
-        }
-        const clankerId = opencode.harnessSessionId && opencode.harnessSessionId === window.harnessSessionId ? window.clankerId : undefined
-        details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || window.name || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || window.pane || opencode.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, completionKey, updatedAt: opencode.updatedAt, terminalId: managedTerminal?.id, clankerId, observation: { source: "lifecycle", confidence: clankerId ? "attested" : "observed", state: sourceState, observedAt: opencode.updatedAt } })
-      }
-      if (windowOpencodes.length > 0) continue
-
       const registeredIdentity = ownedClankerIdentity(window)
       const registeredHarness = registeredIdentity?.harness
       const runtimeHarness = window.agentStatus?.agent && supportedHarnesses.has(window.agentStatus.agent) ? window.agentStatus.agent : undefined
@@ -181,10 +136,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const projectedHarness = registeredHarness ?? observedHarness
       if (matchingReport?.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: matchingReport.updatedAt, minIntervalMs: 0 })
       const runtimeState = runtimeHarness ? window.agentStatus?.status : undefined
-      const registeredFallback = registeredHarness === "opencode" && window.harnessSessionId && activeOpenCodeSessions.has(window.harnessSessionId)
-        ? "working"
-        : "unknown"
-      const sourceState = matchingReport?.state ?? observedReport?.state ?? runtimeState ?? registeredFallback
+      const sourceState = matchingReport?.state ?? observedReport?.state ?? runtimeState ?? "unknown"
       const updatedAt = matchingReport?.updatedAt ?? observedReport?.updatedAt ?? window.activity * 1000
       const completionKey = projectedKind === "window" ? windowCompletionKey(instanceId, window.id) : paneCompletionKey(instanceId, window.pane)
       const state = stateWithSeen(sourceState, updatedAt, seen.get(completionKey), focused)
@@ -222,18 +174,10 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       }
     }
 
-    for (const opencode of opencodesByWindow.get("") ?? []) {
-      if (opencode.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: opencode.updatedAt, minIntervalMs: 0 })
-      const completionKey = paneCompletionKey(instanceId, opencode.stablePane || opencode.pane)
-      const sourceState = opencodeState(opencode)
-      const state = stateWithSeen(sourceState, opencode.updatedAt, seen.get(completionKey))
-      details.push({ kind: "clanker", harness: "opencode", status: opencode.status, detail: opencode.detail, title: opencode.title || opencode.directory, age: opencode.age, state, target: { type: "opencode", session: opencode.session, pane: opencode.stablePane || opencode.pane }, completionKey, updatedAt: opencode.updatedAt, observation: { source: "lifecycle", confidence: "observed", state: sourceState, observedAt: opencode.updatedAt } })
-    }
-
     if (details.length === 0) details.push({ kind: "session", status: meta.flags, detail: "", title: sessionPath, age: ageFromTimestamp(session.recency * 1000, observedAt), state: "unknown", target: { type: "session", session: session.name, management: sessionManaged ? "managed" : "unmanaged", resourceId: sessionManaged ? session.resourceId : undefined, location: sessionLocation }, updatedAt: 0 })
 
     const markers = [
-      sessionOpencodes.length > 0 || sessionWindows.some((window) => window.agentStatus?.agent === "opencode" || detectedHarnessByPane.get(window.pane) === "opencode") ? "oc" : "",
+      sessionWindows.some((window) => window.agentStatus?.agent === "opencode" || detectedHarnessByPane.get(window.pane) === "opencode") ? "oc" : "",
       sessionWindows.some((window) => isPiWindow(window) || window.agentStatus?.agent === "pi" || detectedHarnessByPane.get(window.pane) === "pi") ? "pi" : "",
       sessionWindows.some((window) => isClaudeWindow(window) || window.agentStatus?.agent === "claude" || detectedHarnessByPane.get(window.pane) === "claude") ? "C" : "",
       sessionWindows.some((window) => codexPanes.has(window.pane) || window.agentStatus?.agent === "codex" || detectedHarnessByPane.get(window.pane) === "codex") ? "codex" : "",
@@ -249,10 +193,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     rows.push(row)
   }
 
-  const occupiedDirs = new Set([
-    ...rows.map((row) => expandHome(row.path, home)),
-    ...opencodes.map((row) => expandHome(row.directory.replace(/ \([0-9]+\)$/, ""), home)),
-  ])
+  const occupiedDirs = new Set(rows.map((row) => expandHome(row.path, home)))
   const occupiedWorkshopIds = new Set(rows.flatMap((row) => row.workshopId ? [row.workshopId] : []))
   for (const directory of directories) {
     const path = expandHome(directory.path, home)

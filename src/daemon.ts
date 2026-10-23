@@ -34,8 +34,7 @@ import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
 import { submitMutation } from "./transport"
 import type { MutationExecution, MutationExecutor } from "./transport/operations"
 import { createProcessDiscoveryProvider } from "./server/process-discovery"
-import type { ForegroundAgentDiscovery, ForegroundAgentHarness } from "./server/process-discovery"
-import { collectOpenCodeService, invalidateOpenCodeServiceState } from "./server/opencode"
+import type { ForegroundAgentHarness } from "./server/process-discovery"
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
 import { isCodexWindow, projectResources } from "./server/project"
@@ -384,26 +383,23 @@ const collectSessions = Effect.all([
       Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }),
       Effect.forEach(
         multiplexer.windows,
-        (window): Effect.Effect<readonly [string, ForegroundAgentDiscovery | undefined, ForegroundAgentHarness | undefined], Error> => {
+        (window): Effect.Effect<readonly [string, ForegroundAgentHarness | undefined], Error> => {
           const discovery = processDiscovery.discover(Number(window.pid))
-          if (discovery) return Effect.succeed([window.pane, discovery, discovery.harness] as const)
-          if (isCodexWindow(window)) return Effect.succeed([window.pane, undefined, "codex"] as const)
-          return Effect.succeed([window.pane, undefined, undefined] as const)
+          if (discovery) return Effect.succeed([window.pane, discovery.harness] as const)
+          if (isCodexWindow(window)) return Effect.succeed([window.pane, "codex"] as const)
+          return Effect.succeed([window.pane, undefined] as const)
         },
         { concurrency: 8 },
       ),
     ], { concurrency: "unbounded" }).pipe(Effect.flatMap(([resources, gitMetas, harnessDetections]) => {
       const detectedHarnessByPane = new Map<string, ForegroundAgentHarness>()
-      const discoveriesByPane = new Map<string, ForegroundAgentDiscovery>()
-      for (const [pane, discovery, harness] of harnessDetections) {
-        if (discovery) discoveriesByPane.set(pane, discovery)
+      for (const [pane, harness] of harnessDetections) {
         if (harness) detectedHarnessByPane.set(pane, harness)
       }
-      return Effect.promise(() => collectOpenCodeService(resources.windows, discoveriesByPane)).pipe(Effect.map((opencodes) => {
+      return Effect.sync(() => {
         const projection = projectResources({
           sessions: resources.sessions,
           windows: resources.windows,
-          opencodes,
           directories,
           clankerReports,
           seen,
@@ -420,7 +416,7 @@ const collectSessions = Effect.all([
         })
         for (const effect of projection.effects) applyProjectEffect(effect)
         return projection.sessions
-      }))
+      })
     }))
   }),
 )
@@ -541,7 +537,6 @@ const ingestLifecycleObservation = (report: import("./transport").ObservationRep
   if (!parsed) return false
   const previous = liveLifecycleReports.get(parsed.pane)
   liveLifecycleReports.set(parsed.pane, parsed)
-  if (parsed.harness === "opencode") invalidateOpenCodeServiceState()
 
   mkdirSync(clankerStateDir, { recursive: true, mode: 0o700 })
   const target = `${clankerStateDir}/${report.pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`

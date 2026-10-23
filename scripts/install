@@ -204,6 +204,12 @@ if [[ "$with_integrations" == true ]]; then
         destination="$skill_root/clanker-coordination"
         install_symlink "$active/integrations/skills/clanker-coordination" "$destination"
     done
+    # OpenCode state comes from Herdr's pane-local OpenCode reporter (ADR-0006), which Herdr
+    # owns and keeps current; without it Herdr falls back to screen detection.
+    if command -v herdr >/dev/null 2>&1 && { command -v opencode >/dev/null 2>&1 || command -v opencode2 >/dev/null 2>&1; }; then
+        herdr integration install opencode >/dev/null \
+            || echo "Warning: herdr OpenCode integration install failed; OpenCode state falls back to Herdr screen detection" >&2
+    fi
 fi
 
 if [[ "$with_herdr" == true ]]; then

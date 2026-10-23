@@ -36,7 +36,6 @@ const muxWindow = (overrides: Partial<MuxWindow> = {}): MuxWindow => ({
 const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   sessions: [],
   windows: [],
-  opencodes: [],
   directories: [],
   clankerReports: [],
   seen: new Map(),
@@ -145,64 +144,45 @@ describe("session resource projection", () => {
     expect(seen.size).toBe(0)
   })
 
-  test("associates OpenCode panes, suppresses duplicate window details, and preserves ready state", () => {
+  test("projects an OpenCode pane from Herdr runtime status without a service correlation", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow()],
-      opencodes: [{ directory: "/tmp/work", status: "completed", detail: "", title: "reviewer", age: "5s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_690_000, stablePane: "%1" }],
+      windows: [muxWindow({ command: "opencode2", agentStatus: { agent: "opencode", status: "blocked" } })],
     }))
 
     expect(result.sessions[0]?.markers).toEqual(["oc"])
     expect(result.sessions[0]?.details).toHaveLength(1)
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", title: "reviewer", state: "done", target: { type: "opencode", pane: "%1" } })
-    expect(result.effects).toEqual([{ type: "markDirectoryActivity", path: "/tmp/work", source: "clanker", updatedAt: 3_690_000, minIntervalMs: 0 }])
-  })
-
-  test("projects a bound active OpenCode root session as working", () => {
-    const result = projectResources(inputs({
-      sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-stale", harnessSessionId: "session-stale" })],
-      opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
-    }))
-
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", state: "working", title: "active task" })
+    expect(result.sessions[0]?.details[0]).toMatchObject({
+      kind: "observation",
+      harness: "opencode",
+      status: "runtime blocked",
+      state: "blocked",
+      target: { type: "window", pane: "%1" },
+      observation: { source: "runtime", confidence: "observed", state: "blocked", observedAt },
+    })
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 
-  test("retains OpenCode ownership when the projected root matches pane metadata", () => {
-    const result = projectResources(inputs({
-      sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-current", harnessSessionId: "session-root" })],
-      opencodes: [{ directory: "/tmp/work", status: "generating", detail: "session running", title: "active task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1", harnessSessionId: "session-root" }],
-    }))
-
-    expect(result.sessions[0]?.details[0]?.clankerId).toBe("clanker-current")
-  })
-
-  test("uses the exact active OpenCode session when a legacy process has no lifecycle report", () => {
-    const active = projectResources(inputs({
-      sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
-      activeOpenCodeSessions: new Set(["session-root"]),
-    }))
-    expect(active.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", state: "working", clankerId: "clanker-current" })
+  test("projects an owned OpenCode Clanker from Herdr runtime status until its own lifecycle report arrives", () => {
+    const owned = muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root", agentStatus: { agent: "opencode", status: "working" } })
+    const runtime = projectResources(inputs({ sessions: [muxSession()], windows: [owned] }))
+    expect(runtime.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "opencode", state: "working", clankerId: "clanker-current", observation: { source: "runtime", confidence: "observed" } })
 
     const reported = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root" })],
-      activeOpenCodeSessions: new Set(["session-root"]),
+      windows: [owned],
       clankerReports: [{ clankerId: "clanker-current", harness: "opencode", pane: "%1", state: "done", updatedAt: 3_650_000, harnessSessionId: "session-root" }],
     }))
-    expect(reported.sessions[0]?.details[0]).toMatchObject({ state: "done" })
+    expect(reported.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", state: "done", clankerId: "clanker-current", observation: { source: "lifecycle", confidence: "attested" } })
   })
 
-  test("does not infer OpenCode ownership when both session IDs are absent", () => {
+  test("does not infer OpenCode ownership from Herdr detection alone", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-unverified" })],
-      opencodes: [{ directory: "/tmp/work", status: "done", detail: "awaiting next task", title: "task", age: "1s", session: "repo@work", pane: "repo@work:0.0", updatedAt: 3_699_000, stablePane: "%1" }],
+      windows: [muxWindow({ clankerId: "clanker-unverified", agentStatus: { agent: "opencode", status: "done" } })],
     }))
 
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "observation", harness: "opencode" })
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 

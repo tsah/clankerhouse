@@ -12,6 +12,7 @@ import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostStat
 import { recoveryUnitName } from "./process-owner"
 import { decideRecovery } from "./planner"
 import { observePanes } from "./panes"
+import { forgetReportedResumes, reportResumeCommand } from "./gate"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
@@ -98,6 +99,7 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       if (decision.type === "adopt") {
         const latest = store.attemptsFor(desired.clankerId).at(-1)
         if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
+        await reportResumeCommand(multiplexer, decision.pane, desired)
         result.adopted.push(desired.clankerId)
         continue
       }
@@ -171,6 +173,7 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         result.skipped.push({ clankerId: desired.clankerId, reason: error instanceof Error ? error.message : String(error) })
       }
     }
+    forgetReportedResumes(new Set(panes.map((pane) => pane.pane)))
     return result
   } finally {
     if (ownStore) store.close()
@@ -260,7 +263,10 @@ export class RecoveryController {
         }
         const serverEpoch = await runtimeServerEpoch(this.multiplexer)
         if (serverEpoch && serverEpoch !== recordedServerEpoch) {
-          if (recordedServerEpoch) this.store.advanceMultiplexerEpoch()
+          if (recordedServerEpoch) {
+            this.store.advanceMultiplexerEpoch()
+            forgetReportedResumes()
+          }
           this.store.setMetadata("runtime.server_epoch", serverEpoch)
         }
       }

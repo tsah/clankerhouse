@@ -26,6 +26,28 @@ export const resumeArgv = (clankerId: string, env: Record<string, string | undef
   return [RESUME_GATE_COMMAND, ...(instance ? ["--instance", instance] : []), clankerId]
 }
 
+const reportedResume = new Map<string, string>()
+
+/**
+ * Report the gate as the pane's restore command once per pane and runtime server. A refusal (another
+ * source holds the pane, or the runtime does not yet see the harness) is retried on the next reconcile.
+ */
+export const reportResumeCommand = async (multiplexer: ManagedMultiplexer, pane: string, desired: DesiredClankerRecord) => {
+  if (typeof multiplexer.reportAgentSession !== "function") return false
+  const argv = resumeArgv(desired.clankerId)
+  const key = JSON.stringify([desired.clankerId, desired.harness, desired.harnessSessionId, argv])
+  if (reportedResume.get(pane) === key) return true
+  try { if (!await multiplexer.reportAgentSession(pane, desired.harness, desired.harnessSessionId, argv)) return false }
+  catch { return false }
+  reportedResume.set(pane, key)
+  return true
+}
+
+/** Drop report memory for panes that no longer exist, or for every pane after a runtime restart. */
+export const forgetReportedResumes = (livePanes?: ReadonlySet<string>) => {
+  for (const pane of [...reportedResume.keys()]) if (!livePanes || !livePanes.has(pane)) reportedResume.delete(pane)
+}
+
 /** Durable record of Recovery admitting a Clanker into a waiting gate pane. */
 export interface GateAdmission {
   pane: string

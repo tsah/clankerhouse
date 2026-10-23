@@ -209,6 +209,20 @@ describe("herdr multiplexer adapter", () => {
     expect(seqs[2]!).toBeGreaterThan(seqs[1]!)
   })
 
+  test("reports the restore command under the harness source with a sequence newer than any earlier report", async () => {
+    const calls: Call[] = []
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })
+    const before = Date.now() * 1000
+    await adapter.reportAgentSession("w1:p2", "pi", "session-1", ["clankerhouse-resume", "clanker-1"])
+    await adapter.reportAgentSession("w1:p2", "pi", null, ["clankerhouse-resume", "clanker-1"])
+    expect(calls.map((call) => call.method)).toEqual(["pane.report_agent_session", "pane.report_agent_session"])
+    expect(calls[0]!.params).toMatchObject({ pane_id: "w1:p2", source: "clankerhouse:pi", agent: "pi", agent_session_id: "session-1", resume_argv: ["clankerhouse-resume", "clanker-1"] })
+    expect(calls[1]!.params).not.toHaveProperty("agent_session_id")
+    const [first, second] = calls.map((call) => call.params.seq as number)
+    expect(first).toBeGreaterThanOrEqual(before)
+    expect(second).toBeGreaterThan(first!)
+  })
+
   test("focus walks workspace, tab, and pane; kill and rename map by scope", async () => {
     const calls: Call[] = []
     const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })

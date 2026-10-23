@@ -61,6 +61,33 @@ describe("recovery reconciliation", () => {
     } finally { store.close() }
   })
 
+  test("an adopted live clanker reports the resume gate to the runtime once per pane, retrying refusals", async () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-resume-report-")); roots.push(root)
+    const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })
+    const reports: Array<[string, string, string | null, string[]]> = []
+    let refuse = true
+    const multiplexer = {
+      kind: "herdr",
+      observe: async () => ({ kind: "herdr", instanceId: "isolated", sessions: [{ id: "w1", nativeName: "w", path: root, attached: false, recency: 1, windows: [{ id: "w1:t1", index: "1", nativeName: "pi", active: true, panes: [{ id: "w1:p4", index: "0", pid: "", command: "", title: "", currentPath: root, activity: 0, active: true, claims: { clankerId: "clanker-live", harness: "pi", harnessSessionId: "session-live" } }] }] }] }),
+      reportAgentSession: async (pane: string, harness: string, sessionId: string | null, argv: string[]) => {
+        reports.push([pane, harness, sessionId, argv])
+        if (refuse) throw new Error("herdr pane.report_agent_session: resume_not_accepted")
+        return true
+      },
+    } as unknown as ManagedMultiplexer
+    try {
+      store.createDesired({ clankerId: "clanker-live", harness: "pi", workshopId: "w", workshopPath: root, preferredSessionLabel: "w", preferredWindowLabel: "pi", cwd: root, harnessSessionId: "session-live", launchSpec: { version: 1, profile: null }, originalTask: "task" }, { now: 1 })
+      for (let tick = 0; tick < 3; tick++) {
+        expect((await reconcileRecovery(store, { now: 100 + tick, multiplexer })).adopted).toEqual(["clanker-live"])
+        refuse = false
+      }
+      expect(reports).toEqual([
+        ["w1:p4", "pi", "session-live", ["clankerhouse-resume", "clanker-live"]],
+        ["w1:p4", "pi", "session-live", ["clankerhouse-resume", "clanker-live"]],
+      ])
+    } finally { store.close() }
+  })
+
   test("simultaneous stale clankers become pending without launching on boot", async () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-controller-")); roots.push(root)
     const store = openRecoveryStore({ dbPath: join(root, "recovery.sqlite3") })

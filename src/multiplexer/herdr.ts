@@ -609,6 +609,15 @@ export class HerdrAdapter implements Multiplexer {
   async releaseAgent(paneId: string, harness: string) {
     await this.request("pane.release_agent", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, seq: nextHerdrReportSeq() })
   }
+
+  /**
+   * Report the resume command herdr runs in this pane after a server restart. herdr accepts it only from the
+   * source holding the pane, or from a reporter named after the agent it detects there when no source holds
+   * it (`resume_not_accepted` otherwise), and keeps it while that source and agent hold the pane.
+   */
+  async reportAgentSession(paneId: string, harness: string, sessionId: string | null, resumeArgv: string[]) {
+    await this.request("pane.report_agent_session", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, seq: nextHerdrReportSeq(), ...(sessionId ? { agent_session_id: sessionId } : {}), resume_argv: resumeArgv })
+  }
 }
 
 let lastReportSeq = 0

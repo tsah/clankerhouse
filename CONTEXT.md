@@ -14,11 +14,11 @@ An externally running harness session correlated to a Workshop and Terminal. Cla
 
 ## Display Name
 
-Mutable Clankerhouse-owned presentation metadata. Native multiplexer labels may seed Display Names during Absorption and may mirror them afterward, but names never establish identity, ownership, correlation, parentage, deduplication, or recovery.
+Mutable Clankerhouse-owned presentation metadata. Native multiplexer labels may seed Display Names during Absorption and may mirror them afterward, but names never establish identity, ownership, correlation, parentage, or deduplication.
 
 ## Multiplexer
 
-A replaceable runtime that hosts terminal session, window, and pane topology. Clankerhouse owns semantic identity, Display Names, Workshop ownership, and recovery intent; the Multiplexer owns live terminal processes, layout, attachment, and focus.
+A replaceable runtime that hosts terminal session, window, and pane topology. Clankerhouse owns semantic identity, Display Names, Workshop ownership, and the Clanker Ledger; the Multiplexer owns live terminal processes, layout, attachment, and focus.
 
 The Multiplexer interface is expressed in Clankerhouse operations and capabilities rather than as a generic command passthrough. Herdr is the only current adapter (ADR-0008). Supporting another Multiplexer does not require Clankerhouse to own terminal multiplexing itself.
 
@@ -26,7 +26,7 @@ The Multiplexer interface is expressed in Clankerhouse operations and capabiliti
 
 The current ephemeral location of a managed entity, expressed as a Multiplexer kind, Multiplexer instance identity, and opaque native session, window, and pane IDs. Multiplexer Locations can change or disappear without changing Workshop, Terminal, or Clanker identity.
 
-A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes and their return belongs to Recovery. Presentation the daemon derives from Declarations, the Label tokens and each pane's Workshop-parent claim that Herdr's agent view filters on, is rewritten on every observation and so returns by itself.
+A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes; they remain open in the Clanker Ledger as Interrupted Clankers. Presentation the daemon derives from Declarations, the Label tokens and each pane's Workshop-parent claim that Herdr's agent view filters on, is rewritten on every observation and so returns by itself.
 
 ## Managed Resource
 
@@ -46,21 +46,25 @@ Switching outside Clankerhouse does not trigger Absorption. After Absorption, ne
 
 The active pane determines the Workshop that owns an absorbed multiplexer session. Different working directories in sibling panes do not imply different ownership.
 
-## Recovery
+## Clanker Ledger
 
-Recovery reconciles recoverable intent with current external Observations. A supported harness manually or programmatically started in an absorbed Workshop becomes recoverable while it is observed active. A graceful harness exit or manual removal while the host and Multiplexer remain healthy cancels that obligation; disappearance during process, Multiplexer, or host failure may recreate its Terminal and resume its harness session. Ordinary shell Terminals do not create a recovery obligation and are not recreated merely because they once had stable identity.
+The durable record of every Pi, Claude, and OpenCode Clanker that Clankerhouse launched or observed in an absorbed Workshop: its Workshop, cwd, harness, launch spec, original task, current harness session (which follows `/clear`, `/new`, and resumes), owner systemd scope, and the Herdr server it was last seen alive in. A row is open while its Clanker runs and closes once the Clanker has been missing for about a minute in the same Herdr server, or when it is closed explicitly or its Workshop is Stopped. The ledger is a record, not a controller: Clankerhouse never relaunches anything from it by itself. Ordinary shell Terminals and Codex are not recorded.
+
+## Interrupted Clanker
+
+An open Clanker Ledger row that is not alive and was last seen in an earlier Herdr server: it was running when the host or Herdr went down. An Interrupted Clanker returns only when someone runs `clankers resume`, which continues its exact harness session in its Workshop under the same Clanker identity without replaying a prompt; `clankers ledger close` drops one that should not return. After a restart the operator typically asks a Clanker to read `clankers ledger --interrupted` and resume what still matters.
 
 ## Herd Reconciliation
 
-The continuous process that consumes Multiplexer topology, foreground process, harness lifecycle, host, and recovery Observations for absorbed Workshops. It maintains stable internal correlation, current presentation, and recoverable intent without replacing the external facts. Starting through Clankerhouse and starting directly in the Multiplexer enter the same reconciliation path.
+The continuous process that consumes Multiplexer topology, foreground process, and harness lifecycle Observations for absorbed Workshops. It maintains stable internal correlation, current presentation, and the Clanker Ledger without replacing the external facts. Starting through Clankerhouse and starting directly in the Multiplexer enter the same reconciliation path.
 
 ## Declaration
 
-An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, recoverable intent, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
+An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, Clanker Ledger records, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
 
 ## Label
 
-A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering, identity, or Recovery. Clankerhouse itself understands exactly one Label, Done.
+A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering or identity. Clankerhouse itself understands exactly one Label, Done.
 
 ## Title
 
@@ -76,7 +80,7 @@ The daemon process that deletes a Done Workshop once it has been left alone for 
 
 ## Stopped
 
-A Workshop whose live resources were released on purpose with `clankers workshop stop`. Its clankers' recoverable intent becomes stopped, so Recovery leaves them alone; their waiting messages are orphaned; and its Multiplexer sessions close. The worktree, branch, Labels, and lineage remain, and the Workshop stays listed as a sessionless row; opening it starts a plain shell, not the old harness. Stopped is not a Label and Clankerhouse never stops a Workshop by itself: a Workshop Hook decides when, typically on Done.
+A Workshop whose live resources were released on purpose with `clankers workshop stop`. Its clankers' Clanker Ledger rows close, so they are never listed as interrupted; their waiting messages are orphaned; and its Multiplexer sessions close. The worktree, branch, Labels, and lineage remain, and the Workshop stays listed as a sessionless row; opening it starts a plain shell, not the old harness. Stopped is not a Label and Clankerhouse never stops a Workshop by itself: a Workshop Hook decides when, typically on Done.
 
 ## Workshop Hook
 
@@ -84,8 +88,8 @@ An executable Clankerhouse runs inside the Workshop: either tracked in the targe
 
 ## Observation
 
-A timestamped fact reported by an external runtime Adapter, such as multiplexer topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
+A timestamped fact reported by an external runtime Adapter, such as multiplexer topology, process presence, lifecycle state, or Git state. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
 
 Whether a finished Clanker has been seen is an Observation too: the Multiplexer tracks it (Herdr's `done` until the tab is viewed, then `idle`), and Clankerhouse keeps no acknowledgement of its own.
 
-Harness state can remain an Observation without becoming a Clanker. A lifecycle report with no Clanker claim may describe a pane's current harness state only while the Multiplexer's agent detection observes a matching harness process on that pane. It provides presentation state, not owned identity, Clanker actions, or Recovery authority.
+Harness state can remain an Observation without becoming a Clanker. A lifecycle report with no Clanker claim may describe a pane's current harness state only while the Multiplexer's agent detection observes a matching harness process on that pane. It provides presentation state, not owned identity, Clanker actions, or a Clanker Ledger row.

@@ -15,9 +15,9 @@ Clankerhouse uses a functional core with an Effect-based imperative shell.
 
 The functional core consists of ordinary deterministic TypeScript functions. Inputs are validated observations, intents, and durable state. Outputs are decisions, plans, events, invariant violations, or new state. Core functions do not execute multiplexer, filesystem, Git, process, socket, database, or clock effects.
 
-New or materially refactored orchestration uses Effect services and Layers for those capabilities. Production Layers call real adapters. Unit tests call the core directly and use deterministic test Layers/TestClock for Effect use-case orchestration. Adapter contract tests validate translation at each boundary. Existing async adapters are migrated incrementally; accepting this ADR does not claim that every legacy shell, notably the current Recovery controller, has already been converted to Effect.
+New or materially refactored orchestration uses Effect services and Layers for those capabilities. Production Layers call real adapters. Unit tests call the core directly and use deterministic test Layers/TestClock for Effect use-case orchestration. Adapter contract tests validate translation at each boundary. Existing async adapters are migrated incrementally; accepting this ADR does not claim that every legacy shell has already been converted to Effect.
 
-The first explicit diagnostic core is `src/diagnostics.ts`; the authoritative projection comparator is exported from `src/model.ts`; and `src/recovery/planner.ts` extracts one-Clanker Recovery decisions from the async controller. Existing pure projection, tree, Recovery admission/campaign, protocol parsing, and mutation-stage functions remain core seams. New behavior must deepen these seams rather than add policy to `src/daemon.ts`, shell scripts, or the native renderer.
+The first explicit diagnostic core is `src/diagnostics.ts`; and the authoritative projection comparator is exported from `src/model.ts`. Existing pure projection, tree, protocol parsing, and mutation-stage functions remain core seams. New behavior must deepen these seams rather than add policy to `src/daemon.ts`, shell scripts, or the native renderer.
 
 Every product feature is recorded in `docs/features.json` and must have:
 

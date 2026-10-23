@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR-0001 and supersedes the tmux parts of ADR-0007.
+Accepted. Amends ADR-0001 and supersedes the tmux parts of ADR-0007. Amended by ADR-0009 (2026-10-23): Recovery and its `clankers recovery` commands were retired.
 
 ## Context
 
@@ -16,7 +16,7 @@ Herdr is the only Multiplexer Adapter. The tmux Adapter and every tmux-only entr
 
 - The Multiplexer Interface and its Runtime Capabilities stay (ADR-0001, ADR-0007), so another Adapter remains possible without changing Workshop, Terminal, or Clanker identity.
 - `CLANKERHOUSE_MULTIPLEXER` and managed-pane inference are removed; the Adapter is always Herdr. Instance paths default to the `-herdr` suffix (`$XDG_RUNTIME_DIR/clankerhouse-$UID-herdr`, `~/.local/state/clankerhouse-herdr`); `CLANKERHOUSE_INSTANCE` still overrides the suffix.
-- Target types are `session` and `window`. Durable mutation stages are named `multiplexer.*`. Recovery stores preferred session and window labels.
+- Target types are `session` and `window`. Durable mutation stages are named `multiplexer.*`. Durable records store preferred session and window labels.
 - Herdr does not route focus per client, so focus is server-global.
 - The TPM plugin (`clankerhouse.tmux`) and the tmux popup, delete, stop-popup, stop-current-session, TUI-active, and picker launchers are deleted. `clankerhouse-tmux-stop` becomes `clankerhouse-mux-stop`. The Pi lifecycle extension is renamed `clanker-lifecycle.ts`. The installer's daemon handoff selects `--herdr-socket` instead of `--tmux-socket`.
 - Standalone QA suites that only exercised tmux chrome (stop popup, client routing, the tmux popup half of current-session, the tmux Absorption transaction) are deleted. Runtime-neutral suites run against an isolated Herdr server.
@@ -26,5 +26,5 @@ Herdr is the only Multiplexer Adapter. The tmux Adapter and every tmux-only entr
 - One Adapter, one QA matrix, and no tmux vocabulary outside historical ADRs.
 - Persisted compatibility is migrated, not kept: registry and recovery stores rename `tmux_session_name`/`tmux_window_name` to `preferred_session_label`/`preferred_window_label`; in-flight operations recorded with `tmux.*` stage names are read under their `multiplexer.*` names; the `tmux_session`/`tmux_window` target kinds are no longer emitted or accepted, and the native client ignores an older `state.json` fallback.
 - State of a legacy tmux instance is not migrated automatically. Its unsuffixed runtime directory, `~/.local/state/clankerhouse` registry, and recovery database are left untouched and are not read by the Herdr instance. Workshops and worktrees on disk are unaffected; tmux-era Clankers must be restarted inside Herdr to be tracked again.
-- There is no Alt-X stop-current-session binding; stopping uses the picker or `clankers recovery stop`.
+- There is no Alt-X stop-current-session binding; stopping uses the picker or `clankers workshop stop` (originally `clankers recovery stop`, retired by ADR-0009).
 - Users without Herdr can no longer run Clankerhouse.

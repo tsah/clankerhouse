@@ -24,12 +24,13 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
 - [x] **F5** README says Codex reports through its own hooks; nothing installs them, so
   Codex state is Herdr screen detection only. Correct the docs.
   Landed: Codex is documented as Herdr-observed; `wait`/`watch` have no Codex turns.
-- [ ] **F6** The installer sets `resume_agents_on_restore = false` globally, disabling
+- [-] **F6** The installer sets `resume_agents_on_restore = false` globally, disabling
   Herdr restore for unmanaged panes too. Resolved by P5.
+  Declined: landed, then reverted when Recovery was retired (see docs/sunset-recovery-checklist.md). Restore stays off (ADR-0009).
 - [x] **F7** Verify: Herdr documents that token metadata (all `ch_*` claims) is not
   restored after a cold server restart. Confirm Clankerhouse rewrites workspace and pane
   claims afterwards; fix if not. Confirmed lost; reconciliation now restores Workshop
-  and Terminal claims from the registry. Clanker claims are left to Recovery.
+  and Terminal claims from the registry. Clanker claims are left to Recovery (since ADR-0009: to an explicit `clankers resume`).
 - [x] **F8** Herdr 0.9.3 → 0.9.5 (survives process/thread exhaustion, atomic saves,
   SIGHUP no longer stops the server). Verify the suite against 0.9.5; upgrade the binary
   only after F1 is deployed. Verified: the full suite and qa-herdr/qa-recovery pass on
@@ -71,16 +72,17 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   is requeued. `agent_prompt_stalled` cannot tell whether the text sits unsubmitted in the
   input, so retrying on it could submit a message twice, and a `wait` would hold the
   delivery pass up to 5 s per message. The queue and the focus rule are unchanged.
-- [ ] **P5** Recovery relaunch mechanism → Herdr native restore with
+- [-] **P5** Recovery relaunch mechanism → Herdr native restore with
   `resume_argv: ["clankerhouse-resume", "<clankerId>"]`; the gate command enforces
   Clankerhouse admission policy and then runs the harness. Re-enable
   `resume_agents_on_restore`. Caveat: Herdr resumes only after a client attaches.
+  Declined: landed, then reverted when Recovery was retired (see docs/sunset-recovery-checklist.md). Interrupted clankers are resumed explicitly with `clankers resume` (ADR-0009).
 - [x] **P6** `/proc` harness discovery (`src/server/process-discovery.ts`) → pane
   `agent` field and `pane.agent_detected`. Projection reads `agentStatus.agent` from the
   snapshot; pane names and titles only feed session markers, never observations.
 - [x] **P7** OpenCode service polling (`src/server/opencode.ts`) → Herdr's OpenCode
   integration (pane-local lifecycle, V2 support). State is Herdr runtime status; the
-  Clankerhouse plugin keeps identity/Recovery binding and attested owned-session reports.
+  Clankerhouse plugin keeps identity/session binding (now for the clanker ledger) and attested owned-session reports.
   `scripts/install --integrations` installs the Herdr integration.
 - [-] **P8** Exit detection (`.exited` marks, `alive`) → `pane.release_agent`, Herdr's
   shell-prompt release, `pane.exited`. Herdr's side landed with P1: a session end (Claude

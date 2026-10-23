@@ -8,7 +8,7 @@ compatibility launchers and personal configuration.
 
 - `bin/`: public commands, relocatable through `CLANKERHOUSE_HOME`
 - `libexec/`: private helpers
-- `src/`: TUI, API, projection, transport, workshop, and recovery code
+- `src/`: TUI, API, projection, transport, workshop, and clanker ledger code
 - `integrations/`: Pi, Claude-compatible reporter, OpenCode, and shared skill
 - `share/systemd/user/`: user-unit templates rendered by the installer
 
@@ -69,10 +69,11 @@ the rollback target. Unmanaged-file refusal and legacy manifests remain valid.
 
 `clankerhouse-install-herdr` writes Alt-K, Alt-B, and Alt-D popup bindings into a
 managed block of Herdr's `config.toml`. Rerunning it keeps keys the operator
-changed. Recovery services should use a stable prefix installation.
+changed. It also sets `resume_agents_on_restore = false`, so Herdr never relaunches
+agents itself. Systemd units should use a stable prefix installation.
 
 ## Release gate
 
-A release must pass type checking, Bun and Python tests, API/daemon/recovery/TUI
+A release must pass type checking, Bun and Python tests, API/daemon/TUI
 QA, the isolated Herdr Adapter scenario, and relocatable prefix install/uninstall QA.
 The package must have no runtime dependency on a parent dotfiles checkout.

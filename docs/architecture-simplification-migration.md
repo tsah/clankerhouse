@@ -6,6 +6,8 @@ Clankerhouse will become one long-lived daemon Module behind one Unix-socket Int
 
 This migration preserves the domain language in `CONTEXT.md` and ADR-0001: the Multiplexer remains replaceable behind one Adapter (Herdr since ADR-0008), durable IDs remain authoritative, and Multiplexer Locations are validated ephemeral claims.
 
+Automatic Recovery, which earlier phases carried, was retired by ADR-0009 in favor of the clanker ledger; its records survive only as imported legacy data.
+
 ## Safety invariants
 
 - The source checkout and the user's installed application, services, Herdr server, and state are never modified by development or QA.
@@ -38,21 +40,21 @@ Port the recovery schema-v3 compatibility fix, failed-Workshop rollback, OpenCod
 
 ### Phase 3 — Expand and migrate the durable registry
 
-Create one registry database containing Workshops, Terminals, Clankers, desired recovery state, append-only journal, leases, and Multiplexer Locations. Migration is resumable and transactional:
+Create one registry database containing Workshops, Terminals, Clankers, imported legacy Recovery state, append-only journal, leases, and Multiplexer Locations. Migration is resumable and transactional:
 
 1. create expanded tables without changing legacy stores;
-2. import `workshops.sqlite3`, `resources.sqlite3`, and recovery v1/v2/v3 data with provenance/idempotency keys;
+2. import `workshops.sqlite3`, `resources.sqlite3`, and legacy recovery v1–v4 data with provenance/idempotency keys;
 3. import manifests and validated multiplexer identity claims only as projections/claims;
 4. run `foreign_key_check` and semantic identity checks;
 5. dual-read with the new registry preferred and legacy fallback during the compatibility window;
 6. activate daemon writes to the registry;
 7. retain legacy databases read-only for rollback; contract only in a later release.
 
-The recovery journal remains append-only. Interrupted imports resume without duplicate identity or journal events.
+The imported journal remains append-only. Interrupted imports resume without duplicate identity or journal events.
 
 ### Phase 4 — Deepen the mutation Module
 
-One daemon-owned Module accepts create, absorb, open, rename, reparent, detach, delete, start, stop, and recovery intents. Every operation has an idempotency key, durable stages, and a result journal. External effects (Worktrunk, the Multiplexer, systemd, manifests) are reconciled rather than assumed atomic. Retries resume at the last durable stage and compensate only effects proven to be owned by the operation.
+One daemon-owned Module accepts create, absorb, open, rename, reparent, detach, delete, and Workshop stop intents. Every operation has an idempotency key, durable stages, and a result journal. External effects (Worktrunk, the Multiplexer, systemd, manifests) are reconciled rather than assumed atomic. Retries resume at the last durable stage and compensate only effects proven to be owned by the operation.
 
 Legacy CLI commands and lifecycle integrations become socket clients. A documented compatibility window keeps their command shapes and report formats while routing state changes through the daemon.
 
@@ -72,8 +74,8 @@ Install into a validated versioned directory, run preflight/build/QA there, then
 - [ ] Native supports jump, repository/branch creation, rename, attach/reparent, detach, deletion, and exact target opening.
 - [ ] No live client polls `state.json`; fallback is read once at startup only.
 - [ ] All state-changing commands issue typed daemon mutation intents and retries are safe after each injected external failure.
-- [ ] Registry fixtures for legacy Workshop lineage, resource registry, recovery v1/v2/v3, manifests, and multiplexer claims import without loss and pass `PRAGMA foreign_key_check`.
-- [ ] Existing CLI commands, multiplexer bindings, lifecycle reports, and recovery behavior have focused compatibility tests and a documented window.
+- [ ] Registry fixtures for legacy Workshop lineage, resource registry, legacy recovery v1–v4, manifests, and multiplexer claims import without loss and pass `PRAGMA foreign_key_check`.
+- [ ] Existing CLI commands, multiplexer bindings, lifecycle reports, and clanker ledger behavior have focused compatibility tests and a documented window.
 - [ ] OpenCode status no longer shells out to Python on the live projection path and never infers Clanker identity from process resemblance.
 - [ ] Failed install preflight or activation leaves the previous version and daemon usable.
 - [ ] TypeScript, Python, Rust, integration, and relevant isolated QA suites pass.

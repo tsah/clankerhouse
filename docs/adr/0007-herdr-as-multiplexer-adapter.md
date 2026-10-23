@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Partly superseded by ADR-0008: the tmux Adapter has since been retired and Herdr is the only Adapter. The Interface and Capability split below remain in force; the runtime selection rules and the tmux column of the Capability table are historical.
+Accepted. Partly superseded by ADR-0008: the tmux Adapter has since been retired and Herdr is the only Adapter. The Interface and Capability split below remain in force; the runtime selection rules and the tmux column of the Capability table are historical. Amended by ADR-0009 (2026-10-23): Clankerhouse Recovery was retired; the server epoch now marks interrupted Clankers in the clanker ledger, and Herdr's agent restore stays disabled.
 
 ## Context
 
@@ -22,7 +22,7 @@ Clankerhouse adds herdr as a second Multiplexer Adapter. To make that possible a
 
 Every Adapter implements, in Clankerhouse domain operations and without exposing native command syntax:
 
-- `instance()` — the Multiplexer instance identity that scopes Multiplexer Locations; with `durableIds` it survives a runtime restart. A separate optional server epoch changes on every restart and drives Recovery's `multiplexer_restart` trigger; under herdr it is the identity of the freshly bound API socket file, since herdr reports no server pid or start time.
+- `instance()` — the Multiplexer instance identity that scopes Multiplexer Locations; with `durableIds` it survives a runtime restart. A separate optional server epoch changes on every restart and marks Clankers last seen in an earlier server as interrupted in the clanker ledger (ADR-0009); under herdr it is the identity of the freshly bound API socket file, since herdr reports no server pid or start time.
 - `observe()` — the current topology as opaque native session, window, and pane ids with cwd, foreground command, title, active flags, and the Adapter's identity-claim metadata.
 - `changes()` — a Change Stream of topology and focus events. An Adapter may synthesize it by polling; consumers never poll the runtime themselves.
 - `spawn({ scope, cwd, env, launch })` — create a session, window, or pane at a cwd with injected environment, returning native ids. `launch` is either an interactive shell or an argv; the Adapter reports which it supports.
@@ -32,7 +32,7 @@ Every Adapter implements, in Clankerhouse domain operations and without exposing
 
 ### Optional Runtime Capabilities
 
-An Adapter declares which of these it provides. Projection, Recovery, and clients gate on the declaration exactly as they gate on `availableActions` today.
+An Adapter declares which of these it provides. Projection and clients gate on the declaration exactly as they gate on `availableActions` today.
 
 | Capability | Provides | tmux | herdr |
 |---|---|---|---|
@@ -54,14 +54,14 @@ An explicit non-empty `CLANKERHOUSE_MULTIPLEXER` is authoritative. Otherwise, th
 
 ### Authority
 
-- The Clankerhouse registry remains authoritative for Workshop, Terminal, and Clanker identity, Display Names, lineage, and recoverable intent (ADR-0004). Runtime metadata carries claims; with `durableIds` the registry maps Clankerhouse ids to native ids directly and claims exist only for child-process self-correlation.
+- The Clankerhouse registry remains authoritative for Workshop, Terminal, and Clanker identity, Display Names, and lineage (ADR-0004). Runtime metadata carries claims; with `durableIds` the registry maps Clankerhouse ids to native ids directly and claims exist only for child-process self-correlation.
 - Runtime `agentStatus` and `sessionRefs` are Observations with `source: runtime` and `confidence: observed`. Harness reporters (Pi extension, Claude hooks, OpenCode plugin) remain the attested source and continue to carry generations, results, attestation, and the Pi send channel. Their lifecycle state is mirrored back to a runtime that accepts pushed status so the runtime's own UI agrees; the daemon does it, never the hot-path hook.
-- Clankerhouse Recovery remains the only recovery authority. A runtime's own agent resume on restore is disabled by the installer.
+- A runtime's own agent resume on restore is disabled by the installer. Since ADR-0009, interrupted Clankers return only through an explicit `clankers resume`.
 - Clanker communication uses verified semantic transports. Pi's harness-native socket remains preferred. An Adapter may expose `agentPrompt` only when its operation targets an exact pane, validates that a recognized interactive harness still owns that pane, and rejects blocked input. Clankerhouse revalidates the pane's Clanker ID claim immediately before submission. Raw pane input, output capture, and tmux key or paste simulation are not Clanker transports.
 
 ### Naming
 
-herdr terms (`workspace`, `tab`, `tokens`, `w1:p3`, `agent.wait`) appear only inside the herdr Adapter module. `Target.type` becomes `session | window | pane`; the runtime kind lives on the Multiplexer Location. Recovery stores preferred session and window labels, not tmux names. Daemon mutation stage names lose the `tmux.` prefix.
+herdr terms (`workspace`, `tab`, `tokens`, `w1:p3`, `agent.wait`) appear only inside the herdr Adapter module. `Target.type` becomes `session | window | pane`; the runtime kind lives on the Multiplexer Location. Durable records store preferred session and window labels, not tmux names. Daemon mutation stage names lose the `tmux.` prefix.
 
 ### Sequencing
 
@@ -78,7 +78,7 @@ The Interface is extracted and every out-of-Adapter tmux invocation is routed th
 - Projection takes whether a finished clanker was seen from herdr's effective status (`done` until the tab is viewed, `idle` after), replacing Clankerhouse's own seen ledger. herdr's seen is per tab and counts the tab on screen when a turn settles as seen; a pane herdr holds no settled status for counts as seen while focused.
 - The installer pins a herdr version, and the Adapter gates on a minimum `ping.protocol` rather than an exact match: herdr keeps its JSON API compatible across protocol bumps, JSON clients ignore unknown fields, and an unsupported method is an ordinary request error.
 - Activity recency, which orders the TUI, is derived from Change Stream events under herdr because the API carries no activity timestamps.
-- Boot autostart, systemd scopes, lineage, and Recovery policy remain Clankerhouse's and are unchanged by the Adapter.
+- Boot autostart, systemd scopes, and lineage remain Clankerhouse's and are unchanged by the Adapter.
 - herdr's `--remote` attach, live binary handoff, and macOS process identification become available without Clankerhouse work.
 
 ## Implementation status

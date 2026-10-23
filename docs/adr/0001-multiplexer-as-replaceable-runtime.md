@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amended by ADR-0007 (Herdr Adapter) and ADR-0008 (tmux Adapter retired; Herdr is the only Adapter).
+Accepted. Amended by ADR-0007 (Herdr Adapter) and ADR-0008 (tmux Adapter retired; Herdr is the only Adapter). Amended by ADR-0009 (2026-10-23): automatic Recovery was retired for a clanker ledger.
 
 ## Context
 
@@ -24,6 +24,6 @@ Existing snapshot names and name-based target fields remain compatibility hints 
 
 - Native multiplexer names can change without changing Clankerhouse identity.
 - Collection joins resources by native IDs rather than names.
-- Recovery can reconcile desired resources against explicit identity and current location.
+- Durable records (since ADR-0009, the clanker ledger) are matched to live resources by explicit identity and current location.
 - A future multiplexer adapter can be added without changing Workshop, Terminal, or Clanker identity.
 - Adapter discovery and a general plugin framework remain out of scope.

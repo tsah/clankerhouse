@@ -4,12 +4,12 @@ The simplification ships as an expand/migrate/contract migration. The daemon/reg
 
 ## Preserved during the compatibility release
 
-- Existing command names and argument shapes under `bin/`, including `clankerhouse`, `clankers`, recovery, lifecycle reporting, stop, deletion, and harness launchers.
+- Existing command names and argument shapes under `bin/`, including `clankerhouse`, `clankers`, lifecycle reporting, stop, deletion, and harness launchers.
 - Herdr popup bindings installed by `clankerhouse-install-herdr`. Identity claims on Herdr panes remain claims validated against the durable registry.
 - Workshop manifest version 1. Manifests are imported and repaired as projections; they do not override a conflicting durable identity.
 - Lifecycle report JSON and the legacy report directory read path.
 - The current snapshot schema version and socket protocol version 1 methods. New protocol fields and methods are additive.
-- Recovery database schemas v1, v2, and v3 as import inputs. Legacy database files remain untouched and available for rollback.
+- Legacy Recovery database schemas v1 to v4 as import inputs: the registry imports them for provenance and the clanker ledger imports `recovery.sqlite3` once. The files remain untouched.
 - A one-time `state.json` startup/crash fallback. Live synchronization uses the Unix socket only.
 
 ## Authority during the window
@@ -30,6 +30,6 @@ Until then, tests must exercise both legacy ingress and the authoritative socket
 
 ## Current compatibility gate
 
-The daemon initializes, imports, and validates the unified registry at startup. Socket mutation operations and their retry stages are authoritative in the registry `operations` table. Domain rows imported from Workshop, resource, and recovery stores are marked `legacy-mutable` and are not preferred by live projection while any supported ingress can still write those stores directly. Repeated startup import is skipped per source provenance during this gate, preventing a changed mutable source from being mistaken for an immutable historical import.
+The daemon initializes, imports, and validates the unified registry at startup. Socket mutation operations and their retry stages are authoritative in the registry `operations` table. Domain rows imported from Workshop, resource, and legacy Recovery stores are marked `legacy-mutable` and are not preferred by live projection while any supported ingress can still write those stores directly. Repeated startup import is skipped per source provenance during this gate, preventing a changed mutable source from being mistaken for an immutable historical import.
 
-Target `open`, Workshop `ensure`, Recovery `start`, `stop`, `suspend`, `tombstone`, and per-Clanker `resume` command shapes route through the daemon when its socket is available. Daemon-owned compatibility subprocesses set `CLANKERHOUSE_DAEMON_INTERNAL=1` to prevent recursive socket submission. `CLANKERHOUSE_LEGACY_MUTATIONS=1` is the explicit rollback escape hatch. Other legacy mutation ingress remains compatibility-gated until it can be converted without recursive daemon-to-client calls; the gate must not be removed before that conversion is complete.
+Target `open` and Workshop `ensure` command shapes route through the daemon when its socket is available. Daemon-owned compatibility subprocesses set `CLANKERHOUSE_DAEMON_INTERNAL=1` to prevent recursive socket submission. `CLANKERHOUSE_LEGACY_MUTATIONS=1` is the explicit rollback escape hatch. Other legacy mutation ingress remains compatibility-gated until it can be converted without recursive daemon-to-client calls; the gate must not be removed before that conversion is complete.

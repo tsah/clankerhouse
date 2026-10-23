@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by ADR-0009 (2026-10-23): Recovery and its Clanker start, stop, and recovery intents were retired; Clanker records moved to the clanker ledger, and the registry keeps imported legacy Recovery records only for provenance.
 
 ## Context
 
@@ -29,6 +29,6 @@ Installation stages and validates a versioned application, atomically activates 
 - Rust/ratatui is the sole rendering/input Adapter after action parity; Bun/TypeScript remains the daemon and control plane.
 - Tree, search, ordering, target, and available-action policy has one owner.
 - State-changing legacy commands become socket clients while preserving command shapes during the compatibility window.
-- Recovery and workflow retries can reconcile partial external effects from durable operation stages.
+- Workflow retries can reconcile partial external effects from durable operation stages.
 - SQLite migration and daemon handoff add implementation complexity, but that complexity gains locality behind small Interfaces.
 - The Multiplexer Adapter stays behind the Interface (ADR-0007, ADR-0008). Durable IDs and validated Multiplexer Locations remain authoritative as required by ADR-0001.

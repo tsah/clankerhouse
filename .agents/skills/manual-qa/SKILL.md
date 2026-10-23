@@ -12,7 +12,7 @@ The coding agent is the semantic judge. Automated assertions are evidence, not a
 
 1. Work from the repository root.
 2. Read `CONTEXT.md`, `docs/features.json`, and relevant ADRs.
-3. Never use the live `HOME`, XDG state/runtime paths, Herdr socket, registry, Recovery database, or installation prefix for simulations.
+3. Never use the live `HOME`, XDG state/runtime paths, Herdr socket, registry, clanker ledger, or installation prefix for simulations.
 4. Every scenario must use temporary `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, installation prefix, and Herdr server socket (`HERDR_SOCKET_PATH`).
 5. Refuse to continue if a scenario cannot prove isolation.
 6. Do not deploy, reload live bindings, stop live services, or mutate live Clankers.
@@ -74,7 +74,7 @@ Use an isolated real Herdr server, the real daemon/socket, real native client, t
 - absorption and stable identity after native rename
 - Clanker API sends, waits, results, and unsupported capabilities
 - daemon reconnect and stale-producer handling
-- Recovery clean loss, interruption ambiguity, admission, stop, suspension, and tombstones
+- clanker ledger: closing on clean loss, interrupted rows across a Herdr restart, `clankers ledger close`, and `clankers resume`
 - process ownership
 - atomic install, activation failure, and rollback
 - Neovim integration and popup lifecycle

@@ -1,6 +1,6 @@
 ---
 name: troubleshoot
-description: Diagnose the current Clankerhouse TUI and runtime when rows, question marks, names, hierarchy, sorting, selection, actions, Recovery, or navigation look wrong. Starts read-only, captures semantic evidence, reproduces defects in isolation, and requires confirmation before live mutations.
+description: Diagnose the current Clankerhouse TUI and runtime when rows, question marks, names, hierarchy, sorting, selection, actions, the clanker ledger, or navigation look wrong. Starts read-only, captures semantic evidence, reproduces defects in isolation, and requires confirmation before live mutations.
 compatibility: Linux with a running Clankerhouse installation, Bun, Herdr, jq, Python, and repository access for fixes.
 ---
 
@@ -27,8 +27,7 @@ clankers diagnose --json
 clankerhouse-native --dump-tree
 clankerhouse-native --check
 clankers list
-clankers recovery status
-systemctl --user --no-pager status clankerhouse-recovery.service
+clankers ledger --state open
 clankers mux observe
 herdr api snapshot
 ```
@@ -49,7 +48,7 @@ For every detail row:
 
 - `window`: require the exact session/window/pane tuple in the Multiplexer and compare current command, title, path, and managed Terminal Location.
 - process `observation`: inspect the pane TTY foreground process group in `/proc`; require the reported harness executable or recognized package entrypoint. A pane title or stale command label alone is insufficient.
-- lifecycle `observation`: require the source report and compare pane, Clanker ID, harness, state, observed time, harness-session ID, and recovery-attempt ID. Recompute the projected rejection reason. Incomplete and rejected reports must remain visible but must not drive aggregate runtime state.
+- lifecycle `observation`: require the source report and compare pane, Clanker ID, harness, state, observed time, and harness-session ID. Recompute the projected rejection reason. Incomplete and rejected reports must remain visible but must not drive aggregate runtime state.
 - `clanker`: require owned Clanker identity from pane metadata/registry plus current process evidence. An attested state additionally requires exact lifecycle identity correlation. If correlation fails, require unknown runtime state and a separate rejected observation rather than the report's claimed state.
 
 Finally assert set equality between all live multiplexer panes and unique projected pane targets, allowing multiple evidence details to reference one target but no live pane to disappear. Recompute each session aggregate from details, verify current-session status changes only ordering/metadata, and compare the complete projection with `clankerhouse-native --dump-tree`. Report exact counts for sessions, directories, unique panes, managed Locations, Clankers, observations by source/confidence, mismatches, and omissions.
@@ -88,9 +87,9 @@ Separate durable Display Names from native multiplexer labels. Check whitespace/
 
 Trace selected rendered key → typed target → socket intent → durable operation → validated Multiplexer Location → focused target. Confirm the action is advertised and affects only that stable target.
 
-### Recovery drift
+### Ledger drift
 
-Compare recorded and current Clanker inventories. Inspect active campaigns, pending candidates, recent attempts, desired states, multiplexer/boot epochs, and whether activation resumed work that was previously stopped.
+Compare `clankers ledger --state open` with the live Clankers. An open row that is not alive in the current Herdr server is interrupted only if it was last seen in an earlier server epoch; one missing in the same server should close within about a minute. Check that each row's harness session follows the pane after `/clear` or a resume, and that stopped Workshops left no open rows.
 
 ## 3. Form and test hypotheses
 

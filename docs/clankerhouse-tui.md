@@ -95,19 +95,14 @@ Clanker communication uses the native `clankers` API and never raw pane input
 or pane capture. Harness detection comes from Herdr's per-pane agent detection and
 cannot assign clanker identity or authorize destructive actions.
 
-A separate durable recovery control plane stores desired Pi, Claude, and
-OpenCode clankers, exact harness session identities, attempts, leases, and
-append-only journal events under `$XDG_STATE_HOME/clankerhouse-herdr`. Its persistent
-controller creates an automatic campaign only after a Linux boot-ID change. It
-admits one missing clanker after a quiet healthy boot, waits for stable liveness,
-and then admits the next. Same-boot pane loss is not enrolled automatically.
-Recovery continues settled work but never replays interrupted tools; expensive
-validation and external effects require confirmation. Repeated or ambiguous
-attempts enter durable quarantine. Tracked harnesses
-are owned by systemd scopes so an intentional stop terminates every descendant.
-Tombstones, intentional stops, quarantine, and resource-pressure suspensions take
-precedence. Recovery state changes are typed daemon mutation intents with durable
-stages; observation and operation status share the private socket Interface.
+The clanker ledger, `clankers.sqlite3` under `$XDG_STATE_HOME/clankerhouse-herdr`,
+records every Pi, Claude, and OpenCode clanker with its Workshop, launch spec,
+original task, and current harness session. The daemon closes a row once its
+clanker has been gone for a minute in the same Herdr server; rows last seen in an
+earlier server stay open and are listed by `clankers ledger --interrupted`.
+Nothing is relaunched automatically: `clankers resume` continues one exact session
+without replaying a prompt. Tracked harnesses are owned by systemd scopes so an
+intentional stop terminates every descendant.
 
 See `clankerhouse/README.md` for the CLI and runtime contract and
 `docs/qa/clanker-api.md` for safety-scoped API validation.

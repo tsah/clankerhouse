@@ -17,6 +17,10 @@ export const HERDR_MIN_PROTOCOL = 20
 export const HERDR_PANE_ADDRESS_ENV = "HERDR_PANE_ID"
 /** Most per-pane requests one observation keeps in flight. */
 export const HERDR_PROCESS_INFO_CONCURRENCY = 8
+/** Coalesces topology bursts before the agent-status subscription is re-established. */
+export const HERDR_STATUS_RESUBSCRIBE_DELAY_MS = 250
+/** Events after which the set of agent panes may differ; herdr names pushed events with underscores (`pane_created`). */
+const statusTopologyEvents = /^pane[._](created|closed|moved|exited|agent_detected)$|^(tab|workspace)[._]closed$/
 
 /** Claim key → herdr token name (`^[A-Za-z0-9_-]{1,32}$`, values ≤ 80 chars). */
 const tokenNames: Partial<Record<ClaimKey, string>> = {
@@ -94,6 +98,7 @@ interface HerdrWorkspace { workspace_id: string; number: number; label: string; 
 interface HerdrTab { tab_id: string; workspace_id: string; number: number; label: string; focused: boolean; agent_status: RuntimeAgentStatus }
 interface HerdrPane { pane_id: string; terminal_id: string; workspace_id: string; tab_id: string; focused: boolean; cwd?: string | null; foreground_cwd?: string | null; label?: string | null; agent?: string | null; title?: string | null; terminal_title?: string | null; terminal_title_stripped?: string | null; agent_status: RuntimeAgentStatus; tokens?: Record<string, string>; agent_session?: { source: string; agent: string; kind: "id" | "path"; value: string } | null; revision: number }
 interface HerdrSnapshot { focused_workspace_id?: string | null; focused_tab_id?: string | null; focused_pane_id?: string | null; workspaces: HerdrWorkspace[]; tabs: HerdrTab[]; panes: HerdrPane[] }
+interface HerdrEventData { pane?: { pane_id?: string }; pane_id?: string; workspace_id?: string }
 interface HerdrProcessInfo { shell_pid?: number | null; foreground_process_group_id?: number | null; foreground_processes?: Array<{ pid: number; name?: string; argv?: string[]; cmdline?: string; cwd?: string }> }
 
 const paneNumber = (paneId: string) => Number(paneId.split(":p")[1] ?? 0) || 0
@@ -279,63 +284,137 @@ export class HerdrAdapter implements Multiplexer {
     return { kind: "herdr", instanceId, sessions }
   }
 
+  /** One `events.subscribe` connection; `end` runs once, with herdr's error when it rejected or dropped the subscription. */
+  private subscribe(id: string, subscriptions: Array<Record<string, string>>, on: { started(): void; event(event: string, data: HerdrEventData | undefined): void; end(error?: { code?: string }): void }) {
+    const socket = createConnection(this.socketPath)
+    let buffer = ""
+    let ended = false
+    const end = (error?: { code?: string }) => {
+      if (ended) return
+      ended = true
+      socket.destroy()
+      on.end(error)
+    }
+    socket.setEncoding("utf8")
+    socket.on("connect", () => socket.write(`${JSON.stringify({ id, method: "events.subscribe", params: { subscriptions } })}\n`))
+    socket.on("data", (chunk) => {
+      buffer += chunk
+      let newline = buffer.indexOf("\n")
+      while (newline >= 0 && !ended) {
+        const line = buffer.slice(0, newline)
+        buffer = buffer.slice(newline + 1)
+        newline = buffer.indexOf("\n")
+        let payload: { event?: string; data?: HerdrEventData; result?: { type?: string }; error?: { code?: string } }
+        try { payload = JSON.parse(line) } catch { continue }
+        if (payload.error) end(payload.error)
+        else if (payload.result?.type === "subscription_started") on.started()
+        else if (payload.event) on.event(payload.event, payload.data)
+      }
+    })
+    socket.on("error", () => end())
+    socket.on("close", () => end())
+    return () => end()
+  }
+
+  private touchEvent(data: HerdrEventData | undefined) {
+    const paneId = data?.pane?.pane_id ?? data?.pane_id
+    const now = Math.floor(Date.now() / 1000)
+    if (paneId) this.activity.set(paneId, now)
+    if (data?.workspace_id) this.activity.set(data.workspace_id, now)
+  }
+
+  /**
+   * herdr emits no `pane.updated` when a pane's agent status changes, and `pane.agent_status_changed` needs one
+   * subscription entry per existing pane: one unknown pane rejects the whole request. Status therefore rides a second
+   * connection, re-established for the current agent panes whenever topology may have changed them. A pane gains an
+   * agent through `pane.agent_detected`, so only agent panes are subscribed, which bounds herdr's per-entry polling.
+   */
+  private statusSubscriptions(push: (kind: MultiplexerChange["kind"]) => void, signal: AbortSignal) {
+    let current: object | undefined
+    let subscribedKey: string | undefined
+    let close = () => {}
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let running = false
+    let again = false
+    let failures = 0
+    const schedule = (delayMs = HERDR_STATUS_RESUBSCRIBE_DELAY_MS) => {
+      if (signal.aborted || timer) return
+      timer = setTimeout(() => { timer = undefined; void sync() }, delayMs)
+    }
+    const retry = () => schedule(Math.min(HERDR_STATUS_RESUBSCRIBE_DELAY_MS * 2 ** failures++, 15_000))
+    const sync = async () => {
+      if (running) { again = true; return }
+      running = true
+      try {
+        const panes = (await this.snapshot()).panes.filter((pane) => pane.agent).map((pane) => pane.pane_id).sort()
+        const key = panes.join(" ")
+        if (signal.aborted || (current && key === subscribedKey)) return
+        const previous = close
+        current = undefined
+        previous()
+        if (!panes.length) return
+        const token = {}
+        current = token
+        subscribedKey = key
+        close = this.subscribe("status", panes.map((pane_id) => ({ type: "pane.agent_status_changed", pane_id })), {
+          started: () => { failures = 0 },
+          event: (_event, data) => { this.touchEvent(data); push("status") },
+          end: (error) => {
+            if (current !== token) return
+            current = undefined
+            if (signal.aborted) return
+            // Lost history means statuses may have changed unseen; consumers re-observe on reconnect.
+            if (error?.code === "events_lost") push("reconnect")
+            retry()
+          },
+        })
+      } catch { retry() } finally {
+        running = false
+        if (again) { again = false; schedule() }
+      }
+    }
+    return { refresh: () => schedule(), stop: () => { clearTimeout(timer); current = undefined; close() } }
+  }
+
   async *changes(signal: AbortSignal): AsyncIterable<MultiplexerChange> {
     const subscriptions = ["workspace.created", "workspace.updated", "workspace.metadata_updated", "workspace.renamed", "workspace.closed", "workspace.focused", "worktree.created", "worktree.opened", "worktree.removed", "tab.created", "tab.closed", "tab.renamed", "tab.focused", "pane.created", "pane.closed", "pane.updated", "pane.focused", "pane.moved", "pane.exited", "pane.agent_detected"].map((type) => ({ type }))
+    const queue: MultiplexerChange[] = []
+    let notify: (() => void) | undefined
+    const push = (kind: MultiplexerChange["kind"]) => { queue.push({ kind, at: Date.now() }); notify?.() }
+    const statuses = this.statusSubscriptions(push, signal)
     let backoffMs = 500
-    while (!signal.aborted) {
-      const queue: MultiplexerChange[] = []
-      let notify: (() => void) | undefined
-      let closed = false
-      const socket = createConnection(this.socketPath)
-      let buffer = ""
-      socket.setEncoding("utf8")
-      socket.on("connect", () => socket.write(`${JSON.stringify({ id: "changes", method: "events.subscribe", params: { subscriptions } })}\n`))
-      socket.on("data", (chunk) => {
-        buffer += chunk
-        let newline = buffer.indexOf("\n")
-        while (newline >= 0) {
-          const line = buffer.slice(0, newline)
-          buffer = buffer.slice(newline + 1)
-          newline = buffer.indexOf("\n")
-          try {
-            const payload = JSON.parse(line) as { event?: string; result?: { type?: string }; error?: unknown }
-            if (payload.error) { closed = true; socket.destroy(); break }
-            if (payload.result?.type === "subscription_started") { backoffMs = 500; queue.push({ kind: "reconnect", at: Date.now() }) }
-            else if (payload.event) {
-              const event = payload.event
-              const kind: MultiplexerChange["kind"] = /focused$/.test(event) ? "focus" : /metadata_updated$|renamed$|pane_updated$/.test(event) ? "metadata" : /agent_detected$/.test(event) ? "status" : "topology"
-              const data = (payload as { data?: { pane?: { pane_id?: string; revision?: number }; pane_id?: string; workspace_id?: string } }).data
-              const paneId = data?.pane?.pane_id ?? data?.pane_id
-              const now = Math.floor(Date.now() / 1000)
-              if (paneId) this.activity.set(paneId, now)
-              if (data?.workspace_id) this.activity.set(data.workspace_id, now)
-              queue.push({ kind, at: Date.now() })
-            }
-          } catch {}
-          notify?.()
-        }
-      })
-      const finish = () => { closed = true; notify?.() }
-      socket.on("error", finish)
-      socket.on("close", finish)
-      const abort = () => { socket.destroy(); finish() }
-      signal.addEventListener("abort", abort, { once: true })
-      try {
-        while (!closed || queue.length) {
-          if (queue.length) { yield queue.shift()!; continue }
-          await new Promise<void>((resolve) => { notify = resolve })
-          notify = undefined
-        }
-      } finally {
-        signal.removeEventListener("abort", abort)
-        socket.destroy()
-      }
+    let reconnect: ReturnType<typeof setTimeout> | undefined
+    let closeTopology = () => {}
+    const connect = () => {
       if (signal.aborted) return
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, backoffMs)
-        signal.addEventListener("abort", () => { clearTimeout(timer); resolve() }, { once: true })
+      closeTopology = this.subscribe("changes", subscriptions, {
+        started: () => { backoffMs = 500; push("reconnect"); statuses.refresh() },
+        event: (event, data) => {
+          this.touchEvent(data)
+          push(/focused$/.test(event) ? "focus" : /metadata_updated$|renamed$|pane_updated$/.test(event) ? "metadata" : /agent_detected$/.test(event) ? "status" : "topology")
+          if (statusTopologyEvents.test(event)) statuses.refresh()
+        },
+        end: () => {
+          if (signal.aborted) return
+          reconnect = setTimeout(connect, backoffMs)
+          backoffMs = Math.min(backoffMs * 2, 15_000)
+        },
       })
-      backoffMs = Math.min(backoffMs * 2, 15_000)
+    }
+    const wake = () => notify?.()
+    signal.addEventListener("abort", wake)
+    try {
+      connect()
+      while (!signal.aborted) {
+        if (queue.length) { yield queue.shift()!; continue }
+        await new Promise<void>((resolve) => { notify = resolve })
+        notify = undefined
+      }
+    } finally {
+      signal.removeEventListener("abort", wake)
+      clearTimeout(reconnect)
+      closeTopology()
+      statuses.stop()
     }
   }
 

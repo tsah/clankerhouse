@@ -222,6 +222,61 @@ describe("herdr multiplexer adapter", () => {
     } finally { server.stop(true); rmSync(path, { force: true }) }
   })
 
+  test("streams agent status changes over a per-pane subscription that follows the agent panes", async () => {
+    const path = `/tmp/clankerhouse-herdr-status-${process.pid}.sock`
+    rmSync(path, { force: true })
+    let panes = [{ pane_id: "w1:p1", agent: "codex" }, { pane_id: "w1:p2" }]
+    const statusSubscriptions: Array<{ panes: string[]; socket: { write(data: string): unknown; end(): unknown } }> = []
+    let rejectNext = false
+    let topologySocket: { write(data: string): unknown } | undefined
+    const line = (value: unknown) => `${JSON.stringify(value)}\n`
+    const server = Bun.listen({
+      unix: path,
+      socket: {
+        data(socket, chunk) {
+          const request = JSON.parse(chunk.toString().trim()) as { id: string; method: string; params: { subscriptions?: Array<{ type: string; pane_id?: string }> } }
+          if (request.method === "session.snapshot") return void socket.write(line({ id: request.id, result: { snapshot: { workspaces: [], tabs: [], panes } } }))
+          const subscriptions = request.params.subscriptions ?? []
+          if (!subscriptions.some((entry) => entry.type === "pane.agent_status_changed")) {
+            topologySocket = socket
+            return void socket.write(line({ id: request.id, result: { type: "subscription_started" } }))
+          }
+          if (rejectNext) { rejectNext = false; socket.write(line({ id: request.id, error: { code: "pane_not_found", message: "pane not found" } })); return void socket.end() }
+          statusSubscriptions.push({ panes: subscriptions.map((entry) => entry.pane_id!), socket })
+          socket.write(line({ id: request.id, result: { type: "subscription_started" } }))
+        },
+      },
+    })
+    const controller = new AbortController()
+    const seen: string[] = []
+    const adapter = new HerdrAdapter({ socketPath: path })
+    const until = async (predicate: () => boolean) => { for (let index = 0; index < 400 && !predicate(); index++) await Bun.sleep(5); expect(predicate()).toBe(true) }
+    const consuming = (async () => { for await (const change of adapter.changes(controller.signal)) seen.push(change.kind) })()
+    try {
+      await until(() => statusSubscriptions.length === 1)
+      expect(statusSubscriptions[0]!.panes).toEqual(["w1:p1"])
+      statusSubscriptions[0]!.socket.write(line({ event: "pane_agent_status_changed", data: { pane_id: "w1:p1", workspace_id: "w1", agent_status: "working" } }))
+      await until(() => seen.includes("status"))
+
+      // A detected agent widens the subscription; a pane that vanished first makes herdr reject it, and the adapter retries.
+      panes = [...panes.slice(0, 1), { pane_id: "w1:p2", agent: "claude" }]
+      rejectNext = true
+      topologySocket!.write(line({ event: "pane_agent_detected", data: { pane_id: "w1:p2", workspace_id: "w1" } }))
+      await until(() => statusSubscriptions.length === 2)
+      expect(statusSubscriptions[1]!.panes).toEqual(["w1:p1", "w1:p2"])
+
+      // Lost event history is reported as a reconnect and resubscribes.
+      const before = seen.filter((kind) => kind === "reconnect").length
+      statusSubscriptions[1]!.socket.write(line({ id: "status", error: { code: "events_lost", message: "lost" } }))
+      await until(() => statusSubscriptions.length === 3 && seen.filter((kind) => kind === "reconnect").length > before)
+    } finally {
+      controller.abort()
+      await consuming
+      server.stop(true)
+      rmSync(path, { force: true })
+    }
+  })
+
   test("resolves the socket path from the environment", () => {
     expect(herdrSocketPath({ HERDR_SOCKET_PATH: "/x/herdr.sock" })).toBe("/x/herdr.sock")
     expect(herdrSocketPath({ XDG_CONFIG_HOME: "/cfg" })).toBe("/cfg/herdr/herdr.sock")

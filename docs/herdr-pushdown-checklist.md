@@ -81,8 +81,17 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   integration (pane-local lifecycle, V2 support). State is Herdr runtime status; the
   Clankerhouse plugin keeps identity/Recovery binding and attested owned-session reports.
   `scripts/install --integrations` installs the Herdr integration.
-- [ ] **P8** Exit detection (`.exited` marks, `alive`) → `pane.release_agent`, Herdr's
-  shell-prompt release, `pane.exited`.
+- [-] **P8** Exit detection (`.exited` marks, `alive`) → `pane.release_agent`, Herdr's
+  shell-prompt release, `pane.exited`. Herdr's side landed with P1: a session end (Claude
+  `SessionEnd`, Pi `session_shutdown`) sends `pane.release_agent`, and Herdr releases a
+  crashed harness itself once it sees the process exit. Declined replacing the marks and
+  `alive`: the lifecycle wrapper writes the mark the moment the harness returns, naming the
+  exact clanker, with no detection latency, so a just-spawned clanker is never dropped for
+  not being detected yet; `pane.exited` never fires when a leftover child keeps the pane
+  open, which is the case the mark exists for; Herdr's pane `agent` now carries the mirrored
+  label, so it no longer proves a process, which is what `alive` cross-checks; and the
+  clean-exit versus crash distinction Recovery needs (exit status, final Ctrl-C, shutdown
+  signals) is the wrapper's to observe, not Herdr's.
 - [-] **P9** Herdr config surgery in `clankerhouse-install-herdr` → a Herdr plugin
   (`herdr-plugin.toml`: popup panes, actions bound with `plugin_action`, startup hook).
   Declined (Herdr 0.9.5 spike): a manifest cannot declare keybindings, so `config.toml`

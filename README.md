@@ -118,6 +118,8 @@ Successful responses are JSON. Errors are versioned JSON on stderr; unknown or a
 
 A worker clanker declares its state upward with `clankers report`, run from inside the clanker (`CLANKER_ID`, else the pane's Clanker claim, identifies it). The Report is addressed to the reporting Workshop's parent unless `--to` names a Workshop or clanker id or `--no-parent` records it unaddressed; a root Workshop's Reports are recorded with `to: null`. The payload must be one JSON object of at most 64 KiB. Reports are durable, ordered by `seq`, and kept in `$XDG_STATE_HOME/clankerhouse/orchestration.sqlite3`; a Report is the clanker's Declaration and never changes its lifecycle `state`.
 
+A Report that needs the operator also asks Herdr to show a notification (`notification.show` with the request sound), titled `<state> · <Workshop title or branch>` with the message as its body. By default `question`, `blocked`, and `failed` notify. Set `CLANKERHOUSE_REPORT_NOTIFY` in the clankers' environment to a comma list of states to choose others, or to `none` to turn it off; Herdr's own `[ui.toast] delivery` decides whether and where it appears (`off`, its default, shows nothing). The Report is recorded first, and the notification never fails it or holds it up for more than about a second; Herdr declining (toasts off, no attached client, rate limit) is silent.
+
 An orchestrator wakes on any child event with one background command:
 
 ```bash

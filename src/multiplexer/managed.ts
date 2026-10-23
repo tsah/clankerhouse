@@ -74,6 +74,8 @@ export class ManagedMultiplexer {
   claim(location: NativeLocation, key: ClaimKey, value: string | null) { return this.adapter.claim(location, key, value) }
   readClaim(location: NativeLocation, key: ClaimKey) { return this.adapter.readClaim(location, key) }
   paneAddressEnv() { return this.adapter.paneAddressEnv() }
+  /** Resolves false when the runtime cannot notify. */
+  async notify(notice: { title: string; body?: string }) { return this.adapter.notify ? this.adapter.notify(notice) : false }
   changes(signal: AbortSignal) { return this.adapter.changes(signal) }
   available() { return this.adapter.available() }
 

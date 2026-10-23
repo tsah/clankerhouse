@@ -71,6 +71,8 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   name. The operator opts in with `$labels` / `$lbl_<key>` in `[ui.sidebar.spaces] rows`.
 - [ ] **P11** Attention: `notification.show` for blocked/question Reports and an
   `agent.view.set` view of a Workshop's children.
+  Notifications landed: `clankers report` notifies for `question`, `blocked`, `failed`
+  (operator-chosen with `CLANKERHOUSE_REPORT_NOTIFY`), bounded to ~1 s, after recording.
 - [-] **P12** `post-create` → plugin `worktree.created` event hook. Only with P13.
   Declined with P13; Herdr event hooks are also unordered, unlimited and unapproved.
 - [-] **P13** Evaluate replacing Worktrunk + warm pool + `worktree-delete` with Herdr

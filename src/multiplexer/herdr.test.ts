@@ -317,6 +317,20 @@ describe("herdr multiplexer adapter", () => {
     expect(observed.sessions[0]!.shownLabels).toEqual({ lbl_stage: "retro", labels: "retro" })
   })
 
+  test("shows a notification and treats herdr's not-shown reasons as plain false", async () => {
+    const calls: Call[] = []
+    let shown = true
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: async (method, params = {}) => {
+      calls.push({ method, params })
+      return { type: "notification_show", shown, reason: shown ? "shown" : "no_foreground_client" }
+    } })
+    expect(await adapter.notify({ title: "question · w", body: "Which?" })).toBe(true)
+    expect(calls).toEqual([{ method: "notification.show", params: { title: "question · w", body: "Which?", sound: "request" } }])
+    shown = false
+    expect(await adapter.notify({ title: "blocked · w" })).toBe(false)
+    expect(await new HerdrAdapter({ socketPath: "/tmp/clankerhouse-no-such-herdr.sock" }).notify({ title: "x" })).toBe(false)
+  })
+
   test("keeps label tokens within herdr's token-name and per-report limits", () => {
     const many = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`k${String(index).padStart(2, "0")}`, `v${index}`]))
     const tokens = herdrLabelTokens({ ...many, ["x".repeat(30)]: "long-key" })

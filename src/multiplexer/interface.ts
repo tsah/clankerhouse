@@ -186,6 +186,8 @@ export interface Multiplexer {
    * there. Presentation only; resolves false when nothing needed writing.
    */
   showLabels?(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined): Promise<boolean>
+  /** Ask the runtime to show the operator a notification. Best effort and quick; resolves whether it was shown. */
+  notify?(notice: { title: string; body?: string }): Promise<boolean>
   /** Name of the environment variable a child process reads to learn its own pane address. */
   paneAddressEnv(): string
   /** Whether the current process is running inside this runtime. */

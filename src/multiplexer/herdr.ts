@@ -21,6 +21,8 @@ export const HERDR_PROCESS_INFO_CONCURRENCY = 8
 export const HERDR_PROCESS_INFO_TTL_MS = 10_000
 /** Coalesces topology bursts before the agent-status subscription is re-established. */
 export const HERDR_STATUS_RESUBSCRIBE_DELAY_MS = 250
+/** A notification is a courtesy: the caller never waits on herdr longer than this. */
+export const HERDR_NOTIFY_TIMEOUT_MS = 1_000
 /** Events after which the set of agent panes may differ; herdr names pushed events with underscores (`pane_created`). */
 const statusTopologyEvents = /^pane[._](created|closed|moved|exited|agent_detected)$|^(tab|workspace)[._]closed$/
 
@@ -147,6 +149,8 @@ export class HerdrAdapter implements Multiplexer {
   readonly kind = "herdr" as const
   readonly socketPath: string
   private readonly request: HerdrRequest
+  /** A test's request function; otherwise quick calls open their own short-timeout connection. */
+  private readonly injectedRequest?: HerdrRequest
   private readonly activity = new Map<string, number>()
   private readonly revisions = new Map<string, number>()
   private readonly source: string
@@ -157,6 +161,7 @@ export class HerdrAdapter implements Multiplexer {
   constructor(options: { socketPath?: string; request?: HerdrRequest; source?: string } = {}) {
     this.socketPath = options.socketPath ?? herdrSocketPath()
     this.request = options.request ?? herdrRequest(this.socketPath)
+    this.injectedRequest = options.request
     this.source = options.source ?? "clankerhouse"
   }
 
@@ -563,6 +568,17 @@ export class HerdrAdapter implements Multiplexer {
       await this.request("workspace.report_metadata", { workspace_id: location.nativeSessionId, source: this.source, tokens: Object.fromEntries(patch.slice(start, start + 16)) })
     }
     return patch.length > 0
+  }
+
+  /**
+   * `notification.show` with the request sound. herdr answers `shown: false` when toasts are off, no client is in
+   * the foreground, or it is rate limited; none of that is an error here. A missing server answers at once.
+   */
+  async notify(notice: { title: string; body?: string }) {
+    if (!this.injectedRequest && !existsSync(this.socketPath)) return false
+    const request = this.injectedRequest ?? herdrRequest(this.socketPath, HERDR_NOTIFY_TIMEOUT_MS)
+    const result = await request("notification.show", { title: notice.title, ...(notice.body ? { body: notice.body } : {}), sound: "request" })
+    return result.shown === true
   }
 
   /** Mirror an attested Clankerhouse lifecycle state into herdr so its own UI agrees. */

@@ -712,14 +712,13 @@ done
 # Herdr owns seen. This fake Pi reports to no daemon, so Herdr holds no settled status for
 # it, and its finished turn counts as seen exactly while its pane is focused.
 pi_state() {
-    rm -f "$cache_file"
     refresh_daemon
-    python3 - "$cache_file" "$pi_pane" <<'PY'
-import json,sys
-snap=json.load(open(sys.argv[1]))
-sessions=snap["sessions"] if "sessions" in snap else snap["snapshot"]["sessions"]
-print(next(d["state"] for s in sessions for d in s["details"] if d.get("kind")=="clanker" and d["target"].get("pane")==sys.argv[2]))
-PY
+    bun --eval '
+      const [modulePath, socketPath, pane] = process.argv.slice(1)
+      const { getSnapshot } = await import(modulePath)
+      const snapshot = await getSnapshot(socketPath)
+      console.log(snapshot.sessions.flatMap((s) => s.details).find((d) => d.kind === "clanker" && d.target?.pane === pane)?.state ?? "")
+    ' "$repo/src/transport/index.ts" "$rtd/daemon.sock" "$pi_pane"
 }
 herdr_focus_pane() {
     python3 - "$qa_herdr_sock" "$1" <<'PY'

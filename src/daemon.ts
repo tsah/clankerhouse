@@ -52,7 +52,6 @@ const repositoryCachePath = `${runtimeDir}/repositories.json`
 const clankerStateDir = `${runtimeDir}/clanker-state`
 // Read reports from clankers that were already running before the rename.
 const previousClankerStateDir = `${Bun.env.XDG_RUNTIME_DIR ?? "/tmp"}/alt-k-tui-${process.getuid?.() ?? Bun.env.USER ?? "user"}/agent-state`
-const seenStateDir = `${runtimeDir}/seen-state`
 const refreshMs = Number(Bun.env.CLANKERHOUSE_REFRESH_MS ?? 15_000) || 15_000
 const coldRefreshMs = Number(Bun.env.CLANKERHOUSE_COLD_REFRESH_MS ?? 60_000) || 60_000
 const directoryRefreshMs = Number(Bun.env.CLANKERHOUSE_DIRECTORY_REFRESH_MS ?? 10 * 60_000) || 10 * 60_000
@@ -323,27 +322,6 @@ const collectClankerReports = Effect.sync(() => {
   return selectCurrentLifecycleObservations(reports)
 })
 
-const readSeenState = () => {
-  const seen = new Map<string, number>()
-  if (!existsSync(seenStateDir)) return seen
-  for (const entry of readdirSync(seenStateDir)) {
-    if (!entry.endsWith(".json")) continue
-    try {
-      const record = JSON.parse(readFileSync(`${seenStateDir}/${entry}`, "utf8")) as { key?: string; seenAt?: number }
-      if (record.key) seen.set(record.key, Number(record.seenAt ?? 0) || 0)
-    } catch {}
-  }
-  return seen
-}
-
-const markSeen = (key: string, seenAt = Date.now()) => {
-  mkdirSync(seenStateDir, { recursive: true })
-  const target = `${seenStateDir}/${encodeURIComponent(key)}.json`
-  const tmp = `${target}.${process.pid}.tmp`
-  writeFileSync(tmp, JSON.stringify({ key, seenAt }))
-  renameSync(tmp, target)
-}
-
 const gitMetaCache = new Map<string, { refreshedAt: number; value: { branch: string; flags: string } }>()
 const gitMeta = (path: string) => Effect.gen(function* () {
   if (!path) return { branch: "", flags: "" }
@@ -363,10 +341,6 @@ const gitMeta = (path: string) => Effect.gen(function* () {
 })
 
 const applyProjectEffect = (effect: ProjectEffect) => {
-  if (effect.type === "markSeen") {
-    markSeen(effect.key, effect.seenAt)
-    return
-  }
   markDirectoryActivity(effect.path, effect.source, effect.updatedAt, effect.minIntervalMs)
 }
 
@@ -374,10 +348,9 @@ const collectSessions = Effect.all([
   collectMultiplexerResources,
   collectDirectories,
   collectClankerReports,
-  Effect.sync(readSeenState),
   collectProjectionEnrichment,
 ], { concurrency: "unbounded" }).pipe(
-  Effect.flatMap(([multiplexer, directories, clankerReports, seen, enrichment]) => {
+  Effect.flatMap(([multiplexer, directories, clankerReports, enrichment]) => {
     const { lineage, incidents, managedResources } = enrichment
     return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
       const projection = projectResources({
@@ -385,7 +358,6 @@ const collectSessions = Effect.all([
         windows: multiplexer.windows,
         directories,
         clankerReports,
-        seen,
         lineage,
         incidents,
         gitMetaByPath: new Map(gitMetas),
@@ -959,18 +931,6 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
         const command = await runDeleteCommand([binPath("clankers"), "target", "open", "--json", JSON.stringify(intent.target)])
         if (command.exitCode !== 0) throw new Error(command.stderr.trim() || command.stdout.trim() || "Unable to open target")
       }
-      const openedLocation = checkpoint.location as { instanceId?: string; nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
-      const completionKey = latestWrittenProjection?.sessions
-        .flatMap((session) => session.details)
-        .find((detail) => {
-          const candidate = "location" in detail.target ? detail.target.location : undefined
-          return candidate && openedLocation
-            && candidate.instanceId === openedLocation.instanceId
-            && candidate.nativeSessionId === openedLocation.nativeSessionId
-            && (!openedLocation.nativeWindowId || candidate.nativeWindowId === openedLocation.nativeWindowId)
-            && (!openedLocation.nativePaneId || candidate.nativePaneId === openedLocation.nativePaneId)
-        })?.completionKey
-      if (completionKey) markSeen(completionKey)
       return { checkpoint: { ...checkpoint, outcome: { opened: true } }, result: { opened: true } }
     }
   }

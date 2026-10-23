@@ -13,16 +13,13 @@ export interface GitMeta {
   flags: string
 }
 
-export type ProjectEffect =
-  | { type: "markDirectoryActivity"; path: string; source: ActivitySource; updatedAt: number; minIntervalMs: number }
-  | { type: "markSeen"; key: string; seenAt: number }
+export type ProjectEffect = { type: "markDirectoryActivity"; path: string; source: ActivitySource; updatedAt: number; minIntervalMs: number }
 
 export interface ProjectInputs {
   sessions: readonly MuxSession[]
   windows: readonly MuxWindow[]
   directories: readonly DirectoryRow[]
   clankerReports: readonly LifecycleObservation[]
-  seen: ReadonlyMap<string, number>
   lineage: LineageSnapshot
   incidents: readonly ResourceIncident[]
   gitMetaByPath: ReadonlyMap<string, GitMeta>
@@ -49,9 +46,6 @@ const ageFromTimestamp = (timestamp: number, observedAt: number) => {
   return `${Math.floor(diff / 86400)}d`
 }
 
-const paneCompletionKey = (instanceId: string, pane: string) => `${instanceId}:pane:${pane}`
-const windowCompletionKey = (instanceId: string, window: string) => `${instanceId}:window:${window}`
-
 export const isPiWindow = (window: MuxWindow) => window.command === "pi" || window.name.toLowerCase() === "pi" || window.name.toLowerCase().startsWith("p:") || window.title.startsWith("π")
 export const isClaudeWindow = (window: MuxWindow) => window.command === "claude" || window.name.toLowerCase() === "claude" || window.title.toLowerCase().includes("claude code")
 export const isCodexWindow = (window: MuxWindow) => window.command === "codex" || window.name.toLowerCase() === "codex" || window.title.toLowerCase().includes("codex")
@@ -69,7 +63,6 @@ const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | nul
 export const projectResources = (inputs: ProjectInputs): ProjectResult => {
   const { sessions, windows, directories, clankerReports, lineage, incidents, gitMetaByPath, observedAt, instanceId, home } = inputs
   const multiplexerKind = inputs.multiplexerKind ?? "herdr"
-  const seen = new Map(inputs.seen)
   const effects: ProjectEffect[] = []
   const windowsBySession = Map.groupBy(windows, (window) => window.sessionId)
   const worktreePaths = new Set(directories.filter((directory) => directory.source === "worktree").map((directory) => expandHome(directory.path, home)))
@@ -135,12 +128,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const runtimeState = observedHarness ? window.agentStatus?.status : undefined
       const sourceState = matchingReport?.state ?? observedReport?.state ?? runtimeState ?? "unknown"
       const updatedAt = matchingReport?.updatedAt ?? observedReport?.updatedAt ?? window.activity * 1000
-      const completionKey = projectedKind === "window" ? windowCompletionKey(instanceId, window.id) : paneCompletionKey(instanceId, window.pane)
-      const state = stateWithSeen(sourceState, updatedAt, seen.get(completionKey), focused)
-      if (sourceState === "done" && focused) {
-        effects.push({ type: "markSeen", key: completionKey, seenAt: observedAt })
-        seen.set(completionKey, observedAt)
-      }
+      const state = stateWithSeen(sourceState, window.agentStatus?.status, focused)
       const observation: RuntimeObservation = matchingReport
         ? { source: "lifecycle", confidence: "attested", state: sourceState, observedAt: matchingReport.updatedAt }
         : observedReport
@@ -149,7 +137,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
             ? { source: "runtime", confidence: "observed", state: sourceState, observedAt }
             : { source: "runtime", confidence: "observed", state: "present", observedAt }
       const status = projectedKind === "window" ? window.command : observedReport ? `reported ${sourceState}` : runtimeState !== undefined ? `runtime ${sourceState}` : ""
-      details.push({ kind: projectedKind, harness: projectedHarness, status, detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, completionKey, updatedAt, terminalId: managedTerminal?.id, clankerId: registeredHarness ? window.clankerId : undefined, observation })
+      details.push({ kind: projectedKind, harness: projectedHarness, status, detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, updatedAt, terminalId: managedTerminal?.id, clankerId: registeredHarness ? window.clankerId : undefined, observation })
       for (const unmatched of observationReconciliation.unmatchedByPane.get(window.pane) ?? []) {
         const report = unmatched.observation
         if (report === observedReport) continue

@@ -38,7 +38,6 @@ const inputs = (overrides: Partial<ProjectInputs> = {}): ProjectInputs => ({
   windows: [],
   directories: [],
   clankerReports: [],
-  seen: new Map(),
   lineage: emptyLineage(),
   incidents: [],
   gitMetaByPath: new Map(),
@@ -124,22 +123,33 @@ describe("session resource projection", () => {
     }
   })
 
-  test("returns focused completion and activity writes as explicit effects", () => {
-    const seen = new Map<string, number>()
+  test("returns activity writes as explicit effects and shows a focused completion as seen", () => {
     const result = projectResources(inputs({
       sessions: [muxSession({ attached: true })],
       windows: [muxWindow({ command: "pi", name: "pi", title: "π working", active: true, clankerId: "clanker-1", explicitHarness: "pi" })],
       clankerReports: [{ clankerId: "clanker-1", harness: "pi", pane: "%1", state: "done", updatedAt: 3_650_000 }],
-      seen,
     }))
 
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "pi", state: "idle", completionKey: `${instanceId}:pane:%1` })
+    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", harness: "pi", state: "idle" })
     expect(result.effects).toEqual([
       { type: "markDirectoryActivity", path: "/tmp/work", source: "active", updatedAt: observedAt, minIntervalMs: 60_000 },
       { type: "markDirectoryActivity", path: "/tmp/work", source: "clanker", updatedAt: 3_650_000, minIntervalMs: 0 },
-      { type: "markSeen", key: `${instanceId}:pane:%1`, seenAt: observedAt },
     ])
-    expect(seen.size).toBe(0)
+  })
+
+  test("takes whether a finished clanker was seen from Herdr's done and idle", () => {
+    const project = (status: "done" | "idle" | "working", active: boolean) => projectResources(inputs({
+      sessions: [muxSession({ attached: true })],
+      windows: [muxWindow({ command: "claude", name: "claude", active, clankerId: "clanker-1", explicitHarness: "claude", agentStatus: { agent: "claude", status } })],
+      clankerReports: [{ clankerId: "clanker-1", harness: "claude", pane: "%1", state: "done", updatedAt: 3_650_000 }],
+    })).sessions[0]?.details[0]?.state
+    expect(project("done", false)).toBe("done")
+    expect(project("idle", false)).toBe("idle")
+    // Herdr has not taken the settle yet: unseen unless the operator is looking at it.
+    expect(project("working", false)).toBe("done")
+    expect(project("working", true)).toBe("idle")
+    // Herdr's per-tab seen wins over Clankerhouse's own focus guess.
+    expect(project("done", true)).toBe("done")
   })
 
   test("projects an OpenCode pane from Herdr runtime status without a service correlation", () => {

@@ -30,6 +30,7 @@
         "Confirm each exact target and Workshop appears once",
         "Confirm status-bearing rows (including blue idle checkmarks) rank ahead of neutral grey-orb rows, with last-seen ordering within each group, contiguous lineage, and the current session pinned nearest the prompt",
         "Give a directory or shell newer activity than an idle Clanker; confirm its grey orb remains farther from the prompt, including among siblings and when a status-bearing lineage is collapsed",
+        "Let a clanker finish in a background Herdr tab; confirm it shows ready (done) in the picker and Herdr's sidebar until its tab is viewed, then idle in both, and that one finishing in the tab on screen goes straight to idle",
         "Confirm OpenCode panes reflect Herdr's runtime agent status, including blocked on forms and permissions when Herdr's OpenCode integration is installed",
         "Confirm Herdr-detected harnesses and rejected lifecycle reports remain visible without becoming managed Clankers"
       ]

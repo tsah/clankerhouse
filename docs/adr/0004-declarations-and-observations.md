@@ -10,7 +10,7 @@ Clankerhouse owns durable Workshop, Terminal, and Clanker identity while the Mul
 
 ## Decision
 
-Clankerhouse is authoritative for Declarations: stable identity, Display Names, Workshop lineage, desired recovery state, acknowledgement, and durable mutation intent.
+Clankerhouse is authoritative for Declarations: stable identity, Display Names, Workshop lineage, desired recovery state, and durable mutation intent.
 
 Runtime Adapters are authoritative for their Observations. Every Observation carries its source, observed time, reported state when available, and confidence. Identity correlation may classify evidence as attested, observed, or rejected. Rejected or incomplete evidence cannot establish managed identity, drive Recovery, or become an actionable Clanker, but remains reportable when it has a current target.
 
@@ -24,4 +24,5 @@ Projection keeps existing state and target fields as compatibility outputs while
 - A mismatched lifecycle report remains diagnosable without affecting aggregate runtime state.
 - Stable identity and mutation safety continue to use validated registry records and Multiplexer Locations.
 - Snapshot additions remain optional and backward-compatible during migration.
+- Whether a finished clanker has been seen was once a Clankerhouse acknowledgement ledger; it is now the Multiplexer's Observation (Herdr's effective `done` versus `idle`), fed by the lifecycle state Clankerhouse mirrors into Herdr.
 - Recovery adoption must eventually consume the same validated observation model instead of raw multiplexer claims.

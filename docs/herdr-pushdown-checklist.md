@@ -45,8 +45,12 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   `agent_session_id`; done → `idle` with a synthetic `working` when the spool coalesced it;
   session end → `pane.release_agent`; reports read over 30 s late are skipped, since Herdr
   never releases a pane held for a harness whose process it did not see exit.
-- [ ] **P2** Seen/ready tracking (`markSeen` effects, completion keys, `stateWithSeen`)
-  → Herdr `seen` and effective `done`.
+- [x] **P2** Seen/ready tracking (`markSeen` effects, completion keys, `stateWithSeen`)
+  → Herdr `seen` and effective `done`. Landed: the seen ledger, `markSeen` effects, and
+  completion keys are gone; projection shows a finished clanker `done` or `idle` as Herdr
+  does. Differences accepted: Herdr's seen is per tab (any pane of a viewed tab is seen) and
+  a client-less server treats the active tab as watched. Fallback when Herdr holds no
+  settled status (lagging, or not observing the harness): seen only while focused.
 - [ ] **P3** Settle/wait logic (hook generation counting, `watch` settled) →
   `completion_seq` / `state_change_seq` and `agent.wait`. Keep turn windows for
   `clankers result`.

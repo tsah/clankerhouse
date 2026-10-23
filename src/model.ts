@@ -24,7 +24,7 @@ export interface RuntimeObservation {
   reason?: string
 }
 
-export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; completionKey?: string; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation }
+export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
 export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string; labels?: string[]; title?: string; project?: string }
 export interface TreeRow {
@@ -89,10 +89,16 @@ interface VisibleTreeNode {
 export const normalizeReportedState = (state: ReportedClankerState, hookEvent?: string): ClankerState =>
   state === "done" && hookEvent === "session_start" ? "idle" : state
 
-export const stateWithSeen = (state: ClankerState, updatedAt: number, seenAt = 0, focused = false): ClankerState => {
+/**
+ * A settled turn stays `done` until the operator has seen it, then shows `idle`. The Multiplexer tracks seen: Herdr
+ * reports a settled pane `done` until its tab is viewed, or `idle` when the tab was in view as the turn settled.
+ * A pane whose runtime status holds no settled turn (Herdr still catching up, or not observing the harness)
+ * counts as seen only while it is focused.
+ */
+export const stateWithSeen = (state: ClankerState, runtimeStatus: string | undefined, focused = false): ClankerState => {
   if (state !== "done") return state
-  if (focused || (seenAt > 0 && (!updatedAt || seenAt >= updatedAt))) return "idle"
-  return "done"
+  if (runtimeStatus === "idle" || runtimeStatus === "done") return runtimeStatus
+  return focused ? "idle" : "done"
 }
 
 const aggregateStates = (states: ClankerState[]): ClankerState => {

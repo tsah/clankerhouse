@@ -56,7 +56,7 @@ The continuous process that consumes Multiplexer topology, foreground process, h
 
 ## Declaration
 
-An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, recoverable intent, user acknowledgement, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
+An internal record intentionally maintained by Clankerhouse: stable correlation identity, Display Names, Workshop lineage, recoverable intent, and durable mutation intent. A Declaration is authoritative only for Clankerhouse behavior; it never overrides current external state.
 
 ## Label
 
@@ -85,5 +85,7 @@ An executable Clankerhouse runs inside the Workshop: either tracked in the targe
 ## Observation
 
 A timestamped fact reported by an external runtime Adapter, such as multiplexer topology, process presence, lifecycle state, Git state, or host pressure. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.
+
+Whether a finished Clanker has been seen is an Observation too: the Multiplexer tracks it (Herdr's `done` until the tab is viewed, then `idle`), and Clankerhouse keeps no acknowledgement of its own.
 
 Harness state can remain an Observation without becoming a Clanker. A lifecycle report with no Clanker claim may describe a pane's current harness state only while the Multiplexer's agent detection observes a matching harness process on that pane. It provides presentation state, not owned identity, Clanker actions, or Recovery authority.

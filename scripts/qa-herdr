@@ -181,7 +181,7 @@ for _ in {1..100}; do [[ -s "$report" ]] && break; sleep 0.05; done
 grep -q '"state": *"working"' "$report" || grep -q '"state":"working"' "$report" || fail "state report content: $(cat "$report")"
 "${common_env[@]}" "$clankers" status clanker-qa | grep -q '"state":"working"' || fail "clanker status did not read the report"
 
-step "The daemon mirrors Claude hook lifecycle into Herdr's agent status and releases the pane at session end"
+step "The daemon mirrors Claude hook lifecycle into Herdr, takes seen from Herdr, and releases the pane at session end"
 mirror_window=$("${common_env[@]}" "$clankers" mux spawn --session "$session_id" --name claude --cwd "$work" -- sleep 120)
 mirror_pane=$(printf '%s' "$mirror_window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])')
 claude_hook() { # STATE EVENT
@@ -204,11 +204,32 @@ for _ in range(100):
 sys.exit(f"Herdr shows {got!r} for {sys.argv[2]}, expected {sys.argv[3]!r}")
 PY
 }
+projected_state() { # EXPECTED: the daemon projection's state for the mirrored clanker
+    for _ in {1..100}; do
+        bun --eval 'const [m, s] = process.argv.slice(1); await (await import(m)).refreshProjection(s)' "$repo/src/transport/index.ts" "$daemon_socket" >/dev/null
+        got=$(python3 - "$cache" "$mirror_pane" <<'PY'
+import json,sys
+snap=json.load(open(sys.argv[1]))
+sessions=snap["sessions"] if "sessions" in snap else snap["snapshot"]["sessions"]
+print(next((d["state"] for s in sessions for d in s["details"] if d.get("clankerId")=="clanker-mirror"), "missing"))
+PY
+)
+        [[ "$got" == "$1" ]] && return 0
+        sleep 0.05
+    done
+    printf 'projection shows %s, expected %s\n' "$got" "$1" >&2
+    return 1
+}
 claude_hook working UserPromptSubmit
 herdr_agent "claude working" || fail "Herdr did not take the mirrored working state"
 # The spawned tab is in the background, so Herdr keeps the settled turn unseen.
 claude_hook done Stop
 herdr_agent "claude done" || fail "Herdr did not record the mirrored completion as unseen"
+projected_state done || fail "an unseen completion did not project as done"
+# Herdr owns seen: viewing the tab marks the turn seen, and the projection follows.
+"${common_env[@]}" "$clankers" mux focus --session "$session_id" --window "$(printf '%s' "$mirror_window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeWindowId"])')" --pane "$mirror_pane"
+herdr_agent "claude idle" || fail "Herdr did not mark the viewed completion seen"
+projected_state idle || fail "a seen completion did not project as idle"
 claude_hook unknown SessionEnd
 herdr_agent "- unknown" || fail "Herdr kept the pane after the session ended"
 

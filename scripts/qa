@@ -709,17 +709,36 @@ for _ in {1..100}; do
 done
 [[ " $pi_panes " == *" $active "* ]] || { printf 'Expected Herdr focus on a pi pane (%s), got %s\n' "$pi_panes" "$active" >&2; exit 1; }
 
-seen_count=0
-mkdir -p "$rtd/seen-state"
-for _ in {1..100}; do
-    seen_count=$(find "$rtd/seen-state" -maxdepth 1 -type f -name '*.json' | wc -l)
-    [[ "$seen_count" -ge 1 ]] && break
-    sleep 0.05
-done
-[[ "$seen_count" -ge 1 ]] || { printf 'Expected a persisted seen record\n' >&2; exit 1; }
-rm -f "$cache_file"
-# The first focused projection writes acknowledgement as an effect; the next
-# projection consumes it and renders the Clanker idle.
+# Herdr owns seen. This fake Pi reports to no daemon, so Herdr holds no settled status for
+# it, and its finished turn counts as seen exactly while its pane is focused.
+pi_state() {
+    rm -f "$cache_file"
+    refresh_daemon
+    python3 - "$cache_file" "$pi_pane" <<'PY'
+import json,sys
+snap=json.load(open(sys.argv[1]))
+sessions=snap["sessions"] if "sessions" in snap else snap["snapshot"]["sessions"]
+print(next(d["state"] for s in sessions for d in s["details"] if d.get("kind")=="clanker" and d["target"].get("pane")==sys.argv[2]))
+PY
+}
+herdr_focus_pane() {
+    python3 - "$qa_herdr_sock" "$1" <<'PY'
+import json,socket,sys
+def call(method, params):
+    sock=socket.socket(socket.AF_UNIX); sock.connect(sys.argv[1])
+    sock.sendall((json.dumps({"id":"qa","method":method,"params":params})+"\n").encode())
+    data=b""
+    while b"\n" not in data: data += sock.recv(65536)
+    reply=json.loads(data.split(b"\n",1)[0]); assert "error" not in reply, reply
+    return reply["result"]
+pane=call("pane.get",{"pane_id":sys.argv[2]})["pane"]
+call("workspace.focus",{"workspace_id":pane["workspace_id"]}); call("tab.focus",{"tab_id":pane["tab_id"]}); call("pane.focus",{"pane_id":sys.argv[2]})
+PY
+}
+herdr_focus_pane "$pi_pane"
+[[ "$(pi_state)" == idle ]] || { printf 'Expected the focused finished clanker to render idle\n' >&2; exit 1; }
+herdr_focus_pane "$main_pane"
+[[ "$(pi_state)" == done ]] || { printf 'Expected the unfocused finished clanker to render done\n' >&2; exit 1; }
 refresh_daemon
 
 open_picker_window picker

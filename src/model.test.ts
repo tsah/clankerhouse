@@ -14,7 +14,6 @@ const detail = (session: string, title: string, suffix: string, state: TreeRow["
   age: "1m",
   state,
   target: windowTarget(session, suffix),
-  completionKey: `window:@${suffix}`,
   updatedAt: Number.parseInt(suffix, 10) || 0,
 })
 
@@ -50,11 +49,15 @@ describe("clanker state", () => {
     expect(normalizeReportedState("done", "session_start")).toBe("idle")
   })
 
-  test("acknowledges only the observed completion generation", () => {
-    expect(stateWithSeen("done", 200, 0)).toBe("done")
-    expect(stateWithSeen("done", 200, 200)).toBe("idle")
-    expect(stateWithSeen("done", 300, 200)).toBe("done")
-    expect(stateWithSeen("blocked", 300, 400)).toBe("blocked")
+  test("takes seen from the runtime's settled status, else from focus", () => {
+    expect(stateWithSeen("done", "done")).toBe("done")
+    expect(stateWithSeen("done", "done", true)).toBe("done")
+    expect(stateWithSeen("done", "idle")).toBe("idle")
+    expect(stateWithSeen("done", "working")).toBe("done")
+    expect(stateWithSeen("done", undefined)).toBe("done")
+    expect(stateWithSeen("done", "unknown", true)).toBe("idle")
+    expect(stateWithSeen("blocked", "idle", true)).toBe("blocked")
+    expect(stateWithSeen("working", "done")).toBe("working")
   })
 
   test("aggregates by actionable state precedence", () => {

@@ -331,6 +331,19 @@ describe("herdr multiplexer adapter", () => {
     expect(await new HerdrAdapter({ socketPath: "/tmp/clankerhouse-no-such-herdr.sock" }).notify({ title: "x" })).toBe(false)
   })
 
+  test("narrows herdr's agent view to a Workshop's children by pane token, and clears only its own view", async () => {
+    const calls: Call[] = []
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })
+    await adapter.showChildAgents({ parentWorkshopId: "workshop-1", label: "children of w" })
+    await adapter.showChildAgents(null)
+    await adapter.claim(paneLocation("w1", null, "w1:p2"), "paneWorkshopParentId", "workshop-1")
+    expect(calls).toEqual([
+      { method: "agent.view.set", params: { source: "clankerhouse", label: "children of w", filter: { op: "eq", field: { token: "ch_pane_parent" }, value: "workshop-1" } } },
+      { method: "agent.view.clear", params: { source: "clankerhouse" } },
+      { method: "pane.report_metadata", params: { pane_id: "w1:p2", source: "clankerhouse", tokens: { ch_pane_parent: "workshop-1" } } },
+    ])
+  })
+
   test("keeps label tokens within herdr's token-name and per-report limits", () => {
     const many = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`k${String(index).padStart(2, "0")}`, `v${index}`]))
     const tokens = herdrLabelTokens({ ...many, ["x".repeat(30)]: "long-key" })

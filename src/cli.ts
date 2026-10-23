@@ -201,6 +201,25 @@ const runListCommand = async (parsed: ParsedArgs) => {
   return console.log(JSON.stringify(await listClankerRows({ cwd, childrenOf: scope, states })))
 }
 
+/** `clankers view children [WORKSHOP]` narrows the Multiplexer's agent list to that Workshop's children; `clear` restores it. */
+const runViewCommand = async (parsed: ParsedArgs) => {
+  const action = parsed.shift()
+  const usage = "Usage: clankers view children [WORKSHOP] | clear"
+  if (action === "clear") {
+    if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usage}`)
+    await openManagedMultiplexer().showChildAgents(null)
+    return console.log(JSON.stringify({ view: null }))
+  }
+  if (action !== "children") throw new Error(usage)
+  const selector = parsed.shift() ?? "."
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usage}`)
+  const workshop = resolveWorkshopSelector(selector)
+  const name = workshopLabels(workshop.workshopId)[TITLE_KEY] || workshop.branch
+  const label = `children of ${name}`.slice(0, 60)
+  await openManagedMultiplexer().showChildAgents({ parentWorkshopId: workshop.workshopId, label })
+  return console.log(JSON.stringify({ view: "children", workshopId: workshop.workshopId, label }))
+}
+
 const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) => {
   if (command === "list") return runListCommand(parsed)
   if (command === "status") return console.log(JSON.stringify(await clankerStatusWithReport(requiredClankerId(parsed))))
@@ -332,6 +351,7 @@ const usage = `Usage:
   clankers result CLANKER_ID [--generation GENERATION]
   clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
+  clankers view children [WORKSHOP] | clear
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers recovery status|journal|reconcile|checkpoint
   clankers recovery attest-exit CLANKER_ID --attempt ID [--session-id ID]
@@ -348,7 +368,7 @@ const usage = `Usage:
 --model MODEL overrides the profile/default model for Pi, Claude, and Codex.
 Pi and Claude retain the override during Recovery. OpenCode does not support this flag.`
 
-const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities"])
+const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
 
 const muxLocation = (parsed: ParsedArgs): NativeLocation => {
   const pane = parsed.take("--pane")
@@ -435,6 +455,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   if (["list", "status", "capabilities", "wait", "send", "send-status", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
 
   if (command === "mux") return runMultiplexerCli(parsed)
+  if (command === "view") return runViewCommand(parsed)
 
   if (command === "delete") {
     const kind = parsed.shift()

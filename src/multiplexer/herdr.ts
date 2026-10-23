@@ -42,6 +42,8 @@ const tokenNames: Partial<Record<ClaimKey, string>> = {
   clankerSocket: "ch_clanker_socket",
   clankerPid: "ch_clanker_pid",
   clankerCapabilities: "ch_clanker_caps",
+  // The Workshop parent again on every pane, because herdr agent views filter on pane tokens only.
+  paneWorkshopParentId: "ch_pane_parent",
 }
 const TOKEN_VALUE_LIMIT = 80
 const pathLikeKeys = new Set<ClaimKey>(["worktreePath", "directoryPath", "gitCommonDir", "clankerSocket"])
@@ -579,6 +581,19 @@ export class HerdrAdapter implements Multiplexer {
     const request = this.injectedRequest ?? herdrRequest(this.socketPath, HERDR_NOTIFY_TIMEOUT_MS)
     const result = await request("notification.show", { title: notice.title, ...(notice.body ? { body: notice.body } : {}), sound: "request" })
     return result.shown === true
+  }
+
+  /** herdr's Agents view, owned by this source so clearing never removes another owner's view. */
+  async showChildAgents(view: { parentWorkshopId: string; label: string } | null) {
+    if (!view) {
+      await this.request("agent.view.clear", { source: this.source })
+      return
+    }
+    await this.request("agent.view.set", {
+      source: this.source,
+      label: view.label,
+      filter: { op: "eq", field: { token: tokenNames.paneWorkshopParentId }, value: view.parentWorkshopId },
+    })
   }
 
   /** Mirror an attested Clankerhouse lifecycle state into herdr so its own UI agrees. */

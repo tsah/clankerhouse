@@ -26,7 +26,7 @@ The Multiplexer interface is expressed in Clankerhouse operations and capabiliti
 
 The current ephemeral location of a managed entity, expressed as a Multiplexer kind, Multiplexer instance identity, and opaque native session, window, and pane IDs. Multiplexer Locations can change or disappear without changing Workshop, Terminal, or Clanker identity.
 
-A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes and their return belongs to Recovery.
+A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes and their return belongs to Recovery. Presentation the daemon derives from Declarations, the Label tokens and each pane's Workshop-parent claim that Herdr's agent view filters on, is rewritten on every observation and so returns by itself.
 
 ## Managed Resource
 

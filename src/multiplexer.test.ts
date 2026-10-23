@@ -165,6 +165,33 @@ describe("managed multiplexer", () => {
     expect(await new ManagedMultiplexer(new FakeAdapter(sessions), { registryPath, workshopStatePath }).mirrorWorkshopLabels(await managed.observe())).toBe(0)
   })
 
+  test("claims each pane's Workshop parent so agent views can select a Workshop's children", async () => {
+    const registryPath = fixture()
+    const workshopStatePath = join(registryPath, "..", "workshops.sqlite3")
+    const parentPath = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-view-parent-"))); roots.push(parentPath)
+    const path = `${parentPath}-child`; roots.push(path)
+    for (const argv of [["init", "-q", "-b", "main"], ["-c", "user.email=qa@example.com", "-c", "user.name=qa", "commit", "-q", "--allow-empty", "-m", "init"], ["worktree", "add", "-q", "-b", "child", path]]) Bun.spawnSync(["git", "-C", parentPath, ...argv])
+    const parent = registerWorkshop({ path: parentPath, commonDir: join(parentPath, ".git"), branch: "main" }, { dbPath: workshopStatePath })
+    const child = registerWorkshop({ path, commonDir: join(parentPath, ".git"), branch: "child" }, { parentWorkshopId: parent.workshopId, dbPath: workshopStatePath })
+    class ViewAdapter extends FakeAdapter { async showChildAgents() {} }
+    const sessions = [
+      ...topology().map((session) => ({ ...session, workshopId: child.workshopId })),
+      // The parent's own panes carry no parent; a stale claim there is cleared.
+      ...topology({ sessionId: "s2" }).map((session) => ({ ...session, path: parentPath, workshopId: undefined, windows: session.windows.map((window) => ({ ...window, panes: window.panes.map((pane) => ({ ...pane, claims: pane.id === "p1" ? { paneWorkshopParentId: "stale" } : {} })) })) })),
+    ]
+    sessions[0]!.windows[0]!.panes[0]!.claims = { paneWorkshopParentId: parent.workshopId }
+    const adapter = new ViewAdapter(sessions, ["session", "pane"])
+    const managed = new ManagedMultiplexer(adapter, { registryPath, workshopStatePath })
+    expect(await managed.claimPaneParents(await managed.observe())).toBe(3)
+    expect(adapter.claims.map(([at, key, value]) => [at.nativeSessionId, at.nativePaneId, key, value])).toEqual([
+      ["s1", "p2", "paneWorkshopParentId", parent.workshopId],
+      ["s1", "p3", "paneWorkshopParentId", parent.workshopId],
+      ["s2", "p1", "paneWorkshopParentId", null],
+    ])
+    // Without agent views there is nothing to feed.
+    expect(await new ManagedMultiplexer(new FakeAdapter(sessions), { registryPath, workshopStatePath }).claimPaneParents(await managed.observe())).toBe(0)
+  })
+
   test("resolves managed resources from the registry rather than stale target hints", async () => {
     const registryPath = fixture()
     const registry = openResourceRegistry({ dbPath: registryPath })

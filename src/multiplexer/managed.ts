@@ -76,6 +76,10 @@ export class ManagedMultiplexer {
   paneAddressEnv() { return this.adapter.paneAddressEnv() }
   /** Resolves false when the runtime cannot notify. */
   async notify(notice: { title: string; body?: string }) { return this.adapter.notify ? this.adapter.notify(notice) : false }
+  showChildAgents(view: { parentWorkshopId: string; label: string } | null) {
+    if (!this.adapter.showChildAgents) throw new UnsupportedMultiplexerOperation(this.kind, "agent view")
+    return this.adapter.showChildAgents(view)
+  }
   changes(signal: AbortSignal) { return this.adapter.changes(signal) }
   available() { return this.adapter.available() }
 
@@ -252,6 +256,35 @@ export class ManagedMultiplexer {
         continue
       }
       this.labelFailures.delete(session.id)
+    }
+    return written
+  }
+
+  /**
+   * Writes each pane's Workshop parent as a pane claim, so a runtime whose agent views filter on pane metadata can
+   * select a Workshop's children (`showChildAgents`). Sessions resolve to Workshops as for labels; only differences
+   * are written, a pane whose Workshop lost its parent is cleared, and a cold restart is repaired on the next pass.
+   */
+  async claimPaneParents(snapshot: MultiplexerSnapshot): Promise<number> {
+    if (!this.adapter.showChildAgents || !this.supportsClaims("pane") || !snapshot.sessions.length) return 0
+    const records = listWorkshopRecords(this.workshopStatePath)
+    const byId = new Map(records.map((workshop) => [workshop.workshopId, workshop]))
+    const byPath = new Map(records.map((workshop) => [workshop.canonicalPath, workshop]))
+    let written = 0
+    for (const session of snapshot.sessions) {
+      const workshop = session.workshopId ? byId.get(session.workshopId) : session.path ? byPath.get(canonicalPath(session.path)) : undefined
+      const parent = workshop?.parentWorkshopId ?? null
+      for (const window of session.windows) {
+        for (const pane of window.panes) {
+          if ((pane.claims?.paneWorkshopParentId ?? null) === parent) continue
+          try {
+            await this.adapter.claim(paneLocation(session.id, window.id, pane.id), "paneWorkshopParentId", parent)
+            written += 1
+          } catch {
+            // The pane may have closed since the observation; the next pass sees the truth.
+          }
+        }
+      }
     }
     return written
   }

@@ -120,6 +120,15 @@ A worker clanker declares its state upward with `clankers report`, run from insi
 
 A Report that needs the operator also asks Herdr to show a notification (`notification.show` with the request sound), titled `<state> · <Workshop title or branch>` with the message as its body. By default `question`, `blocked`, and `failed` notify. Set `CLANKERHOUSE_REPORT_NOTIFY` in the clankers' environment to a comma list of states to choose others, or to `none` to turn it off; Herdr's own `[ui.toast] delivery` decides whether and where it appears (`off`, its default, shows nothing). The Report is recorded first, and the notification never fails it or holds it up for more than about a second; Herdr declining (toasts off, no attached client, rate limit) is silent.
 
+An orchestrator can narrow Herdr's Agents sidebar to its children:
+
+```bash
+clankers view children        # the current Workshop's child Workshops; or name one like --children-of
+clankers view clear           # back to Herdr's normal agent list
+```
+
+The daemon writes each pane's Workshop parent as the pane token `ch_pane_parent` (Herdr agent views filter on pane tokens only), and `view children` installs an `agent.view.set` filter on it, owned by the `clankerhouse` source so `clear` never removes another owner's view. It shows direct children only, follows clankers that appear later, and lasts until cleared or replaced or until the Herdr server exits.
+
 An orchestrator wakes on any child event with one background command:
 
 ```bash

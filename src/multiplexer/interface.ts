@@ -45,7 +45,7 @@ export type ClaimScope = "session" | "window" | "pane"
  */
 export type SessionClaimKey = "workshopId" | "workshopParentId" | "worktreePath" | "directoryPath" | "gitCommonDir" | "sessionId" | "sessionDisplayName"
 export type WindowClaimKey = "windowId" | "windowDisplayName" | "windowHarness"
-export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "clankerSocket" | "clankerPid" | "clankerCapabilities"
+export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
 export type ClaimKey = SessionClaimKey | WindowClaimKey | PaneClaimKey
 
 export const claimScopeOf = (key: ClaimKey): ClaimScope => {
@@ -188,6 +188,11 @@ export interface Multiplexer {
   showLabels?(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined): Promise<boolean>
   /** Ask the runtime to show the operator a notification. Best effort and quick; resolves whether it was shown. */
   notify?(notice: { title: string; body?: string }): Promise<boolean>
+  /**
+   * Narrow the runtime's own agent list to the harnesses of one Workshop's child Workshops (panes carrying that
+   * `paneWorkshopParentId` claim), or restore it with null. Transient: the runtime may drop it on restart.
+   */
+  showChildAgents?(view: { parentWorkshopId: string; label: string } | null): Promise<void>
   /** Name of the environment variable a child process reads to learn its own pane address. */
   paneAddressEnv(): string
   /** Whether the current process is running inside this runtime. */

@@ -212,6 +212,7 @@
         "Inside a spawned and a recovered clanker, confirm CLANKERHOUSE_WORKSHOP_ID and CLANKERHOUSE_PARENT_WORKSHOP_ID",
         "During a tool-heavy Claude turn, confirm `status.lastEventAt` advances on each tool call",
         "While a spawned clanker runs a long test command, confirm `status.health` shows its scope's memory, any D-state pids, and that command as `longestChild` with a growing `elapsed`",
+        "From a Workshop with child clankers, run `clankers view children`; confirm Herdr's Agents sidebar lists only the children's clankers, picks up a newly spawned child, and `clankers view clear` restores the full list",
         "With Herdr toasts enabled (`[ui.toast] delivery`), report `--state question` from a clanker in a background tab; confirm a notification titled with the state and Workshop title shows the message, that `working` and `done` stay quiet, and that `CLANKERHOUSE_REPORT_NOTIFY=none` silences it",
         "Queue a message to a clanker, then close its pane; confirm `send-status` reports orphaned at once and that the stored message turns orphaned after 30 minutes, after which the daemon stops its 30-second delivery pass"
       ]

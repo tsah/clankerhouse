@@ -69,10 +69,12 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   Landed: the daemon writes visible Labels as `lbl_<key>` plus an aggregate `labels` token on
   every observation (diff only), so cold restarts are repaired; the title stays the workspace
   name. The operator opts in with `$labels` / `$lbl_<key>` in `[ui.sidebar.spaces] rows`.
-- [ ] **P11** Attention: `notification.show` for blocked/question Reports and an
+- [x] **P11** Attention: `notification.show` for blocked/question Reports and an
   `agent.view.set` view of a Workshop's children.
-  Notifications landed: `clankers report` notifies for `question`, `blocked`, `failed`
-  (operator-chosen with `CLANKERHOUSE_REPORT_NOTIFY`), bounded to ~1 s, after recording.
+  Landed: `clankers report` notifies for `question`, `blocked`, `failed` (operator-chosen
+  with `CLANKERHOUSE_REPORT_NOTIFY`), bounded to ~1 s, after recording. The daemon claims
+  each pane's Workshop parent (`ch_pane_parent`); `clankers view children [WORKSHOP]|clear`
+  sets or clears a `clankerhouse`-owned agent view filtering on it.
 - [-] **P12** `post-create` → plugin `worktree.created` event hook. Only with P13.
   Declined with P13; Herdr event hooks are also unordered, unlimited and unapproved.
 - [-] **P13** Evaluate replacing Worktrunk + warm pool + `worktree-delete` with Herdr

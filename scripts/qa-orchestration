@@ -113,6 +113,18 @@ report() { (cd "$root/child" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-child "
 report --state question --message "Which retention?" --payload '{"options":["7d","30d"],"recommendation":"30d"}' \
     | json_assert "data['to'] == '$parent_id' and data['workshopId'] == '$child_id' and data['clankerId'] == 'clanker-qa-child' and data['payload']['recommendation'] == '30d'"
 report --state working --no-parent | json_assert 'data["to"] is None'
+
+# P11: the daemon marks each child pane with its Workshop's parent, which Herdr's agent view filters on.
+for _ in {1..200}; do
+    [[ "$(mux read-claim --pane "$child_pane" paneWorkshopParentId 2>/dev/null)" == "$parent_id" ]] && break
+    sleep 0.05
+done
+[[ "$(mux read-claim --pane "$child_pane" paneWorkshopParentId)" == "$parent_id" ]] || fail "child pane did not get its parent Workshop claim"
+(cd "$parent" && api view children) | json_assert "data['view'] == 'children' and data['workshopId'] == '$parent_id' and data['label'] == 'children of main'"
+api view clear | json_assert 'data["view"] is None'
+set +e; (api view bogus) >/dev/null 2>&1; code=$?; set -e
+[[ $code -ne 0 ]] || fail "view accepted an unknown action"
+echo "PASS: child panes carry their parent Workshop and view children sets the Herdr agent view"
 report --state blocked --to clanker-qa-other | json_assert 'data["to"] == "clanker-qa-other"'
 printf '%s' '{"from":"stdin"}' | report --state done | json_assert 'data["payload"] == {"from": "stdin"}'
 for bad in '[]' '"text"' '{broken' "$(python3 -c 'import json; print(json.dumps({"x": "y" * 70000}))')"; do
@@ -187,4 +199,4 @@ hook "$grandchild_pane" clanker-qa-grandchild done '{"hook_event_name":"Stop","b
 echo "PASS: --clanker watch"
 
 api --help | grep -q "clankers watch" || fail "help omits watch"
-echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, and cursor resume after kill."
+echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, cursor resume after kill, and the children agent view."

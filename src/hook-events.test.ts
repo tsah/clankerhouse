@@ -11,11 +11,13 @@ const spool = () => {
   roots.push(root)
   return root
 }
-const request = { pane: "w1:p2", clankerId: "clanker-1", harnessSessionId: "session-1", state: "done", recoveryAttemptId: "7", updatedAt: 1 }
+const request = { pane: "w1:p2", clankerId: "clanker-1", harnessSessionId: "session-1", state: "done", recoveryAttemptId: "7", updatedAt: 1, harness: "claude", generation: 3 }
 
 describe("spooled hook requests", () => {
   test("parses the hook's request and rejects incomplete or malformed ones", () => {
-    expect(parseHookAttestRequest(request)).toEqual({ pane: "w1:p2", clankerId: "clanker-1", harnessSessionId: "session-1", state: "done", attemptId: 7 })
+    expect(parseHookAttestRequest(request)).toEqual({ pane: "w1:p2", clankerId: "clanker-1", harnessSessionId: "session-1", state: "done", attemptId: 7, harness: "claude", generation: 3, updatedAt: 1 })
+    // Hooks that predate lifecycle mirroring name no harness or generation.
+    expect(parseHookAttestRequest({ ...request, harness: undefined, generation: undefined })).toEqual({ pane: "w1:p2", clankerId: "clanker-1", harnessSessionId: "session-1", state: "done", attemptId: 7, updatedAt: 1 })
     expect(parseHookAttestRequest({ ...request, recoveryAttemptId: null })?.attemptId).toBeUndefined()
     for (const broken of [null, "x", { ...request, clankerId: "" }, { ...request, harnessSessionId: undefined }, { ...request, recoveryAttemptId: "-1" }, { ...request, recoveryAttemptId: "x" }]) {
       expect(parseHookAttestRequest(broken)).toBeUndefined()

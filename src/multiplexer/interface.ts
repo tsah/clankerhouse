@@ -178,6 +178,10 @@ export interface Multiplexer {
   focus(location: NativeLocation): Promise<void>
   /** Submit text through the runtime's validated interactive-harness prompt operation when `agentPrompt` is declared. */
   promptAgent?(location: NativeLocation, text: string): Promise<void>
+  /** Mirror a harness lifecycle state into the runtime's `agentStatus`, holding the pane for that harness. */
+  reportAgentState?(pane: string, harness: string, state: "idle" | "working" | "blocked", harnessSessionId?: string): Promise<void>
+  /** Return a pane held by `reportAgentState` to the runtime's own agent detection. */
+  releaseAgent?(pane: string, harness: string): Promise<void>
   /** Write (or clear with null) an identity claim on the native object at `location`. */
   claim(location: NativeLocation, key: ClaimKey, value: string | null): Promise<void>
   readClaim(location: NativeLocation, key: ClaimKey): Promise<string | undefined>

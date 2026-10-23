@@ -15,8 +15,9 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
 - [x] **F2** Real Multiplexer instance epoch. `instanceId()` is the socket path, which
   never changes across a Herdr restart, so the Recovery `multiplexer_restart` trigger and
   `advanceMultiplexerEpoch()` can never fire even with F1 fixed.
-- [ ] **F3** `HerdrAdapter.reportAgentState` is dead code while ADR-0007 says attested
+- [x] **F3** `HerdrAdapter.reportAgentState` is dead code while ADR-0007 says attested
   state is mirrored into Herdr. Resolved by P1 (wire it) or delete it and fix the ADR.
+  Wired by P1.
 - [x] **F4** Herdr status changes do not reach the daemon: it never subscribes to
   `pane.agent_status_changed`, and Herdr emits no `pane.updated` on status change, so
   unhooked panes (Codex) lag until the 15 s poll.
@@ -35,10 +36,15 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
 
 ## Push down into Herdr
 
-- [ ] **P1** Mirror attested Claude/Pi lifecycle state into Herdr with
+- [x] **P1** Mirror attested Claude/Pi lifecycle state into Herdr with
   `pane.report_agent` + `seq` (from the daemon, never from the hot-path hook), so Herdr's
   waits, `seen`, notifications, sidebar and `completion_seq` agree with Clankerhouse.
   Precondition: a custom source can hold a pane running a Herdr-supported agent.
+  Landed (`src/lifecycle-mirror.ts`): source `clankerhouse:<harness>`, agent `claude`/`pi`,
+  `seq` from `nextHerdrReportSeq()` (any other `clankerhouse:*` report must use it too),
+  `agent_session_id`; done → `idle` with a synthetic `working` when the spool coalesced it;
+  session end → `pane.release_agent`; reports read over 30 s late are skipped, since Herdr
+  never releases a pane held for a harness whose process it did not see exit.
 - [ ] **P2** Seen/ready tracking (`markSeen` effects, completion keys, `stateWithSeen`)
   → Herdr `seen` and effective `done`.
 - [ ] **P3** Settle/wait logic (hook generation counting, `watch` settled) →

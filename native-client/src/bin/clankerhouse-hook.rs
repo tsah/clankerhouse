@@ -255,8 +255,8 @@ fn run(args: &[String]) -> Result<(), String> {
     mark_activity(&ctx, &payload);
 
     // Recovery attestation needs the daemon's registry, so it is spooled rather than run here.
-    // The daemon applies the newest request per pane; settle points are always re-sent so a
-    // failed adoption is retried once per turn.
+    // The daemon applies the newest request per pane and mirrors its state into the
+    // Multiplexer; settle points are always re-sent so a failed adoption is retried once per turn.
     let changed = previous.is_null()
         || previous_state != state
         || text(&previous, "harnessSessionId") != session_id
@@ -266,9 +266,11 @@ fn run(args: &[String]) -> Result<(), String> {
         private_dir(&spool)?;
         let request = json!({
             "pane": ctx.pane,
+            "harness": harness,
             "clankerId": clanker_id,
             "harnessSessionId": session_id,
             "state": state,
+            "generation": generation,
             "recoveryAttemptId": if attempt.is_empty() { Value::Null } else { json!(attempt) },
             "updatedAt": now_ms(),
         });

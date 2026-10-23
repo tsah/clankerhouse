@@ -174,6 +174,7 @@
         "src/clanker-list.test.ts",
         "src/claude-background-tasks.test.ts",
         "src/hook-events.test.ts",
+        "src/lifecycle-mirror.test.ts",
         "src/multiplexer/herdr.test.ts",
         "integrations/opencode/clankerhouse-lifecycle.test.ts"
       ],
@@ -188,7 +189,8 @@
         "Have Claude stop its foreground response while a background shell task runs or is pending; confirm working state and pending waits persist until a later Stop reports no tasks in flight",
         "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or create Recovery intent",
         "Run in-process Pi SDK workers while the visible parent is working; confirm worker start, settlement, and shutdown preserve the parent's identity, working state, native socket, and results",
-        "Under load from several busy clankers, confirm each Claude tool call's lifecycle hook still finishes in milliseconds and a finished clanker always settles to done"
+        "Under load from several busy clankers, confirm each Claude tool call's lifecycle hook still finishes in milliseconds and a finished clanker always settles to done",
+        "Run Claude and Pi clankers in background Herdr tabs; confirm Herdr's sidebar and `herdr agent list` follow working, blocked, and done, that a finished turn notifies like Herdr's own integrations, and that quitting the harness clears the agent from the pane"
       ]
     },
     {

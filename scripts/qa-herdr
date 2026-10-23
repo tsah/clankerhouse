@@ -181,6 +181,37 @@ for _ in {1..100}; do [[ -s "$report" ]] && break; sleep 0.05; done
 grep -q '"state": *"working"' "$report" || grep -q '"state":"working"' "$report" || fail "state report content: $(cat "$report")"
 "${common_env[@]}" "$clankers" status clanker-qa | grep -q '"state":"working"' || fail "clanker status did not read the report"
 
+step "The daemon mirrors Claude hook lifecycle into Herdr's agent status and releases the pane at session end"
+mirror_window=$("${common_env[@]}" "$clankers" mux spawn --session "$session_id" --name claude --cwd "$work" -- sleep 120)
+mirror_pane=$(printf '%s' "$mirror_window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])')
+claude_hook() { # STATE EVENT
+    printf '{"session_id":"11111111-2222-3333-4444-555555555555","hook_event_name":"%s","prompt":"qa","cwd":"%s"}' "$2" "$work" \
+        | "${common_env[@]}" HERDR_PANE_ID="$mirror_pane" CLANKER_ID=clanker-mirror bash "$repo/bin/clankerhouse-clanker-state-report" claude "$1"
+}
+herdr_agent() { # EXPECTED "agent status": poll Herdr's own view of the pane
+    python3 - "$herdr_sock" "$mirror_pane" "$1" <<'PY'
+import json,socket,sys,time
+def pane():
+    sock=socket.socket(socket.AF_UNIX); sock.connect(sys.argv[1])
+    sock.sendall((json.dumps({"id":"qa","method":"pane.get","params":{"pane_id":sys.argv[2]}})+"\n").encode())
+    data=b""
+    while b"\n" not in data: data += sock.recv(65536)
+    return json.loads(data.split(b"\n",1)[0])["result"]["pane"]
+for _ in range(100):
+    p=pane(); got=f'{p.get("agent") or "-"} {p.get("agent_status")}'
+    if got==sys.argv[3]: sys.exit(0)
+    time.sleep(0.05)
+sys.exit(f"Herdr shows {got!r} for {sys.argv[2]}, expected {sys.argv[3]!r}")
+PY
+}
+claude_hook working UserPromptSubmit
+herdr_agent "claude working" || fail "Herdr did not take the mirrored working state"
+# The spawned tab is in the background, so Herdr keeps the settled turn unseen.
+claude_hook done Stop
+herdr_agent "claude done" || fail "Herdr did not record the mirrored completion as unseen"
+claude_hook unknown SessionEnd
+herdr_agent "- unknown" || fail "Herdr kept the pane after the session ended"
+
 step "Herdr launcher opens the native client on the Herdr instance"
 native_tree=$("${common_env[@]}" HERDR_SOCKET_PATH="$herdr_sock" timeout 15s bash "$repo/bin/clankerhouse-herdr" --dump-tree) || fail "Herdr launcher did not produce the native tree"
 printf '%s' "$native_tree" >"$root/native-tree.json"

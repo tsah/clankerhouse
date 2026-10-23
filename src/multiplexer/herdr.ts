@@ -596,8 +596,24 @@ export class HerdrAdapter implements Multiplexer {
     })
   }
 
-  /** Mirror an attested Clankerhouse lifecycle state into herdr so its own UI agrees. */
-  async reportAgentState(paneId: string, harness: string, state: "idle" | "working" | "blocked" | "unknown", seq?: number, sessionId?: string) {
-    await this.request("pane.report_agent", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, state, ...(seq !== undefined ? { seq } : {}), ...(sessionId ? { agent_session_id: sessionId } : {}) })
+  /**
+   * Hold the pane for `harness` with a lifecycle state, so herdr's sidebar, waits, notifications, and seen agree with
+   * Clankerhouse. The agent keeps herdr's own name (`claude`, `pi`), which `agent.prompt` requires.
+   */
+  async reportAgentState(paneId: string, harness: string, state: "idle" | "working" | "blocked", sessionId?: string) {
+    await this.request("pane.report_agent", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, state, seq: nextHerdrReportSeq(), ...(sessionId ? { agent_session_id: sessionId } : {}) })
+  }
+
+  /** Give the pane back to herdr's own detection once the harness session has ended. */
+  async releaseAgent(paneId: string, harness: string) {
+    await this.request("pane.release_agent", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, seq: nextHerdrReportSeq() })
   }
 }
+
+let lastReportSeq = 0
+/**
+ * herdr ignores a report whose `seq` is not above the last one it accepted from that source on that pane, including
+ * after a daemon restart, and ignores a report with no `seq` once one had one. Every report from a `clankerhouse:*`
+ * source takes its number here: microseconds since the epoch, kept strictly increasing within the process.
+ */
+export const nextHerdrReportSeq = () => (lastReportSeq = Math.max(lastReportSeq + 1, Date.now() * 1000))

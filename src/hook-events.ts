@@ -3,7 +3,8 @@
  * harness tool call, so it never waits on the daemon: when a clanker's state, session or
  * Recovery attempt changes it leaves one request per pane in the runtime spool, replacing
  * any request not yet applied. The daemon claims each request by renaming it, so a hook
- * that writes again meanwhile starts a new file instead of being lost.
+ * that writes again meanwhile starts a new file instead of being lost, then attests it for
+ * Recovery and mirrors its state into the Multiplexer.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, watch } from "node:fs"
 
@@ -13,6 +14,10 @@ export interface HookAttestRequest {
   harnessSessionId: string
   state: string
   attemptId?: number
+  /** Harness that ran the hook; absent from hooks that predate lifecycle mirroring. */
+  harness?: string
+  generation?: number
+  updatedAt?: number
 }
 
 const text = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined
@@ -24,7 +29,14 @@ export const parseHookAttestRequest = (value: unknown): HookAttestRequest | unde
   if (!pane || !clankerId || !harnessSessionId || !state) return undefined
   const attempt = record.recoveryAttemptId === null || record.recoveryAttemptId === undefined ? undefined : Number(record.recoveryAttemptId)
   if (attempt !== undefined && !(Number.isSafeInteger(attempt) && attempt >= 0)) return undefined
-  return { pane, clankerId, harnessSessionId, state, attemptId: attempt }
+  const harness = text(record.harness)
+  const generation = Number(record.generation), updatedAt = Number(record.updatedAt)
+  return {
+    pane, clankerId, harnessSessionId, state, attemptId: attempt,
+    ...(harness ? { harness } : {}),
+    ...(Number.isSafeInteger(generation) && generation >= 0 ? { generation } : {}),
+    ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updatedAt } : {}),
+  }
 }
 
 /** Claim and return every pending request; malformed ones are discarded. */

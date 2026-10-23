@@ -191,6 +191,24 @@ describe("herdr multiplexer adapter", () => {
     await expect(adapter.promptAgent(sessionLocation("w1"), "not a pane")).rejects.toThrow(/requires a pane location/)
   })
 
+  test("holds a pane for a harness under its herdr agent name with strictly increasing seq, and releases it", async () => {
+    const calls: Call[] = []
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })
+    const before = Date.now() * 1000
+    await adapter.reportAgentState("w1:p2", "claude", "working", "session-1")
+    await adapter.reportAgentState("w1:p2", "claude", "idle")
+    await adapter.releaseAgent("w1:p2", "claude")
+    expect(calls.map((call): Call => ({ ...call, params: { ...call.params, seq: undefined } }))).toEqual([
+      { method: "pane.report_agent", params: { pane_id: "w1:p2", source: "clankerhouse:claude", agent: "claude", state: "working", agent_session_id: "session-1", seq: undefined } },
+      { method: "pane.report_agent", params: { pane_id: "w1:p2", source: "clankerhouse:claude", agent: "claude", state: "idle", seq: undefined } },
+      { method: "pane.release_agent", params: { pane_id: "w1:p2", source: "clankerhouse:claude", agent: "claude", seq: undefined } },
+    ])
+    const seqs = calls.map((call) => call.params.seq as number)
+    expect(seqs[0]!).toBeGreaterThanOrEqual(before)
+    expect(seqs[1]!).toBeGreaterThan(seqs[0]!)
+    expect(seqs[2]!).toBeGreaterThan(seqs[1]!)
+  })
+
   test("focus walks workspace, tab, and pane; kill and rename map by scope", async () => {
     const calls: Call[] = []
     const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })

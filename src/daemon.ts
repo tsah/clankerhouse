@@ -26,6 +26,7 @@ import { openDurableRegistry, type DurableRegistry } from "./registry"
 import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
 import { attestHarnessSession } from "./recovery/attest"
 import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
+import { LifecycleMirror } from "./lifecycle-mirror"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
@@ -492,9 +493,13 @@ const startQueuedDelivery = () => {
   return () => clearInterval(timer)
 }
 
+// Harness lifecycle reports are mirrored into the Multiplexer's agent status (ADR-0007).
+const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter)
+
 const applyHookAttestRequest = async (request: HookAttestRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
+  if (request.harness) void lifecycleMirror.offer({ ...request, harness: request.harness })
   if (hasPendingMessagesFor(request.clankerId)) runQueuedDelivery()
   const store = openRecoveryStore()
   try {
@@ -516,6 +521,7 @@ const ingestLifecycleObservation = (report: import("./transport").ObservationRep
   if (!parsed) return false
   const previous = liveLifecycleReports.get(parsed.pane)
   liveLifecycleReports.set(parsed.pane, parsed)
+  if (parsed.clankerId) void lifecycleMirror.offer(report)
 
   mkdirSync(clankerStateDir, { recursive: true, mode: 0o700 })
   const target = `${clankerStateDir}/${report.pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`

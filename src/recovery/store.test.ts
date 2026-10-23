@@ -239,7 +239,7 @@ describe("recovery store", () => {
     store.close()
   })
 
-  test("binds an exact harness session once and rejects mismatch", () => {
+  test("binds an exact harness session and follows it when the harness moves on", () => {
     const { dbPath } = fixture()
     const store = openRecoveryStore({ dbPath })
     store.createDesired(desired(), { now: 10 })
@@ -247,8 +247,9 @@ describe("recovery store", () => {
     expect(bound.harnessSessionId).toBe("pi-session-exact")
     expect(bound.revision).toBe(2)
     expect(store.bindHarnessSession("clanker-1", "pi-session-exact", { now: 30 }).revision).toBe(2)
-    expect(() => store.bindHarnessSession("clanker-1", "different-session", { now: 40 })).toThrow(/mismatch/)
-    expect(store.journalEntries({ clankerId: "clanker-1" }).filter((entry) => entry.event === "session.bound")).toHaveLength(1)
+    const rebound = store.bindHarnessSession("clanker-1", "different-session", { now: 40 })
+    expect(rebound).toMatchObject({ harnessSessionId: "different-session", revision: 3 })
+    expect(store.journalEntries({ clankerId: "clanker-1" }).map((entry) => entry.event).filter((event) => event.startsWith("session."))).toEqual(["session.bound", "session.rebound"])
     store.close()
   })
 

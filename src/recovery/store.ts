@@ -350,11 +350,12 @@ export class RecoveryStore {
       if (current.desiredState === "tombstoned") throw new Error(`Clanker ${clankerId} is tombstoned`)
       if (options.expectedRevision !== undefined && current.revision !== options.expectedRevision) throw new Error(`Revision mismatch for clanker ${clankerId}`)
       if (current.harnessSessionId === harnessSessionId) return current
-      if (current.harnessSessionId !== null) throw new Error(`Harness session mismatch for clanker ${clankerId}`)
+      // The harness owns its session: `/clear`, a resume or a new session moves the clanker on,
+      // and the record follows so it always names the conversation the pane is running.
       const revision = current.revision + 1
-      this.db.query("UPDATE desired_clankers SET harness_session_id = ?2, revision = ?3, updated_at = ?4 WHERE clanker_id = ?1 AND harness_session_id IS NULL AND desired_state != 'tombstoned'")
+      this.db.query("UPDATE desired_clankers SET harness_session_id = ?2, revision = ?3, updated_at = ?4 WHERE clanker_id = ?1 AND desired_state != 'tombstoned'")
         .run(clankerId, harnessSessionId, revision, now)
-      this.journal(clankerId, "session.bound", revision, { harnessSessionId }, now)
+      this.journal(clankerId, current.harnessSessionId === null ? "session.bound" : "session.rebound", revision, current.harnessSessionId === null ? { harnessSessionId } : { harnessSessionId, previous: current.harnessSessionId }, now)
       return this.getDesired(clankerId)!
     }).immediate()
   }

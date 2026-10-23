@@ -1,6 +1,7 @@
 import { validateModelName, type DesiredClankerRecord, type LaunchSpec, type RecoveryHarness } from "./model"
 import { binPath, libexecPath } from "../installation"
 import { ownedHarnessCommand } from "./process-owner"
+import { workshopLaunchIdentity } from "../workshop"
 
 export const recoveryPrompt = (attemptId: string) => `Clankerhouse recovery attempt ${attemptId}: the previous host or multiplexer server ended unexpectedly. Inspect existing session and repository state, then autonomously continue from the last settled user request. Never replay an interrupted tool call or assume that a missing result means the operation did not complete. Read-only inspection and local source edits are allowed. Before running tests, lint, builds, indexing, package installation, containers, migrations, or other expensive validation, ask for operator confirmation. Also ask for operator confirmation before commits, pushes, deployments, issue updates, network mutations, or any other externally visible or non-idempotent action.`
 
@@ -101,4 +102,16 @@ export const recoveryHarnessCommand = (desired: DesiredClankerRecord, attemptId:
       ? ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", "--resume", desired.harnessSessionId, ...(profile ? ["--agent", profile] : []), ...modelArgs, prompt]
       : ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, "--session", desired.harnessSessionId, "--", desired.cwd, prompt]
   return ownedHarnessCommand(command, desired.clankerId, attemptId, resourceClass(desired.launchSpec))
+}
+
+/**
+ * The exact harness launch for an admitted Recovery attempt, rebuilt from the registry so it never
+ * depends on environment a pane was created with: the original task for an initial launch, the
+ * inspect-first continuation for a relaunch.
+ */
+export const admittedHarnessCommand = (desired: DesiredClankerRecord, attemptId: string, initial: boolean) => {
+  const workshop = workshopLaunchIdentity(desired.workshopId, desired.workshopPath)
+  return initial
+    ? initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId, workshop })
+    : recoveryHarnessCommand(desired, attemptId, workshop)
 }

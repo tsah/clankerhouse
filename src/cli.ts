@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { randomUUID } from "node:crypto"
-import { existsSync, fstatSync, readFileSync, statSync } from "node:fs"
+import { existsSync, fstatSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, listClankers, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
@@ -12,6 +12,7 @@ import { reconcileRecovery } from "./recovery/controller"
 import type { RecoveryResourceClass } from "./recovery/model"
 import { harnessModelArgs } from "./recovery/harness"
 import { stopOwnedHarness } from "./recovery/process-owner"
+import { runResumeGate } from "./recovery/gate"
 import { openManagedMultiplexer } from "./multiplexer"
 import { MultiplexerResourceExhaustedError, paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
@@ -358,6 +359,7 @@ const usage = `Usage:
   clankers recovery pending|pause-all
   clankers recovery resume CLANKER_ID [--force]
   clankers recovery unquarantine CLANKER_ID --reason TEXT
+  clankers recovery gate CLANKER_ID --pane PANE [--argv-out FILE]   (used by clankerhouse-resume)
   clankers recovery stop|start|suspend|tombstone CLANKER_ID
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
@@ -368,7 +370,7 @@ const usage = `Usage:
 --model MODEL overrides the profile/default model for Pi, Claude, and Codex.
 Pi and Claude retain the override during Recovery. OpenCode does not support this flag.`
 
-const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
+const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "recoveryGate", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
 
 const muxLocation = (parsed: ParsedArgs): NativeLocation => {
   const pane = parsed.take("--pane")
@@ -533,6 +535,18 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         const force = parsed.has("--force")
         const routed = await routeCompatibilityMutation({ type: "recovery", clankerId: id, action: "resume", force })
         return console.log(JSON.stringify(routed ? routed.result : await reconcileRecovery(store, { trigger: "manual", clankerId: id, allowLaunch: true, automatic: false, bypassAdmission: force })))
+      }
+      if (subcommand === "gate") {
+        const id = requiredClankerId(parsed)
+        const pane = parsed.take("--pane")
+        if (!pane) throw new Error("--pane is required")
+        const argvOut = parsed.take("--argv-out")
+        const gate = await runResumeGate(store, openManagedMultiplexer(), { clankerId: id, pane })
+        if (gate.argv) {
+          if (!argvOut) throw new Error("--argv-out is required to launch")
+          writeFileSync(argvOut, gate.argv.map((arg) => `${arg}\0`).join(""), { mode: 0o600 })
+        }
+        return console.log([gate.action, gate.message.replace(/\s+/g, " "), gate.statusPrefix].join("\n"))
       }
       if (subcommand === "unquarantine") {
         const id = requiredClankerId(parsed)

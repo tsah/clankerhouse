@@ -45,7 +45,7 @@ export type ClaimScope = "session" | "window" | "pane"
  */
 export type SessionClaimKey = "workshopId" | "workshopParentId" | "worktreePath" | "directoryPath" | "gitCommonDir" | "sessionId" | "sessionDisplayName"
 export type WindowClaimKey = "windowId" | "windowDisplayName" | "windowHarness"
-export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
+export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "recoveryGate" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
 export type ClaimKey = SessionClaimKey | WindowClaimKey | PaneClaimKey
 
 export const claimScopeOf = (key: ClaimKey): ClaimScope => {

@@ -39,6 +39,7 @@ const tokenNames: Partial<Record<ClaimKey, string>> = {
   harness: "ch_harness",
   harnessSessionId: "ch_harness_session",
   recoveryAttemptId: "ch_recovery_attempt",
+  recoveryGate: "ch_recovery_gate",
   clankerSocket: "ch_clanker_socket",
   clankerPid: "ch_clanker_pid",
   clankerCapabilities: "ch_clanker_caps",

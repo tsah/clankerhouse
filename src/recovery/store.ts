@@ -482,6 +482,21 @@ export class RecoveryStore {
     }).immediate()
   }
 
+  /** An admitted attempt that never started a harness: abandon it and return the Clanker to pending, not to interrupted review. */
+  abandonAdmission(clankerId: string, attemptId: number, reason: string, options: { now?: number } = {}) {
+    if (!reason || reason.trim() !== reason || /[\0\r\n]/.test(reason)) throw new Error("Invalid abandon reason")
+    const now = this.now(options.now)
+    return this.db.transaction(() => {
+      const attempt = this.getAttempt(attemptId)
+      if (!attempt || attempt.clankerId !== clankerId) throw new Error(`Recovery attempt ${attemptId} does not belong to ${clankerId}`)
+      if (attempt.status === "running") this.finishAttempt(attemptId, "abandoned", { error: reason, now })
+      const current = this.getDesired(clankerId)
+      if (!current) throw new Error(`Unknown clanker ${clankerId}`)
+      if (current.recoveryCondition !== "recovering" || this.attemptsFor(clankerId).at(-1)?.id !== attemptId) return current
+      return this.setRecoveryCondition(clankerId, "pending", { reason, ownerUnit: null, now })
+    }).immediate()
+  }
+
   beginAttempt(clankerId: string, trigger: string, options: { now?: number; automatic?: boolean; bootEpoch?: number | null } = {}) {
     if (!trigger || trigger.trim() !== trigger) throw new Error("Invalid recovery trigger")
     const now = this.now(options.now)

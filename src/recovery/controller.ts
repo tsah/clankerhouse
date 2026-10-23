@@ -11,6 +11,7 @@ import { paneLocation, sessionLocation, windowLocation } from "../multiplexer/in
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
 import { recoveryUnitName } from "./process-owner"
 import { decideRecovery } from "./planner"
+import { observePanes } from "./panes"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
@@ -24,36 +25,6 @@ export const processStartTicks = (pid = process.pid, procRoot = Bun.env.CLANKERH
   const text = readFileSync(`${procRoot}/${pid}/stat`, "utf8")
   const fields = text.slice(text.lastIndexOf(")") + 2).split(" ")
   return Number(fields[19])
-}
-
-export interface ObservedPane {
-  pane: string
-  session: string
-  nativeSessionId: string
-  windowId: string
-  clankerId: string
-  harness: string
-  harnessSessionId: string
-  recoveryAttemptId: string
-}
-
-export const observePanes = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ObservedPane[]> => {
-  let snapshot
-  try { snapshot = await multiplexer.observe({ processInfo: false }) }
-  catch { return [] }
-  return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => {
-    const claims = pane.claims ?? {}
-    return {
-      pane: pane.id,
-      session: session.nativeName,
-      nativeSessionId: session.id,
-      windowId: window.id,
-      clankerId: claims.clankerId || pane.clankerId || "",
-      harness: claims.harness || pane.harness || "",
-      harnessSessionId: claims.harnessSessionId || pane.harnessSessionId || "",
-      recoveryAttemptId: claims.recoveryAttemptId || pane.recoveryAttemptId || "",
-    }
-  })))
 }
 
 interface ObservedSession { id: string; name: string; path: string; workshopId: string; windowNames: string[] }
@@ -194,7 +165,7 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         if (window) await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", desired.harness)
         await ensureManagedSession(nativeSessionId, multiplexer)
         result.launched.push(desired.clankerId)
-        panes = [...panes, { pane, session: session.name, nativeSessionId, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
+        panes = [...panes, { pane, session: session.name, nativeSessionId, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId, recoveryGate: "" }]
       } catch (error) {
         store.finishAttempt(attempt.id, "failed", { error: error instanceof Error ? error.message : String(error), now: Date.now() })
         result.skipped.push({ clankerId: desired.clankerId, reason: error instanceof Error ? error.message : String(error) })

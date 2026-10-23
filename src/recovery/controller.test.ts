@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { advanceRecoveryCampaign, reconcileRecovery, RecoveryController, startRecoveryCampaign } from "./controller"
 import { openRecoveryStore } from "./store"
-import { GATE_LAUNCH_TIMEOUT_MS, gateStatusPrefix, readGateAdmission } from "./gate"
+import { GATE_LAUNCH_TIMEOUT_MS, gateStatusPrefix, readGateAdmission, RESUME_REREPORT_MS } from "./gate"
 import type { ManagedMultiplexer } from "../multiplexer"
 import type { ClaimKey, MultiplexerSession, NativeLocation, SpawnRequest } from "../multiplexer/interface"
 
@@ -82,10 +82,10 @@ describe("recovery reconciliation", () => {
         expect((await reconcileRecovery(store, { now: 100 + tick, multiplexer })).adopted).toEqual(["clanker-live"])
         refuse = false
       }
-      expect(reports).toEqual([
-        ["w1:p4", "pi", "session-live", ["clankerhouse-resume", "clanker-live"]],
-        ["w1:p4", "pi", "session-live", ["clankerhouse-resume", "clanker-live"]],
-      ])
+      expect(reports).toHaveLength(2)
+      expect(reports[1]).toEqual(["w1:p4", "pi", "session-live", ["clankerhouse-resume", "clanker-live"]])
+      await reconcileRecovery(store, { now: 102 + RESUME_REREPORT_MS, multiplexer })
+      expect(reports).toHaveLength(3)
     } finally { store.close() }
   })
 

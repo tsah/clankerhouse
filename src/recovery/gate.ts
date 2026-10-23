@@ -26,20 +26,27 @@ export const resumeArgv = (clankerId: string, env: Record<string, string | undef
   return [RESUME_GATE_COMMAND, ...(instance ? ["--instance", instance] : []), clankerId]
 }
 
-const reportedResume = new Map<string, string>()
+const reportedResume = new Map<string, { key: string; at: number }>()
+/**
+ * A report is repeated this often: releasing the pane (the lifecycle mirror does on SessionEnd and Pi
+ * session_shutdown) also drops its resume command, and a harness that keeps running needs it back.
+ */
+export const RESUME_REREPORT_MS = 300_000
 
 /**
- * Report the gate as the pane's restore command once per pane and runtime server. A refusal (another
- * source holds the pane, or the runtime does not yet see the harness) is retried on the next reconcile.
+ * Report the gate as the pane's restore command once per pane, runtime server, and re-report period.
+ * A refusal (another source holds the pane, or the runtime does not yet see the harness) is retried on
+ * the next reconcile.
  */
-export const reportResumeCommand = async (multiplexer: ManagedMultiplexer, pane: string, desired: DesiredClankerRecord) => {
+export const reportResumeCommand = async (multiplexer: ManagedMultiplexer, pane: string, desired: DesiredClankerRecord, now = Date.now()) => {
   if (typeof multiplexer.reportAgentSession !== "function") return false
   const argv = resumeArgv(desired.clankerId)
   const key = JSON.stringify([desired.clankerId, desired.harness, desired.harnessSessionId, argv])
-  if (reportedResume.get(pane) === key) return true
+  const previous = reportedResume.get(pane)
+  if (previous?.key === key && now - previous.at < RESUME_REREPORT_MS) return true
   try { if (!await multiplexer.reportAgentSession(pane, desired.harness, desired.harnessSessionId, argv)) return false }
   catch { return false }
-  reportedResume.set(pane, key)
+  reportedResume.set(pane, { key, at: now })
   return true
 }
 

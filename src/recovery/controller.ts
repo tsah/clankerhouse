@@ -121,7 +121,7 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       if (decision.type === "adopt") {
         const latest = store.attemptsFor(desired.clankerId).at(-1)
         if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
-        await reportResumeCommand(multiplexer, decision.pane, desired)
+        await reportResumeCommand(multiplexer, decision.pane, desired, now)
         result.adopted.push(desired.clankerId)
         continue
       }

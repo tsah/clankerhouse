@@ -49,7 +49,7 @@ export const isClaudeWindow = (window: MuxWindow) => window.command === "claude"
 export const isCodexWindow = (window: MuxWindow) => window.command === "codex" || window.name.toLowerCase() === "codex" || window.title.toLowerCase().includes("codex")
 const supportedHarnesses = new Set(["pi", "claude", "codex", "opencode"])
 const ownedClankerIdentity = (window: MuxWindow): OwnedClankerIdentity | undefined => window.clankerId && supportedHarnesses.has(window.explicitHarness || "")
-  ? { pane: window.pane, clankerId: window.clankerId, harness: window.explicitHarness!, harnessSessionId: window.harnessSessionId, recoveryAttemptId: window.recoveryAttemptId }
+  ? { pane: window.pane, clankerId: window.clankerId, harness: window.explicitHarness!, harnessSessionId: window.harnessSessionId }
   : undefined
 
 const buildLineageFields = (workshopId?: string, parentWorkshopId?: string | null, childWorkshopCount = 0) => {

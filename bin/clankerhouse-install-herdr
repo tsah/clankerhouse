@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install or refresh Clankerhouse herdr integration: Alt-K/Alt-B/Alt-D popup keybindings and
-the safe-recovery setting (resume_agents_on_restore = false) in herdr's config.toml.
+Herdr agent restore turned off (resume_agents_on_restore = false) in herdr's config.toml, so
+a restart leaves interrupted clankers for `clankers resume` rather than relaunching them.
 
 Idempotent: the keybindings live inside a managed marker block that is replaced on reruns;
 the session setting is updated in place. Pass --uninstall to remove the managed block.

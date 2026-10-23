@@ -271,7 +271,7 @@ export class OrchestrationStore {
   /**
    * Track pending messages' recipients against a complete observation of the live clankers. A
    * recipient missing for `orphanAfterMs` orphans its pending messages; one seen again restarts
-   * the clock, so a clanker that Recovery brings back still gets its queue.
+   * the clock, so a clanker that is resumed still gets its queue.
    */
   reconcileRecipients(present: ReadonlySet<string>, now = Date.now(), orphanAfterMs = ORPHAN_AFTER_MS): StoredMessage[] {
     return this.db.transaction(() => {

@@ -9,8 +9,6 @@ const isolatedEnv = (overrides: Record<string, string> = {}) => ({
   ...process.env,
   CLANKER_ID: "",
   CLANKER_SESSION_ID: "",
-  CLANKER_RECOVERY_ATTEMPT: "",
-  CLANKER_RECOVERY_TRACKED: "",
   HERDR_PANE_ID: "",
   CLANKERHOUSE_INSTANCE: "",
   ...overrides,
@@ -63,7 +61,6 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
         HERDR_PANE_ID: "w1:p44",
         CLANKER_ID: "clanker-opencode",
         CLANKER_SESSION_ID: "session-root",
-        CLANKER_RECOVERY_ATTEMPT: "attempt-1",
         CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
         REPORT_PATH: reportPath,
         CLANKERS_LOG: clankersLog,
@@ -176,7 +173,6 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     expect(requests).toHaveLength(2)
     expect(requests.map((request: any) => request.params.state)).toEqual(["idle", "working"])
     expect(requests.every((request: any) => request.method === "observation.report")).toBe(true)
-    expect(requests.every((request: any) => request.params.recoveryAttemptId === undefined)).toBe(true)
     expect(existsSync(join(runtimeRoot, "clanker-state", "w1_p44.json"))).toBe(false)
   })
 

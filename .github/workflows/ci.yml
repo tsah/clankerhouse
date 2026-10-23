@@ -52,6 +52,5 @@ jobs:
       - run: scripts/qa-clanker-api
       - run: scripts/qa-orchestration
       - run: scripts/qa-daemon
-      - run: scripts/qa-recovery
       - run: scripts/qa-herdr
       - run: bash -x scripts/qa-install

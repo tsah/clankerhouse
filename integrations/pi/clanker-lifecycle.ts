@@ -29,7 +29,6 @@ interface ClankerResult {
 interface PersistedReport {
 	clankerId?: string;
 	harnessSessionId?: string;
-	recoveryAttemptId?: string;
 	generation?: number;
 	settledGeneration?: number;
 	result?: ClankerResult;
@@ -135,7 +134,7 @@ export function extractAssistantResult(messages: Array<any>) {
 export default function (pi: ExtensionAPI) {
 	// Headless Pi subprocesses such as Agent workers inherit HERDR_PANE_ID but do
 	// not own its Terminal. Their --no-session identities are ephemeral and
-	// must never replace the parent Clanker or create Recovery declarations.
+	// must never replace the parent Clanker or enter the clanker ledger.
 	if (sessionless) return;
 
 	const activeSubagents = new Set<string>();
@@ -155,18 +154,11 @@ export default function (pi: ExtensionAPI) {
 	let externalSendInFlight = false;
 	let lastReportFingerprint = "";
 	let harnessSessionId = process.env.CLANKER_SESSION_ID?.trim() || "";
-	const recoveryAttemptId = process.env.CLANKER_RECOVERY_ATTEMPT?.trim() || "";
-
-	const attestSession = () => {
-		if (!harnessSessionId) return;
-		const cli = process.env.CLANKERHOUSE_CLANKERS || "clankers";
-		spawnSync(cli, ["recovery", "attest", clankerId, "--session-id", harnessSessionId, ...(recoveryAttemptId ? ["--attempt", recoveryAttemptId] : [])], { env: clankersEnv, stdio: "ignore" });
-	};
 
 	const report = (state: State, event: string) => {
 		if (!ownsPane || !pane || !stateFile) return;
 		const result = results.at(-1);
-		const fingerprint = [state, clankerId, harnessSessionId, recoveryAttemptId, generation, settledGeneration, result?.generation ?? "", activeSubagents.size].join("\0");
+		const fingerprint = [state, clankerId, harnessSessionId, generation, settledGeneration, result?.generation ?? "", activeSubagents.size].join("\0");
 		if (fingerprint === lastReportFingerprint) return;
 		lastReportFingerprint = fingerprint;
 		reportSeq += 1;
@@ -177,7 +169,6 @@ export default function (pi: ExtensionAPI) {
 			harness: "pi",
 			clankerId,
 			harnessSessionId,
-			...(recoveryAttemptId ? { recoveryAttemptId } : {}),
 			state,
 			pane,
 			generation,
@@ -255,7 +246,6 @@ export default function (pi: ExtensionAPI) {
 		setPaneClaim("clankerId", clankerId);
 		setPaneClaim("harness", "pi");
 		if (harnessSessionId) setPaneClaim("harnessSessionId", harnessSessionId);
-		if (recoveryAttemptId) setPaneClaim("recoveryAttemptId", recoveryAttemptId);
 		setPaneClaim("clankerPid", String(process.pid));
 		setPaneClaim("clankerCapabilities", "status,wait,send,result");
 		mkdirSync(socketDirectory, { recursive: true, mode: 0o700 });
@@ -336,19 +326,11 @@ export default function (pi: ExtensionAPI) {
 		generation = Number(persistedId === clankerId ? persisted.generation : 0) || 0;
 		settledGeneration = Number(persistedId === clankerId ? persisted.settledGeneration : 0) || 0;
 		results = persistedId === clankerId && Array.isArray(persisted.results) ? persisted.results.slice(-20) : [];
-		// Declare owned identity before validating a preallocated session. A
-		// mismatch must remain attributable to this Pi process rather than
-		// degrading into identity-free lifecycle evidence.
+		// The clanker follows whatever session Pi is in, so the ledger names it after /new or /resume.
 		setPaneClaim("clankerId", clankerId);
 		setPaneClaim("harness", "pi");
 		setPaneClaim("harnessSessionId", harnessSessionId);
-		const expectedSessionId = process.env.CLANKER_SESSION_ID?.trim();
-		if (expectedSessionId && harnessSessionId !== expectedSessionId) {
-			reportParentState("blocked", "session_identity_mismatch");
-			return;
-		}
 		await startSocket();
-		attestSession();
 		reportParentState("idle", "session_start");
 	});
 	pi.on("agent_start", (_event, ctx) => {

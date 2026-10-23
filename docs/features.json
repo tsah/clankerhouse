@@ -74,7 +74,7 @@
     },
     {
       "id": "typed-actions",
-      "title": "Rename, attach, detach, delete, create, start, and stop actions",
+      "title": "Rename, attach, detach, delete, and create actions",
       "core": true,
       "unit": [
         "src/daemon-mutations.test.ts",
@@ -88,10 +88,9 @@
       "standalone": [
         "scripts/qa",
         "scripts/qa-lineage-actions",
-        "scripts/qa-recovery",
         "scripts/qa-herdr"
       ],
-      "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), stop, Recovery desired-state transitions, protocol validation, and durable action stages are automated; rename, detach, create, and start require the manual standalone walkthrough until dedicated interaction scenarios are added.",
+      "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), protocol validation, and durable action stages are automated; rename, detach, and create require the manual standalone walkthrough until dedicated interaction scenarios are added.",
       "manual": [
         "Exercise every advertised action in the laboratory",
         "Cancel each destructive confirmation once",
@@ -150,9 +149,8 @@
       "unit": [
         "src/cli.test.ts",
         "src/workflow.test.ts",
-        "src/recovery/model.test.ts",
-        "src/recovery/harness.test.ts",
-        "src/recovery/store.test.ts"
+        "src/harness-launch.test.ts",
+        "src/clanker-ledger.test.ts"
       ],
       "standalone": [
         "scripts/qa-spawn-model"
@@ -161,7 +159,7 @@
         "Spawn Pi, Claude, and Codex with --model in an isolated Workshop and confirm the exact model reaches each harness",
         "Create a Workshop with --model and confirm the default prompt is unchanged",
         "Combine a Pi profile with --model and confirm the explicit model wins while other profile settings remain",
-        "Resume a Pi or Claude Clanker and confirm its saved model override survives Recovery",
+        "Close a Pi or Claude Clanker, `clankers resume` it, and confirm its saved model override survives",
         "Confirm OpenCode rejects --model before creating a Workshop"
       ]
     },
@@ -187,7 +185,7 @@
         "Under Herdr, send an exact prompt to Claude and observe its lifecycle response",
         "Confirm generations, waits, and results correlate",
         "Have Claude stop its foreground response while a background shell task runs or is pending; confirm working state and pending waits persist until a later Stop reports no tasks in flight",
-        "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or create Recovery intent",
+        "Run a sessionless Pi worker and confirm it cannot replace its parent pane identity or enter the clanker ledger",
         "Run in-process Pi SDK workers while the visible parent is working; confirm worker start, settlement, and shutdown preserve the parent's identity, working state, native socket, and results",
         "Under load from several busy clankers, confirm each Claude tool call's lifecycle hook still finishes in milliseconds and a finished clanker always settles to done",
         "Run Claude and Pi clankers in background Herdr tabs; confirm Herdr's sidebar and `herdr agent list` follow working, blocked, and done, that a finished turn notifies like Herdr's own integrations, and that quitting the harness clears the agent from the pane"
@@ -211,7 +209,7 @@
         "Restart the daemon and confirm `clankers status` still shows the clanker's lastReport while its lifecycle state is unchanged",
         "Kill and re-run a watch with the same cursor file; confirm no event repeats and none is lost, including children spawned in between",
         "Under Herdr, send to a working Claude clanker; confirm `delivery: queued`, one delivery after it stops, `send-status` acked with a startedGeneration, and that `wait --message` returns on that turn",
-        "Inside a spawned and a recovered clanker, confirm CLANKERHOUSE_WORKSHOP_ID and CLANKERHOUSE_PARENT_WORKSHOP_ID",
+        "Inside a spawned and a resumed clanker, confirm CLANKERHOUSE_WORKSHOP_ID and CLANKERHOUSE_PARENT_WORKSHOP_ID",
         "During a tool-heavy Claude turn, confirm `status.lastEventAt` advances on each tool call",
         "While a spawned clanker runs a long test command, confirm `status.health` shows its scope's memory, any D-state pids, and that command as `longestChild` with a growing `elapsed`",
         "From a Workshop with child clankers, run `clankers view children`; confirm Herdr's Agents sidebar lists only the children's clankers, picks up a newly spawned child, and `clankers view clear` restores the full list",
@@ -257,27 +255,24 @@
       ]
     },
     {
-      "id": "recovery",
-      "title": "Desired state, admission, campaigns, leases, interruption safety, and reconciliation",
+      "id": "clanker-ledger",
+      "title": "Durable clanker ledger, interrupted clankers, and exact-session resume",
       "core": true,
       "unit": [
-        "src/recovery/admission.test.ts",
-        "src/recovery/controller.test.ts",
-        "src/recovery/planner.test.ts",
-        "src/recovery/store.test.ts",
-        "src/recovery/interruption.test.ts",
-        "src/recovery/harness.test.ts",
-        "src/recovery/model.test.ts"
+        "src/clanker-ledger.test.ts",
+        "src/harness-launch.test.ts",
+        "src/workshop-stop.test.ts",
+        "src/workflow.test.ts"
       ],
       "standalone": [
-        "scripts/qa-recovery",
-        "scripts/qa-spawn-model"
+        "scripts/qa-spawn-model",
+        "scripts/qa-workshop-labels"
       ],
       "manual": [
-        "Simulate clean loss, hard reboot, ambiguous interruption, and resource pressure",
-        "Confirm restoring a lost session starts with only the recovering agent tab",
-        "Confirm only admitted candidates launch",
-        "Confirm stopped and suspended Clankers remain stopped"
+        "Restart Herdr with clankers running; confirm `clankers ledger --interrupted` lists exactly them, each with its current harness session",
+        "Run `/clear` in a Claude clanker; confirm its ledger row follows the new session",
+        "Close a clanker's pane; confirm its row closes within about a minute and it is not listed as interrupted",
+        "`clankers resume` an interrupted clanker; confirm it opens one agent tab in its Workshop, continues the same conversation, and keeps its clanker id"
       ]
     },
     {
@@ -285,10 +280,9 @@
       "title": "Process ownership",
       "core": true,
       "unit": [
-        "src/recovery/process-owner.test.ts"
+        "src/harness-launch.test.ts"
       ],
       "standalone": [
-        "scripts/qa-recovery",
         "scripts/qa-process-owner"
       ],
       "manual": [
@@ -379,8 +373,7 @@
         "src/paths.test.ts"
       ],
       "standalone": [
-        "scripts/qa-herdr",
-        "scripts/qa-recovery"
+        "scripts/qa-herdr"
       ],
       "manual": [
         "From a Herdr pane, confirm every generic CLI, picker, child process, and instance path resolves the Herdr instance",
@@ -417,7 +410,7 @@
         "Edit a title with Alt-R, clear it with an empty title, and confirm the branch never changes",
         "Judge that rows untouched for days are visibly dimmer, that state glyphs keep full colour, and that only the working glyph animates",
         "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state",
-        "Under Herdr, run `clankers workshop stop` in a done Workshop with a live clanker; confirm its workspace closes, the herdr server's open fds drop by about three per pane, the row stays in the picker without a session, Recovery does not relaunch the clanker, and opening the row starts a plain shell"
+        "Under Herdr, run `clankers workshop stop` in a done Workshop with a live clanker; confirm its workspace closes, the herdr server's open fds drop by about three per pane, the row stays in the picker without a session, its clanker is closed in `clankers ledger`, and opening the row starts a plain shell"
       ]
     }
   ]

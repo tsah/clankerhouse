@@ -4,7 +4,7 @@
 //! however busy the machine is. It never starts another process or waits on the daemon
 //! on the common path: it records the clanker state in its pane's state file and returns.
 //! Multiplexer claims are written only when they change (once per session in practice),
-//! and the Recovery attestation is left in a spool file for the daemon to apply.
+//! and the state change is left in a spool file for the daemon to mirror.
 
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -135,7 +135,6 @@ fn run(args: &[String]) -> Result<(), String> {
         .to_string();
     let hook_event = payload.get("hook_event_name").and_then(Value::as_str).map(str::to_string);
     let expected_session = var("CLANKER_SESSION_ID");
-    let attempt = var("CLANKER_RECOVERY_ATTEMPT");
     let env_clanker = var("CLANKER_ID");
 
     let reports = ctx.runtime_dir.join("clanker-state");
@@ -218,7 +217,6 @@ fn run(args: &[String]) -> Result<(), String> {
         "harness": harness,
         "clankerId": clanker_id,
         "harnessSessionId": or_previous(&session_id, "harnessSessionId"),
-        "recoveryAttemptId": or_previous(&attempt, "recoveryAttemptId"),
         "state": state,
         "pane": ctx.pane,
         "generation": generation,
@@ -242,9 +240,6 @@ fn run(args: &[String]) -> Result<(), String> {
     if !session_id.is_empty() && (fresh || text(&previous, "harnessSessionId") != session_id) {
         claims.insert("harnessSessionId", Some(session_id.clone()));
     }
-    if !attempt.is_empty() && (fresh || text(&previous, "recoveryAttemptId") != attempt) {
-        claims.insert("recoveryAttemptId", Some(attempt.clone()));
-    }
     let foreign_session = !session_id.is_empty() && !expected_session.is_empty() && expected_session != session_id;
     if state == "unknown" && !foreign_session {
         claims.insert("harness", None);
@@ -254,13 +249,12 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     mark_activity(&ctx, &payload);
 
-    // Recovery attestation needs the daemon's registry, so it is spooled rather than run here.
-    // The daemon applies the newest request per pane and mirrors its state into the
-    // Multiplexer; settle points are always re-sent so a failed adoption is retried once per turn.
+    // Mirroring the state into the Multiplexer is the daemon's job, so it is spooled rather than
+    // run here. The daemon applies the newest request per pane; settle points are always re-sent
+    // so a mirror that missed one catches up once per turn.
     let changed = previous.is_null()
         || previous_state != state
-        || text(&previous, "harnessSessionId") != session_id
-        || text(&previous, "recoveryAttemptId") != attempt;
+        || text(&previous, "harnessSessionId") != session_id;
     if !session_id.is_empty() && !foreign_session && (changed || state == "done" || state == "idle") {
         let spool = ctx.runtime_dir.join("hook-events");
         private_dir(&spool)?;
@@ -271,7 +265,6 @@ fn run(args: &[String]) -> Result<(), String> {
             "harnessSessionId": session_id,
             "state": state,
             "generation": generation,
-            "recoveryAttemptId": if attempt.is_empty() { Value::Null } else { json!(attempt) },
             "updatedAt": now_ms(),
         });
         write_atomic(&spool.join(format!("{}.json", safe_name(&ctx.pane))), request.to_string().as_bytes())?;
@@ -295,7 +288,7 @@ fn herdr_token(key: &str) -> &'static str {
         "clankerId" => "ch_clanker_id",
         "harness" => "ch_harness",
         "harnessSessionId" => "ch_harness_session",
-        _ => "ch_recovery_attempt",
+        other => unreachable!("unknown claim {other}"),
     }
 }
 

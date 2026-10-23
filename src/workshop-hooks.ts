@@ -1,7 +1,7 @@
 import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 import { binPath } from "./installation"
-import { ownedScopeCommand } from "./recovery/process-owner"
+import { ownedScopeCommand } from "./harness-launch"
 import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, projectName, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
 import { changeWorkshopLabel, identifyWorkshopSync, registerWorkshop, workshopForId, workshopForPath, workshopLabels, workshopStatePath, type WorkshopRecord } from "./workshop"
 

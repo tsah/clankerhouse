@@ -315,16 +315,6 @@ describe("session resource projection", () => {
     expect(result.sessions[0]?.details[1]?.observation).toMatchObject({ confidence: "rejected", reason: "harness-session-mismatch", state: "done" })
   })
 
-  test("does not apply a prior recovery attempt report to a replacement", () => {
-    const result = projectResources(inputs({
-      sessions: [muxSession()],
-      windows: [muxWindow({ clankerId: "clanker-current", explicitHarness: "opencode", harnessSessionId: "session-root", recoveryAttemptId: "attempt-new" })],
-      clankerReports: [{ clankerId: "clanker-current", harness: "opencode", pane: "%1", state: "done", updatedAt: 3_650_000, harnessSessionId: "session-root", recoveryAttemptId: "attempt-old" }],
-    }))
-
-    expect(result.sessions[0]?.details[0]).toMatchObject({ kind: "clanker", state: "unknown", clankerId: "clanker-current" })
-    expect(result.sessions[0]?.details[1]?.observation).toMatchObject({ confidence: "rejected", reason: "recovery-attempt-mismatch", state: "done" })
-  })
 
   test("projects incomplete lifecycle evidence as rejected instead of suppressing it", () => {
     const result = projectResources(inputs({

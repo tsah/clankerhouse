@@ -5,10 +5,8 @@ import { markDirectoryActivity } from "./activity"
 import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
-import { harnessModelArgs, initialHarnessCommand, workshopEnvironment, type WorkshopLaunchIdentity } from "./recovery/harness"
-import type { LaunchSpec, RecoveryResourceClass } from "./recovery/model"
-import { recoveryUnitName } from "./recovery/process-owner"
-import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
+import { clankerUnitName, harnessCommand, harnessModelArgs, resumeLaunch, workshopEnvironment, type WorkshopLaunchIdentity } from "./harness-launch"
+import { openClankerLedger, pathWorkshopId, type ClankerLedger, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
 import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { workshopBase } from "./workshop-base"
 import { TITLE_KEY } from "./labels"
@@ -115,13 +113,12 @@ export interface SpawnClankerOptions {
   model?: string
   name?: string
   wait?: boolean
-  resourceClass?: RecoveryResourceClass
+  resourceClass?: ResourceClass
   multiplexer?: ManagedMultiplexer
 }
 
-/** Everything up to the clanker's pane existing; a failure here means no clanker was created. */
-async function launchClanker(harness: Harness, cwd: string, prompt: string, clankerId: string, options: { profile?: string; model?: string; requestedName?: string; resourceClass?: RecoveryResourceClass }, multiplexer: ManagedMultiplexer, progress: { registered: boolean }) {
-  const { profile, model, requestedName, resourceClass } = options
+/** Where a clanker's window opens: its Workshop's session, and a window name free in it. */
+async function clankerPlacement(cwd: string, prefix: string, multiplexer: ManagedMultiplexer) {
   const id = await identity(cwd)
   const workshop = persistWorkshopLineage(id, { preserveParent: true })
   const current = await sessionForPath(id.path, multiplexer)
@@ -129,59 +126,79 @@ async function launchClanker(harness: Harness, cwd: string, prompt: string, clan
   const live = current ? (await multiplexer.observe({ processInfo: false })).sessions.find((row) => row.id === current.id) : undefined
   if (current && !live) throw new Error(`Session ${session} disappeared before the clanker was launched`)
   markDirectoryActivity(id.path, "clanker")
-  const prefix = requestedName || harness
   const existing = live?.windows.map((window) => window.nativeName) ?? []
   let name = prefix; let n = 2
   while (existing.includes(name)) name = `${prefix}-${n++}`
-  const recoverable = harness !== "codex"
+  const ledgerWorkshop = workshop ?? workshopForPath(id.path)
+  const launchWorkshop: WorkshopLaunchIdentity = { workshopId: ledgerWorkshop?.workshopId || pathWorkshopId(id.path), parentWorkshopId: ledgerWorkshop?.parentWorkshopId ?? null }
+  return { id, workshop, session, live, name, launchWorkshop }
+}
+
+type ClankerPlacement = Awaited<ReturnType<typeof clankerPlacement>>
+
+const openClankerWindow = (placement: ClankerPlacement, argv: string[], multiplexer: ManagedMultiplexer) => {
+  const { id, live, name, session, launchWorkshop } = placement
+  const launch = { cwd: id.path, env: { ...spawnedRuntimeEnv(), ...workshopEnvironment(launchWorkshop) }, launch: { kind: "argv" as const, argv } }
+  return multiplexer.spawn(live
+    ? { ...launch, scope: "window", nativeSessionId: live.id, name }
+    : { ...launch, scope: "session", name: session, windowName: name })
+}
+
+/** Claims the new pane for its clanker and the session for its Workshop. */
+const claimClankerPane = async (placement: ClankerPlacement, location: { nativeSessionId: string; nativeWindowId: string; nativePaneId: string }, clankerId: string, harness: Harness, multiplexer: ManagedMultiplexer) => {
+  const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = location
+  await applyWorkshopClaims(multiplexer, nativeSessionId, placement.id, placement.workshop)
+  const at = paneLocation(nativeSessionId, window, pane)
+  await multiplexer.claim(at, "clankerId", clankerId)
+  await multiplexer.claim(at, "harness", harness)
+  await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", harness)
+  await ensureManagedSession(nativeSessionId, multiplexer)
+}
+
+/** Everything up to the clanker's pane existing; a failure here means no clanker was created. */
+async function launchClanker(harness: Harness, cwd: string, prompt: string, clankerId: string, options: { profile?: string; model?: string; requestedName?: string; resourceClass?: ResourceClass }, multiplexer: ManagedMultiplexer, progress: { registered: boolean }) {
+  const { profile, model, requestedName, resourceClass } = options
+  const placement = await clankerPlacement(cwd, requestedName || harness, multiplexer)
+  const { id, session, name, launchWorkshop } = placement
+  const recorded = harness !== "codex"
   const harnessSessionId = harness === "pi" || harness === "claude" ? randomUUID() : null
-  const recoveryWorkshop = workshop ?? workshopForPath(id.path)
-  const recoveryWorkshopId = recoveryWorkshop?.workshopId || `path-${createHash("sha256").update(id.path).digest("hex").slice(0, 24)}`
-  const launchWorkshop: WorkshopLaunchIdentity = { workshopId: recoveryWorkshopId, parentWorkshopId: recoveryWorkshop?.parentWorkshopId ?? null }
   let argv = codexCommand(prompt, clankerId, launchWorkshop, model)
-  if (recoverable) {
-    const recoverableHarness = harness as Exclude<Harness, "codex">
-    let store: RecoveryStore | undefined
+  if (recorded) {
+    const ledgerHarness = harness as Exclude<Harness, "codex">
+    let ledger: ClankerLedger | undefined
     try {
-      store = openRecoveryStore()
+      ledger = openClankerLedger()
       const launchSpec: LaunchSpec = model !== undefined
         ? { version: 3, profile: profile || null, model, resourceClass: resourceClass ?? "untrusted" }
         : resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
-      store.createDesired({
+      ledger.record({
         clankerId,
-        harness: recoverableHarness,
-        workshopId: recoveryWorkshopId,
+        harness: ledgerHarness,
+        workshopId: launchWorkshop.workshopId,
         workshopPath: id.path,
-        preferredSessionLabel: session,
-        preferredWindowLabel: name,
+        sessionLabel: session,
+        windowLabel: name,
         cwd: id.path,
         harnessSessionId,
         launchSpec,
         originalTask: prompt,
       })
       progress.registered = true
-      const attempt = store.beginAttempt(clankerId, "initial")
-      const attemptId = String(attempt.id)
-      store.setRecoveryOwner(clankerId, recoveryUnitName(clankerId, attemptId))
-      argv = initialHarnessCommand({ harness: recoverableHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, attemptId, workshop: launchWorkshop })
+      const unit = clankerUnitName(clankerId)
+      ledger.setOwnerUnit(clankerId, unit)
+      argv = harnessCommand({ harness: ledgerHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, workshop: launchWorkshop }, unit)
     } catch (error) {
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
-    } finally { store?.close() }
+    } finally { ledger?.close() }
   }
-  const launch = { cwd: id.path, env: { ...spawnedRuntimeEnv(), ...workshopEnvironment(launchWorkshop) }, launch: { kind: "argv" as const, argv } }
-  const spawnedLocation = await multiplexer.spawn(live
-    ? { ...launch, scope: "window", nativeSessionId: live.id, name }
-    : { ...launch, scope: "session", name: session, windowName: name })
-  return { id, workshop, session, name, recoverable, harnessSessionId, spawnedLocation }
+  const spawnedLocation = await openClankerWindow(placement, argv, multiplexer)
+  return { placement, recorded, harnessSessionId, spawnedLocation }
 }
 
-/** Tombstones the Recovery record of a clanker whose launch failed, if one was written. */
+/** Closes the ledger record of a clanker whose launch failed, if one was written. */
 const retireRegistration = (clankerId: string) => {
-  const store = openRecoveryStore()
-  try {
-    const registered = store.getDesired(clankerId)
-    if (registered && registered.desiredState !== "tombstoned") store.tombstone(clankerId, { reason: "initial launch failed" })
-  } finally { store.close() }
+  const ledger = openClankerLedger()
+  try { ledger.end(clankerId, "launch-failed") } finally { ledger.close() }
 }
 
 export async function spawnClanker(harness: Harness, cwd: string, prompt: string, options: SpawnClankerOptions = {}) {
@@ -192,19 +209,15 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
   const clankerId = generatedClankerId()
   const progress = { registered: false }
   const launched = await launchClanker(harness, cwd, prompt, clankerId, { profile, model, requestedName, resourceClass }, multiplexer, progress).catch((error) => {
-    // Nothing runs yet, so retire the Recovery record rather than leave Recovery to launch it.
+    // Nothing runs, so the ledger must not list it as interrupted.
     if (progress.registered) try { retireRegistration(clankerId) } catch {}
     throw error instanceof ClankerRegistrationError ? error : new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
   })
-  const { id, workshop, session, name, recoverable, harnessSessionId, spawnedLocation } = launched
-  const { nativeSessionId, nativeWindowId: window, nativePaneId: pane } = spawnedLocation
-  await applyWorkshopClaims(multiplexer, nativeSessionId, id, workshop)
-  const at = paneLocation(nativeSessionId, window, pane)
-  await multiplexer.claim(at, "clankerId", clankerId)
-  await multiplexer.claim(at, "harness", harness)
-  await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", harness)
-  await ensureManagedSession(nativeSessionId, multiplexer)
-  const spawned: Record<string, unknown> = { identity: id, session, window, pane, name, clankerId, ...(recoverable ? { harnessSessionId } : {}) }
+  const { placement, recorded, harnessSessionId, spawnedLocation } = launched
+  const { id: identityRow, session, name } = placement
+  const { nativeWindowId: window, nativePaneId: pane } = spawnedLocation
+  await claimClankerPane(placement, spawnedLocation, clankerId, harness, multiplexer)
+  const spawned: Record<string, unknown> = { identity: identityRow, session, window, pane, name, clankerId, ...(recorded ? { harnessSessionId } : {}) }
   if (wait) {
     const timeout = Number(Bun.env.CLANKER_WAIT_TIMEOUT || 600) * 1000
     const settled = await waitForClanker(clankerId, { afterGeneration: 0, timeoutMs: timeout })
@@ -216,6 +229,28 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
     }
   }
   return spawned
+}
+
+/**
+ * Reopens a ledger clanker that is not running: a new window in its Workshop continues its exact
+ * harness session under the same clanker id, optionally with a first prompt.
+ */
+export async function resumeClanker(clankerId: string, options: { prompt?: string; multiplexer?: ManagedMultiplexer } = {}) {
+  const ledger = openClankerLedger()
+  try {
+    const clanker = ledger.get(clankerId)
+    if (!clanker) throw new Error(`Unknown clanker ${clankerId}`)
+    if (!clanker.harnessSessionId) throw new Error(`Clanker ${clankerId} has no harness session to resume`)
+    if ((await listClankers()).some((row) => row.id === clankerId)) throw new Error(`Clanker ${clankerId} is already running`)
+    const multiplexer = options.multiplexer ?? openManagedMultiplexer()
+    const placement = await clankerPlacement(clanker.workshopPath, clanker.windowLabel, multiplexer)
+    const unit = clankerUnitName(clankerId)
+    const location = await openClankerWindow(placement, harnessCommand(resumeLaunch(clanker, placement.launchWorkshop, options.prompt), unit), multiplexer)
+    ledger.reopen(clankerId)
+    ledger.setOwnerUnit(clankerId, unit)
+    await claimClankerPane(placement, location, clankerId, clanker.harness, multiplexer)
+    return { clankerId, harnessSessionId: clanker.harnessSessionId, session: placement.session, window: location.nativeWindowId, pane: location.nativePaneId, name: placement.name }
+  } finally { ledger.close() }
 }
 
 /** Creates the worktree through the daemon, or returns undefined when no daemon serves this client. */

@@ -22,12 +22,10 @@ import { instanceSlug, runtimeDirFor, stateHomeDefault } from "./paths"
 import { paneLocation, sessionLocation } from "./multiplexer/interface"
 import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
 import { openDurableRegistry, type DurableRegistry } from "./registry"
-import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
-import { attestHarnessSession } from "./recovery/attest"
-import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
+import { legacyRecoveryStatePath, openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
+import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { LifecycleMirror } from "./lifecycle-mirror"
-import { reconcileRecovery, RecoveryController } from "./recovery/controller"
-import { stopOwnedHarness } from "./recovery/process-owner"
+import { stopOwnedHarness } from "./harness-launch"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
@@ -62,7 +60,6 @@ let latestProjectionSemanticKey = ""
 let projectionRefreshInFlight: Promise<ProjectionSnapshot<SessionRow>> | undefined
 let snapshotServer: SnapshotServer<SessionRow> | undefined
 let durableRegistry: DurableRegistry | undefined
-let recoveryController: RecoveryController | undefined
 const liveLifecycleReports = new Map<string, LifecycleObservation>()
 // The herd as of the newest observation, served to clanker API callers so they need not observe.
 let latestHerd: HerdResult<PaneMetadata> | undefined
@@ -103,6 +100,8 @@ const daemonMultiplexer = () => (daemonMultiplexerInstance ??= openManagedMultip
 const collectMultiplexerResources = Effect.tryPromise({
   try: async () => {
     const multiplexer = daemonMultiplexer()
+    // Read before observing, so a server restart in between is never stamped on the old server's panes.
+    const serverEpoch = await multiplexer.serverEpoch().catch(() => undefined)
     let observedAt = Date.now()
     let snapshot = await multiplexer.observe()
     if (await multiplexer.reconcileAbsorbedTopology(snapshot)) {
@@ -147,13 +146,55 @@ const collectMultiplexerResources = Effect.tryPromise({
       clankerId: pane.clankerId,
       explicitHarness: pane.harness,
       harnessSessionId: pane.harnessSessionId,
-      recoveryAttemptId: pane.recoveryAttemptId,
       agentStatus: pane.agentStatus,
     }))))
-    return { kind: snapshot.kind, instanceId: snapshot.instanceId, sessions, windows }
+    return { kind: snapshot.kind, instanceId: snapshot.instanceId, serverEpoch, sessions, windows }
   },
   catch: (error) => error instanceof Error ? error : new Error(String(error)),
 })
+
+/** A ledger clanker missing this long, in the server it was last seen in, ended rather than flickered. */
+const LEDGER_MISSING_MS = 60_000
+const ledgerMissingSince = new Map<string, number>()
+let ledgerSyncFailure = ""
+
+/** Record which clankers are alive, and their current sessions, in the clanker ledger. */
+const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[], windows: readonly MuxWindow[]) => {
+  const now = Date.now()
+  const panes = new Map(windows.map((window) => [window.pane, window]))
+  const observed: ObservedClanker[] = sessions.flatMap((session) => session.details.flatMap((detail) => {
+    const window = detail.target.type === "window" ? panes.get(detail.target.pane) : undefined
+    if (detail.kind !== "clanker" || !detail.clankerId || !window) return []
+    const workshopPath = session.path || window.currentPath || ""
+    if (!workshopPath.startsWith("/")) return []
+    return [{
+      clankerId: detail.clankerId,
+      harness: window.explicitHarness ?? detail.harness ?? "",
+      harnessSessionId: window.harnessSessionId,
+      workshopId: session.workshopId || pathWorkshopId(workshopPath),
+      workshopPath,
+      cwd: window.currentPath?.startsWith("/") ? window.currentPath : workshopPath,
+      sessionLabel: window.session,
+      windowLabel: window.name,
+    }]
+  }))
+  const alive = new Set(observed.map((clanker) => clanker.clankerId))
+  for (const clankerId of ledgerMissingSince.keys()) if (alive.has(clankerId)) ledgerMissingSince.delete(clankerId)
+  const missing = (clankerId: string) => {
+    const since = ledgerMissingSince.get(clankerId)
+    if (since === undefined) ledgerMissingSince.set(clankerId, now)
+    return since !== undefined && now - since >= LEDGER_MISSING_MS
+  }
+  try {
+    const ledger = openClankerLedger()
+    try { ledger.sync(observed, serverEpoch, missing) } finally { ledger.close() }
+    ledgerSyncFailure = ""
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message !== ledgerSyncFailure) console.error(`Clanker ledger update failed: ${message}`)
+    ledgerSyncFailure = message
+  }
+}
 
 const readManagedResources = () => {
   const registry = openResourceRegistry()
@@ -365,6 +406,7 @@ const collectSessions = Effect.all([
         home: Bun.env.HOME,
       })
       for (const effect of projection.effects) applyProjectEffect(effect)
+      if (multiplexer.serverEpoch) syncClankerLedger(multiplexer.serverEpoch, projection.sessions, multiplexer.windows)
       return projection.sessions
     }))
   }),
@@ -425,9 +467,7 @@ const scheduleProjectionRefresh = () => {
   })
 }
 
-// Failures repeat every turn (an unmanaged harness, say), so each distinct one is logged once per pane.
-const hookAttestFailures = new Map<string, string>()
-let stopHookAttestRequests: (() => void) | undefined
+let stopHookStateRequests: (() => void) | undefined
 
 // Queued Claude messages: a delivery pass when a clanker with pending messages changes state or
 // the operator's focus moves, and a slow fallback pass while anything is pending. Every pass
@@ -465,20 +505,11 @@ const startQueuedDelivery = () => {
 // Harness lifecycle reports are mirrored into the Multiplexer's agent status (ADR-0007).
 const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter)
 
-const applyHookAttestRequest = async (request: HookAttestRequest) => {
+const applyHookStateRequest = async (request: HookStateRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
   if (request.harness) void lifecycleMirror.offer({ ...request, harness: request.harness })
   if (hasPendingMessagesFor(request.clankerId)) runQueuedDelivery()
-  const store = openRecoveryStore()
-  try {
-    await attestHarnessSession(store, request)
-    hookAttestFailures.delete(request.pane)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (hookAttestFailures.get(request.pane) !== message) console.error(`Recovery attestation for ${request.clankerId} failed: ${message}`)
-    hookAttestFailures.set(request.pane, message)
-  } finally { store.close() }
 }
 
 const ingestLifecycleObservation = (report: import("./transport").ObservationReport) => {
@@ -502,7 +533,6 @@ const ingestLifecycleObservation = (report: import("./transport").ObservationRep
     || previous.state !== parsed.state
     || previous.harnessSessionId !== parsed.harnessSessionId
     || previous.clankerId !== parsed.clankerId
-    || previous.recoveryAttemptId !== parsed.recoveryAttemptId
   if (changed) scheduleProjectionRefresh()
   return true
 }
@@ -516,8 +546,7 @@ const serverProgram = Effect.gen(function* () {
   }
   const shutdown = () => {
     cleanup()
-    recoveryController?.stop()
-    stopHookAttestRequests?.()
+    stopHookStateRequests?.()
     stopQueuedDelivery?.()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
@@ -541,7 +570,7 @@ const serverProgram = Effect.gen(function* () {
           workshops: workshopStatePath,
           altKLineage: `${stateHome}/alt-k-tui${instanceSlug()}/workspaces.sqlite3`,
           resources: resourceRegistryStatePath(stateHome),
-          recovery: recoveryStatePath(stateHome),
+          recovery: legacyRecoveryStatePath(stateHome),
         }, { oncePerSource: true })
         const validation = registry.validate()
         if (validation.foreignKeyViolations.length || validation.semanticViolations.length) throw new Error(`Unified registry validation failed: ${[...validation.semanticViolations, ...validation.foreignKeyViolations.map(String)].join(", ")}`)
@@ -561,14 +590,7 @@ const serverProgram = Effect.gen(function* () {
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   projectionSource = producerLease.epoch
-  // The authoritative daemon also owns Recovery reconciliation. A legacy
-  // recovery process may remain during the compatibility window; the durable
-  // global Recovery lease guarantees that only one controller can act.
-  recoveryController = new RecoveryController(undefined, undefined, daemonMultiplexer())
-  void recoveryController.run().catch((error) => {
-    console.error(`Recovery controller stopped: ${error instanceof Error ? error.message : String(error)}`)
-  }).finally(() => recoveryController?.close())
-  stopHookAttestRequests = watchHookAttestRequests(`${runtimeDir}/hook-events`, applyHookAttestRequest)
+  stopHookStateRequests = watchHookStateRequests(`${runtimeDir}/hook-events`, applyHookStateRequest)
   stopQueuedDelivery = startQueuedDelivery()
   if (daemonMultiplexer().capabilities().nativeChanges) {
     // Runtimes with a native Change Stream drive refreshes by event; polled runtimes rely on the refresh loop below.
@@ -1039,9 +1061,9 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const nativeSessionId = String(checkpoint.nativeSessionId)
       if (await exactSession({ nativeSessionId })) {
         const ids = await sessionClankerIds(nativeSessionId)
-        const recovery = openRecoveryStore()
+        const ledger = openClankerLedger()
         let allStopped = false
-        try { allStopped = ids.every((id) => recovery.getDesired(id)?.desiredState === "stopped") } finally { recovery.close() }
+        try { allStopped = ids.every((id) => ledger.get(id)?.state === "closed") } finally { ledger.close() }
         if (!allStopped) {
           const marked = await runDeleteCommand([binPath("clankerhouse-mux-stop"), "mark-session", nativeSessionId])
           if (marked.exitCode !== 0) throw new Error(marked.stderr.trim() || "Unable to mark worktree session for deletion")
@@ -1153,7 +1175,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     if (stage === "desired-state.updated") {
       const canonical = (candidate: string) => { try { return realpathSync(candidate) } catch { return candidate } }
       const snapshot = await daemonMultiplexer().observe()
-      const store = openRecoveryStore()
+      const ledger = openClankerLedger()
       try {
         const plan = workshopStopPlan({
           path,
@@ -1164,26 +1186,26 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
             paths: [session.worktreePath, session.directoryPath, session.path].filter(Boolean).map(canonical),
             clankerIds: session.windows.flatMap((window) => window.panes.flatMap((pane) => pane.clankerId ? [pane.clankerId] : [])),
           })),
-          desired: store.listDesired().map((row) => ({ clankerId: row.clankerId, workshopId: row.workshopId, workshopPath: canonical(row.workshopPath), desiredState: row.desiredState })),
+          clankers: ledger.list().map((row) => ({ clankerId: row.clankerId, workshopId: row.workshopId, workshopPath: canonical(row.workshopPath), state: row.state })),
         })
-        for (const clankerId of plan.stop) store.setDesiredState(clankerId, "stopped", { reason: "workshop-stopped" })
+        for (const clankerId of plan.stop) ledger.end(clankerId, "workshop-stopped")
         return { checkpoint: { ...checkpoint, clankerIds: plan.clankerIds, sessionIds: plan.sessionIds } }
-      } finally { store.close() }
+      } finally { ledger.close() }
     }
     if (stage === "messages.orphaned") {
       withOrchestrationStore((store) => store.orphanMessagesFor(clankerIds))
       return { checkpoint }
     }
     if (stage === "harness.stopped") {
-      const store = openRecoveryStore()
+      const ledger = openClankerLedger()
       try {
         for (const clankerId of clankerIds) {
-          const ownerUnit = store.getDesired(clankerId)?.ownerUnit
+          const ownerUnit = ledger.get(clankerId)?.ownerUnit
           if (!ownerUnit) continue
           const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
           if (active) stopOwnedHarness(ownerUnit)
         }
-      } finally { store.close() }
+      } finally { ledger.close() }
       return { checkpoint }
     }
     if (stage === "sessions.closed") {
@@ -1237,49 +1259,6 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       if (checkpoint.created) dispatchPostCreateHook(ensureWorkshopForLabels(realpathSync(String(checkpoint.path))))
       return { checkpoint }
     }
-  }
-
-  if (intent.type === "start" || intent.type === "stop" || intent.type === "recovery") {
-    const store = openRecoveryStore()
-    try {
-      if (stage === "identity.validated") {
-        if (!store.getDesired(intent.clankerId)) throw new Error(`Unknown Clanker ${intent.clankerId}`)
-        return { checkpoint }
-      }
-      const action = intent.type === "start" ? "resume" : intent.type === "stop" ? "stop" : intent.action
-      if (stage === "desired-state.updated") {
-        const state = action === "resume" || action === "reconcile" ? "running" : action === "suspend" ? "suspended_resource_pressure" : action === "tombstone" ? "tombstoned" : "stopped"
-        const desired = store.getDesired(intent.clankerId)!
-        if (desired.desiredState !== state) store.setDesiredState(intent.clankerId, state, { reason: intent.type === "stop" ? intent.reason || "daemon-stop" : intent.type === "recovery" ? intent.reason || intent.action : "daemon-start" })
-        return { checkpoint }
-      }
-      if (stage === "harness.stopped") {
-        const desired = store.getDesired(intent.clankerId)!
-        const matches = (await listClankers()).filter((row) => row.id === intent.clankerId)
-        if (matches.length > 1) throw new Error(`Ambiguous live panes for ${intent.clankerId}`)
-        if (desired.ownerUnit) {
-          const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", desired.ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
-          if (active) stopOwnedHarness(desired.ownerUnit)
-        }
-        if (matches.length) await daemonMultiplexer().kill(paneLocation(matches[0]!.sessionId, matches[0]!.window, matches[0]!.pane))
-        return { checkpoint: { ...checkpoint, outcome: { stopped: true } } }
-      }
-      if (stage === "recovery.reconciled") {
-        const shouldLaunch = action === "resume" || action === "reconcile"
-        if (!shouldLaunch) {
-          const desired = store.getDesired(intent.clankerId)!
-          if (desired.ownerUnit) {
-            const active = Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", desired.ownerUnit], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
-            if (active) stopOwnedHarness(desired.ownerUnit)
-          }
-          const matches = (await listClankers()).filter((row) => row.id === intent.clankerId)
-          if (matches.length > 1) throw new Error(`Ambiguous live panes for ${intent.clankerId}`)
-          if (matches.length === 1) await daemonMultiplexer().kill(paneLocation(matches[0]!.sessionId, matches[0]!.window, matches[0]!.pane))
-        }
-        const result = shouldLaunch ? await reconcileRecovery(store, { trigger: "daemon", clankerId: intent.clankerId, allowLaunch: true, automatic: false, bypassAdmission: intent.type !== "stop" && intent.force === true }) : { clankerId: intent.clankerId, state: store.getDesired(intent.clankerId)?.desiredState }
-        return { checkpoint: { ...checkpoint, outcome: result } }
-      }
-    } finally { store.close() }
   }
 
   throw new Error(`Unsupported mutation stage ${intent.type}/${stage}`)

@@ -7,7 +7,6 @@ const clankersEnv = process.env
 const clankersCli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
 const clankerId = process.env.CLANKER_ID?.trim() || ""
 const expectedSessionId = process.env.CLANKER_SESSION_ID?.trim() || ""
-const recoveryAttemptId = process.env.CLANKER_RECOVERY_ATTEMPT?.trim() || ""
 const tracked = Boolean(clankerId)
 let attestedSessionId = ""
 let observedSessionId = ""
@@ -45,12 +44,7 @@ const attest = (sessionId: string) => {
   claims.set("clankerId", clankerId)
   claims.set("harness", "opencode")
   claims.set("harnessSessionId", sessionId)
-  if (recoveryAttemptId) claims.set("recoveryAttemptId", recoveryAttemptId)
-  const cli = clankersCli
-  const args = ["recovery", "attest", clankerId, "--session-id", sessionId]
-  if (recoveryAttemptId) args.push("--attempt", recoveryAttemptId)
-  const result = spawnSync(cli, args, { env: clankersEnv, stdio: "ignore" })
-  if (result.status === 0) attestedSessionId = sessionId
+  attestedSessionId = sessionId
 }
 
 const trackedSession = (sessionId: string) => {
@@ -120,7 +114,7 @@ const report = (state: ClankerState, hookEvent: string) => {
   const harnessSessionId = tracked ? attestedSessionId : observedSessionId
   if (!pane || !harnessSessionId) return
   currentState = state
-  const fingerprint = [state, harnessSessionId, clankerId, recoveryAttemptId, generation, settledGeneration].join("\0")
+  const fingerprint = [state, harnessSessionId, clankerId, generation, settledGeneration].join("\0")
   if (fingerprint === lastReportFingerprint) return
   lastReportFingerprint = fingerprint
   reportSeq += 1
@@ -130,7 +124,6 @@ const report = (state: ClankerState, hookEvent: string) => {
     harness: "opencode",
     ...(clankerId ? { clankerId } : {}),
     harnessSessionId,
-    ...(recoveryAttemptId ? { recoveryAttemptId } : {}),
     state,
     pane,
     generation,
@@ -146,7 +139,7 @@ const report = (state: ClankerState, hookEvent: string) => {
 const withdraw = () => {
   const currentId = claims.read("clankerId")?.stdout.trim()
   if (currentId !== clankerId) return
-  for (const key of ["clankerId", "harness", "harnessSessionId", "recoveryAttemptId"]) claims.unset(key)
+  for (const key of ["clankerId", "harness", "harnessSessionId"]) claims.unset(key)
 }
 
 if (expectedSessionId) try {

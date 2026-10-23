@@ -131,34 +131,34 @@ describe("clanker launch failure", () => {
   const roots: string[] = []
   afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
-  test("a runtime that cannot create the pane leaves no clanker for Recovery and asks for rollback", async () => {
+  test("a runtime that cannot create the pane leaves no open clanker in the ledger and asks for rollback", async () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-launch-failure-"))
     roots.push(root)
     const repo = join(root, "repo")
     const git = (...args: string[]) => Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "pipe" })
     Bun.spawnSync(["git", "init", "-q", repo])
     git("-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "init")
-    // In its own process, because Workshop and Recovery state paths are fixed when their modules load.
+    // In its own process, because Workshop and ledger state paths are fixed when their modules load.
     const script = join(root, "launch.ts")
     writeFileSync(script, `
       import { spawnClanker } from ${JSON.stringify(join(import.meta.dir, "workflow.ts"))}
       import { MultiplexerResourceExhaustedError } from ${JSON.stringify(join(import.meta.dir, "multiplexer/interface.ts"))}
-      import { openRecoveryStore } from ${JSON.stringify(join(import.meta.dir, "recovery/store.ts"))}
+      import { openClankerLedger } from ${JSON.stringify(join(import.meta.dir, "clanker-ledger.ts"))}
       const multiplexer = {
         kind: "herdr",
         observe: async () => ({ kind: "herdr", instanceId: "herdr:test", sessions: [] }),
         spawn: async () => { throw new MultiplexerResourceExhaustedError("herdr workspace.create: the herdr server ran out of file descriptors") },
       }
       const error = await spawnClanker("claude", ${JSON.stringify(repo)}, "task", { multiplexer: multiplexer as never }).then(() => undefined, (failure) => failure)
-      const store = openRecoveryStore()
-      console.log(JSON.stringify({ name: error?.name, cause: error?.cause?.name, message: error?.message, desired: store.listDesired({ includeTombstoned: true }).map((row) => row.desiredState) }))
-      store.close()
+      const ledger = openClankerLedger()
+      console.log(JSON.stringify({ name: error?.name, cause: error?.cause?.name, message: error?.message, ledger: ledger.list().map((row) => [row.state, row.closedReason]) }))
+      ledger.close()
     `)
     const env = { ...Bun.env, HOME: root, XDG_STATE_HOME: join(root, "state"), XDG_RUNTIME_DIR: join(root, "runtime"), CLANKERHOUSE_INSTANCE: "unit" }
     const run = Bun.spawnSync(["bun", script], { env, stdout: "pipe", stderr: "pipe" })
     expect(run.exitCode, run.stderr.toString()).toBe(0)
     const outcome = JSON.parse(run.stdout.toString().trim().split("\n").at(-1)!)
-    expect(outcome).toMatchObject({ name: "ClankerRegistrationError", cause: "MultiplexerResourceExhaustedError", desired: ["tombstoned"] })
+    expect(outcome).toMatchObject({ name: "ClankerRegistrationError", cause: "MultiplexerResourceExhaustedError", ledger: [["closed", "launch-failed"]] })
     expect(outcome.message).toMatch(/ran out of file descriptors/)
   })
 })

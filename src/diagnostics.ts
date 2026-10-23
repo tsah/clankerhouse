@@ -141,7 +141,7 @@ export const diagnoseProjection = (sessions: readonly SessionRow[]): ProjectionD
       "info",
       `${detail.harness || "Runtime"} evidence in ${row.name} did not match owned identity`,
       [targetKey(detail.target)],
-      "Inspect the reported and owned Clanker, harness-session, and recovery-attempt identities without suppressing the observed fact.",
+      "Inspect the reported and owned Clanker and harness-session identities without suppressing the observed fact.",
       { source: detail.observation.source, state: detail.observation.state, reason: detail.observation.reason ?? null, observedAt: detail.observation.observedAt },
     ))
   }

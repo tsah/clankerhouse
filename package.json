@@ -1,7 +1,7 @@
 {
   "name": "clankerhouse",
   "version": "0.1.0",
-  "description": "Herdr-native workshops, visible harness sessions, and durable recovery",
+  "description": "Herdr-native workshops, visible harness sessions, and a durable clanker ledger",
   "license": "MIT",
   "author": "Tsah Weiss",
   "repository": {
@@ -43,7 +43,6 @@
     "test:nvim": "scripts/qa-nvim",
     "qa:api": "scripts/qa-clanker-api",
     "qa:daemon": "scripts/qa-daemon",
-    "qa:recovery": "scripts/qa-recovery",
     "qa:process-owner": "scripts/qa-process-owner",
     "qa:herdr": "scripts/qa-herdr",
     "qa:install": "scripts/qa-install",

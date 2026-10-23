@@ -17,7 +17,7 @@ case "${1:-}" in
 unit/static:
   feature-catalogue, TypeScript, Rust
 standalone/end-to-end:
-  native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, Recovery, process owner,
+  native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, process owner,
   lineage actions, workshop labels, Herdr adapter, installer, full TUI
 EOF
         exit 0
@@ -51,7 +51,6 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "orchestration reports and watch scenario" scripts/qa-orchestration
     run "spawn model override scenario" scripts/qa-spawn-model
     run "authoritative daemon scenario" scripts/qa-daemon
-    run "Recovery campaign scenario" scripts/qa-recovery
     run "process ownership scenario" scripts/qa-process-owner
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels

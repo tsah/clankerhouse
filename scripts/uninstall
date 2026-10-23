@@ -20,7 +20,7 @@ if [[ -x "$app/bin/clankerhouse-uninstall-claude-hooks" ]]; then
     "$app/bin/clankerhouse-uninstall-claude-hooks"
 fi
 
-# The spot-watch and resource-guard units are retired; older manifests may still record them.
+# The Recovery, spot-watch and resource-guard units are retired; older manifests may still record them.
 for unit in clankerhouse-recovery.service clankerhouse-resource-guard.service clankerhouse-spot-watch.service clankerhouse-recovery.slice; do
     if grep -F "/$unit" "$manifest" >/dev/null; then systemctl --user disable --now "$unit" 2>/dev/null || true; fi
 done

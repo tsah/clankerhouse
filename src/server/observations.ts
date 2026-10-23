@@ -10,7 +10,6 @@ export interface LifecycleObservation {
   updatedAt: number
   hookEvent?: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
 }
 
 export interface OwnedClankerIdentity {
@@ -18,7 +17,6 @@ export interface OwnedClankerIdentity {
   clankerId: string
   harness: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
 }
 
 export type UnmatchedObservationReason =
@@ -26,7 +24,6 @@ export type UnmatchedObservationReason =
   | "clanker-id-mismatch"
   | "harness-mismatch"
   | "harness-session-mismatch"
-  | "recovery-attempt-mismatch"
   | "incomplete-observation"
 
 export interface UnmatchedClankerObservation {
@@ -63,7 +60,6 @@ export const parseClankerObservation = (value: unknown): LifecycleObservation | 
     updatedAt: Number(raw.updatedAt ?? 0) || 0,
     ...(hookEvent ? { hookEvent } : {}),
     ...(text(raw.harnessSessionId) ? { harnessSessionId: text(raw.harnessSessionId) } : {}),
-    ...(text(raw.recoveryAttemptId) ? { recoveryAttemptId: text(raw.recoveryAttemptId) } : {}),
   }
 }
 
@@ -73,22 +69,19 @@ const exactMatch = (identity: OwnedClankerIdentity, observation: LifecycleObserv
   && identity.clankerId === observation.clankerId
   && identity.harness === observation.harness
   && (!identity.harnessSessionId || identity.harnessSessionId === observation.harnessSessionId)
-  && (!identity.recoveryAttemptId || identity.recoveryAttemptId === observation.recoveryAttemptId)
 
 const mismatchReason = (identity: OwnedClankerIdentity | undefined, observation: LifecycleObservation): UnmatchedObservationReason => {
   if (!observation.clankerId || !observation.harness || !observation.state) return "incomplete-observation"
   if (!identity) return "no-owned-identity"
   if (identity.clankerId !== observation.clankerId) return "clanker-id-mismatch"
   if (identity.harness !== observation.harness) return "harness-mismatch"
-  if (identity.harnessSessionId && identity.harnessSessionId !== observation.harnessSessionId) return "harness-session-mismatch"
-  return "recovery-attempt-mismatch"
+  return "harness-session-mismatch"
 }
 
 const observationKey = (observation: LifecycleObservation) => [
   observation.clankerId ?? "",
   observation.harness ?? "",
   observation.harnessSessionId ?? "",
-  observation.recoveryAttemptId ?? "",
 ].join("\0")
 
 export const selectCurrentLifecycleObservations = (observations: readonly LifecycleObservation[]): LifecycleObservation[] =>

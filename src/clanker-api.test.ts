@@ -271,7 +271,7 @@ describe("Herdr semantic prompt transport", () => {
     const multiplexer = fakeHerdr(clankerId, paneId, [])
     const mark = join(reports, "w1_p31.exited")
     const lifecycle = (...command: string[]) => Bun.spawnSync([join(import.meta.dir, "../bin/clankerhouse-harness-lifecycle"), "--", ...command], {
-      env: { ...process.env, HERDR_PANE_ID: paneId, CLANKER_ID: clankerId, CLANKER_RECOVERY_TRACKED: "" }, stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, HERDR_PANE_ID: paneId, CLANKER_ID: clankerId }, stdout: "pipe", stderr: "pipe",
     }).exitCode
 
     expect((await listClankers({ multiplexer })).map((clanker) => clanker.id)).toEqual([clankerId])
@@ -396,7 +396,7 @@ await Bun.sleep(10)
 console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, steerReceipt, sent, report, socketMode, socketRemoved: !existsSync(socketPath) }))
 `)
     const child = Bun.spawnSync([process.execPath, script], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), HERDR_PANE_ID: "w1:p44", CLANKERHOUSE_INSTANCE: "", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKER_RECOVERY_ATTEMPT: "", CLANKERHOUSE_CLANKERS: join(bin, "clankers") },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), HERDR_PANE_ID: "w1:p44", CLANKERHOUSE_INSTANCE: "", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKERHOUSE_CLANKERS: join(bin, "clankers") },
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -474,7 +474,7 @@ for (const mode of ["print", "json", "rpc"]) {
   await child.emit("agent_settled")
   await child.emit("session_shutdown", { reason: "quit" })
   assert.equal(readFileSync(reportPath, "utf8"), beforeReport, mode + " changed the parent report")
-  assert.equal(readFileSync(claimLog, "utf8"), beforeClaims, mode + " touched pane claims or Recovery")
+  assert.equal(readFileSync(claimLog, "utf8"), beforeClaims, mode + " touched pane claims")
   assert.deepEqual(readdirSync(runtime + "/clanker-sockets"), beforeSockets)
 }
 // The owner, not a worker's extension instance, aggregates background work.

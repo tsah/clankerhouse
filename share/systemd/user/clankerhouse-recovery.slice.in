@@ -1,5 +1,5 @@
 [Unit]
-Description=Clankerhouse aggregate recovery workload budget
+Description=Clankerhouse aggregate clanker workload budget
 
 [Slice]
 CPUWeight=20

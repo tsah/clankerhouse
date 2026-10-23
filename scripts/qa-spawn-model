@@ -21,10 +21,10 @@ import json, os, pathlib, subprocess, sys, time
 harness = pathlib.Path(sys.argv[0]).name
 argv = sys.argv[1:]
 clanker = os.environ.get("CLANKER_ID", "unexpected")
-mode = "recovery" if "--session" in argv or "--resume" in argv else "initial"
+mode = "resume" if "--session" in argv or "--resume" in argv else "initial"
 path = pathlib.Path(os.environ["CLANKERHOUSE_QA_LOG_DIR"]) / (clanker + "." + mode + ".json")
 record = {"harness": harness, "argv": argv, "cwd": os.getcwd(), "complete": False,
-          "pane": os.environ.get("HERDR_PANE_ID"), "attempt": os.environ.get("CLANKER_RECOVERY_ATTEMPT"),
+          "pane": os.environ.get("HERDR_PANE_ID"),
           "workshopId": os.environ.get("CLANKERHOUSE_WORKSHOP_ID"), "parentWorkshopId": os.environ.get("CLANKERHOUSE_PARENT_WORKSHOP_ID")}
 def save():
     pending = path.with_suffix(".tmp")
@@ -35,12 +35,9 @@ try:
     if harness not in ("pi", "claude", "codex"):
         raise RuntimeError("Unsupported harness unexpectedly launched")
     if harness != "codex":
-        flag = ("--session" if harness == "pi" else "--resume") if mode == "recovery" else "--session-id"
+        flag = ("--session" if harness == "pi" else "--resume") if mode == "resume" else "--session-id"
         session = argv[argv.index(flag) + 1]
         record["sessionId"] = session
-        subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "recovery", "attest", clanker,
-                        "--session-id", session, "--attempt", os.environ["CLANKER_RECOVERY_ATTEMPT"]],
-                       check=True, capture_output=True, text=True, timeout=15)
         subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "mux", "claim", "--pane", os.environ["HERDR_PANE_ID"],
                         "harnessSessionId", session], check=True, capture_output=True, timeout=15)
     record["complete"] = True
@@ -122,8 +119,8 @@ def main():
             return False
         return True
 
-    def status():
-        return json.loads(cli("recovery", "status").stdout)
+    def ledger():
+        return json.loads(cli("ledger").stdout)
 
     def wait_log(clanker, mode="initial"):
         path = root / "logs" / f"{clanker}.{mode}.json"
@@ -293,9 +290,9 @@ def main():
             if harness == "claude" and profile_name:
                 expected += ["--agent", profile_name]
             require(argv == expected + [prompt], f"Profile options or prompt changed: {argv!r}")
-            rows = status()["clankers"]
+            rows = ledger()
             if harness == "codex":
-                require(not any(row["clankerId"] == result["clankerId"] for row in rows), "Codex unexpectedly became recoverable")
+                require(not any(row["clankerId"] == result["clankerId"] for row in rows), "Codex unexpectedly entered the clanker ledger")
                 spec = None
             else:
                 spec = {"version": 3 if model is not None else 2 if resource else 1, "profile": profile_name}
@@ -358,38 +355,41 @@ def main():
         require(not run([tools["git"], "-C", fixtures["workshop"], "branch", "--list", "failed-profile"]).stdout.strip(), "Failed Workshop branch survived rollback")
         print("PASS: registration failure rolls back without creating a shell tab", flush=True)
 
-        # The saved model, not a changed profile default, controls exact recovery.
+        # The saved model, not a changed profile default, controls an exact resume.
         profile.write_text(profile.read_text().replace("qa/profile-default", "qa/changed-profile-default"))
-        cli("recovery", "reconcile")
         for result, initial, spec in (pi, claude):
             clanker = result["clankerId"]
             require(cli("mux", "read-claim", "--pane", result["pane"], "clankerId").stdout.strip() == clanker,
                     "Refusing to kill a pane without the expected fixture ownership")
             cli("mux", "kill", "--pane", result["pane"])
-            cli("recovery", "reconcile")
-            resumed = json.loads(cli("recovery", "resume", clanker, "--force").stdout)
-            require(clanker in resumed["launched"], f"Exact recovery not launched: {resumed}")
-            recovered = wait_log(clanker, "recovery")
-            require(recovered["sessionId"] == initial["sessionId"], "Recovery changed exact session identity")
-            require(recovered["cwd"] == initial["cwd"], "Recovery changed worktree")
+            deadline = time.monotonic() + 15
+            while True:
+                attempt = cli("resume", clanker, check=False)
+                if attempt.returncode == 0 or "already running" not in attempt.stderr or time.monotonic() > deadline:
+                    break
+                time.sleep(0.2)
+            require(attempt.returncode == 0, f"Resume failed: {attempt.stderr}")
+            resumed = json.loads(attempt.stdout)
+            require(resumed["clankerId"] == clanker and resumed["harnessSessionId"] == initial["sessionId"], f"Unexpected resume: {resumed}")
+            recovered = wait_log(clanker, "resume")
+            require(recovered["sessionId"] == initial["sessionId"], "Resume changed exact session identity")
+            require(recovered["cwd"] == initial["cwd"], "Resume changed worktree")
             require((recovered["workshopId"], recovered["parentWorkshopId"]) == (initial["workshopId"], initial["parentWorkshopId"]),
-                    f"Recovery changed the Workshop launch env: {recovered}")
+                    f"Resume changed the Workshop launch env: {recovered}")
             if initial["harness"] == "claude":
                 recovered_pane = next(pane["id"] for session in observe() for window in session["windows"] for pane in window["panes"]
                                       if (pane.get("claims") or {}).get("clankerId") == clanker)
                 require(len(windows_holding(recovered_pane)) == 1,
-                        "Recovery recreated an unnecessary shell tab")
+                        "Resume recreated an unnecessary shell tab")
             expected = list(initial["argv"][:-1])
             expected[expected.index("--session-id")] = "--session" if initial["harness"] == "pi" else "--resume"
-            require(recovered["argv"][:-1] == expected, f"Recovery lost model/profile options: {recovered}")
-            require(recovered["argv"][-1].startswith("Clankerhouse recovery attempt "), "Recovery replayed the original prompt")
-            desired = next(row for row in status()["clankers"] if row["clankerId"] == clanker)
-            require(desired["launchSpec"] == spec, "Recovery changed the saved launch spec")
-            # Admission permits only one active Recovery. Stop this reviewed fixture
-            # through the real API before testing the next recoverable harness.
-            cli("recovery", "stop", clanker, "--reason", "qa-model-verified")
-            print(f"PASS: {initial['harness']} exact recovery retains model and profile", flush=True)
-        require(not (root / "shell-expanded").exists(), "Recovery shell-expanded the model")
+            require(recovered["argv"] == expected, f"Resume lost model/profile options or replayed the prompt: {recovered}")
+            row = next(row for row in ledger() if row["clankerId"] == clanker)
+            require(row["launchSpec"] == spec and row["state"] == "open", f"Resume changed the ledger row: {row}")
+            closed = json.loads(cli("ledger", "close", clanker, "--reason", "qa-model-verified").stdout)
+            require(closed["state"] == "closed" and closed["closedReason"] == "qa-model-verified", f"Unexpected close: {closed}")
+            print(f"PASS: {initial['harness']} resume retains model and profile", flush=True)
+        require(not (root / "shell-expanded").exists(), "Resume shell-expanded the model")
         print("Clankerhouse spawn model QA passed.")
     finally:
         for sig in old_handlers:

@@ -1,8 +1,0 @@
-#!/bin/bash
-set -euo pipefail
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/../libexec/clankerhouse-env"
-bun_bin=$(command -v bun || true)
-[[ -n "$bun_bin" ]] || { echo "bun is required for Clankerhouse recovery" >&2; exit 127; }
-exec "$bun_bin" run "$CLANKERHOUSE_HOME/src/recovery-daemon.ts" "$@"

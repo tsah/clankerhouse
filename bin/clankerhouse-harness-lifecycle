@@ -13,14 +13,10 @@ if [[ "${1:-}" != "--" || $# -lt 2 ]]; then
 fi
 shift
 
-saw_int=false
-shutdown_signal=false
-
 # The harness remains the foreground command in the pane's process group, so
-# terminal signals reach it directly exactly once. These traps only classify
-# how the foreground command ended; they must not forward a duplicate signal.
-trap 'saw_int=true' INT
-trap 'shutdown_signal=true' HUP TERM
+# terminal signals reach it directly exactly once. These traps keep the wrapper
+# alive to mark the exit; they must not forward a duplicate signal.
+trap ':' INT HUP TERM
 
 # A pane can outlive its harness, held open by a leftover child. Marking the harness exited
 # lets discovery drop the clanker instead of reporting its last state forever. A relaunch in
@@ -37,25 +33,6 @@ status=0
 
 if [[ -n "$exit_mark" ]]; then
     { mkdir -p -m 700 "${exit_mark%/*}" && printf '%s\n' "$CLANKER_ID" >"$exit_mark"; } 2>/dev/null || true
-fi
-
-if [[ "${CLANKER_RECOVERY_TRACKED:-}" == "1" && -n "${CLANKER_ID:-}" && -n "${CLANKER_RECOVERY_ATTEMPT:-}" && "$shutdown_signal" == false ]]; then
-    reason=""
-    if [[ "$status" -eq 0 ]]; then
-        reason="clean-harness-exit"
-    elif [[ "$status" -eq 130 && "$saw_int" == true ]]; then
-        reason="user-interrupt-exit"
-    fi
-    if [[ -n "$reason" ]]; then
-        clankers_command=${CLANKERHOUSE_CLANKERS:-"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/clankers"}
-        session_id=${CLANKER_SESSION_ID:-}
-        if [[ -z "$session_id" && -n "$(ch_mux_pane)" ]]; then
-            session_id=$(ch_mux_pane_read harnessSessionId)
-        fi
-        args=(recovery attest-exit "$CLANKER_ID" --attempt "$CLANKER_RECOVERY_ATTEMPT" --reason "$reason")
-        [[ -z "$session_id" ]] || args+=(--session-id "$session_id")
-        "$clankers_command" "${args[@]}" >/dev/null || true
-    fi
 fi
 
 exit "$status"

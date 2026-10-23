@@ -7,19 +7,15 @@ import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./
 import { submitReport } from "./report"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
-import { reconcileRecovery } from "./recovery/controller"
-import type { RecoveryResourceClass } from "./recovery/model"
-import { harnessModelArgs } from "./recovery/harness"
-import { stopOwnedHarness } from "./recovery/process-owner"
+import { openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
+import { harnessModelArgs, stopOwnedHarness } from "./harness-launch"
 import { openManagedMultiplexer } from "./multiplexer"
 import { MultiplexerResourceExhaustedError, paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
-import { adoptDesired, attestHarnessSession } from "./recovery/attest"
-import { openRecoveryStore, type RecoveryStore } from "./recovery/store"
 import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopLabels, workshopTree } from "./workshop"
-import { ensureDirectorySession, ensureSession, identity, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
+import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
@@ -117,9 +113,9 @@ const harness = (value: string | undefined): Harness => {
   return selected as Harness
 }
 
-const resourceClass = (value: string | undefined): RecoveryResourceClass | undefined => {
+const resourceClass = (value: string | undefined): ResourceClass | undefined => {
   if (value === undefined) return undefined
-  if (["interactive", "validation-heavy", "untrusted"].includes(value)) return value as RecoveryResourceClass
+  if (["interactive", "validation-heavy", "untrusted"].includes(value)) return value as ResourceClass
   throw new Error("--resource-class must be interactive, validation-heavy, or untrusted")
 }
 
@@ -278,57 +274,18 @@ const resolveWorkshopPath = (selector: string, cwd = process.cwd()) => {
 }
 
 
-const adoptLivePiSessions = async (store: RecoveryStore) => {
-  const runtime = `${runtimeDirFor()}/clanker-state`
-  const sessionRoot = Bun.env.PI_CODING_AGENT_SESSION_DIR || join(Bun.env.HOME || "", ".pi", "agent", "sessions")
-  const replies = new Map<string, Array<{ id: string; cwd: string }>>()
-  const sessionsByCwd = new Map<string, Array<{ id: string; cwd: string; updatedAt: number }>>()
-  const files = existsSync(sessionRoot) ? new Bun.Glob("**/*.jsonl").scanSync({ cwd: sessionRoot, absolute: true }) : []
-  for (const file of files) {
-    try {
-      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean)
-      const header = JSON.parse(lines[0] || "{}")
-      if (!header.id || !header.cwd) continue
-      sessionsByCwd.set(header.cwd, [...(sessionsByCwd.get(header.cwd) || []), { id: header.id, cwd: header.cwd, updatedAt: statSync(file).mtimeMs }])
-      for (const line of lines.slice(1)) {
-        const entry = JSON.parse(line)
-        const message = entry?.message
-        if (message?.role !== "assistant" || !Array.isArray(message.content)) continue
-        const reply = message.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n")
-        if (!reply) continue
-        replies.set(reply, [...(replies.get(reply) || []), { id: header.id, cwd: header.cwd }])
-      }
-    } catch {}
-  }
-  const adopted: string[] = []
-  const skipped: Array<{ clankerId: string; reason: string }> = []
-  const usedSessionIds = new Set(store.listDesired({ includeTombstoned: true }).flatMap((row) => row.harnessSessionId ? [row.harnessSessionId] : []))
-  for (const live of (await listClankers()).filter((row) => row.harness === "pi" && !store.getDesired(row.id))) {
-    let report: any = {}
-    try { report = JSON.parse(readFileSync(`${runtime}/${live.pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`, "utf8")) } catch {}
-    const matched = new Map<string, { id: string; cwd: string }>()
-    for (const result of [...(report.results || [])].reverse()) {
-      for (const candidate of replies.get(result?.reply) || []) if (candidate.cwd === live.cwd || candidate.cwd === live.worktreePath) matched.set(candidate.id, candidate)
-      if (matched.size === 1) break
-    }
-    let sessionId = matched.size === 1 ? [...matched.values()][0]!.id : ""
-    if (!sessionId && report.updatedAt) {
-      const timed = (sessionsByCwd.get(live.cwd) || []).filter((candidate) => !usedSessionIds.has(candidate.id)).map((candidate) => ({ ...candidate, distance: Math.abs(candidate.updatedAt - Number(report.updatedAt)) })).sort((a, b) => a.distance - b.distance)
-      if (timed[0] && timed[0].distance <= 30_000 && (!timed[1] || timed[1].distance - timed[0].distance >= 1_000)) sessionId = timed[0].id
-    }
-    if (!sessionId) {
-      const only = (sessionsByCwd.get(live.cwd) || []).filter((candidate) => !usedSessionIds.has(candidate.id))
-      if (only.length === 1) sessionId = only[0]!.id
-    }
-    if (!sessionId) {
-      skipped.push({ clankerId: live.id, reason: matched.size ? "ambiguous Pi session history" : "no exact Pi result/session match" })
-      continue
-    }
-    await adoptDesired(store, live.id, sessionId)
-    usedSessionIds.add(sessionId)
-    adopted.push(live.id)
-  }
-  return { adopted, skipped }
+/**
+ * The clanker ledger with liveness: an open clanker that is not alive was interrupted by a
+ * restart and can be resumed. Liveness is null when the daemon cannot be asked.
+ */
+const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; interrupted?: boolean }) => {
+  const ledger = openClankerLedger()
+  let rows
+  try { rows = ledger.list({ state: options.interrupted ? "open" : options.state, workshopId: options.workshopId }) } finally { ledger.close() }
+  const live = await listClankers().then((clankers) => new Set(clankers.map((clanker) => clanker.id)), () => undefined)
+  return rows
+    .map((row) => ({ ...row, alive: live ? live.has(row.clankerId) : null, interrupted: live ? row.state === "open" && !live.has(row.clankerId) : null }))
+    .filter((row) => !options.interrupted || row.interrupted !== false)
 }
 
 const usage = `Usage:
@@ -352,12 +309,9 @@ const usage = `Usage:
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
   clankers view children [WORKSHOP] | clear
   clankers delete session|worktree --session SESSION [--path PATH] --yes
-  clankers recovery status|journal|reconcile|checkpoint
-  clankers recovery attest-exit CLANKER_ID --attempt ID [--session-id ID]
-  clankers recovery pending|pause-all
-  clankers recovery resume CLANKER_ID [--force]
-  clankers recovery unquarantine CLANKER_ID --reason TEXT
-  clankers recovery stop|start|suspend|tombstone CLANKER_ID
+  clankers ledger [--state open|closed | --interrupted] [--workshop ID]
+  clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
+  clankers resume CLANKER_ID [--prompt TEXT]
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
@@ -365,9 +319,9 @@ const usage = `Usage:
   clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
 
 --model MODEL overrides the profile/default model for Pi, Claude, and Codex.
-Pi and Claude retain the override during Recovery. OpenCode does not support this flag.`
+Pi and Claude keep the override when resumed. OpenCode does not support this flag.`
 
-const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "recoveryAttemptId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
+const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
 
 const muxLocation = (parsed: ParsedArgs): NativeLocation => {
   const pane = parsed.take("--pane")
@@ -507,94 +461,33 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     return
   }
 
-  if (command === "recovery") {
-    const subcommand = parsed.shift()
-    const store = openRecoveryStore()
-    try {
-      if (subcommand === "status") return console.log(JSON.stringify({ epochs: store.runtimeEpochs(), serverEpoch: store.getMetadata("runtime.server_epoch") ?? null, clankers: store.listDesired({ includeTombstoned: true }).map((row) => ({ ...row, originalTask: undefined })), attempts: store.listDesired({ includeTombstoned: true }).flatMap((row) => store.attemptsFor(row.clankerId)) }))
-      if (subcommand === "journal") return console.log(JSON.stringify(store.journalEntries({ afterId: nonNegativeNumber(parsed.take("--after"), "--after"), limit: nonNegativeNumber(parsed.take("--limit"), "--limit") })))
-      if (subcommand === "reconcile") return console.log(JSON.stringify(await reconcileRecovery(store, { trigger: parsed.take("--reason") || "manual" })))
-      if (subcommand === "pending") return console.log(JSON.stringify(store.listDesired().filter((row) => row.recoveryCondition !== "healthy")))
-      if (subcommand === "pause-all") {
-        const reason = parsed.take("--reason") || "operator-paused-all"
-        const live = await listClankers()
-        const paused = []
-        for (const row of store.listDesired().filter((candidate) => candidate.desiredState === "running")) {
-          const desired = store.setDesiredState(row.clankerId, "suspended_resource_pressure", { reason })
-          if (desired.ownerUnit) stopOwnedHarness(desired.ownerUnit)
-          for (const match of live.filter((candidate) => candidate.id === row.clankerId)) await openManagedMultiplexer().kill(paneLocation(match.sessionId, match.window, match.pane)).catch(() => {})
-          paused.push(row.clankerId)
+  if (command === "ledger") {
+    if (parsed.args[0] === "close") {
+      // Closing stops the harness too, so it is not reopened by the next observation.
+      parsed.shift()
+      const id = requiredClankerId(parsed)
+      const reason = parsed.take("--reason") || "operator"
+      const ifPresent = parsed.has("--if-present")
+      const ledger = openClankerLedger()
+      try {
+        const clanker = ledger.get(id)
+        if (!clanker) {
+          if (ifPresent) return console.log(JSON.stringify({ clankerId: id, tracked: false }))
+          throw new Error(`Unknown clanker ${id}`)
         }
-        return console.log(JSON.stringify({ paused }))
-      }
-      if (subcommand === "resume") {
-        const id = requiredClankerId(parsed)
-        const force = parsed.has("--force")
-        const routed = await routeCompatibilityMutation({ type: "recovery", clankerId: id, action: "resume", force })
-        return console.log(JSON.stringify(routed ? routed.result : await reconcileRecovery(store, { trigger: "manual", clankerId: id, allowLaunch: true, automatic: false, bypassAdmission: force })))
-      }
-      if (subcommand === "unquarantine") {
-        const id = requiredClankerId(parsed)
-        const reason = parsed.take("--reason")
-        if (!reason) throw new Error("--reason is required")
-        return console.log(JSON.stringify(store.resetRecovery(id, reason)))
-      }
-      if (subcommand === "adopt-live") return console.log(JSON.stringify(await adoptLivePiSessions(store)))
-      if (subcommand === "checkpoint") {
-        store.setMetadata("checkpoint.latest", { reason: parsed.take("--reason") || "manual", deadline: parsed.take("--deadline") || null, createdAt: Date.now() })
-        return console.log(JSON.stringify({ checkpointed: true }))
-      }
-      if (subcommand === "attest") {
-        const id = requiredClankerId(parsed)
-        const sessionId = parsed.take("--session-id")
-        if (!sessionId) throw new Error("--session-id is required")
-        const state = parsed.take("--state")
-        const attemptId = nonNegativeNumber(parsed.take("--attempt"), "--attempt")
-        return console.log(JSON.stringify(await attestHarnessSession(store, { clankerId: id, harnessSessionId: sessionId, state, attemptId })))
-      }
-      if (subcommand === "attest-exit") {
-        const id = requiredClankerId(parsed)
-        const attemptId = nonNegativeNumber(parsed.take("--attempt"), "--attempt")
-        if (attemptId === undefined) throw new Error("--attempt is required")
-        const sessionId = parsed.take("--session-id")
-        if (!sessionId) throw new Error("--session-id is required")
-        const desired = store.attestHarnessExit(id, attemptId, {
-          harnessSessionId: sessionId,
-          reason: parsed.take("--reason") || "harness-exit",
-        })
-        return console.log(JSON.stringify(desired))
-      }
-      if (["stop", "start", "suspend", "tombstone"].includes(subcommand || "")) {
-        const id = requiredClankerId(parsed)
-        const state = subcommand === "start" ? "running" : subcommand === "suspend" ? "suspended_resource_pressure" : subcommand === "tombstone" ? "tombstoned" : "stopped"
-        const noKill = parsed.has("--no-kill")
-        const noPaneKill = parsed.has("--no-pane-kill")
-        const reason = parsed.take("--reason") || subcommand!
-        if (parsed.has("--if-present") && !store.getDesired(id)) return console.log(JSON.stringify({ clankerId: id, tracked: false }))
-        if (!noKill && !noPaneKill) {
-          const intent: MutationIntent = subcommand === "start"
-            ? { type: "start", clankerId: id }
-            : subcommand === "stop"
-              ? { type: "stop", clankerId: id, confirmed: true, reason }
-              : { type: "recovery", clankerId: id, action: subcommand as "suspend" | "tombstone", reason }
-          const routed = await routeCompatibilityMutation(intent)
-          if (routed) return console.log(JSON.stringify(routed.result))
-        }
-        const desired = store.setDesiredState(id, state, { reason })
-        if (!noKill && (subcommand === "stop" || subcommand === "suspend" || subcommand === "tombstone")) {
-          if (desired.ownerUnit) {
-            stopOwnedHarness(desired.ownerUnit)
-          }
-          if (!noPaneKill) {
-            const matches = (await listClankers()).filter((row) => row.id === id)
-            if (matches.length > 1) throw new Error(`Ambiguous live panes for ${id}`)
-            if (matches.length === 1) await openManagedMultiplexer().kill(paneLocation(matches[0]!.sessionId, matches[0]!.window, matches[0]!.pane)).catch(() => {})
-          }
-        }
-        return console.log(JSON.stringify(desired))
-      }
-      throw new Error("Usage: clankers recovery status|journal|reconcile|pending|pause-all|resume|unquarantine|checkpoint|attest|attest-exit|stop|start|suspend|tombstone ...")
-    } finally { store.close() }
+        if (clanker.ownerUnit) stopOwnedHarness(clanker.ownerUnit)
+        ledger.end(id, reason)
+        return console.log(JSON.stringify(ledger.get(id)))
+      } finally { ledger.close() }
+    }
+    const state = parsed.take("--state")
+    if (state !== undefined && state !== "open" && state !== "closed") throw new Error("--state must be open or closed")
+    return console.log(JSON.stringify(await ledgerRows({ state, workshopId: parsed.take("--workshop"), interrupted: parsed.has("--interrupted") })))
+  }
+
+  if (command === "resume") {
+    const id = requiredClankerId(parsed)
+    return console.log(JSON.stringify(await resumeClanker(id, { prompt: parsed.take("--prompt") })))
   }
 
   if (command === "workshop") {

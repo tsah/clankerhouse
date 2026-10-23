@@ -8,16 +8,15 @@ describe("workshop stop plan", () => {
     { id: "w3", workshopId: "workshop-b", paths: ["/repo/b"], clankerIds: ["clanker-b"] },
     { id: "w4", workshopId: "workshop-a", paths: ["/elsewhere"], clankerIds: [] },
   ]
-  const desired = [
-    { clankerId: "clanker-a1", workshopId: "workshop-a", workshopPath: "/repo/a", desiredState: "running" as const },
-    { clankerId: "clanker-a2", workshopId: "path-123", workshopPath: "/repo/a", desiredState: "suspended_resource_pressure" as const },
-    { clankerId: "clanker-a3", workshopId: "workshop-a", workshopPath: "/repo/a", desiredState: "stopped" as const },
-    { clankerId: "clanker-a4", workshopId: "workshop-a", workshopPath: "/repo/a", desiredState: "tombstoned" as const },
-    { clankerId: "clanker-b", workshopId: "workshop-b", workshopPath: "/repo/b", desiredState: "running" as const },
+  const clankers = [
+    { clankerId: "clanker-a1", workshopId: "workshop-a", workshopPath: "/repo/a", state: "open" as const },
+    { clankerId: "clanker-a2", workshopId: "path-123", workshopPath: "/repo/a", state: "open" as const },
+    { clankerId: "clanker-a3", workshopId: "workshop-a", workshopPath: "/repo/a", state: "closed" as const },
+    { clankerId: "clanker-b", workshopId: "workshop-b", workshopPath: "/repo/b", state: "open" as const },
   ]
 
-  test("closes every session of the Workshop by id or path and stops its registered clankers", () => {
-    expect(workshopStopPlan({ path: "/repo/a", workshopId: "workshop-a", sessions, desired })).toEqual({
+  test("closes every session of the Workshop by id or path and closes its open clankers", () => {
+    expect(workshopStopPlan({ path: "/repo/a", workshopId: "workshop-a", sessions, clankers })).toEqual({
       sessionIds: ["w1", "w2", "w4"],
       stop: ["clanker-a1", "clanker-a2"],
       clankerIds: ["clanker-a1", "clanker-a2", "clanker-a3", "clanker-live"],
@@ -25,10 +24,10 @@ describe("workshop stop plan", () => {
   })
 
   test("matches by path alone for a directory with no Workshop record", () => {
-    expect(workshopStopPlan({ path: "/repo/b", sessions, desired })).toEqual({ sessionIds: ["w3"], stop: ["clanker-b"], clankerIds: ["clanker-b"] })
+    expect(workshopStopPlan({ path: "/repo/b", sessions, clankers })).toEqual({ sessionIds: ["w3"], stop: ["clanker-b"], clankerIds: ["clanker-b"] })
   })
 
   test("is empty, not an error, when the Workshop is already stopped", () => {
-    expect(workshopStopPlan({ path: "/repo/c", workshopId: "workshop-c", sessions, desired })).toEqual({ sessionIds: [], stop: [], clankerIds: [] })
+    expect(workshopStopPlan({ path: "/repo/c", workshopId: "workshop-c", sessions, clankers })).toEqual({ sessionIds: [], stop: [], clankerIds: [] })
   })
 })

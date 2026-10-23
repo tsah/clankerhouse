@@ -4,13 +4,10 @@ import { parseRequest } from "./protocol"
 const mutation = (intent: unknown) => parseRequest({ version: 1, id: "request", method: "mutation.submit", params: { idempotencyKey: "key", intent } })
 
 describe("mutation protocol target set", () => {
-  test("accepts absorb, reparent, start, stop, and recovery intents", () => {
+  test("accepts absorb, reparent, and create intents", () => {
     const intents = [
       { type: "absorb", target: { type: "session", session: "repo", management: "unmanaged", location: { kind: "herdr", instanceId: "server", nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null } } },
       { type: "reparent", workshopId: "child", parentWorkshopId: "parent", session: "repo" },
-      { type: "start", clankerId: "clanker-1", force: true },
-      { type: "stop", clankerId: "clanker-1", confirmed: true, reason: "operator" },
-      { type: "recovery", clankerId: "clanker-1", action: "resume", force: true },
       { type: "create", repository: "/repo/main", branch: "feature", create: false, remoteRef: "origin/feature" },
     ]
     for (const intent of intents) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
@@ -45,9 +42,8 @@ describe("mutation protocol target set", () => {
     ]) expect(mutation(intent)).toMatchObject({ ok: false, error: { code: "bad_request" } })
   })
 
-  test("requires destructive stop confirmation and a known recovery action", () => {
-    expect(mutation({ type: "stop", clankerId: "clanker-1" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
-    expect(mutation({ type: "recovery", clankerId: "clanker-1", action: "guess" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
+  test("rejects the retired Recovery intents", () => {
+    for (const type of ["start", "stop", "recovery"]) expect(mutation({ type, clankerId: "clanker-1", confirmed: true, action: "resume" })).toMatchObject({ ok: false, error: { code: "bad_request" } })
   })
 })
 

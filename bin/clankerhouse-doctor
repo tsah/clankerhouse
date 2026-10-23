@@ -38,11 +38,5 @@ else
     ok 'no dotfiles path dependencies in standalone runtime'
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-    for unit in clankerhouse-recovery.service; do
-        state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
-        [[ "$state" == enabled ]] && ok "$unit enabled" || warn "$unit not enabled"
-    done
-fi
 printf '\n%d broken, %d optional gaps\n' "$failures" "$warnings"
 ((failures == 0))

@@ -65,7 +65,6 @@ function fixture() {
     CLANKERHOUSE_INSTANCE: "",
     CLANKER_ID: "clanker-background-test",
     CLANKER_SESSION_ID: "claude-test-session",
-    CLANKER_RECOVERY_ATTEMPT: "",
     HERDR_ENV: "1",
     HERDR_PANE_ID: "w1:p9",
     HERDR_SESSION: "",
@@ -132,7 +131,7 @@ describe("Claude background-task lifecycle", () => {
     expect(requests).toEqual(["pane.get", "pane.report_metadata"])
     expect(f.spawned()).toEqual([])
     expect(f.attestation()).toEqual(requested)
-    expect(f.attestation()).toMatchObject({ pane: "w1:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working", recoveryAttemptId: null })
+    expect(f.attestation()).toMatchObject({ pane: "w1:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working" })
   })
 
   test("Stop defers completion and Recovery settlement until background work has finished", async () => {

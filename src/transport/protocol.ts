@@ -4,7 +4,7 @@ import type { ProjectionSnapshot } from "../projection"
 
 export const SNAPSHOT_PROTOCOL_VERSION = 1 as const
 
-export type AvailableAction = "open" | "absorb" | "rename" | "attach" | "reparent" | "detach" | "delete" | "create" | "start" | "stop" | "recovery"
+export type AvailableAction = "open" | "absorb" | "rename" | "attach" | "reparent" | "detach" | "delete" | "create"
 
 export type MutationIntent =
   | { type: "open"; target: Target }
@@ -15,9 +15,6 @@ export type MutationIntent =
   | { type: "delete"; kind: "pane" | "session" | "worktree"; session: string; confirmed: true; pane?: string; path?: string }
   /** deferSession leaves the session to the Workshop's first Clanker; the outcome is then the worktree path. */
   | { type: "create"; repository: string; branch: string; create: boolean; base?: string; remoteRef?: string; title?: string; deferSession?: boolean }
-  | { type: "start"; clankerId: string; force?: boolean }
-  | { type: "stop"; clankerId: string; confirmed: true; reason?: string }
-  | { type: "recovery"; clankerId: string; action: "reconcile" | "resume" | "suspend" | "tombstone"; force?: boolean; reason?: string }
   /** The Workshop is named by its worktree path, or by workshopId when the worktree may already be gone. */
   | { type: "label"; path?: string; workshopId?: string; key: string; value: string | null }
   | { type: "done"; path: string }
@@ -36,7 +33,6 @@ export interface ObservationReport {
   hookEvent?: string
   clankerId?: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
   generation?: number
   settledGeneration?: number
   result?: unknown
@@ -109,7 +105,7 @@ const parseObservationReport = (value: unknown): ObservationReport | undefined =
     || !observationStates.has(report.state as ObservationState)
     || !validNonNegativeInteger(report.updatedAt)) return undefined
   if (report.hookEvent !== undefined && !validText(report.hookEvent, 128)) return undefined
-  for (const field of ["clankerId", "harnessSessionId", "recoveryAttemptId"] as const) {
+  for (const field of ["clankerId", "harnessSessionId"] as const) {
     if (report[field] !== undefined && !validText(report[field], 256)) return undefined
   }
   for (const field of ["generation", "settledGeneration"] as const) {
@@ -142,9 +138,6 @@ const parseIntent = (value: unknown): MutationIntent | undefined => {
     case "detach": return validText(intent.workshopId) ? { type: "detach", workshopId: intent.workshopId, session: validText(intent.session) ? intent.session : undefined } : undefined
     case "delete": return ["pane", "session", "worktree"].includes(String(intent.kind)) && validText(intent.session) && intent.confirmed === true ? { type: "delete", kind: intent.kind as "pane" | "session" | "worktree", session: intent.session, confirmed: true, pane: validText(intent.pane) ? intent.pane : undefined, path: validText(intent.path) ? intent.path : undefined } : undefined
     case "create": return validText(intent.repository) && validText(intent.branch) && typeof intent.create === "boolean" ? { type: "create", repository: intent.repository, branch: intent.branch, create: intent.create, base: validText(intent.base) ? intent.base : undefined, remoteRef: validText(intent.remoteRef) ? intent.remoteRef : undefined, ...(validLabelValue(intent.title, "title") ? { title: intent.title } : {}), ...(intent.deferSession === true ? { deferSession: true } : {}) } : undefined
-    case "start": return validText(intent.clankerId) ? { type: "start", clankerId: intent.clankerId, force: intent.force === true || undefined } : undefined
-    case "stop": return validText(intent.clankerId) && intent.confirmed === true ? { type: "stop", clankerId: intent.clankerId, confirmed: true, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
-    case "recovery": return validText(intent.clankerId) && ["reconcile", "resume", "suspend", "tombstone"].includes(String(intent.action)) ? { type: "recovery", clankerId: intent.clankerId, action: intent.action as "reconcile" | "resume" | "suspend" | "tombstone", force: intent.force === true || undefined, reason: validText(intent.reason) ? intent.reason : undefined } : undefined
     case "label": return validText(intent.path) !== validText(intent.workshopId) && validLabelKey(intent.key) && (intent.value === null || validLabelValue(intent.value, intent.key)) ? { type: "label", ...(validText(intent.path) ? { path: intent.path } : { workshopId: intent.workshopId as string }), key: intent.key, value: intent.value } : undefined
     case "done": return validText(intent.path) ? { type: "done", path: intent.path } : undefined
     case "workshop.stop": return validText(intent.path) ? { type: "workshop.stop", path: intent.path } : undefined

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { basename } from "node:path"
-import { safeUnitPart } from "./recovery/process-owner"
+import { safeUnitPart } from "./harness-launch"
 
 /** Resource facts about a clanker's process scope; each field is absent when it cannot be read. */
 export interface ClankerHealth {
@@ -32,7 +32,7 @@ const defaultRoots = (): HealthRoots => {
 
 const read = (path: string) => { try { return readFileSync(path, "utf8") } catch { return undefined } }
 
-/** The newest attempt's scope directory for a clanker, matching `recoveryUnitName`. */
+/** The newest launch's scope directory for a clanker, matching `clankerUnitName`. */
 const scopeFor = (clankerId: string, slice: string) => {
   const prefix = `clankerhouse-${safeUnitPart(clankerId)}-`
   let entries: string[]

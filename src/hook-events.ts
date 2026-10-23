@@ -1,19 +1,18 @@
 /**
  * Spooled lifecycle-hook requests. `clankerhouse-hook` runs synchronously inside every
- * harness tool call, so it never waits on the daemon: when a clanker's state, session or
- * Recovery attempt changes it leaves one request per pane in the runtime spool, replacing
- * any request not yet applied. The daemon claims each request by renaming it, so a hook
- * that writes again meanwhile starts a new file instead of being lost, then attests it for
- * Recovery and mirrors its state into the Multiplexer.
+ * harness tool call, so it never waits on the daemon: when a clanker's state or session
+ * changes it leaves one request per pane in the runtime spool, replacing any request not yet
+ * applied. The daemon claims each request by renaming it, so a hook that writes again
+ * meanwhile starts a new file instead of being lost, then mirrors its state into the
+ * Multiplexer.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, watch } from "node:fs"
 
-export interface HookAttestRequest {
+export interface HookStateRequest {
   pane: string
   clankerId: string
   harnessSessionId: string
   state: string
-  attemptId?: number
   /** Harness that ran the hook; absent from hooks that predate lifecycle mirroring. */
   harness?: string
   generation?: number
@@ -22,17 +21,15 @@ export interface HookAttestRequest {
 
 const text = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined
 
-export const parseHookAttestRequest = (value: unknown): HookAttestRequest | undefined => {
+export const parseHookStateRequest = (value: unknown): HookStateRequest | undefined => {
   if (!value || typeof value !== "object") return undefined
   const record = value as Record<string, unknown>
   const pane = text(record.pane), clankerId = text(record.clankerId), harnessSessionId = text(record.harnessSessionId), state = text(record.state)
   if (!pane || !clankerId || !harnessSessionId || !state) return undefined
-  const attempt = record.recoveryAttemptId === null || record.recoveryAttemptId === undefined ? undefined : Number(record.recoveryAttemptId)
-  if (attempt !== undefined && !(Number.isSafeInteger(attempt) && attempt >= 0)) return undefined
   const harness = text(record.harness)
   const generation = Number(record.generation), updatedAt = Number(record.updatedAt)
   return {
-    pane, clankerId, harnessSessionId, state, attemptId: attempt,
+    pane, clankerId, harnessSessionId, state,
     ...(harness ? { harness } : {}),
     ...(Number.isSafeInteger(generation) && generation >= 0 ? { generation } : {}),
     ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updatedAt } : {}),
@@ -40,15 +37,15 @@ export const parseHookAttestRequest = (value: unknown): HookAttestRequest | unde
 }
 
 /** Claim and return every pending request; malformed ones are discarded. */
-export const takeHookAttestRequests = (directory: string): HookAttestRequest[] => {
+export const takeHookStateRequests = (directory: string): HookStateRequest[] => {
   if (!existsSync(directory)) return []
-  const requests: HookAttestRequest[] = []
+  const requests: HookStateRequest[] = []
   for (const entry of readdirSync(directory)) {
     if (!entry.endsWith(".json")) continue
     const claimed = `${directory}/${entry}.${process.pid}.claimed`
     try { renameSync(`${directory}/${entry}`, claimed) } catch { continue }
     try {
-      const request = parseHookAttestRequest(JSON.parse(readFileSync(claimed, "utf8")))
+      const request = parseHookStateRequest(JSON.parse(readFileSync(claimed, "utf8")))
       if (request) requests.push(request)
     } catch {}
     try { unlinkSync(claimed) } catch {}
@@ -60,7 +57,7 @@ export const takeHookAttestRequests = (directory: string): HookAttestRequest[] =
  * Apply spooled requests one batch at a time, on change notification plus a slow sweep that
  * covers missed notifications. Returns a stop function.
  */
-export const watchHookAttestRequests = (directory: string, apply: (request: HookAttestRequest) => Promise<void>, sweepMs = 30_000, fallbackSweepMs = 1_000, watchDirectory: typeof watch = watch) => {
+export const watchHookStateRequests = (directory: string, apply: (request: HookStateRequest) => Promise<void>, sweepMs = 30_000, fallbackSweepMs = 1_000, watchDirectory: typeof watch = watch) => {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   let running = false
   let pending = false
@@ -70,7 +67,7 @@ export const watchHookAttestRequests = (directory: string, apply: (request: Hook
     try {
       do {
         pending = false
-        for (const request of takeHookAttestRequests(directory)) await apply(request)
+        for (const request of takeHookStateRequests(directory)) await apply(request)
       } while (pending)
     } finally { running = false }
   }

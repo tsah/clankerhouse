@@ -45,7 +45,7 @@ export type ClaimScope = "session" | "window" | "pane"
  */
 export type SessionClaimKey = "workshopId" | "workshopParentId" | "worktreePath" | "directoryPath" | "gitCommonDir" | "sessionId" | "sessionDisplayName"
 export type WindowClaimKey = "windowId" | "windowDisplayName" | "windowHarness"
-export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
+export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
 export type ClaimKey = SessionClaimKey | WindowClaimKey | PaneClaimKey
 
 export const claimScopeOf = (key: ClaimKey): ClaimScope => {
@@ -86,7 +86,6 @@ export interface MultiplexerPane {
   clankerId?: string
   harness?: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
   /** Present only when the Adapter declares `processInfo`. */
   processInfo?: RuntimeProcessInfo
   /** Present only when the Adapter declares `agentStatus`. */

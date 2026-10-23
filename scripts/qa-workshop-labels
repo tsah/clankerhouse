@@ -221,8 +221,8 @@ merged_result=$(cd "$origin" && clankers workshop label set status=done --worksh
 [[ "$(clankers workshop label list --workshop "$merged_id")" == '{"status":"done"}' ]] || fail "Expected labels listed by Workshop ID"
 
 # Stopping a Workshop releases what is live and keeps what is durable: its session closes, its
-# clanker is no longer wanted running, its pending message is orphaned, and the worktree, branch,
-# and labels stay. The clanker is registered suspended so Recovery never launches it here.
+# clanker is closed in the ledger, its pending message is orphaned, and the worktree, branch, and
+# labels stay.
 stopped_path="$root/dev/stopped"
 git -C "$origin" worktree add -q -b stopped "$stopped_path"
 qa_herdr workspace create --cwd "$stopped_path" --label qa-stopped --no-focus >/dev/null
@@ -231,23 +231,23 @@ clankers workshop label set status=done --cwd "$stopped_path" >/dev/null
 stopped_state() {
     env XDG_STATE_HOME="$state_home" XDG_RUNTIME_DIR="$runtime" HOME="$root/home" STOPPED_PATH="$stopped_path" STEP="$1" bun --eval '
       const [storePath, orchestrationPath] = process.argv.slice(1)
-      const { openRecoveryStore } = await import(storePath)
+      const { openClankerLedger } = await import(storePath)
       const { OrchestrationStore } = await import(orchestrationPath)
-      const recovery = openRecoveryStore()
+      const ledger = openClankerLedger()
       const messages = OrchestrationStore.open()
       if (process.env.STEP === "seed") {
-        recovery.createDesired({ clankerId: "clanker-qa-stopped", harness: "claude", workshopId: "path-qa-stopped", workshopPath: process.env.STOPPED_PATH, preferredSessionLabel: "qa-stopped", preferredWindowLabel: "claude", cwd: process.env.STOPPED_PATH, harnessSessionId: null, launchSpec: { version: 1, profile: null }, originalTask: "qa", desiredState: "suspended_resource_pressure" })
+        ledger.record({ clankerId: "clanker-qa-stopped", harness: "claude", workshopId: "path-qa-stopped", workshopPath: process.env.STOPPED_PATH, sessionLabel: "qa-stopped", windowLabel: "claude", cwd: process.env.STOPPED_PATH, harnessSessionId: null, launchSpec: { version: 1, profile: null }, originalTask: "qa" })
         messages.insertMessage({ messageId: "msg-qa-stopped", clankerId: "clanker-qa-stopped", text: "later", delivery: "queued", state: "queued", afterGeneration: 0 })
       }
-      console.log(JSON.stringify([recovery.getDesired("clanker-qa-stopped")?.desiredState, messages.message("msg-qa-stopped")?.state]))
-      recovery.close(); messages.close()
-    ' "$repo/src/recovery/store.ts" "$repo/src/orchestration.ts"
+      console.log(JSON.stringify([ledger.get("clanker-qa-stopped")?.state, messages.message("msg-qa-stopped")?.state]))
+      ledger.close(); messages.close()
+    ' "$repo/src/clanker-ledger.ts" "$repo/src/orchestration.ts"
 }
-[[ "$(stopped_state seed)" == '["suspended_resource_pressure","queued"]' ]] || fail "Could not seed the Workshop to stop"
+[[ "$(stopped_state seed)" == '["open","queued"]' ]] || fail "Could not seed the Workshop to stop"
 stop_result=$(clankers workshop stop --cwd "$stopped_path")
 [[ "$(jq -c '[.stopped, .clankerIds, (.sessionIds | length)]' <<<"$stop_result")" == '[true,["clanker-qa-stopped"],1]' ]] || fail "Unexpected workshop stop result: $stop_result"
 if has_workspace qa-stopped; then fail "Expected the stopped Workshop's workspace to close"; fi
-[[ "$(stopped_state check)" == '["stopped","orphaned"]' ]] || fail "Expected the clanker stopped and its message orphaned, got $(stopped_state check)"
+[[ "$(stopped_state check)" == '["closed","orphaned"]' ]] || fail "Expected the clanker closed and its message orphaned, got $(stopped_state check)"
 [[ -d "$stopped_path" ]] || fail "Stopping must keep the worktree"
 git -C "$origin" show-ref --verify --quiet refs/heads/stopped || fail "Stopping must keep the branch"
 [[ "$(clankers workshop label list --cwd "$stopped_path")" == '{"status":"done"}' ]] || fail "Stopping must keep the Workshop's labels"

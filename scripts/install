@@ -7,7 +7,6 @@ prefix=${CLANKERHOUSE_PREFIX:-${PREFIX:-$HOME/.local}}
 with_systemd=false
 with_integrations=false
 with_herdr=false
-enable_services=true
 dry_run=false
 force=false
 no_daemon_handoff=false
@@ -17,7 +16,7 @@ preflight_hook=
 activation_hook=
 
 usage() {
-    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--no-enable] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
 }
 while (($#)); do
     case "$1" in
@@ -25,7 +24,6 @@ while (($#)); do
         --systemd) with_systemd=true; shift ;;
         --integrations) with_integrations=true; shift ;;
         --herdr) with_herdr=true; shift ;;
-        --no-enable) enable_services=false; shift ;;
         --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
         --herdr-socket) herdr_socket=${2:?}; shift 2 ;;
         --no-daemon-handoff) no_daemon_handoff=true; shift ;;
@@ -309,7 +307,7 @@ if [[ "$with_integrations" == true ]]; then
     CLANKERHOUSE_BIN_DIR="$bin_dir" "$active/bin/clankerhouse-install-claude-hooks"
 fi
 # Units from retired features: stop and delete any copy a previous install recorded.
-retired_units=(clankerhouse-spot-watch.service clankerhouse-resource-guard.service)
+retired_units=(clankerhouse-spot-watch.service clankerhouse-resource-guard.service clankerhouse-recovery.service)
 retired_unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 retired_removed=false
 for unit in "${retired_units[@]}"; do
@@ -324,9 +322,6 @@ done
 
 if [[ "$with_systemd" == true ]]; then
     systemctl --user daemon-reload
-    if [[ "$enable_services" == true ]]; then
-        systemctl --user enable --now clankerhouse-recovery.service
-    fi
 elif [[ "$retired_removed" == true ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
 fi

@@ -147,7 +147,7 @@ ln -s "$active/integrations/pi/$legacy_pi_extension" "$home/.pi/agent/extensions
 
 # A successful upgrade retains the old version, moves optional links through the
 # stable active path, and renders user units through stable validated wrappers.
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations --systemd --no-enable >/dev/null
+"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations --systemd >/dev/null
 new_target=$(readlink -f "$active")
 [[ "$new_target" != "$old_target" && -d "$old_target" ]]
 [[ ! -e "$home/.pi/agent/extensions/$legacy_pi_extension" && ! -L "$home/.pi/agent/extensions/$legacy_pi_extension" ]]
@@ -238,8 +238,6 @@ try:
 finally:
     hidden.rename(reporter)
 PY
-grep -F "ExecStart=\"$prefix/bin/clankerhouse-recovery\"" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
-grep -F "Documentation=file:$active/README.md" "$home/.config/systemd/user/clankerhouse-recovery.service" >/dev/null
 grep -Fx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
 ! grep -F -- '--user enable' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
 

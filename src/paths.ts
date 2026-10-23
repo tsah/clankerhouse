@@ -1,7 +1,7 @@
 /**
  * Instance-scoped runtime and state locations.
  *
- * Instances never share a daemon socket, cache, registry, or recovery store. The
+ * Instances never share a daemon socket, cache, registry, or clanker ledger. The
  * instance slug comes from CLANKERHOUSE_INSTANCE when set ("default" means no
  * suffix); otherwise it is `-herdr`, the Herdr instance's established paths.
  */

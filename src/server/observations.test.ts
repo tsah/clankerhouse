@@ -44,13 +44,12 @@ describe("Clanker observations", () => {
     expect(result.unmatchedByPane.size).toBe(0)
   })
 
-  test("requires owned session and recovery correlation when declared", () => {
-    const owned = identity({ harnessSessionId: "session-new", recoveryAttemptId: "attempt-new" })
-    const priorSession = observation({ harnessSessionId: "session-old", recoveryAttemptId: "attempt-new" })
-    const priorAttempt = observation({ harnessSessionId: "session-new", recoveryAttemptId: "attempt-old" })
-    const result = reconcileClankerObservations([owned], [priorSession, priorAttempt])
+  test("requires owned session correlation when declared", () => {
+    const owned = identity({ harnessSessionId: "session-new" })
+    const priorSession = observation({ harnessSessionId: "session-old" })
+    const result = reconcileClankerObservations([owned], [priorSession])
     expect(result.matchedByPane.size).toBe(0)
-    expect(result.unmatchedByPane.get("%1")?.map((entry) => entry.reason)).toEqual(["harness-session-mismatch", "recovery-attempt-mismatch"])
+    expect(result.unmatchedByPane.get("%1")?.map((entry) => entry.reason)).toEqual(["harness-session-mismatch"])
   })
 
   test("preserves rejected current-pane observations without manufacturing identity", () => {

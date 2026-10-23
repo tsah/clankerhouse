@@ -28,13 +28,13 @@ else
 fi
 while IFS= read -r clanker_id; do
     [[ -n "$clanker_id" ]] || continue
-    progress "Persisting stop intent for $clanker_id"
-    if ! stop_output=$("$clankers_cli" recovery stop "$clanker_id" --reason intentional-multiplexer-stop --no-pane-kill --if-present 2>&1); then
-        printf 'Unable to persist stop intent for %s: %s\n' "$clanker_id" "$stop_output" >&2
+    progress "Closing $clanker_id in the clanker ledger"
+    if ! stop_output=$("$clankers_cli" ledger close "$clanker_id" --reason intentional-multiplexer-stop --if-present 2>&1); then
+        printf 'Unable to close %s in the clanker ledger: %s\n' "$clanker_id" "$stop_output" >&2
         exit 1
     fi
 done <<<"$ids"
-progress "Stop intents persisted"
+progress "Clankers closed"
 
 if [[ "$kind" == "mark-session" ]]; then
     exit 0

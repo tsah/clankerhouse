@@ -36,7 +36,6 @@ export interface MuxWindow {
   clankerId?: string
   explicitHarness?: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
   agentStatus?: { agent?: string; status: RuntimeAgentStatus }
 }
 
@@ -57,5 +56,4 @@ export interface ClankerReport {
   updatedAt: number
   hookEvent?: string
   harnessSessionId?: string
-  recoveryAttemptId?: string
 }

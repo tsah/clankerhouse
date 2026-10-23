@@ -78,7 +78,7 @@ The Interface is extracted and every out-of-Adapter tmux invocation is routed th
 - Projection takes whether a finished clanker was seen from herdr's effective status (`done` until the tab is viewed, `idle` after), replacing Clankerhouse's own seen ledger. herdr's seen is per tab and counts the tab on screen when a turn settles as seen; a pane herdr holds no settled status for counts as seen while focused.
 - The installer pins a herdr version, and the Adapter gates on a minimum `ping.protocol` rather than an exact match: herdr keeps its JSON API compatible across protocol bumps, JSON clients ignore unknown fields, and an unsupported method is an ordinary request error.
 - Activity recency, which orders the TUI, is derived from Change Stream events under herdr because the API carries no activity timestamps.
-- Boot autostart, systemd scopes, resource guard, spot watch, incidents, lineage, and Recovery policy remain Clankerhouse's and are unchanged by the Adapter.
+- Boot autostart, systemd scopes, resource guard, incidents, lineage, and Recovery policy remain Clankerhouse's and are unchanged by the Adapter.
 - herdr's `--remote` attach, live binary handoff, and macOS process identification become available without Clankerhouse work.
 
 ## Implementation status

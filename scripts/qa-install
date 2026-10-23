@@ -167,9 +167,19 @@ plugin_mtime=$(stat -c %Y "$opencode_plugin")
 skill_inode=$(stat -c %i "$opencode_skill")
 skill_mtime=$(stat -c %Y "$opencode_skill")
 
+# A unit of a retired feature that an earlier install recorded is stopped and
+# deleted by any later install, even without --systemd.
+manifest="$state/clankerhouse/installations/$(printf '%s' "$(realpath -m -- "$prefix")" | sha256sum | cut -d' ' -f1).files"
+retired_unit="$home/.config/systemd/user/clankerhouse-spot-watch.service"
+printf '[Service]\nExecStart=/bin/true\n' > "$retired_unit"
+printf '%s\n' "$retired_unit" >> "$manifest"
+
 # Reinstalling integrations whose stable targets are already correct must not
 # replace their symlink inodes and trigger live harness/plugin reloads.
 "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations >/dev/null
+[[ ! -e "$retired_unit" ]]
+grep -Fx -- '--user disable --now clankerhouse-spot-watch.service' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
+! grep -Fx -- "$retired_unit" "$manifest" >/dev/null
 new_target=$(readlink -f "$active")
 [[ "$(stat -c %i "$opencode_plugin")" == "$plugin_inode" ]]
 [[ "$(stat -c %Y "$opencode_plugin")" == "$plugin_mtime" ]]

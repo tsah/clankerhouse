@@ -42,7 +42,7 @@ if [[ "$mode" == all || "$mode" == unit ]]; then
     run "native hook build" cargo build --manifest-path native-client/Cargo.toml --release --locked --bin clankerhouse-hook
     run "TypeScript unit and component tests" bun test
     run "Python unit and component tests" env PYTHONPATH=.. python3 -m unittest \
-        tests.test_resource_guard tests.test_spot_watch
+        tests.test_resource_guard
     run "Rust native-client unit tests" cargo test --manifest-path native-client/Cargo.toml
 fi
 

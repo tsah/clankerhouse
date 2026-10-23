@@ -28,7 +28,7 @@ clankerhouse-native --dump-tree
 clankerhouse-native --check
 clankers list
 clankers recovery status
-systemctl --user --no-pager status clankerhouse-recovery.service clankerhouse-resource-guard.service clankerhouse-spot-watch.service
+systemctl --user --no-pager status clankerhouse-recovery.service clankerhouse-resource-guard.service
 clankers mux observe
 herdr api snapshot
 ```

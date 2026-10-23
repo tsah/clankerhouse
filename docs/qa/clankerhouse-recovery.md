@@ -1,6 +1,6 @@
 # Clankerhouse restart and Spot recovery QA
 
-This plan validates guarded automatic recovery after a Spot/Linux reboot, explicit single-clanker recovery for later same-boot loss, process-scope cleanup, and EC2 Spot checkpoint handling. It must never inspect, signal, or mutate real workshops, clankers, Herdr servers, worktrees, harness sessions, or AWS resources.
+This plan validates guarded automatic recovery after a Spot/Linux reboot, explicit single-clanker recovery for later same-boot loss, and process-scope cleanup. It must never inspect, signal, or mutate real workshops, clankers, Herdr servers, worktrees, or harness sessions.
 
 ## Safety boundary
 
@@ -13,7 +13,6 @@ Every destructive scenario must:
 - use private `HOME`, `XDG_STATE_HOME`, and `XDG_RUNTIME_DIR` trees;
 - put fake `pi`, `claude`, and `opencode` executables first in `PATH`;
 - simulate boot IDs with `CLANKERHOUSE_BOOT_ID_PATH`;
-- simulate IMDS with a loopback fake HTTP server;
 - never use pane input or capture to communicate with a clanker.
 
 ## Automated checks
@@ -23,7 +22,7 @@ From `clankerhouse/`:
 ```bash
 bun run check
 bun test
-PYTHONPATH=.. python3 -m unittest tests.test_resource_guard tests.test_spot_watch
+PYTHONPATH=.. python3 -m unittest tests.test_resource_guard
 scripts/qa-clanker-api
 scripts/qa-daemon
 scripts/qa-recovery
@@ -51,7 +50,7 @@ scripts/qa
 14. Dirty/untracked Git state and native harness session files remain preserved.
 15. No operation touches the user's real Herdr socket, cgroups, or harness stores.
 
-Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, command construction, and IMDSv2 token/404/401/rebalance/interruption behavior.
+Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, and command construction.
 
 ## Spot deployment acceptance
 
@@ -61,7 +60,6 @@ Before migrating, verify on the target image:
 systemctl --user daemon-reload
 systemctl --user enable --now clankerhouse-recovery.service
 systemctl --user enable --now clankerhouse-resource-guard.service
-systemctl --user enable --now clankerhouse-spot-watch.service
 clankers recovery status
 loginctl show-user "$USER" -p Linger
 ```
@@ -75,4 +73,4 @@ The following must live on retained encrypted storage mounted at the same paths 
 - repositories and Worktrunk worktrees;
 - required harness credentials.
 
-For Spot termination, do not rely on a root EBS volume with `DeleteOnTermination=true`. Use a retained/reattached encrypted EBS volume, EFS, or an externally restored checkpoint. The interruption notice is only a fast-path flush; successful hard-restart QA is the release gate.
+For Spot termination, do not rely on a root EBS volume with `DeleteOnTermination=true`. Use a retained/reattached encrypted EBS volume, EFS, or an externally restored checkpoint. Successful hard-restart QA is the release gate.

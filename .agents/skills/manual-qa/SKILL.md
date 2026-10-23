@@ -75,7 +75,7 @@ Use an isolated real Herdr server, the real daemon/socket, real native client, t
 - Clanker API sends, waits, results, and unsupported capabilities
 - daemon reconnect and stale-producer handling
 - Recovery clean loss, interruption ambiguity, admission, stop, suspension, and tombstones
-- resource pressure, Spot handling, and process ownership
+- resource pressure and process ownership
 - atomic install, activation failure, and rollback
 - Neovim integration and popup lifecycle
 

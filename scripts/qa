@@ -734,7 +734,13 @@ pane=call("pane.get",{"pane_id":sys.argv[2]})["pane"]
 call("workspace.focus",{"workspace_id":pane["workspace_id"]}); call("tab.focus",{"tab_id":pane["tab_id"]}); call("pane.focus",{"pane_id":sys.argv[2]})
 PY
 }
-herdr_focus_pane "$pi_pane"
+# The picker's jump above focuses through the daemon and can land after a direct focus, so
+# focus the pane until Herdr keeps it.
+for _ in {1..20}; do
+    herdr_focus_pane "$pi_pane"
+    sleep 0.3
+    [[ "$(focused_field focused_pane_id)" == "$pi_pane" ]] && break
+done
 [[ "$(pi_state)" == idle ]] || { printf 'Expected the focused finished clanker to render idle\n' >&2; exit 1; }
 herdr_focus_pane "$main_pane"
 [[ "$(pi_state)" == done ]] || { printf 'Expected the unfocused finished clanker to render done\n' >&2; exit 1; }

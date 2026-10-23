@@ -67,6 +67,14 @@ describe("Recovery planner functional core", () => {
     expect(decideRecovery(input())).toEqual({ type: "consider-admission", code: "eligible", reason: "candidate is eligible for host admission" })
   })
 
+  test("admits into exactly one waiting resume gate and never duplicates a runtime-resumed session", () => {
+    expect(decideRecovery(input({ gatePanes: ["w1:p2"] }))).toMatchObject({ type: "consider-admission", gatePane: "w1:p2" })
+    expect(decideRecovery(input({ gatePanes: ["w1:p2"], allowLaunch: false }))).toMatchObject({ type: "pending", code: "manual-resume-required" })
+    expect(decideRecovery(input({ gatePanes: ["w1:p2", "w1:p3"] }))).toMatchObject({ type: "block", code: "duplicate-resume-gates" })
+    expect(decideRecovery(input({ runtimeResumedPane: "w1:p4", gatePanes: ["w1:p2"] }))).toMatchObject({ type: "block", code: "runtime-resumed", pane: "w1:p4" })
+    expect(decideRecovery(input({ desired: desired({ recoveryCondition: "healthy" }), gatePanes: ["w1:p2"] }))).toMatchObject({ type: "mark-pending" })
+  })
+
   test("is deterministic for equal prepared observations", () => {
     const prepared = input({ backoffRemainingMs: 50 })
     expect(JSON.stringify(decideRecovery(prepared))).toBe(JSON.stringify(decideRecovery(structuredClone(prepared))))

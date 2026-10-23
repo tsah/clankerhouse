@@ -51,9 +51,16 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   does. Differences accepted: Herdr's seen is per tab (any pane of a viewed tab is seen) and
   a client-less server treats the active tab as watched. Fallback when Herdr holds no
   settled status (lagging, or not observing the harness): seen only while focused.
-- [ ] **P3** Settle/wait logic (hook generation counting, `watch` settled) →
+- [-] **P3** Settle/wait logic (hook generation counting, `watch` settled) →
   `completion_seq` / `state_change_seq` and `agent.wait`. Keep turn windows for
-  `clankers result`.
+  `clankers result`. Declined: `wait`, `wait --after`, `result --generation`,
+  `send --wait`, and watch cursors are all addressed by turn generation. Herdr's counters
+  are server-global, name no turn, reset when the session or agent label changes, and
+  exist only while Herdr holds the mirrored state, so they cannot replace generations.
+  `agent.wait` would only wake a waiter that must still re-read the hook record (Herdr
+  trails it by the daemon's mirror hop), at the price of one Herdr connection and server
+  file descriptor per waiter for the whole wait; `--until done` never matches in the
+  active tab. Waiters keep polling the daemon's herd, which costs Herdr nothing.
 - [ ] **P4** Send acknowledgement (prompt SHA-256 matching) → `agent.prompt` with
   `wait:{until}`, `agent_blocked`, `agent_prompt_stalled`. The durable queue stays.
 - [ ] **P5** Recovery relaunch mechanism → Herdr native restore with

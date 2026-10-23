@@ -73,7 +73,7 @@ The Interface is extracted and every out-of-Adapter tmux invocation is routed th
 - Under herdr, Absorption reduces to registering a workspace whose identity cwd is a Workshop path; continuous reconciliation becomes event-driven; the tmux server-epoch, `wait-for` lock, popup unbind/rebind wrapper, and `/proc` environ scan for an open TUI disappear.
 - Under herdr, the Alt-K TUI runs as a `[[keys.command]]` popup receiving `HERDR_ACTIVE_*` and focuses targets through the socket.
 - Clankerhouse must handle a runtime whose Change Stream is live-only: reconnect means snapshot, resubscribe, and republish non-persistent claims.
-- The herdr protocol is exact-match versioned; the installer pins a herdr version and the daemon gates on `ping.protocol`.
+- The installer pins a herdr version, and the Adapter gates on a minimum `ping.protocol` rather than an exact match: herdr keeps its JSON API compatible across protocol bumps, JSON clients ignore unknown fields, and an unsupported method is an ordinary request error.
 - Activity recency, which orders the TUI, is derived from Change Stream events under herdr because the API carries no activity timestamps.
 - Boot autostart, systemd scopes, resource guard, spot watch, incidents, lineage, and Recovery policy remain Clankerhouse's and are unchanged by the Adapter.
 - herdr's `--remote` attach, live binary handoff, and macOS process identification become available without Clankerhouse work.

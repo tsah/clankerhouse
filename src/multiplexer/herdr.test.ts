@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrRequest, herdrSocketPath } from "./herdr"
+import { HERDR_MIN_PROTOCOL, HERDR_PROCESS_INFO_CONCURRENCY, HerdrAdapter, herdrRequest, herdrSocketPath } from "./herdr"
 import { MultiplexerResourceExhaustedError, paneLocation, sessionLocation, windowLocation } from "./interface"
 
 interface Call { method: string; params: Record<string, unknown> }
@@ -19,7 +19,7 @@ const fakeHerdr = (calls: Call[]) => {
   const request = async (method: string, params: Record<string, unknown> = {}) => {
     calls.push({ method, params })
     switch (method) {
-      case "ping": return { type: "pong", version: "0.8.2", protocol: 20 }
+      case "ping": return { type: "pong", version: "0.9.5", protocol: 22, capabilities: { live_handoff: true } }
       case "session.snapshot": return { snapshot: { focused_workspace_id: "w1", focused_tab_id: "w1:t1", focused_pane_id: "w1:p1", ...state } }
       case "pane.process_info": return { process_info: params.pane_id === "w1:p2" ? { pane_id: "w1:p2", shell_pid: 200, foreground_process_group_id: 201, foreground_processes: [{ pid: 200, name: "zsh", argv: ["zsh"] }, { pid: 201, name: "pi", argv: ["pi", "--session", "x"], cwd: "/repo/src" }] } : { pane_id: "w1:p1", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: [{ pid: 100, name: "zsh", argv: ["zsh"] }] } }
       case "workspace.create": return { workspace: { workspace_id: "w2", label: params.label }, tab: { tab_id: "w2:t1" }, root_pane: { pane_id: "w2:p1" } }
@@ -183,6 +183,20 @@ describe("herdr multiplexer adapter", () => {
     await adapter.rename(windowLocation("w1", "w1:t2"), "logs")
     expect(calls.map((call) => call.method)).toEqual(["workspace.focus", "tab.focus", "pane.focus", "workspace.close", "tab.close", "pane.close", "tab.rename"])
     expect(await adapter.currentLocation()).toEqual({ kind: "herdr", instanceId: "herdr:/tmp/x.sock", nativeSessionId: "w1", nativeWindowId: "w1:t1", nativePaneId: "w1:p1" })
+  })
+
+  test("accepts any herdr protocol at or above the supported minimum and refuses older ones", async () => {
+    const path = `/tmp/clankerhouse-herdr-protocol-${process.pid}.sock`
+    let protocol = 22
+    const server = Bun.listen({ unix: path, socket: { data(socket) { socket.write(`${JSON.stringify({ id: "1", result: { type: "pong", version: "x", protocol, capabilities: { future: true } } })}\n`) } } })
+    try {
+      const adapter = new HerdrAdapter({ socketPath: path })
+      expect(await adapter.available()).toBe(true)
+      protocol = HERDR_MIN_PROTOCOL + 40
+      expect(await adapter.available()).toBe(true)
+      protocol = HERDR_MIN_PROTOCOL - 1
+      await expect(adapter.available()).rejects.toThrow(/older than the supported minimum/)
+    } finally { server.stop(true) }
   })
 
   test("resolves the socket path from the environment", () => {

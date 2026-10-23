@@ -12,7 +12,8 @@ import {
   type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type MultiplexerWindow, type NativeLocation, type ObserveOptions, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
 
-export const HERDR_PROTOCOL = 20
+/** Oldest herdr socket protocol whose JSON API this Adapter uses; newer protocols are accepted because herdr keeps JSON methods compatible and clients ignore unknown fields. */
+export const HERDR_MIN_PROTOCOL = 20
 export const HERDR_PANE_ADDRESS_ENV = "HERDR_PANE_ID"
 /** Most per-pane requests one observation keeps in flight. */
 export const HERDR_PROCESS_INFO_CONCURRENCY = 8
@@ -133,7 +134,7 @@ export class HerdrAdapter implements Multiplexer {
     if (!existsSync(this.socketPath)) return false
     try {
       const pong = await this.request("ping")
-      if (pong.protocol !== HERDR_PROTOCOL) throw new MultiplexerUnavailableError("herdr", `protocol ${String(pong.protocol)} differs from supported ${HERDR_PROTOCOL}`)
+      if (!(typeof pong.protocol === "number" && pong.protocol >= HERDR_MIN_PROTOCOL)) throw new MultiplexerUnavailableError("herdr", `protocol ${String(pong.protocol)} is older than the supported minimum ${HERDR_MIN_PROTOCOL}`)
       return true
     } catch (error) {
       if (error instanceof MultiplexerUnavailableError && /protocol/.test(error.message)) throw error

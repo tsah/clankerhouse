@@ -28,7 +28,7 @@ const fakeHerdr = (socketPath: string, cwd: string, panes: FakePane[]) => {
       data(socket, chunk) {
         const request = JSON.parse(chunk.toString().trim()) as { id: string; method: string; params: { pane_id?: string } }
         const pane = panes.find((candidate) => candidate.pane_id === request.params.pane_id)
-        const result = request.method === "ping" ? { type: "pong", protocol: 20 }
+        const result = request.method === "ping" ? { type: "pong", protocol: 22 }
           : request.method === "session.snapshot" ? { snapshot: {
             focused_workspace_id: "w1",
             workspaces: [{ workspace_id: "w1", number: 1, label: "fixture", focused: true, active_tab_id: panes[0]!.tab_id, agent_status: "unknown", tokens: {} }],

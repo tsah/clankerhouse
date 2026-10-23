@@ -44,8 +44,8 @@ Rules:
    guess. Reuse an ID returned by a workshop/clanker spawn.
 5. Pi supports native send/result and report waits. Claude supports queued and
    follow-up send, report waits, and result (the final assistant message of
-   that generation, from its transcript); `steer` is unsupported. Codex supports
-   report waits only. OpenCode is monitor-only until its native contract is
+   that generation, from its transcript); `steer` is unsupported. Codex has no
+   lifecycle reports, so it supports status only, as `unknown`; do not wait on it. OpenCode is monitor-only until its native contract is
    verified. Capabilities remain authoritative.
 6. One unsettled external Pi message is admitted at a time. Wait for it before
    retrying.

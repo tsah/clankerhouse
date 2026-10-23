@@ -46,7 +46,11 @@ export class LifecycleMirror {
   private readonly running = new Set<string>()
   private readonly failures = new Map<string, string>()
 
-  constructor(private readonly target: () => MirrorTarget, private readonly options: { now?: () => number; log?: (message: string) => void } = {}) {}
+  /**
+   * `onHoldChanged` runs after the mirror releases a pane or holds it again: a release also drops the pane's Herdr
+   * resume command, so Recovery reports its gate again on the next reconcile instead of waiting for its re-report period.
+   */
+  constructor(private readonly target: () => MirrorTarget, private readonly options: { now?: () => number; log?: (message: string) => void; onHoldChanged?: (pane: string) => void } = {}) {}
 
   /** Mirror the newest report for its pane; reports that arrive while one is in flight replace each other. */
   offer(report: MirrorReport): Promise<void> {
@@ -79,6 +83,7 @@ export class LifecycleMirror {
         if (previous?.state === "released" && previous.harness === report.harness) return
         await target.releaseAgent(report.pane, report.harness)
         this.mirrored.set(report.pane, { harness: report.harness, state: "released", generation })
+        this.options.onHoldChanged?.(report.pane)
       } else {
         const sameHarness = previous?.harness === report.harness
         const newTurn = report.state === "done" && (!sameHarness || generation > previous!.generation)
@@ -87,6 +92,7 @@ export class LifecycleMirror {
           await target.reportAgentState(report.pane, report.harness, "working", report.harnessSessionId)
         }
         await target.reportAgentState(report.pane, report.harness, desired, report.harnessSessionId)
+        if (!sameHarness || previous!.state === "released") this.options.onHoldChanged?.(report.pane)
         this.mirrored.set(report.pane, { harness: report.harness, state: desired, generation: Math.max(generation, sameHarness ? previous!.generation : 0) })
       }
       this.failures.delete(report.pane)

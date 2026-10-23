@@ -50,6 +50,9 @@ export const reportResumeCommand = async (multiplexer: ManagedMultiplexer, pane:
   return true
 }
 
+/** Forget one pane's report, so the next reconcile reports the gate again (the pane was released or re-held). */
+export const forgetReportedResume = (pane: string) => { reportedResume.delete(pane) }
+
 /** Drop report memory for panes that no longer exist, or for every pane after a runtime restart. */
 export const forgetReportedResumes = (livePanes?: ReadonlySet<string>) => {
   for (const pane of [...reportedResume.keys()]) if (!livePanes || !livePanes.has(pane)) reportedResume.delete(pane)

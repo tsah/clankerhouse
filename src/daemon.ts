@@ -27,6 +27,7 @@ import { openRecoveryStore, recoveryStatePath } from "./recovery/store"
 import { attestHarnessSession } from "./recovery/attest"
 import { watchHookAttestRequests, type HookAttestRequest } from "./hook-events"
 import { LifecycleMirror } from "./lifecycle-mirror"
+import { forgetReportedResume } from "./recovery/gate"
 import { reconcileRecovery, RecoveryController } from "./recovery/controller"
 import { stopOwnedHarness } from "./recovery/process-owner"
 import { createStagedMutationExecutor } from "./daemon-mutations"
@@ -466,7 +467,7 @@ const startQueuedDelivery = () => {
 }
 
 // Harness lifecycle reports are mirrored into the Multiplexer's agent status (ADR-0007).
-const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter)
+const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter, { onHoldChanged: forgetReportedResume })
 
 const applyHookAttestRequest = async (request: HookAttestRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.

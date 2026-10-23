@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Partly superseded by ADR-0008: the tmux Adapter has since been retired and Herdr is the only Adapter. The Interface and Capability split below remain in force; the runtime selection rules and the tmux column of the Capability table are historical.
+Accepted. Partly superseded by ADR-0008 and, for runtime resume on restore, by ADR-0009: the tmux Adapter has since been retired and Herdr is the only Adapter. The Interface and Capability split below remain in force; the runtime selection rules and the tmux column of the Capability table are historical.
 
 ## Context
 
@@ -56,7 +56,7 @@ An explicit non-empty `CLANKERHOUSE_MULTIPLEXER` is authoritative. Otherwise, th
 
 - The Clankerhouse registry remains authoritative for Workshop, Terminal, and Clanker identity, Display Names, lineage, and recoverable intent (ADR-0004). Runtime metadata carries claims; with `durableIds` the registry maps Clankerhouse ids to native ids directly and claims exist only for child-process self-correlation.
 - Runtime `agentStatus` and `sessionRefs` are Observations with `source: runtime` and `confidence: observed`. Harness reporters (Pi extension, Claude hooks, OpenCode plugin) remain the attested source and continue to carry generations, results, attestation, and the Pi send channel. Their lifecycle state is mirrored back to a runtime that accepts pushed status so the runtime's own UI agrees; the daemon does it, never the hot-path hook.
-- Clankerhouse Recovery remains the only recovery authority. A runtime's own agent resume on restore is disabled by the installer.
+- Clankerhouse Recovery remains the only recovery authority. ADR-0009 lets Herdr's own restore relaunch a Clanker pane only through the `clankerhouse-resume` gate, which waits for Recovery's admission; the installer no longer disables runtime resume.
 - Clanker communication uses verified semantic transports. Pi's harness-native socket remains preferred. An Adapter may expose `agentPrompt` only when its operation targets an exact pane, validates that a recognized interactive harness still owns that pane, and rejects blocked input. Clankerhouse revalidates the pane's Clanker ID claim immediately before submission. Raw pane input, output capture, and tmux key or paste simulation are not Clanker transports.
 
 ### Naming

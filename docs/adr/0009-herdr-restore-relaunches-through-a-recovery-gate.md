@@ -67,6 +67,8 @@ The installer stops forcing `resume_agents_on_restore = false`. Existing install
 | OpenCode with Herdr's official integration | Herdr resumes `opencode --session <id>` itself, outside admission and the process-owner scope. Recovery blocks a duplicate relaunch while a pane reports that exact session, and keeps the Clanker pending until the operator closes that pane and resumes. The only way to gate OpenCode is `resume_agents_on_restore = false`, which also disables gates. |
 | Herdr 0.9.3 vs 0.9.5 | Both resume headless; resume commands need 0.9.2 or later. Older servers ignore `resume_argv` and Recovery falls back. |
 | Lifecycle mirror reports with a smaller `seq` | Herdr would ignore the mirror. Both use `nextHerdrReportSeq()` (microsecond timestamp, monotonic per process). |
+| The pane is released (the lifecycle mirror releases on SessionEnd and Pi `session_shutdown`) | Release also drops the resume command. The mirror tells Recovery when it releases or re-holds a pane, so the next reconcile reports the gate again; every report is also repeated every five minutes while the Clanker stays adopted. |
+| The mirror reports `agent_session_id` under `clankerhouse:<harness>` | Herdr keeps session references only from its official `herdr:*` sources, so there is no built-in `claude --resume` fallback for these panes; only the gate resumes them. |
 
 ## Consequences
 

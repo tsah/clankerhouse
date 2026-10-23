@@ -50,6 +50,7 @@ scripts/qa
 13. When no child workload is safely attributable, a tracked Clanker is durably stopped with its pane preserved; untracked harness processes are never signalled as a fallback. Intentional stop, resource stop, quarantine, and tombstones prevent resurrection.
 14. Dirty/untracked Git state and native harness session files remain preserved.
 15. No operation touches the user's real Herdr socket, cgroups, or harness stores.
+16. After a Herdr-only restart of the isolated server, Herdr saved the `clankerhouse-resume` gate for each adopted pane, restores the panes with the same ids, and the gates wait with the manual resume command; a manual resume launches in the restored pane; a stopped Clanker's gate returns to the shell; an unsettled one waits for interrupted-work review.
 
 Unit tests additionally cover schema reopening, transactionally coupled journaling, append-only journal enforcement, exact-session mismatch rejection, tombstone precedence, lease contention/expiry/new-boot reclamation, attempts, runtime epochs, command construction, and IMDSv2 token/404/401/rebalance/interruption behavior.
 

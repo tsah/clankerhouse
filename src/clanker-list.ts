@@ -137,7 +137,7 @@ export async function listClankerRows(options: ClankerListOptions = {}, dependen
   const listFacts = dependencies.listFacts ?? ((cwd) => listClankerReportFacts({ cwd, multiplexer: dependencies.multiplexer }))
   const workshops = (dependencies.listWorkshops ?? (() => listWorkshopRecords()))()
   const harnessesAlive = dependencies.harnessesAlive
-    ?? (async (rows) => rows.length ? harnessAliveIn(await multiplexer.observe({ processInfo: true }), rows) : new Map<string, boolean>())
+    ?? (async (rows) => rows.length ? harnessAliveIn(await multiplexer.observe({ processInfo: "harnesses" }), rows) : new Map<string, boolean>())
   const claudeText = dependencies.claudeText ?? liveClaudeText
   const byPath = new Map(workshops.map((workshop) => [workshop.canonicalPath, workshop]))
   const scope = options.childrenOf ? watchedWorkshopIds(workshops, options.childrenOf.workshopId, options.childrenOf.descendants) : undefined

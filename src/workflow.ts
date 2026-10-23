@@ -52,7 +52,7 @@ const sessionPathOf = (session: MultiplexerSession) => realpathSafe(session.work
 /** The most recently active session bound to `path`, if any. */
 export async function sessionForPath(path: string, multiplexer: ManagedMultiplexer = openManagedMultiplexer()) {
   const canonical = realpathSafe(path)
-  const snapshot = await multiplexer.observe()
+  const snapshot = await multiplexer.observe({ processInfo: false })
   return snapshot.sessions
     .filter((session) => sessionPathOf(session) === canonical)
     .sort((a, b) => b.recency - a.recency)
@@ -66,7 +66,7 @@ export async function sessionName(id: WorktreeIdentity, multiplexer: ManagedMult
   const record = workshopForPath(id.path)
   const title = record ? workshopLabels(record.workshopId)[TITLE_KEY] : undefined
   const human = title || safeName(`${id.repo}@${id.branch}`)
-  const existing = sessionBySelector((await multiplexer.observe()).sessions, human)
+  const existing = sessionBySelector((await multiplexer.observe({ processInfo: false })).sessions, human)
   if (!existing) return human
   if (sessionPathOf(existing) === id.path) return human
   return `${human}-${createHash("sha256").update(id.path).digest("hex").slice(0, 8)}`
@@ -89,7 +89,7 @@ export async function ensureSession(id: WorktreeIdentity, options: { parentWorks
   const name = existing?.name ?? await sessionName(id, multiplexer)
   let nativeSessionId = existing?.id
   if (!nativeSessionId) {
-    const present = sessionBySelector((await multiplexer.observe()).sessions, name)
+    const present = sessionBySelector((await multiplexer.observe({ processInfo: false })).sessions, name)
     nativeSessionId = present?.id ?? (await multiplexer.spawn({ scope: "session", name, cwd: id.path, windowName: "main", env: spawnedRuntimeEnv() })).nativeSessionId
   }
   await applyWorkshopClaims(multiplexer, nativeSessionId, id, record)
@@ -126,7 +126,7 @@ async function launchClanker(harness: Harness, cwd: string, prompt: string, clan
   const workshop = persistWorkshopLineage(id, { preserveParent: true })
   const current = await sessionForPath(id.path, multiplexer)
   const session = current?.name ?? await sessionName(id, multiplexer)
-  const live = current ? (await multiplexer.observe()).sessions.find((row) => row.id === current.id) : undefined
+  const live = current ? (await multiplexer.observe({ processInfo: false })).sessions.find((row) => row.id === current.id) : undefined
   if (current && !live) throw new Error(`Session ${session} disappeared before the clanker was launched`)
   markDirectoryActivity(id.path, "clanker")
   const prefix = requestedName || harness
@@ -250,7 +250,7 @@ export const invokingSessionTarget = async (multiplexer: ManagedMultiplexer, env
   if (!multiplexer.adapter.insideRuntime()) return undefined
   const paneAddress = env[multiplexer.paneAddressEnv()]?.trim()
   if (paneAddress) {
-    const snapshot = await multiplexer.observe()
+    const snapshot = await multiplexer.observe({ processInfo: false })
     const matches = snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes
       .filter((pane) => pane.id === paneAddress)
       .map((pane) => ({ nativeSessionId: session.id, panePath: pane.currentPath }))))
@@ -324,7 +324,7 @@ export async function rollbackCreatedWorkshop(created: CreatedWorkshop, options:
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const cleanupErrors: string[] = []
   try {
-    const session = created.session ? sessionBySelector((await multiplexer.observe()).sessions, created.session) : undefined
+    const session = created.session ? sessionBySelector((await multiplexer.observe({ processInfo: false })).sessions, created.session) : undefined
     if (session) await multiplexer.kill(sessionLocation(session.id))
   } catch (error) {
     cleanupErrors.push(error instanceof Error ? error.message : `unable to remove ${multiplexer.kind} session`)
@@ -358,7 +358,7 @@ export async function ensureDirectorySession(directory: string, multiplexer: Man
   }
   const base = safeName(basename(canonical)) || "shell"
   let name = base
-  const sessions = (await multiplexer.observe()).sessions
+  const sessions = (await multiplexer.observe({ processInfo: false })).sessions
   const current = sessionBySelector(sessions, name)
   if (current && sessionPathOf(current) !== canonical) name = `${base}-${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`
   const present = sessionBySelector(sessions, name)

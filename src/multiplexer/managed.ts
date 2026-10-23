@@ -89,7 +89,7 @@ export class ManagedMultiplexer {
 
   async absorb(location: Omit<MultiplexerLocation, "observedAt">, observedSnapshot?: MultiplexerSnapshot): Promise<AbsorbedSession> {
     if (location.kind !== this.kind) throw new Error(`Unsupported multiplexer kind: ${location.kind}`)
-    const snapshot = observedSnapshot ?? await this.observe()
+    const snapshot = observedSnapshot ?? await this.observe({ processInfo: false })
     if (snapshot.instanceId !== location.instanceId) throw new Error("Multiplexer instance changed before absorption")
     const session = snapshot.sessions.find((candidate) => candidate.id === location.nativeSessionId)
     if (!session) throw new Error("Multiplexer session disappeared before absorption")
@@ -196,7 +196,7 @@ export class ManagedMultiplexer {
       try {
         const resource = registry.get(target.resourceId)
         if (!resource?.location) throw new Error(`Managed resource has no current location: ${target.resourceId}`)
-        const snapshot = await this.observe()
+        const snapshot = await this.observe({ processInfo: false })
         const session = snapshot.sessions.find((candidate) => candidate.id === resource.location?.nativeSessionId)
         const window = session?.windows.find((candidate) => candidate.id === resource.location?.nativeWindowId)
         const pane = window?.panes.find((candidate) => candidate.id === resource.location?.nativePaneId)
@@ -223,7 +223,7 @@ export class ManagedMultiplexer {
       await this.open(resolved)
       return
     }
-    const snapshot = await this.observe()
+    const snapshot = await this.observe({ processInfo: false })
     const session = snapshot.sessions.find((candidate) => candidate.nativeName === target.session || candidate.id === target.session)
     if (!session) throw new Error(`Unknown ${this.kind} session: ${target.session}`)
     if (target.type === "session") {
@@ -235,7 +235,7 @@ export class ManagedMultiplexer {
 
   /** Absorb the whole session that `selector` (native id or native name) identifies. */
   async ensureManagedSession(selector: string) {
-    const snapshot = await this.observe()
+    const snapshot = await this.observe({ processInfo: false })
     const session = snapshot.sessions.find((candidate) => candidate.id === selector || candidate.nativeName === selector)
     if (!session) throw new Error(`Unknown ${this.kind} session: ${selector}`)
     const pane = session.windows.find((window) => window.active)?.panes.find((candidate) => candidate.active)

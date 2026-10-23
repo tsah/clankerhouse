@@ -17,6 +17,8 @@ export const HERDR_MIN_PROTOCOL = 20
 export const HERDR_PANE_ADDRESS_ENV = "HERDR_PANE_ID"
 /** Most per-pane requests one observation keeps in flight. */
 export const HERDR_PROCESS_INFO_CONCURRENCY = 8
+/** How long a full observation reuses process facts for a pane that runs no harness. */
+export const HERDR_PROCESS_INFO_TTL_MS = 10_000
 /** Coalesces topology bursts before the agent-status subscription is re-established. */
 export const HERDR_STATUS_RESUBSCRIBE_DELAY_MS = 250
 /** Events after which the set of agent panes may differ; herdr names pushed events with underscores (`pane_created`). */
@@ -101,6 +103,9 @@ interface HerdrSnapshot { focused_workspace_id?: string | null; focused_tab_id?:
 interface HerdrEventData { pane?: { pane_id?: string }; pane_id?: string; workspace_id?: string }
 interface HerdrProcessInfo { shell_pid?: number | null; foreground_process_group_id?: number | null; foreground_processes?: Array<{ pid: number; name?: string; argv?: string[]; cmdline?: string; cwd?: string }> }
 
+type ObserveMode = "full" | "harnesses" | "topology"
+const runsHarness = (pane: HerdrPane) => Boolean(pane.agent || pane.tokens?.[tokenNames.harness!] || pane.tokens?.[tokenNames.clankerId!])
+
 const paneNumber = (paneId: string) => Number(paneId.split(":p")[1] ?? 0) || 0
 
 const claimsFromTokens = (tokens: Record<string, string> | undefined): ClaimMap => {
@@ -119,8 +124,9 @@ export class HerdrAdapter implements Multiplexer {
   private readonly activity = new Map<string, number>()
   private readonly revisions = new Map<string, number>()
   private readonly source: string
-  private readonly observing = new Map<"full" | "topology", Promise<MultiplexerSnapshot>>()
-  private readonly nextObservation = new Map<"full" | "topology", Promise<MultiplexerSnapshot>>()
+  private readonly observing = new Map<ObserveMode, Promise<MultiplexerSnapshot>>()
+  private readonly nextObservation = new Map<ObserveMode, Promise<MultiplexerSnapshot>>()
+  private readonly processInfoCache = new Map<string, { at: number; info: HerdrProcessInfo }>()
 
   constructor(options: { socketPath?: string; request?: HerdrRequest; source?: string } = {}) {
     this.socketPath = options.socketPath ?? herdrSocketPath()
@@ -179,7 +185,7 @@ export class HerdrAdapter implements Multiplexer {
    * after it finishes: each still sees topology from after its call, and a process never runs two at once.
    */
   observe(options: ObserveOptions = {}): Promise<MultiplexerSnapshot> {
-    const mode = options.processInfo === false ? "topology" : "full"
+    const mode: ObserveMode = options.processInfo === false ? "topology" : options.processInfo === "harnesses" ? "harnesses" : "full"
     const observing = this.observing.get(mode)
     if (!observing) return this.startObservation(mode)
     let next = this.nextObservation.get(mode)
@@ -193,24 +199,38 @@ export class HerdrAdapter implements Multiplexer {
     return next.then((snapshot) => structuredClone(snapshot))
   }
 
-  private startObservation(mode: "full" | "topology") {
-    const observation = this.observeOnce(mode === "full").finally(() => { if (this.observing.get(mode) === observation) this.observing.delete(mode) })
+  private startObservation(mode: ObserveMode) {
+    const observation = this.observeOnce(mode).finally(() => { if (this.observing.get(mode) === observation) this.observing.delete(mode) })
     this.observing.set(mode, observation)
     return observation
   }
 
-  private async observeOnce(withProcessInfo: boolean): Promise<MultiplexerSnapshot> {
+  /**
+   * Process facts cost one request per pane, and herdr takes one request per connection, each holding a server file
+   * descriptor. `session.snapshot` already carries each pane's agent and cwd, so harness panes are asked every time,
+   * other panes only in full observations and at most once per TTL, and topology observations ask none.
+   */
+  private async observeOnce(mode: ObserveMode): Promise<MultiplexerSnapshot> {
     const [instanceId, snapshot] = await Promise.all([this.instanceId(), this.snapshot()])
     const processInfo = new Map<string, HerdrProcessInfo>()
-    // Process facts cost one request per pane, so callers that only need topology and claims skip them.
-    // herdr takes one request per connection, and each open connection holds a server file descriptor.
+    const now = Date.now()
+    const live = new Set(snapshot.panes.map((pane) => pane.pane_id))
+    for (const paneId of this.processInfoCache.keys()) if (!live.has(paneId)) this.processInfoCache.delete(paneId)
+    const wanted = mode === "topology" ? [] : snapshot.panes.filter((pane) => {
+      if (runsHarness(pane)) return true
+      if (mode === "harnesses") return false
+      const cached = this.processInfoCache.get(pane.pane_id)
+      if (cached && now - cached.at < HERDR_PROCESS_INFO_TTL_MS) { processInfo.set(pane.pane_id, cached.info); return false }
+      return true
+    })
     let next = 0
-    if (withProcessInfo) await Promise.all(Array.from({ length: Math.min(HERDR_PROCESS_INFO_CONCURRENCY, snapshot.panes.length) }, async () => {
-      while (next < snapshot.panes.length) {
-        const pane = snapshot.panes[next++]!
+    await Promise.all(Array.from({ length: Math.min(HERDR_PROCESS_INFO_CONCURRENCY, wanted.length) }, async () => {
+      while (next < wanted.length) {
+        const pane = wanted[next++]!
         try {
-          const info = await this.request("pane.process_info", { pane_id: pane.pane_id })
-          processInfo.set(pane.pane_id, (info.process_info ?? {}) as HerdrProcessInfo)
+          const info = (await this.request("pane.process_info", { pane_id: pane.pane_id })).process_info as HerdrProcessInfo ?? {}
+          processInfo.set(pane.pane_id, info)
+          this.processInfoCache.set(pane.pane_id, { at: Date.now(), info })
         } catch {}
       }
     }))

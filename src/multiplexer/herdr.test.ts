@@ -67,6 +67,23 @@ describe("herdr multiplexer adapter", () => {
     expect(worker.processInfo).toBeUndefined()
   })
 
+  test("asks process facts of harness panes every time and of other panes at most once per TTL", async () => {
+    const calls: Call[] = []
+    const adapter = new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) })
+    const asked = () => calls.filter((call) => call.method === "pane.process_info").map((call) => call.params.pane_id)
+    await adapter.observe()
+    expect(asked()).toEqual(["w1:p1", "w1:p2"])
+    calls.length = 0
+    const again = await adapter.observe()
+    expect(asked()).toEqual(["w1:p2"])
+    expect(again.sessions[0]!.windows[0]!.panes[0]).toMatchObject({ id: "w1:p1", pid: "100", command: "zsh" })
+    calls.length = 0
+    const harnesses = await new HerdrAdapter({ socketPath: "/tmp/x.sock", request: fakeHerdr(calls) }).observe({ processInfo: "harnesses" })
+    expect(asked()).toEqual(["w1:p2"])
+    expect(harnesses.sessions[0]!.windows[0]!.panes[0]!.processInfo).toBeUndefined()
+    expect(harnesses.sessions[0]!.windows[1]!.panes[0]!.processInfo?.foregroundProcesses.at(-1)?.name).toBe("pi")
+  })
+
   test("keeps at most a bounded number of per-pane requests in flight however many panes exist", async () => {
     const panes = Array.from({ length: 50 }, (_, index) => ({ pane_id: `w1:p${index + 1}`, terminal_id: `term_${index}`, workspace_id: "w1", tab_id: "w1:t1", focused: false, agent_status: "unknown", revision: 0 }))
     let inFlight = 0

@@ -39,7 +39,7 @@ export interface ObservedPane {
 
 export const observePanes = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ObservedPane[]> => {
   let snapshot
-  try { snapshot = await multiplexer.observe() }
+  try { snapshot = await multiplexer.observe({ processInfo: false }) }
   catch { return [] }
   return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => {
     const claims = pane.claims ?? {}
@@ -59,7 +59,7 @@ export const observePanes = async (multiplexer: ManagedMultiplexer = openManaged
 interface ObservedSession { id: string; name: string; path: string; workshopId: string; windowNames: string[] }
 const observeSessions = async (multiplexer: ManagedMultiplexer): Promise<ObservedSession[]> => {
   let snapshot
-  try { snapshot = await multiplexer.observe() }
+  try { snapshot = await multiplexer.observe({ processInfo: false }) }
   catch { return [] }
   return snapshot.sessions.map((session) => ({ id: session.id, name: session.nativeName, path: session.worktreePath || session.path, workshopId: session.workshopId || "", windowNames: session.windows.map((window) => window.nativeName) }))
 }

@@ -130,8 +130,12 @@ export interface MultiplexerSnapshot {
 }
 
 export interface ObserveOptions {
-  /** Defaults to true. */
-  processInfo?: boolean
+  /**
+   * Defaults to true: process facts for every pane, which an Adapter that pays per pane may serve from a short-lived
+   * cache for panes running no harness. "harnesses" limits them to panes the runtime sees running an agent or that
+   * carry a harness or Clanker claim, always fresh; false skips them.
+   */
+  processInfo?: boolean | "harnesses"
 }
 
 export type NativeLocation = Pick<MultiplexerLocation, "nativeSessionId" | "nativeWindowId" | "nativePaneId">
@@ -159,7 +163,7 @@ export interface Multiplexer {
   instanceId(): Promise<string>
   /** Identity of the running server process, which changes on every runtime restart; undefined when the runtime is unreachable. Defaults to `instanceId()`. */
   serverEpoch?(): Promise<string | undefined>
-  /** `processInfo: false` lets a runtime that pays per pane for process facts skip them; pane `processInfo`, `pid`, and `command` may then be empty. */
+  /** `processInfo: false` or `"harnesses"` lets a runtime that pays per pane for process facts skip them; pane `processInfo`, `pid`, and `command` may then be empty. */
   observe(options?: ObserveOptions): Promise<MultiplexerSnapshot>
   /** Change Stream. May be synthesized by polling. Ends when the signal aborts. */
   changes(signal: AbortSignal): AsyncIterable<MultiplexerChange>

@@ -39,7 +39,6 @@ const tokenNames: Partial<Record<ClaimKey, string>> = {
   harness: "ch_harness",
   harnessSessionId: "ch_harness_session",
   recoveryAttemptId: "ch_recovery_attempt",
-  recoveryGate: "ch_recovery_gate",
   clankerSocket: "ch_clanker_socket",
   clankerPid: "ch_clanker_pid",
   clankerCapabilities: "ch_clanker_caps",
@@ -608,15 +607,6 @@ export class HerdrAdapter implements Multiplexer {
   /** Give the pane back to herdr's own detection once the harness session has ended. */
   async releaseAgent(paneId: string, harness: string) {
     await this.request("pane.release_agent", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, seq: nextHerdrReportSeq() })
-  }
-
-  /**
-   * Report the resume command herdr runs in this pane after a server restart. herdr accepts it only from the
-   * source holding the pane, or from a reporter named after the agent it detects there when no source holds
-   * it (`resume_not_accepted` otherwise), and keeps it while that source and agent hold the pane.
-   */
-  async reportAgentSession(paneId: string, harness: string, sessionId: string | null, resumeArgv: string[]) {
-    await this.request("pane.report_agent_session", { pane_id: paneId, source: `${this.source}:${harness}`, agent: harness, seq: nextHerdrReportSeq(), ...(sessionId ? { agent_session_id: sessionId } : {}), resume_argv: resumeArgv })
   }
 }
 

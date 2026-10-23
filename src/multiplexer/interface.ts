@@ -45,7 +45,7 @@ export type ClaimScope = "session" | "window" | "pane"
  */
 export type SessionClaimKey = "workshopId" | "workshopParentId" | "worktreePath" | "directoryPath" | "gitCommonDir" | "sessionId" | "sessionDisplayName"
 export type WindowClaimKey = "windowId" | "windowDisplayName" | "windowHarness"
-export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "recoveryGate" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
+export type PaneClaimKey = "terminalId" | "terminalDisplayName" | "clankerId" | "harness" | "harnessSessionId" | "recoveryAttemptId" | "clankerSocket" | "clankerPid" | "clankerCapabilities" | "paneWorkshopParentId"
 export type ClaimKey = SessionClaimKey | WindowClaimKey | PaneClaimKey
 
 export const claimScopeOf = (key: ClaimKey): ClaimScope => {
@@ -182,11 +182,6 @@ export interface Multiplexer {
   reportAgentState?(pane: string, harness: string, state: "idle" | "working" | "blocked", harnessSessionId?: string): Promise<void>
   /** Return a pane held by `reportAgentState` to the runtime's own agent detection. */
   releaseAgent?(pane: string, harness: string): Promise<void>
-  /**
-   * Native session restore: the command the runtime runs in this pane after a server restart, reported by
-   * the pane's harness source. Absent when the runtime cannot restore panes by itself.
-   */
-  reportAgentSession?(paneId: string, harness: string, sessionId: string | null, resumeArgv: string[]): Promise<void>
   /** Write (or clear with null) an identity claim on the native object at `location`. */
   claim(location: NativeLocation, key: ClaimKey, value: string | null): Promise<void>
   readClaim(location: NativeLocation, key: ClaimKey): Promise<string | undefined>

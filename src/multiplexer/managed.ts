@@ -71,12 +71,6 @@ export class ManagedMultiplexer {
     if (!this.capabilities().agentPrompt || !this.adapter.promptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent prompt")
     return this.adapter.promptAgent(location, text)
   }
-  /** Report the command the runtime runs in this pane after a restart; false when the runtime has no native session restore. */
-  async reportAgentSession(paneId: string, harness: string, sessionId: string | null, resumeArgv: string[]) {
-    if (!this.adapter.reportAgentSession) return false
-    await this.adapter.reportAgentSession(paneId, harness, sessionId, resumeArgv)
-    return true
-  }
   claim(location: NativeLocation, key: ClaimKey, value: string | null) { return this.adapter.claim(location, key, value) }
   readClaim(location: NativeLocation, key: ClaimKey) { return this.adapter.readClaim(location, key) }
   paneAddressEnv() { return this.adapter.paneAddressEnv() }

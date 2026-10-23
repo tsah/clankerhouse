@@ -50,18 +50,6 @@ describe("lifecycle mirror", () => {
     expect(calls).toEqual(["w1:p1 claude working s1", "w1:p1 claude release", "w1:p1 claude idle s2"])
   })
 
-  test("announces each release and each re-hold of a pane, so Recovery re-reports its resume gate", async () => {
-    const { target } = recorder()
-    const changed: string[] = []
-    const mirror = new LifecycleMirror(() => target, { now: () => now, onHoldChanged: (pane) => changed.push(pane) })
-    await mirror.offer(report("working", 1))
-    await mirror.offer(report("idle", 1))
-    await mirror.offer(report("unknown", 1))
-    await mirror.offer(report("unknown", 1))
-    await mirror.offer(report("working", 2))
-    expect(changed).toEqual(["w1:p1", "w1:p1", "w1:p1"])
-  })
-
   test("ignores harnesses herdr observes itself, unknown states, and stale reports", async () => {
     const { calls, target } = recorder()
     const mirror = new LifecycleMirror(() => target, { now: () => now })

@@ -324,7 +324,7 @@ panes=[p["id"] for s in snap["sessions"] for w in s["windows"] for p in w["panes
 assert sys.argv[1] not in panes, panes
 ' "$pane_id" || fail "pane survived kill"
 
-step "Keybinding installer is idempotent and leaves Herdr restore on"
+step "Keybinding installer is idempotent and sets safe recovery"
 herdr_cfg="$cfg/herdr/config.toml"
 "${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null || fail "keybinding install failed"
 "${common_env[@]}" CLANKERHOUSE_HERDR_LAUNCHER=/opt/ch-herdr python3 "$repo/bin/clankerhouse-install-herdr" "$herdr_cfg" >/dev/null
@@ -332,8 +332,7 @@ grep -q 'key = "alt+k"' "$herdr_cfg" || fail "alt+k binding missing"
 grep -q 'key = "alt+d"' "$herdr_cfg" || fail "alt+d binding missing"
 grep -q 'command = "/opt/ch-herdr --delete"' "$herdr_cfg" || fail "alt+d does not use the confirmation launcher"
 [[ "$(grep -c 'alt+k' "$herdr_cfg")" == 1 && "$(grep -c 'alt+d' "$herdr_cfg")" == 1 ]] || fail "keybinding installer not idempotent"
-! grep -Eq '^[[:space:]]*resume_agents_on_restore' "$herdr_cfg" || fail "installer changed Herdr restore on a fresh config"
-grep -q 'ADR-0009' "$herdr_cfg" || fail "restore migration marker missing"
+grep -q 'resume_agents_on_restore = false' "$herdr_cfg" || fail "safe-recovery flag not set"
 
 step "Keybinding installer writes through a symlinked config"
 linked_cfg="$cfg/herdr-linked/config.toml"

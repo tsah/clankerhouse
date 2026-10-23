@@ -24,11 +24,8 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
 - [x] **F5** README says Codex reports through its own hooks; nothing installs them, so
   Codex state is Herdr screen detection only. Correct the docs.
   Landed: Codex is documented as Herdr-observed; `wait`/`watch` have no Codex turns.
-- [x] **F6** The installer sets `resume_agents_on_restore = false` globally, disabling
+- [ ] **F6** The installer sets `resume_agents_on_restore = false` globally, disabling
   Herdr restore for unmanaged panes too. Resolved by P5.
-  Landed: the installer no longer sets it; an install whose managed block predates ADR-0009
-  has its `false` turned back on exactly once (printed, marker in the block), and the doctor
-  warns when restore is off.
 - [x] **F7** Verify: Herdr documents that token metadata (all `ch_*` claims) is not
   restored after a cold server restart. Confirm Clankerhouse rewrites workspace and pane
   claims afterwards; fix if not. Confirmed lost; reconciliation now restores Workshop
@@ -74,14 +71,10 @@ Legend: `[ ]` open · `[x]` landed on `main` · `[-]` evaluated and declined (re
   is requeued. `agent_prompt_stalled` cannot tell whether the text sits unsubmitted in the
   input, so retrying on it could submit a message twice, and a `wait` would hold the
   delivery pass up to 5 s per message. The queue and the focus rule are unchanged.
-- [x] **P5** Recovery relaunch mechanism → Herdr native restore with
+- [ ] **P5** Recovery relaunch mechanism → Herdr native restore with
   `resume_argv: ["clankerhouse-resume", "<clankerId>"]`; the gate command enforces
   Clankerhouse admission policy and then runs the harness. Re-enable
   `resume_agents_on_restore`. Caveat: Herdr resumes only after a client attaches.
-  Landed (ADR-0009): the caveat is outdated; 0.9.3 and 0.9.5 run resume commands about two
-  seconds after server start with no client. Recovery admits into the restored gate pane;
-  the pane-creating relaunch remains only as the fallback when no gate exists. OpenCode
-  panes stay with Herdr's own integration, which resumes them outside admission.
 - [x] **P6** `/proc` harness discovery (`src/server/process-discovery.ts`) → pane
   `agent` field and `pane.agent_detected`. Projection reads `agentStatus.agent` from the
   snapshot; pane names and titles only feed session markers, never observations.

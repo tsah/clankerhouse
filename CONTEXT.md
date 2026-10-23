@@ -26,7 +26,7 @@ The Multiplexer interface is expressed in Clankerhouse operations and capabiliti
 
 The current ephemeral location of a managed entity, expressed as a Multiplexer kind, Multiplexer instance identity, and opaque native session, window, and pane IDs. Multiplexer Locations can change or disappear without changing Workshop, Terminal, or Clanker identity.
 
-A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes and their return belongs to Recovery: Herdr reruns the reported `clankerhouse-resume` gate in the restored pane, and the gate claims the Clanker identity again only when Recovery admits it. Presentation the daemon derives from Declarations, the Label tokens and each pane's Workshop-parent claim that Herdr's agent view filters on, is rewritten on every observation and so returns by itself.
+A Herdr Location is a Multiplexer Location whose instance identity is the Herdr server socket and whose native IDs are Herdr workspace, tab, and pane IDs, which survive a Herdr server restart. Identity claims do not survive a cold restart; Herd Reconciliation writes a registered session's Workshop and Terminal claims back while its path is still its Workshop's. Clanker claims are not restored, because the restart ended the harness processes and their return belongs to Recovery. Presentation the daemon derives from Declarations, the Label tokens and each pane's Workshop-parent claim that Herdr's agent view filters on, is rewritten on every observation and so returns by itself.
 
 ## Managed Resource
 
@@ -48,7 +48,7 @@ The active pane determines the Workshop that owns an absorbed multiplexer sessio
 
 ## Recovery
 
-Recovery reconciles recoverable intent with current external Observations. A supported harness manually or programmatically started in an absorbed Workshop becomes recoverable while it is observed active. A graceful harness exit or manual removal while the host and Multiplexer remain healthy cancels that obligation; disappearance during process, Multiplexer, or host failure may resume its harness session, in the pane the Multiplexer restored when its resume gate waits there, otherwise in a recreated Terminal. Recovery decides when; the Multiplexer only restores the place. Ordinary shell Terminals do not create a recovery obligation and are not recreated merely because they once had stable identity.
+Recovery reconciles recoverable intent with current external Observations. A supported harness manually or programmatically started in an absorbed Workshop becomes recoverable while it is observed active. A graceful harness exit or manual removal while the host and Multiplexer remain healthy cancels that obligation; disappearance during process, Multiplexer, or host failure may recreate its Terminal and resume its harness session. Ordinary shell Terminals do not create a recovery obligation and are not recreated merely because they once had stable identity.
 
 ## Herd Reconciliation
 

@@ -9,10 +9,6 @@ export interface RecoveryPaneObservation {
 export interface RecoveryDecisionInput {
   desired: DesiredClankerRecord
   matchingPanes: readonly RecoveryPaneObservation[]
-  /** Restored panes whose resume gate waits for this Clanker (ADR-0009). */
-  gatePanes?: readonly string[]
-  /** A pane where the runtime itself resumed this exact harness session outside Recovery. */
-  runtimeResumedPane?: string
   allowLaunch: boolean
   automaticCandidate: boolean
   backoffRemainingMs: number
@@ -22,12 +18,12 @@ export interface RecoveryDecisionInput {
 
 export type RecoveryDecision =
   | { type: "ignore"; code: "desired-not-running"; reason: string }
-  | { type: "block"; code: "duplicate-live-clanker" | "live-harness-mismatch" | "live-session-mismatch" | "runtime-resumed" | "duplicate-resume-gates" | "interrupted-unknown" | "quarantined"; reason: string; pane?: string }
+  | { type: "block"; code: "duplicate-live-clanker" | "live-harness-mismatch" | "live-session-mismatch" | "interrupted-unknown" | "quarantined"; reason: string; pane?: string }
   | { type: "adopt"; code: "exact-live-clanker"; pane: string; reason: string }
   | { type: "mark-pending"; code: "missing-owned-pane"; reason: string }
   | { type: "pending"; code: "manual-resume-required" | "automatic-candidate-excluded"; reason: string }
   | { type: "defer"; code: "backoff" | "global-recovery-limit"; reason: string; retryAfterMs?: number }
-  | { type: "consider-admission"; code: "eligible"; reason: string; gatePane?: string }
+  | { type: "consider-admission"; code: "eligible"; reason: string }
 
 /**
  * Pure Recovery policy for one freshly observed Clanker. The imperative shell applies
@@ -45,9 +41,6 @@ export const decideRecovery = (input: RecoveryDecisionInput): RecoveryDecision =
     return { type: "adopt", code: "exact-live-clanker", pane: pane.pane, reason: "one exact live Clanker matches desired identity" }
   }
   if (desired.recoveryCondition === "healthy" || desired.recoveryCondition === "recovering") return { type: "mark-pending", code: "missing-owned-pane", reason: "no owned live pane" }
-  if (input.runtimeResumedPane) return { type: "block", code: "runtime-resumed", pane: input.runtimeResumedPane, reason: `harness session already resumed by the multiplexer in pane ${input.runtimeResumedPane}; close it to resume through Recovery` }
-  const gatePanes = input.gatePanes ?? []
-  if (gatePanes.length > 1) return { type: "block", code: "duplicate-resume-gates", reason: `ambiguous resume gates in panes ${gatePanes.join(", ")}` }
   if (!input.allowLaunch) return {
     type: "pending",
     code: input.automaticCandidate ? "manual-resume-required" : "automatic-candidate-excluded",
@@ -58,5 +51,5 @@ export const decideRecovery = (input: RecoveryDecisionInput): RecoveryDecision =
   if (desired.recoveryCondition === "quarantined") return { type: "block", code: "quarantined", reason: desired.quarantineReason || "quarantined" }
   if (input.backoffRemainingMs > 0) return { type: "defer", code: "backoff", reason: `backoff ${input.backoffRemainingMs}ms`, retryAfterMs: input.backoffRemainingMs }
   if (input.activeRecoveries >= (input.maxActiveRecoveries ?? RECOVERY_POLICY.maxActiveRecoveries)) return { type: "defer", code: "global-recovery-limit", reason: "global recovery admission limit reached" }
-  return { type: "consider-admission", code: "eligible", reason: "candidate is eligible for host admission", ...(gatePanes.length === 1 ? { gatePane: gatePanes[0] } : {}) }
+  return { type: "consider-admission", code: "eligible", reason: "candidate is eligible for host admission" }
 }

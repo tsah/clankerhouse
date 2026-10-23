@@ -69,10 +69,7 @@ the rollback target. Unmanaged-file refusal and legacy manifests remain valid.
 
 `clankerhouse-install-herdr` writes Alt-K, Alt-B, and Alt-D popup bindings into a
 managed block of Herdr's `config.toml`. Rerunning it keeps keys the operator
-changed. Recovery services should use a stable prefix installation. Herdr restore
-runs the `clankerhouse-resume` gate from the prefix bin directory, which must be on the
-interactive shell's `PATH`. The installer leaves `[session] resume_agents_on_restore`
-alone except for a one-time migration of installs that had forced it off (ADR-0009).
+changed. Recovery services should use a stable prefix installation.
 
 ## Release gate
 

@@ -32,20 +32,6 @@ optional claude
 optional opencode2
 optional codex
 
-# Herdr restore runs the Recovery gate in each restored Clanker pane (ADR-0009); without it
-# Recovery falls back to relaunching lost Clankers in new panes.
-if command -v clankerhouse-resume >/dev/null 2>&1; then
-    ok "clankerhouse-resume: $(command -v clankerhouse-resume)"
-else
-    warn 'clankerhouse-resume is not on PATH; Herdr-restored Clanker panes cannot resume in place'
-fi
-herdr_config=${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}
-if [[ -r "$herdr_config" ]] && awk '/^[[:space:]]*\[/ { session = ($0 ~ /^[[:space:]]*\[session\][[:space:]]*$/) } session && /^[[:space:]]*resume_agents_on_restore[[:space:]]*=[[:space:]]*false/ { off = 1 } END { exit !off }' "$herdr_config"; then
-    warn "Herdr agent restore is off in $herdr_config; Recovery relaunches lost Clankers in new panes"
-else
-    ok 'Herdr agent restore enabled'
-fi
-
 if rg -n --glob '!clankerhouse-doctor' '(\$HOME|%h)/dotfiles|~/dotfiles' "$CLANKERHOUSE_HOME/bin" "$CLANKERHOUSE_HOME/src" "$CLANKERHOUSE_HOME/share" >/dev/null 2>&1; then
     fail 'standalone runtime still contains a dotfiles path dependency'
 else

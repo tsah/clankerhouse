@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { realpathSync } from "node:fs"
 import { RECOVERY_POLICY, type DesiredClankerRecord, type ProcessIdentity } from "./model"
-import { admittedHarnessCommand, workshopEnvironment } from "./harness"
+import { initialHarnessCommand, recoveryHarnessCommand, workshopEnvironment } from "./harness"
 import { workshopLaunchIdentity } from "../workshop"
 import { openRecoveryStore, type RecoveryStore } from "./store"
 import { recordRecoveryIncident } from "../incidents"
@@ -11,8 +11,6 @@ import { paneLocation, sessionLocation, windowLocation } from "../multiplexer/in
 import { readRecoveryHostState, recoveryAdmissionDecision, type RecoveryHostState } from "./admission"
 import { recoveryUnitName } from "./process-owner"
 import { decideRecovery } from "./planner"
-import { gatePanesFor, observePanes } from "./panes"
-import { forgetReportedResumes, GATE_LAUNCH_TIMEOUT_MS, publishGateWait, readGateAdmission, recordGateAdmission, reportResumeCommand, signalGateAdmitted } from "./gate"
 
 const sleep = (ms: number) => Bun.sleep(ms)
 const realpathSafe = (path: string) => { try { return realpathSync(path) } catch { return path } }
@@ -26,6 +24,36 @@ export const processStartTicks = (pid = process.pid, procRoot = Bun.env.CLANKERH
   const text = readFileSync(`${procRoot}/${pid}/stat`, "utf8")
   const fields = text.slice(text.lastIndexOf(")") + 2).split(" ")
   return Number(fields[19])
+}
+
+export interface ObservedPane {
+  pane: string
+  session: string
+  nativeSessionId: string
+  windowId: string
+  clankerId: string
+  harness: string
+  harnessSessionId: string
+  recoveryAttemptId: string
+}
+
+export const observePanes = async (multiplexer: ManagedMultiplexer = openManagedMultiplexer()): Promise<ObservedPane[]> => {
+  let snapshot
+  try { snapshot = await multiplexer.observe({ processInfo: false }) }
+  catch { return [] }
+  return snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.map((pane) => {
+    const claims = pane.claims ?? {}
+    return {
+      pane: pane.id,
+      session: session.nativeName,
+      nativeSessionId: session.id,
+      windowId: window.id,
+      clankerId: claims.clankerId || pane.clankerId || "",
+      harness: claims.harness || pane.harness || "",
+      harnessSessionId: claims.harnessSessionId || pane.harnessSessionId || "",
+      recoveryAttemptId: claims.recoveryAttemptId || pane.recoveryAttemptId || "",
+    }
+  })))
 }
 
 interface ObservedSession { id: string; name: string; path: string; workshopId: string; windowNames: string[] }
@@ -78,32 +106,10 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       if (options.clankerId && original.clankerId !== options.clankerId) continue
       let desired = original
       const matching = panes.filter((pane) => pane.clankerId === desired.clankerId)
-      // A Herdr-restored pane whose resume gate waits for this Clanker (ADR-0009).
-      const gates = gatePanesFor(panes, desired.clankerId)
-      const hold = (reason: string) => {
-        result.skipped.push({ clankerId: desired.clankerId, reason })
-        if (gates.length === 1) publishGateWait(desired, reason)
-      }
-      const gateAdmission = readGateAdmission(store, desired.clankerId)
-      const admittedAttempt = store.attemptsFor(desired.clankerId).at(-1)
-      if (!matching.length && gateAdmission && !gateAdmission.launchedAt && admittedAttempt?.id === gateAdmission.attemptId && admittedAttempt.status === "running") {
-        const waiting = gates.some((gate) => gate.pane === gateAdmission.pane)
-        if (waiting && now - gateAdmission.admittedAt < GATE_LAUNCH_TIMEOUT_MS) {
-          result.skipped.push({ clankerId: desired.clankerId, reason: "waiting for the resume gate to launch" })
-          continue
-        }
-        // No harness ran, so this is not interrupted work: return to pending.
-        desired = store.abandonAdmission(desired.clankerId, admittedAttempt.id, waiting ? "resume gate did not launch" : "resume gate pane closed before launch", { now })
-      }
-      const runtimeResumed = desired.harnessSessionId
-        ? panes.find((pane) => !pane.clankerId && pane.runtimeSession?.agent === desired.harness && pane.runtimeSession.value === desired.harnessSessionId)?.pane
-        : undefined
       const automaticCandidate = !options.automatic || !options.automaticCandidates || options.automaticCandidates.includes(desired.clankerId)
       const decide = () => decideRecovery({
         desired,
         matchingPanes: matching,
-        gatePanes: gates.map((gate) => gate.pane),
-        runtimeResumedPane: runtimeResumed,
         allowLaunch: Boolean(options.allowLaunch),
         automaticCandidate,
         backoffRemainingMs: backoffRemaining(desired, store, now),
@@ -121,36 +127,28 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
       if (decision.type === "adopt") {
         const latest = store.attemptsFor(desired.clankerId).at(-1)
         if (latest) store.markRecoveryStable(desired.clankerId, latest.id, { now })
-        await reportResumeCommand(multiplexer, decision.pane, desired, now)
         result.adopted.push(desired.clankerId)
         continue
       }
       if (decision.type === "block" || decision.type === "defer") {
-        hold(decision.reason)
+        result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
         continue
       }
       if (decision.type === "pending") {
         result.pending.push(desired.clankerId)
-        hold(decision.reason)
-        continue
-      }
-      const gatePane = decision.type === "consider-admission" ? decision.gatePane : undefined
-      const gate = gates.find((candidate) => candidate.pane === gatePane)
-      // The fallback relaunch creates a pane, so it must not spend an attempt while the Multiplexer is down.
-      if (!gate && typeof multiplexer.available === "function" && !await multiplexer.available().catch(() => false)) {
-        hold("multiplexer unavailable")
+        result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
         continue
       }
       const activeRecoveries = store.listDesired().filter((row) => row.desiredState === "running" && row.recoveryCondition === "recovering").length
       if (!options.bypassAdmission) {
         const host = options.hostState ?? readRecoveryHostState()
         if (!host) {
-          hold("resource guard has not published admission health")
+          result.skipped.push({ clankerId: desired.clankerId, reason: "resource guard has not published admission health" })
           continue
         }
         const decision = recoveryAdmissionDecision({ ...host, now, activeRecoveries, lastAdmissionAt: store.getMetadata<number>("recovery.last_admission_at") ?? host.lastAdmissionAt })
         if (!decision.admit) {
-          hold(decision.reason)
+          result.skipped.push({ clankerId: desired.clankerId, reason: decision.reason })
           continue
         }
       }
@@ -164,27 +162,20 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         if (current?.recoveryCondition === "quarantined") {
           recordRecoveryIncident("recovery_quarantined", { clankerId: current.clankerId, harness: current.harness, worktreePath: current.workshopPath, cwd: current.cwd }, { reason: admission.reason || "recovery policy circuit breaker" })
         }
-        if (current) desired = current
-        hold(admission.reason || "recovery admission denied")
+        result.skipped.push({ clankerId: desired.clankerId, reason: admission.reason || "recovery admission denied" })
         continue
       }
       const attempt = admission.attempt
       const attemptId = String(attempt.id)
       store.setRecoveryOwner(desired.clankerId, recoveryUnitName(desired.clankerId, attemptId), { now })
       store.setMetadata("recovery.last_admission_at", now, { now })
-      if (gate) {
-        // Herdr already restored the pane in place: hand the admission to its gate instead of creating one.
-        recordGateAdmission(store, desired.clankerId, { pane: gate.pane, attemptId: attempt.id, initial: !previousSucceeded, admittedAt: now })
-        try { signalGateAdmitted(desired.clankerId, attempt.id) } catch {}
-        result.launched.push(desired.clankerId)
-        continue
-      }
-      // Fallback relaunch: no restored gate exists (restore off, session lost, gate missing, report refused).
       try {
         const session = await resolveWorkshop(desired, multiplexer)
         const windowName = nextWindowName(session.windowNames, desired.preferredWindowLabel)
         const workshop = workshopLaunchIdentity(desired.workshopId, desired.workshopPath)
-        const argv = admittedHarnessCommand(desired, attemptId, !previousSucceeded)
+        const argv = previousSucceeded
+          ? recoveryHarnessCommand(desired, attemptId, workshop)
+          : initialHarnessCommand({ harness: desired.harness, cwd: desired.cwd, prompt: desired.originalTask, clankerId: desired.clankerId, harnessSessionId: desired.harnessSessionId, launchSpec: desired.launchSpec, attemptId, workshop })
         const launch = { cwd: desired.cwd, env: { ...spawnedRuntimeEnv(), ...workshopEnvironment(workshop) }, launch: { kind: "argv" as const, argv } }
         const launched = await multiplexer.spawn(session.id
           ? { ...launch, scope: "window", nativeSessionId: session.id, name: windowName }
@@ -203,13 +194,12 @@ export const reconcileRecovery = async (providedStore?: RecoveryStore, options: 
         if (window) await multiplexer.claim(windowLocation(nativeSessionId, window), "windowHarness", desired.harness)
         await ensureManagedSession(nativeSessionId, multiplexer)
         result.launched.push(desired.clankerId)
-        panes = [...panes, { pane, session: session.name, nativeSessionId, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId, recoveryGate: "" }]
+        panes = [...panes, { pane, session: session.name, nativeSessionId, windowId: window, clankerId: desired.clankerId, harness: desired.harness, harnessSessionId: desired.harnessSessionId || "", recoveryAttemptId: attemptId }]
       } catch (error) {
         store.finishAttempt(attempt.id, "failed", { error: error instanceof Error ? error.message : String(error), now: Date.now() })
         result.skipped.push({ clankerId: desired.clankerId, reason: error instanceof Error ? error.message : String(error) })
       }
     }
-    forgetReportedResumes(new Set(panes.map((pane) => pane.pane)))
     return result
   } finally {
     if (ownStore) store.close()
@@ -299,10 +289,7 @@ export class RecoveryController {
         }
         const serverEpoch = await runtimeServerEpoch(this.multiplexer)
         if (serverEpoch && serverEpoch !== recordedServerEpoch) {
-          if (recordedServerEpoch) {
-            this.store.advanceMultiplexerEpoch()
-            forgetReportedResumes()
-          }
+          if (recordedServerEpoch) this.store.advanceMultiplexerEpoch()
           this.store.setMetadata("runtime.server_epoch", serverEpoch)
         }
       }

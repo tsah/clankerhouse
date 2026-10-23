@@ -264,7 +264,6 @@
       "unit": [
         "src/recovery/admission.test.ts",
         "src/recovery/controller.test.ts",
-        "src/recovery/gate.test.ts",
         "src/recovery/planner.test.ts",
         "src/recovery/store.test.ts",
         "src/recovery/interruption.test.ts",

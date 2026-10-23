@@ -113,8 +113,7 @@ nvim --headless -u NONE --cmd "set runtimepath^=$active" \
 herdr_config="$XDG_CONFIG_HOME/herdr/config.toml"
 grep -q 'key = "alt+k"' "$herdr_config"
 grep -F "command = \"$prefix/bin/clankerhouse-herdr" "$herdr_config" >/dev/null
-! grep -q 'resume_agents_on_restore = false' "$herdr_config"
-grep -q 'ADR-0009' "$herdr_config"
+grep -q 'resume_agents_on_restore = false' "$herdr_config"
 
 # A failed preflight never quiesces or switches the selected isolated daemon.
 old_pid=$(<"$state_dir/server.pid")

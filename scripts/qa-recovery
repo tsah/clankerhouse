@@ -70,8 +70,7 @@ if [[ "$clean_exit" == true ]]; then
     sleep 1
     exit 0
 fi
-# Keep the harness name as argv[0] so Herdr detects the agent in its pane, as it does real harnesses.
-exec -a "$harness" sleep 300
+exec sleep 300
 SH
 chmod +x "$root/bin/fake-harness"
 for harness in pi claude opencode; do ln -s fake-harness "$root/bin/$harness"; done
@@ -117,9 +116,8 @@ printf 'untracked\n' > "$fixture/untracked.txt"
 before_status=$(git -C "$fixture" status --porcelain=v1)
 
 # Harness panes inherit the isolated Herdr server's environment, so the server is
-# started with the same isolated runtime and state the QA commands use. Restored panes
-# find the clankerhouse-resume gate on that PATH, as the installer's bin dir provides it.
-export PATH="$root/bin:$repo/bin:$PATH" XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state"
+# started with the same isolated runtime and state the QA commands use.
+export PATH="$root/bin:$PATH" XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state"
 export CLANKERHOUSE_BOOT_ID_PATH="$boot_file" CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin"
 export CLANKERHOUSE_LIBEXEC="$repo/libexec" CLANKERHOUSE_CLANKERS="$repo/bin/clankers"
 export CLANKERHOUSE_OPENCODE_LAUNCHER="$root/bin/opencode" CLANKERHOUSE_QA_HARNESS_LOG="$log"
@@ -255,87 +253,9 @@ wait_for_count 0
 recover
 wait_for_count 0
 
-# A Herdr-only restart restores every Clanker pane in place and runs the resume gate there
-# (ADR-0009). Without a boot campaign the gates wait for a manual resume, which then launches
-# in the restored pane instead of a new one; a stopped Clanker's gate returns to the shell.
-attested_count() { clankers recovery status | python3 -c 'import json,sys; print(sum(a["status"]=="succeeded" for a in json.load(sys.stdin)["attempts"]))'; }
-condition_of() { clankers recovery status | ID="$1" python3 -c 'import json,os,sys; print(next(r["recoveryCondition"] for r in json.load(sys.stdin)["clankers"] if r["clankerId"] == os.environ["ID"]))'; }
-gate_panes() {
-    clankers mux observe 2>/dev/null | python3 -c 'import json,sys
-for s in json.load(sys.stdin)["sessions"]:
-    for w in s["windows"]:
-        for p in w["panes"]:
-            gate = (p.get("claims") or {}).get("recoveryGate") or ""
-            if gate: print(p["id"], gate)' || true
-}
-pane_text_contains() {
-    local pane=$1 text=$2
-    for _ in {1..100}; do
-        qa_herdr pane read "$pane" --source recent-unwrapped --lines 60 2>/dev/null | grep -F -- "$text" >/dev/null && return 0
-        sleep 0.1
-    done
-    echo "Pane $pane never showed: $text" >&2
-    qa_herdr pane read "$pane" --source recent-unwrapped --lines 60 >&2 || true
-    return 1
-}
-saved_resume_count() { grep -o 'clankerhouse-resume' "$root/herdr-b/cfg/herdr/session.json" 2>/dev/null | grep -c . || true; }
-
-clankers workshop ensure --cwd "$fixture" >/dev/null
-baseline=$(attested_count)
-gate_ids=()
-for harness in pi claude; do
-    gate_ids+=("$(cd "$fixture" && "${qa_env[@]}" "$repo/bin/clankers" spawn --workshop "$fixture" --name "gate-$harness" --harness "$harness" --prompt "QA gate task for $harness" | python3 -c 'import json,sys; print(json.load(sys.stdin)["clankerId"])')")
-done
-wait_for_count 2
-wait_for_attested $((baseline + 2))
-declare -A gate_pane_of=()
-while read -r pane id; do gate_pane_of[$id]=$pane; done < <(clanker_panes)
-# Adoption reports the gate as each pane's Herdr resume command once Herdr sees the harness there.
-for _ in {1..60}; do
-    recover
-    [[ "$(saved_resume_count)" -ge 2 ]] && break
-    sleep 0.5
-done
-[[ "$(saved_resume_count)" -ge 2 ]] || { echo "Herdr never saved the resume gate for both clankers" >&2; exit 1; }
-
-qa_herdr_stop
-start_herdr "$root/herdr-b"
-for _ in {1..200}; do [[ "$(gate_panes | grep -c .)" -ge 2 ]] && break; sleep 0.1; done
-for id in "${gate_ids[@]}"; do
-    [[ "$(gate_panes | awk -v id="$id" '$2 == id {print $1}')" == "${gate_pane_of[$id]}" ]] || { echo "Resume gate for $id is not waiting in its restored pane ${gate_pane_of[$id]}" >&2; gate_panes >&2; exit 1; }
-done
-recover
-wait_for_count 0
-for id in "${gate_ids[@]}"; do
-    [[ "$(condition_of "$id")" == pending ]] || { echo "$id is not pending after a Herdr-only restart" >&2; exit 1; }
-    pane_text_contains "${gate_pane_of[$id]}" "clankers recovery resume $id"
-done
-
-recoveries=$(awk -F '\t' '$2=="recovery" {count++} END {print count+0}' "$log")
-clankers recovery resume "${gate_ids[0]}" --force >/dev/null
-wait_for_count 1
-[[ "$(clanker_panes)" == "${gate_pane_of[${gate_ids[0]}]} ${gate_ids[0]}" ]] || { echo "Manual resume did not launch in the restored pane" >&2; clanker_panes >&2; exit 1; }
-wait_for_attested $((baseline + 3))
-[[ "$(awk -F '\t' '$2=="recovery" {count++} END {print count+0}' "$log")" == $((recoveries + 1)) ]] || { echo "Expected exactly one resumed harness" >&2; exit 1; }
-[[ "$(gate_panes)" == "${gate_pane_of[${gate_ids[1]}]} ${gate_ids[1]}" ]] || { echo "The other gate stopped waiting" >&2; gate_panes >&2; exit 1; }
-
-# After another restart the stopped Clanker's gate returns to the shell, and the resumed one,
-# lost before it settled, waits for interrupted-work review.
-clankers recovery stop "${gate_ids[1]}" --reason qa-gate-stop >/dev/null
-qa_herdr_stop
-start_herdr "$root/herdr-b"
-pane_text_contains "${gate_pane_of[${gate_ids[1]}]}" "was stopped and will not resume"
-for _ in {1..100}; do [[ "$(gate_panes)" == "${gate_pane_of[${gate_ids[0]}]} ${gate_ids[0]}" ]] && break; sleep 0.1; done
-[[ "$(gate_panes)" == "${gate_pane_of[${gate_ids[0]}]} ${gate_ids[0]}" ]] || { echo "Expected only the resumed clanker's gate to wait" >&2; gate_panes >&2; exit 1; }
-recover
-[[ "$(condition_of "${gate_ids[0]}")" == interrupted_unknown ]] || { echo "Unsettled resumed clanker was not held for review" >&2; exit 1; }
-pane_text_contains "${gate_pane_of[${gate_ids[0]}]}" "clankers recovery unquarantine ${gate_ids[0]}"
-wait_for_count 0
-clankers recovery stop "${gate_ids[0]}" --reason qa-gate-done >/dev/null
-
 after_status=$(git -C "$fixture" status --porcelain=v1)
 [[ "$before_status" == "$after_status" ]] || { echo "Recovery changed dirty or untracked Git state" >&2; diff -u <(printf '%s\n' "$before_status") <(printf '%s\n' "$after_status") >&2 || true; exit 1; }
 [[ "$(stat -c '%a' "$root/state/clankerhouse-herdr")" == 700 ]] || { echo "Recovery state directory is not mode 700" >&2; exit 1; }
 [[ "$(stat -c '%a' "$root/state/clankerhouse-herdr/recovery.sqlite3")" == 600 ]] || { echo "Recovery database is not mode 600" >&2; exit 1; }
 
-printf 'Clankerhouse recovery QA passed: guarded automatic Spot campaign, exact identities, no interrupted-tool replay, single staggered admission, hard-reboot ambiguity quarantine, lease contention, durable stop/suspension/tombstones, clean-exit opt-out, private state permissions, dirty worktree preservation, and Herdr-restored resume gates behave correctly.\n'
+printf 'Clankerhouse recovery QA passed: guarded automatic Spot campaign, exact identities, no interrupted-tool replay, single staggered admission, hard-reboot ambiguity quarantine, lease contention, durable stop/suspension/tombstones, clean-exit opt-out, private state permissions, and dirty worktree preservation behave correctly.\n'

@@ -116,7 +116,7 @@ const terminalReport = (report: ClankerReport, state: ClankerState) => {
 }
 
 /** The pane may outlive its harness, held open by a leftover child; the clanker is gone all the same. */
-const harnessExited = (pane: string, id: string) => {
+export const harnessExited = (pane: string, id: string) => {
   try { return readFileSync(exitMarkPath(pane), "utf8").trim() === id }
   catch { return false }
 }

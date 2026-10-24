@@ -6,7 +6,7 @@ import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestAct
 import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
-import { deliverQueuedMessages, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
+import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
 import { withOrchestrationStore } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { applicationRoot, binPath, libexecPath } from "./installation"
@@ -164,7 +164,7 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
   const panes = new Map(windows.map((window) => [window.pane, window]))
   const observed: ObservedClanker[] = sessions.flatMap((session) => session.details.flatMap((detail) => {
     const window = detail.target.type === "window" ? panes.get(detail.target.pane) : undefined
-    if (detail.kind !== "clanker" || !detail.clankerId || !window) return []
+    if (detail.kind !== "clanker" || !detail.clankerId || !window || harnessExited(window.pane, detail.clankerId)) return []
     const workshopPath = session.path || window.currentPath || ""
     if (!workshopPath.startsWith("/")) return []
     return [{

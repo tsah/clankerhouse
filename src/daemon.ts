@@ -833,6 +833,12 @@ const applyExactWorkshopParent = async (nativeSessionId: string, workshopId: str
   await daemonMultiplexer().claim(sessionLocation(nativeSessionId), "workshopParentId", parentWorkshopId)
 }
 
+const workshopSessionIds = async (workshopId: string) => {
+  const listed = await multiplexerSessionRows()
+  if (listed.error) throw new Error(listed.error)
+  return listed.rows.filter((row) => row[2] === workshopId).map((row) => row[0]!)
+}
+
 const worktreeForBranch = (repository: string, branch: string) => {
   const listed = Bun.spawnSync(["git", "-C", repository, "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "pipe" })
   if (listed.exitCode !== 0) throw new Error(listed.stderr.toString().trim() || `Unable to inspect worktrees for ${repository}`)
@@ -1018,7 +1024,9 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       return { checkpoint }
     }
     if (stage === "multiplexer-parent.updated") {
-      if (checkpoint.nativeSessionId) await applyExactWorkshopParent(String(checkpoint.nativeSessionId), intent.workshopId, parentWorkshopId)
+      // A caller that names no session, as the CLI does, means every session of the Workshop.
+      const nativeSessionIds = checkpoint.nativeSessionId ? [String(checkpoint.nativeSessionId)] : intent.session ? [] : await workshopSessionIds(intent.workshopId)
+      for (const nativeSessionId of nativeSessionIds) await applyExactWorkshopParent(nativeSessionId, intent.workshopId, parentWorkshopId)
       const outcome = parentWorkshopId ? { attached: true } : { detached: true }
       return { checkpoint: { ...checkpoint, outcome } }
     }

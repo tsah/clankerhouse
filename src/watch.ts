@@ -7,7 +7,7 @@
  * that event on resume and never loses one.
  */
 import { existsSync, realpathSync, writeSync } from "node:fs"
-import { resolve } from "node:path"
+import { isAbsolute, resolve } from "node:path"
 import { ClankerApiError, deliverQueuedMessages, listClankers, type ClankerInfo } from "./clanker-api"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import {
@@ -101,6 +101,9 @@ export const resolveWorkshopSelector = (selector: string, cwd = process.cwd()): 
   }
   const byId = workshopForId(selector)
   if (byId) return byId
+  // An absolute path names a Workshop of any repository; branches and basenames only reach the current one.
+  const byPath = isAbsolute(selector) ? workshopForPath(selector) : undefined
+  if (byPath) return byPath
   let workshops: WorkshopRecord[] = []
   try { workshops = projectSnapshot(cwd).workshops } catch {}
   const matches = workshops.filter((row) => row.workshopId === selector || row.branch === selector || row.canonicalPath === selector || row.canonicalPath.endsWith(`/${selector}`))

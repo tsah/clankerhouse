@@ -190,6 +190,8 @@ clankers workshop label set stage=implementing   # current Workshop; --cwd PATH 
 clankers workshop label unset stage
 clankers workshop label list
 clankers workshop stop                            # release the live session; keep the worktree
+clankers workshop detach ID|BRANCH|PATH            # make a Workshop top-level; defaults to the current one
+clankers workshop reparent ID|BRANCH|PATH --parent ID|BRANCH|PATH   # move it under another Workshop
 ```
 
 The daemon also shows each Workshop's visible labels on its Herdr workspaces as workspace tokens: `lbl_<key>` holds one label's value and `labels` holds all values in key order, space-separated. The workspace is the one carrying the Workshop's claim, or else one whose path is the Workshop's worktree, as for the row. The title is not repeated there, since it already names the workspace, and hidden keys are left out. Herdr caps a report at 16 tokens, so the first 15 keys by name get their own token; the rest, and any key longer than 28 characters, appear only in `labels`, which Herdr truncates at 80 characters. Changes reach Herdr on the daemon's next observation, and tokens are written again after a cold Herdr restart, which drops them. Clankerhouse never edits Herdr's configuration; to see the labels, add them to the Space sidebar rows in `~/.config/herdr/config.toml`:
@@ -202,6 +204,8 @@ rows = [
   ["$labels"],                 # or pick keys: ["$lbl_stage", "$lbl_status"]
 ]
 ```
+
+`clankers workshop spawn` makes the Workshop of the current directory the new one's parent; `--parent ID` names another and `--no-parent` makes it top-level. `clankers workshop detach` and `reparent` change that link later, through the same daemon mutation as `Alt-L` and `Alt-A`: the Workshop registry, the worktree's `.clankerhouse/workshop.json`, and the session's multiplexer claim move together, while the Workshop's subtree, clankers, panes, worktree, and branch stay as they are. A running clanker's `CLANKERHOUSE_PARENT_WORKSHOP_ID` keeps its launch value until the clanker next starts. Both print the Workshop's old and new parent as JSON and accept an ID, branch, or worktree path. Detaching a top-level Workshop changes nothing, and a parent that is unknown, in another repository, or inside the Workshop's own subtree is rejected.
 
 `clankers workshop stop` releases what a finished Workshop holds live and keeps what is durable. Its clankers are closed in the clanker ledger, so they are not listed as interrupted; their waiting messages are orphaned; and its multiplexer sessions or Herdr workspaces close. The worktree, branch, labels, and lineage stay, and the Workshop stays listed as a row without a session; opening it starts a plain shell. Stopping never happens on its own: a `labels-changed` hook decides when, for example when a Workshop is marked done. Stopping a stopped Workshop does nothing.
 

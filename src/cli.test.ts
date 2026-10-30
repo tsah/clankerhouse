@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { cliErrorCode, mutationProgressSteps, parseArgs } from "./cli"
+import { cliErrorCode, mutationProgressSteps, parseArgs, usage } from "./cli"
 import { ClankerApiError } from "./clanker-api"
 import { MultiplexerResourceExhaustedError } from "./multiplexer/interface"
 import { ClankerRegistrationError } from "./workflow"
@@ -18,6 +18,14 @@ describe("cli error codes", () => {
     expect(cliErrorCode(new ClankerApiError("NOT_FOUND", "gone", 3))).toEqual({ code: "NOT_FOUND", exitCode: 3 })
     expect(cliErrorCode(new Error("bad flag"))).toEqual({ code: "INVALID_REQUEST", exitCode: 2 })
     expect(cliErrorCode("text")).toEqual({ code: "INVALID_REQUEST", exitCode: 2 })
+  })
+})
+
+describe("cli usage", () => {
+  test("documents every workshop spawn flag and the parent commands", () => {
+    for (const flag of ["--clanker-name", "--resource-class", "--parent ID", "--no-parent", "--wait"]) expect(usage).toContain(flag)
+    expect(usage).toContain("clankers workshop detach [ID|BRANCH|PATH] [--cwd PATH]")
+    expect(usage).toContain("clankers workshop reparent [ID|BRANCH|PATH] --parent ID|BRANCH|PATH [--cwd PATH]")
   })
 })
 

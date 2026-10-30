@@ -14,7 +14,7 @@ import { MultiplexerResourceExhaustedError, paneLocation, type ClaimKey, type Na
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
-import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopLabels, workshopTree } from "./workshop"
+import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
@@ -288,14 +288,16 @@ const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; i
     .filter((row) => !options.interrupted || row.interrupted !== false)
 }
 
-const usage = `Usage:
+export const usage = `Usage:
   clankerhouse
-  clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--prompt TEXT]
+  clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--clanker-name NAME] [--resource-class interactive|validation-heavy|untrusted] [--parent ID | --no-parent] [--wait] [--prompt TEXT]
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH | --workshop ID|BRANCH|PATH]
   clankers workshop done [--cwd PATH]
   clankers workshop stop [--cwd PATH]
+  clankers workshop detach [ID|BRANCH|PATH] [--cwd PATH]
+  clankers workshop reparent [ID|BRANCH|PATH] --parent ID|BRANCH|PATH [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
@@ -319,7 +321,15 @@ const usage = `Usage:
   clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
 
 --model MODEL overrides the profile/default model for Pi, Claude, and Codex.
-Pi and Claude keep the override when resumed. OpenCode does not support this flag.`
+Pi and Claude keep the override when resumed. OpenCode does not support this flag.
+
+A spawned Workshop's parent defaults to the Workshop of the current directory. --parent ID names
+another one and --no-parent makes it top-level. --clanker-name names the first clanker, and --wait
+waits for it to be ready.
+
+workshop detach makes a Workshop top-level, workshop reparent moves it under another Workshop of the
+same repository. Both default to the current Workshop and keep its subtree, clankers, panes, worktree
+and branch; they need the daemon, and a parent inside the Workshop's own subtree is rejected.`
 
 const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
 
@@ -567,12 +577,25 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       if (!routed) throw new Error("Clankerhouse daemon is required to stop a Workshop")
       return console.log(JSON.stringify(routed.result))
     }
+    if (subcommand === "detach" || subcommand === "reparent") {
+      const parentSelector = parsed.take("--parent")
+      if (subcommand === "reparent" && !parentSelector) throw new Error("--parent is required")
+      const selector = parsed.shift()
+      if (parsed.args.length > 0) throw new Error(`Usage: clankers workshop ${subcommand} [ID|BRANCH|PATH]${subcommand === "reparent" ? " --parent ID|BRANCH|PATH" : ""} [--cwd PATH]`)
+      if (selector !== undefined && cwdOption !== undefined) throw new Error("A workshop selector and --cwd are mutually exclusive")
+      const workshop = selector !== undefined ? resolveWorkshopSelector(selector) : workshopForLabelTarget({ path: resolve(cwd) })
+      const parent = parentSelector ? resolveWorkshopSelector(parentSelector, workshop.canonicalPath) : undefined
+      const routed = await routeCompatibilityMutation(parent ? { type: "reparent", workshopId: workshop.workshopId, parentWorkshopId: parent.workshopId } : { type: "detach", workshopId: workshop.workshopId })
+      if (!routed) throw new Error("Clankerhouse daemon is required to change a Workshop's parent")
+      const updated = workshopForId(workshop.workshopId)
+      return console.log(JSON.stringify({ workshopId: workshop.workshopId, parentWorkshopId: updated?.parentWorkshopId ?? null, previousParentWorkshopId: workshop.parentWorkshopId, revision: updated?.revision, changed: updated?.revision !== workshop.revision }))
+    }
     if (subcommand === "show") return console.log(JSON.stringify(workshopDetails(cwd, { id: parsed.take("--id"), path: parsed.take("--path") }) ?? null, null, 2))
     if (subcommand === "tree") return console.log(JSON.stringify(workshopTree(cwd), null, 2))
     if (subcommand === "project") return console.log(JSON.stringify(projectSnapshot(cwd), null, 2))
     if (subcommand === "reconcile") return console.log(JSON.stringify(reconcileRepositoryWorkshops(cwd), null, 2))
     if (subcommand === "bootstrap") return console.log(JSON.stringify(bootstrapRepositoryFromManifests(cwd), null, 2))
-    throw new Error("Usage: clankers workshop spawn|ensure|identity|label|done|stop|show|tree|project|reconcile|bootstrap ...")
+    throw new Error("Usage: clankers workshop spawn|ensure|identity|label|done|stop|detach|reparent|show|tree|project|reconcile|bootstrap ...")
   }
 
   if (command === "spawn") {

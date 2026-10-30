@@ -149,4 +149,40 @@ snapshot_parent=$(SOCKET_PATH="$daemon_socket" CHILD_ID="$child_id" bun --eval '
 ' "$repo/src/transport/index.ts")
 [[ "$snapshot_parent" == "$parent_id" ]] || { printf 'Expected projected child parent %s, got %s\n' "$parent_id" "$snapshot_parent" >&2; exit 1; }
 
-printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, session claim, and projection to the available parent.\n'
+# The CLI moves a parent link through the daemon, so the registry, manifest, and session claim agree.
+expect_parent() {
+    local want=$1 actual
+    actual=$(sqlite3 "$db" "select coalesce(parent_id, '') from workshops where id = '$child_id';")
+    [[ "$actual" == "$want" ]] || { printf 'Expected child DB parent %s, got %s\n' "$want" "$actual" >&2; exit 1; }
+    actual=$(jq -r '.parentWorkshopId // ""' "$child_path/.clankerhouse/workshop.json")
+    [[ "$actual" == "$want" ]] || { printf 'Expected child manifest parent %s, got %s\n' "$want" "$actual" >&2; exit 1; }
+    actual=$(clankers mux read-claim --session "$child_session" workshopParentId)
+    [[ "$actual" == "$want" ]] || { printf 'Expected child session parent claim %s, got %s\n' "$want" "$actual" >&2; exit 1; }
+}
+expect_rejected() {
+    local want=$1 output
+    shift
+    if output=$(clankers "$@" 2>&1); then printf 'Expected rejection of: %s\n' "$*" >&2; exit 1; fi
+    [[ "$output" == *"$want"* ]] || { printf 'Expected %s in: %s\n' "$want" "$output" >&2; exit 1; }
+}
+
+expect_rejected "Unknown workshop" workshop detach no-such-workshop
+expect_rejected "Unknown workshop" workshop reparent "$child_id" --parent no-such-workshop
+expect_rejected "--parent is required" workshop reparent "$child_id"
+expect_rejected "unsafe lineage" workshop reparent "$child_id" --parent "$child_id"
+expect_rejected "unsafe lineage" workshop reparent "$parent_id" --parent "$child_id"
+expect_parent "$parent_id"
+
+detached=$(clankers workshop detach "$child_id")
+jq -e --arg id "$child_id" --arg old "$parent_id" '.workshopId == $id and .parentWorkshopId == null and .previousParentWorkshopId == $old and .changed == true' <<<"$detached" >/dev/null
+expect_parent ""
+jq -e '.changed == false' <<<"$(clankers workshop detach "$child_path")" >/dev/null
+
+jq -e --arg old "$parent_id" '.parentWorkshopId == $old and .previousParentWorkshopId == null and .changed == true' <<<"$(cd "$child_path" && clankers workshop reparent --parent main)" >/dev/null
+expect_parent "$parent_id"
+
+jq -e '.parentWorkshopId == null' <<<"$(clankers workshop detach --cwd "$child_path")" >/dev/null
+expect_parent ""
+[[ "$(workspace_id qa-child)" == "$child_session" ]] || { printf 'Expected the child session to survive detach\n' >&2; exit 1; }
+
+printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, session claim, and projection to the available parent; the CLI detaches and reparents through the daemon and rejects cycles and unknown Workshops.\n'

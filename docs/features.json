@@ -90,7 +90,7 @@
         "scripts/qa-lineage-actions",
         "scripts/qa-herdr"
       ],
-      "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), protocol validation, and durable action stages are automated; rename, detach, and create require the manual standalone walkthrough until dedicated interaction scenarios are added.",
+      "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), protocol validation, and durable action stages are automated; CLI detach and reparent are automated end to end, including cycle and unknown-parent rejection; rename, TUI detach, and create require the manual standalone walkthrough until dedicated interaction scenarios are added.",
       "manual": [
         "Exercise every advertised action in the laboratory",
         "Cancel each destructive confirmation once",

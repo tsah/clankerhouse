@@ -370,7 +370,8 @@
         "src/multiplexer/interface.test.ts",
         "src/multiplexer/shell-environment.test.ts",
         "src/multiplexer/herdr.test.ts",
-        "src/paths.test.ts"
+        "src/paths.test.ts",
+        "src/multiplexer/hc.test.ts"
       ],
       "standalone": [
         "scripts/qa-herdr"

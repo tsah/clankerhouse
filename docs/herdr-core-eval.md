@@ -23,7 +23,7 @@ for popups cannot exist on hc, and hc is still a two-week-old preview.
 | 6 | `hc attach` on a finished terminal | Fixed | `clankers mux attach` checks first: it exits 3 with the reason and last output, and writes no terminal queries. |
 | 7 | ESC did not stop Claude | **Root cause found** | Not hc: Claude Code's vim editor mode (`editorMode: vim`). The first ESC leaves INSERT; the second interrupted in 16 ms. `interruptAgent` handles it: 499 ms on a real turn. ctrl+c also works. |
 | 8 | Feature gaps | Mostly closed | See "Feature gaps" below. |
-| 9 | QA and CI | Done | `scripts/lib/qa-hc-server`, `scripts/qa-hc` (in `./test`), and a CI `test-hc` job pinned to hc 0.1.14. CI has not yet run on the branch's latest commit. |
+| 9 | QA and CI | Done | `scripts/lib/qa-hc-server`, `scripts/qa-hc` (in `./test`), and a CI `test-hc` job pinned to hc 0.1.14, which is green. The Herdr `test` job is red at `scripts/qa-herdr` with `workspace w3 not found`, the same failure as on `main` at 1abd3db; that step passes locally. |
 | 10 | Full `./test` | Passes | All 18 groups, 392 unit tests, with Herdr scenarios and `qa-hc` together. |
 
 **Why systemd for the daemon, not an hc terminal.** `--outlive-parent` or `--no-parent` would survive the starting terminal, but
@@ -96,7 +96,21 @@ The log is `soak/hc-soak.jsonl`, with service output in `soak/hc-soak.out`. It i
 soak must be stopped before the worktree is removed. It is capped at 25% CPU and 256 MB.
 
 <!-- soak:start -->
-No checks recorded yet.
+Last updated 2026-10-30T11:33:15.393Z: 20 minutes, 3 checks.
+
+| Metric | First | Min | Max | Latest |
+|---|---|---|---|---|
+| Core RSS (MB) | 5.6 | 5.6 | 8.3 | 8.3 |
+| Core fds | 14 | 14 | 14 | 14 |
+| Holder RSS (MB) | 2.7 | 2.7 | 2.8 | 2.8 |
+| Holder fds | 18 | 18 | 18 | 18 |
+| Holder threads | 15 | 15 | 15 | 15 |
+| Processes under holders | 5 | 5 | 5 | 5 |
+
+- Core restarts: 0 planned, 0 unplanned. Terminals lost: 0.
+- Status drift: 0 of 233 samples.
+- Traffic: traffic 75, prompt 47, block 13, keys 12, interrupt 3. Errors: none. Slowest operation 5203 ms.
+- Change events delivered: 167.
 <!-- soak:end -->
 
 ## Original verdict (first evaluation): NOT YET

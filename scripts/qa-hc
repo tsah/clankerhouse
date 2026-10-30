@@ -141,6 +141,50 @@ scenario() {
     check "claims survived" test "$("$clankers" mux read-claim --pane "$a" clankerId)" = clanker-a
 }
 
+# A real Workshop: real wt, the real launch path and lifecycle wrapper, a fake harness. Runs under the owning systemd scope
+# when the caller allows it, which is how production launches harnesses.
+workshop_flow() {
+    local label=$1 fixture="$root/fixture-$1" logs="$root/logs-$1"
+    echo "== Workshop flow ($label)"
+    export CLANKERHOUSE_QA_LOG_DIR=$logs
+    mkdir -p "$fixture" "$logs" "$root/worktrees"
+    git init -q -b main "$fixture"
+    git -C "$fixture" config user.name "hc QA"; git -C "$fixture" config user.email qa@example.invalid; git -C "$fixture" config commit.gpgsign false
+    echo fixture >"$fixture/tracked.txt"; git -C "$fixture" add tracked.txt; git -C "$fixture" commit -qm fixture
+    # The daemon launches harnesses, so what the fake needs must be in its environment, by name.
+    export CLANKERHOUSE_HC_CORE_ENV=CLANKERHOUSE_QA_LOG_DIR,CLANKERHOUSE_CLANKERS,CLANKERHOUSE_AUTO_RECOVER,CLANKERHOUSE_PROCESS_OWNER,WORKTRUNK_CONFIG_PATH,WORKTRUNK_SYSTEM_CONFIG_PATH,WORKTRUNK_PROJECT_CONFIG_PATH
+    export CLANKERHOUSE_CLANKERS="$repo/bin/clankers" CLANKERHOUSE_AUTO_RECOVER=0
+    export WORKTRUNK_CONFIG_PATH="$root/wt.toml" WORKTRUNK_SYSTEM_CONFIG_PATH="$root/wt-empty.toml" WORKTRUNK_PROJECT_CONFIG_PATH="$root/wt-empty.toml"
+    printf 'worktree-path = "%s/{{ repo }}.{{ branch | sanitize }}"\n' "$root/worktrees" >"$root/wt.toml"; : >"$root/wt-empty.toml"
+    PATH="$root/bin:$PATH"; export PATH
+    mkdir -p "$root/bin"
+    cat >"$root/bin/pi" <<'SH'
+#!/bin/bash
+env | grep -E '^(CLANKER_ID|CLANKERHOUSE_WORKSHOP_ID|CLANKERHOUSE_MULTIPLEXER|HC_TERMINAL_ID|HERDR_PANE_ID)=' | sort >"$CLANKERHOUSE_QA_LOG_DIR/$CLANKER_ID.env"
+while (($#)); do [[ $1 == --session-id ]] && session=$2; shift; done
+"$CLANKERHOUSE_CLANKERS" mux claim --pane "$HC_TERMINAL_ID" harnessSessionId "$session"
+printf '\033]7501;state=idle:app=pi\033\\'
+exec cat >>"$CLANKERHOUSE_QA_LOG_DIR/$CLANKER_ID.prompts"
+SH
+    chmod +x "$root/bin/pi"
+    "$launcher" --stop-server
+    "$launcher" --ensure-server
+    local spawned clanker terminal
+    spawned=$(cd "$fixture" && "$clankers" workshop spawn --name "lane-$label" --harness pi --no-parent 2>&1) || { fail "workshop spawn: $spawned"; return; }
+    wait_for 100 bash -c "ls '$logs'/*.env >/dev/null 2>&1" || { fail "harness never started: $spawned"; return; }
+    clanker=$(basename "$(ls "$logs"/*.env)" .env)
+    env_log=$(<"$logs/$clanker.env")
+    check "harness got its own identity" contains "$env_log" "CLANKER_ID=$clanker"
+    check "harness is on the lane" contains "$env_log" "CLANKERHOUSE_MULTIPLEXER=hc"
+    check "harness did not inherit the spawner's Herdr pane" bash -c '! grep -q HERDR_PANE_ID <<<"$1"' _ "$env_log"
+    terminal=$(sed -n 's/^HC_TERMINAL_ID=//p' <<<"$env_log")
+    check "terminal carries the clanker claim" wait_for 50 bash -c "test \"\$('$clankers' mux read-claim --pane $terminal clankerId)\" = $clanker"
+    check "status arrives from the harness" wait_for 50 bash -c "'$clankers' mux observe | grep -q '\"agent\":\"pi\"'"
+    check "clankers list shows it" wait_for 100 bash -c "'$clankers' list --cwd '$root/worktrees/fixture-$label.lane-$label' 2>/dev/null | grep -q $clanker"
+    "$clankers" mux kill --pane "$terminal"
+    check "killing the terminal ends the harness" wait_for 50 bash -c "! '$clankers' mux observe | grep -q '\"id\":\"$terminal\"'"
+}
+
 health_starts_nothing() {
     echo "== health never starts a core"
     "$launcher" --stop-server
@@ -154,6 +198,9 @@ health_starts_nothing() {
 }
 
 scenario
+export CLANKERHOUSE_PROCESS_OWNER=disabled
+workshop_flow plain
+unset CLANKERHOUSE_PROCESS_OWNER
 health_starts_nothing
 unset CLANKER_ID CLANKERHOUSE_WORKSHOP_ID HERDR_PANE_ID CLAUDE_CODE_CHILD_SESSION
 
@@ -170,6 +217,7 @@ if [[ -n "$real_runtime" && "$real_runtime" == "/run/user/$(id -u)" && -S "$real
     kill -9 "$pid"
     check "systemd restarted it" wait_for 100 bash -c "new=\$(systemctl --user show -p MainPID --value '$unit'); [[ \$new != 0 && \$new != $pid ]]"
     check "restarted daemon is healthy" wait_for 100 bash -c "'$launcher' --health >/dev/null 2>&1"
+    workshop_flow scoped
     "$launcher" --stop-server
     check "stop leaves no unit" bash -c "! systemctl --user is-active --quiet '$unit'"
 fi

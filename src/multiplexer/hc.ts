@@ -107,6 +107,13 @@ const scrubbedArgv = (argv: string[] | undefined, env: Record<string, string>) =
   return ["env", ...unset, ...(argv ?? ["sh", "-c", 'exec "${SHELL:-/bin/sh}"'])]
 }
 
+/**
+ * A clean core has no Clankerhouse settings and a PATH from whenever it started; Herdr panes got both by inheritance. The
+ * spawner's are handed on explicitly, without the variables that say which clanker the spawner is.
+ */
+const laneEnvironment = (env: Record<string, string | undefined> = Bun.env) =>
+  Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => (entry[0] === "PATH" || /^CLANKERHOUSE_/.test(entry[0])) && !HC_UNSET_ON_SPAWN.includes(entry[0]) && Boolean(entry[1])))
+
 export class HcAttachError extends Error {
   constructor(address: string, reason: string, readonly transcript: string) {
     super(`${address} has finished (${reason}); nothing to attach to`)
@@ -312,8 +319,7 @@ export class HcAdapter implements Multiplexer {
     if (request.scope === "session") labels[SESSION_NAME_LABEL] = request.name
     const windowName = request.scope === "session" ? request.windowName : request.name
     if (windowName) labels[WINDOW_NAME_LABEL] = windowName
-    const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
-    const env = { CLANKERHOUSE_MULTIPLEXER: "hc", ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}), ...request.env }
+    const env = { ...laneEnvironment(), CLANKERHOUSE_MULTIPLEXER: "hc", ...request.env }
     const argv = scrubbedArgv(request.launch?.kind === "argv" ? request.launch.argv : undefined, env)
     const created = await this.request("terminal.run", { cwd: request.cwd, env, labels, argv, no_parent: true, no_notify: true }) as { address?: string; terminal?: HcTerminal }
     const address = (created.terminal?.address ?? created.address)!

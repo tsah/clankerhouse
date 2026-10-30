@@ -319,6 +319,8 @@ export const usage = `Usage:
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
+  clankers mux interrupt|attach --pane PANE
+  clankers mux instance-id|hc-health|hc-ensure|hc-restart|hc-env
   clankers mux clanker-ids|pane-path (--pane PANE|--session SESSION)
   clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
 

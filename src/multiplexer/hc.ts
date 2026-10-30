@@ -1,18 +1,20 @@
 /**
- * SPIKE, do not ship. herdr-core (`hc`) Multiplexer Adapter, to learn how the session/window/pane model and Claims map
- * onto hc's flat terminals. hc has no workspaces, tabs, or focus. Mapping: every terminal is one window with one pane
- * (window id = pane id = hc address), and a session is the set of terminals sharing the `ch_session` label. Session
- * Claims live on every terminal of the session, so a session ends with its last terminal, as a herdr workspace does.
+ * herdr-core (`hc`) Multiplexer Adapter, selected by CLANKERHOUSE_MULTIPLEXER=hc; Herdr stays the default. hc has no
+ * workspaces, tabs, or focus. Mapping: every terminal is one window with one pane (window id = pane id = hc address), and
+ * a session is the set of terminals sharing the `ch_session` label. Session Claims live on every terminal of the session,
+ * so a session ends with its last terminal, as a herdr workspace does. Core lifecycle lives in `hc-core.ts`.
  */
 import { randomUUID } from "node:crypto"
+import { mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
 import {
   claimScopeOf, locationScope,
   MultiplexerUnavailableError, UnsupportedMultiplexerOperation,
-  type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
+  type AgentInterruptOutcome, type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
   type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
+import { runtimeDirFor } from "../paths"
 
 export const HC_PROTOCOL_GENERATION = 1
 export const HC_PANE_ADDRESS_ENV = "HC_TERMINAL_ID"
@@ -20,6 +22,19 @@ const SESSION_LABEL = "ch_session"
 const SESSION_NAME_LABEL = "ch_session_name"
 const WINDOW_NAME_LABEL = "ch_window_name"
 const PANE_NAME_LABEL = "ch_pane_name"
+/** Workshop Labels on session terminals; hc has no sidebar, so these serve `hc ls --label` and `shownLabels`. */
+const SHOWN_LABEL_PREFIX = "lbl_"
+/** The lane's session, so Clankerhouse never shares a core with a person's own `hc` use. */
+export const HC_DEFAULT_SESSION = "clankerhouse"
+/** A harness that always reports and has said nothing for this long is held at a startup dialog. */
+export const HC_STARTUP_SILENCE_MS = 30_000
+/** How long one interrupt key gets to end a turn before the next. Vim-mode Claude spends the first ESC leaving INSERT. */
+export const HC_INTERRUPT_STEP_MS = 400
+/** A notification is a courtesy: the caller never waits on the operator's command longer than this. */
+export const HC_NOTIFY_TIMEOUT_MS = 1_000
+const SELF_REPORTING_HARNESSES = new Set(["claude", "pi"])
+/** hc's name for a program → the harness name Clankerhouse claims. */
+const harnessOfApp: Record<string, string> = { "claude-code": "claude" }
 
 /** Claim key → hc label. hc enforces no key or value limits, so unlike herdr tokens nothing is dropped or refused. */
 const labelNames: Partial<Record<ClaimKey, string>> = {
@@ -45,7 +60,8 @@ const claimKeyByLabel = new Map(Object.entries(labelNames).map(([key, label]) =>
 
 export const hcSocketPath = (env: Record<string, string | undefined> = Bun.env) => {
   if (env.HC_SOCKET) return env.HC_SOCKET
-  return join(env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`, "herdr-core", `${env.HC_SESSION || "default"}.sock`)
+  if (env.HC_TERMINAL_SOCKET) return env.HC_TERMINAL_SOCKET
+  return join(env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`, "herdr-core", `${env.HC_SESSION || HC_DEFAULT_SESSION}.sock`)
 }
 
 export type HcRequest = (method: string, params?: Record<string, unknown>) => Promise<Record<string, any>>
@@ -80,7 +96,23 @@ export const hcRequest = (socketPath: string, timeoutMs = 10_000): HcRequest => 
 })
 
 interface HcForeground { pid: number; name?: string; argv?: string[]; cwd?: string }
-interface HcTerminal { address: string; name?: string | null; argv: string[]; cwd: string; pid: number | null; state: "live" | "finished"; title?: string; created_ms: number; status_ms?: number | null; status?: { state: string; app?: string } | null; labels: Record<string, string>; foreground?: HcForeground | null }
+interface HcTerminal { address: string; name?: string | null; argv: string[]; cwd: string; pid: number | null; state: "live" | "finished"; reason?: string | null; exit_code?: number | null; title?: string; created_ms: number; reported?: boolean; status_ms?: number | null; status?: { state: string; app?: string; kind?: string; msg?: string } | null; labels: Record<string, string>; foreground?: HcForeground | null }
+
+/** Identity a terminal must never take from the core's environment. `spawn` unsets whichever the caller did not set. */
+export const HC_UNSET_ON_SPAWN = ["CLANKER_ID", "CLANKER_SESSION_ID", "CLANKERHOUSE_WORKSHOP_ID", "CLANKERHOUSE_PARENT_WORKSHOP_ID", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+/** `env -u` is the only way to remove a variable from a terminal: hc's `env` parameter can only set them. */
+const scrubbedArgv = (argv: string[] | undefined, env: Record<string, string>) => {
+  const unset = HC_UNSET_ON_SPAWN.filter((name) => !(name in env)).flatMap((name) => ["-u", name])
+  return ["env", ...unset, ...(argv ?? ["sh", "-c", 'exec "${SHELL:-/bin/sh}"'])]
+}
+
+export class HcAttachError extends Error {
+  constructor(address: string, reason: string, readonly transcript: string) {
+    super(`${address} has finished (${reason}); nothing to attach to`)
+    this.name = "HcAttachError"
+  }
+}
 
 /** idle and done both mean the turn is over; `error` needs a person, which Clankerhouse calls blocked. */
 const agentStatusOf = (word: string | undefined): RuntimeAgentStatus => {
@@ -97,16 +129,34 @@ const claimsFromLabels = (labels: Record<string, string>): ClaimMap => {
   return claims
 }
 
+const shownLabelsOf = (labels: Record<string, string>) => Object.fromEntries(Object.entries(labels).filter(([label]) => label.startsWith(SHOWN_LABEL_PREFIX)))
+
+const silentAtStartup = (terminal: HcTerminal, harness: string | undefined, now: number) =>
+  !terminal.reported && Boolean(harness) && SELF_REPORTING_HARNESSES.has(harness!) && now - terminal.created_ms >= HC_STARTUP_SILENCE_MS
+
+const agentStatusFor = (terminal: HcTerminal, harness: string | undefined, now: number): NonNullable<MultiplexerPane["agentStatus"]> => {
+  if (silentAtStartup(terminal, harness, now)) return { agent: harness, status: "blocked", blockedKind: "startup", message: "no status since it started; a startup dialog may be waiting" }
+  const status = terminal.status
+  const agent = status?.app ? harnessOfApp[status.app] ?? status.app : undefined
+  const mapped = agentStatusOf(status?.state)
+  const blockedKind = mapped !== "blocked" ? undefined : status?.state === "error" ? "error" : status?.kind === "permission" || status?.kind === "question" || status?.kind === "auth" ? status.kind : undefined
+  return { agent, status: mapped, ...(blockedKind ? { blockedKind } : {}), ...(status?.msg ? { message: status.msg } : {}) }
+}
+
 const pickClaims = (claims: ClaimMap, scope: "session" | "pane") => Object.fromEntries(Object.entries(claims).filter(([key]) => claimScopeOf(key as ClaimKey) === scope)) as ClaimMap
 
 export class HcAdapter implements Multiplexer {
   readonly kind = "hc" as const
   readonly socketPath: string
   private readonly request: HcRequest
+  private readonly now: () => number
+  private readonly sleep: (ms: number) => Promise<void>
 
-  constructor(options: { socketPath?: string; request?: HcRequest } = {}) {
+  constructor(options: { socketPath?: string; request?: HcRequest; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
     this.socketPath = options.socketPath ?? hcSocketPath()
     this.request = options.request ?? hcRequest(this.socketPath)
+    this.now = options.now ?? Date.now
+    this.sleep = options.sleep ?? Bun.sleep
   }
 
   capabilities(): MultiplexerCapabilities {
@@ -132,11 +182,13 @@ export class HcAdapter implements Multiplexer {
 
   private async terminals() { return (await this.request("terminal.list")).terminals as HcTerminal[] }
 
+  /** One list call carries labels, status and foreground for every terminal. */
   private async sessionTerminals(sessionId: string) { return (await this.terminals()).filter((terminal) => (terminal.labels[SESSION_LABEL] ?? terminal.address) === sessionId) }
 
-  /** One list call carries labels, status and foreground for every terminal, so no per-pane requests and `processInfo` options are moot. */
+  /** No per-pane requests: `terminal.list` has everything, so the `processInfo` options change nothing here. */
   async observe(): Promise<MultiplexerSnapshot> {
     const [instanceId, terminals] = await Promise.all([this.instanceId(), this.terminals()])
+    const now = this.now()
     const grouped = new Map<string, HcTerminal[]>()
     for (const terminal of terminals) {
       const id = terminal.labels[SESSION_LABEL] ?? terminal.address
@@ -167,7 +219,7 @@ export class HcAdapter implements Multiplexer {
           harness: paneClaims.harness,
           harnessSessionId: paneClaims.harnessSessionId,
           processInfo: { shellPid: terminal.pid ?? undefined, foregroundProcessGroupId: foreground?.pid, foregroundProcesses: foreground ? [foreground] : [] },
-          agentStatus: { agent: terminal.status?.app, status: agentStatusOf(terminal.status?.state) },
+          agentStatus: agentStatusFor(terminal, paneClaims.harness, now),
         }
         return { id: terminal.address, index: String(index), nativeName: terminal.labels[WINDOW_NAME_LABEL] ?? "", active: index === 0, claims: {}, panes: [pane] }
       })
@@ -184,6 +236,7 @@ export class HcAdapter implements Multiplexer {
         parentWorkshopId: claims.workshopParentId || undefined,
         resourceId: claims.sessionId,
         displayName: members[0]!.labels[SESSION_NAME_LABEL] || undefined,
+        shownLabels: shownLabelsOf(members[0]!.labels),
         windows,
       }
     })
@@ -259,7 +312,10 @@ export class HcAdapter implements Multiplexer {
     if (request.scope === "session") labels[SESSION_NAME_LABEL] = request.name
     const windowName = request.scope === "session" ? request.windowName : request.name
     if (windowName) labels[WINDOW_NAME_LABEL] = windowName
-    const created = await this.request("terminal.run", { cwd: request.cwd, env: request.env ?? {}, labels, no_parent: true, no_notify: true, ...(request.launch?.kind === "argv" ? { argv: request.launch.argv } : {}) }) as { address?: string; terminal?: HcTerminal }
+    const instance = Bun.env.CLANKERHOUSE_INSTANCE?.trim()
+    const env = { CLANKERHOUSE_MULTIPLEXER: "hc", ...(instance ? { CLANKERHOUSE_INSTANCE: instance } : {}), ...request.env }
+    const argv = scrubbedArgv(request.launch?.kind === "argv" ? request.launch.argv : undefined, env)
+    const created = await this.request("terminal.run", { cwd: request.cwd, env, labels, argv, no_parent: true, no_notify: true }) as { address?: string; terminal?: HcTerminal }
     const address = (created.terminal?.address ?? created.address)!
     return { nativeSessionId: sessionId, nativeWindowId: address, nativePaneId: address }
   }
@@ -268,8 +324,10 @@ export class HcAdapter implements Multiplexer {
     const pane = location.nativePaneId ?? location.nativeWindowId
     const addresses = locationScope(location) === "session" ? (await this.sessionTerminals(location.nativeSessionId)).map((terminal) => terminal.address) : [pane!]
     for (const terminal of addresses) {
-      await this.request("terminal.kill", { terminal })
-      await this.request("terminal.rm", { terminal })
+      try {
+        await this.request("terminal.kill", { terminal })
+        await this.request("terminal.rm", { terminal })
+      } catch (error) { if (!/: not_found:/.test(String(error))) throw error }
     }
   }
 
@@ -279,7 +337,50 @@ export class HcAdapter implements Multiplexer {
     await this.request("terminal.label", { terminal: location.nativePaneId ?? location.nativeWindowId, labels: { [scope === "pane" ? PANE_NAME_LABEL : WINDOW_NAME_LABEL]: name } })
   }
 
-  async focus(): Promise<void> { throw new UnsupportedMultiplexerOperation("hc", "focus") }
+  /**
+   * hc has no focus and this process has no client to move, so the request is left for the launcher that owns the
+   * operator's terminal: `bin/clankerhouse-hc` attaches to it when the picker exits.
+   */
+  async focus(location: NativeLocation) {
+    const terminal = location.nativePaneId ?? location.nativeWindowId ?? (await this.sessionTerminals(location.nativeSessionId))[0]?.address
+    if (!terminal) throw new UnsupportedMultiplexerOperation("hc", "focus on an empty session")
+    const directory = runtimeDirFor()
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    writeFileSync(`${directory}/hc-attach.tmp`, `${terminal}\n`, { mode: 0o600 })
+    renameSync(`${directory}/hc-attach.tmp`, `${directory}/hc-attach`)
+  }
+
+  /** `hc attach` on a finished terminal probes the operator's terminal before failing; answer here instead. */
+  async attachTarget(address: string) {
+    const terminal = await this.request("terminal.get", { terminal: address }) as HcTerminal
+    if (terminal.state === "live") return terminal.address
+    const read = await this.request("terminal.read", { terminal: address, lines: 40 })
+    throw new HcAttachError(terminal.address, terminal.reason ?? `exit ${terminal.exit_code}`, String(read.text ?? ""))
+  }
+
+  /**
+   * Stop the current turn. `hc interrupt` waits out its timeout on a program with no status, and one ESC only leaves
+   * INSERT in vim-mode Claude, so the steps and the check are ours: a program with no status gets ctrl+c and no wait, a
+   * reporting one gets up to two ESCs and each gets a short look at its status.
+   */
+  async interruptAgent(location: NativeLocation): Promise<AgentInterruptOutcome> {
+    const address = location.nativePaneId ?? location.nativeWindowId
+    if (!address) throw new Error("Agent interrupt requires a pane location")
+    const status = async () => (await this.request("terminal.get", { terminal: address }) as HcTerminal).status?.state
+    if (!(await this.request("terminal.get", { terminal: address }) as HcTerminal).reported) {
+      await this.request("terminal.keys", { terminal: address, keys: ["ctrl+c"] })
+      return "sent"
+    }
+    if (await status() !== "working") return "not_working"
+    for (let press = 0; press < 2; press += 1) {
+      await this.request("terminal.keys", { terminal: address, keys: ["esc"] })
+      for (let waited = 0; waited < HC_INTERRUPT_STEP_MS; waited += 50) {
+        if (await status() !== "working") return "stopped"
+        await this.sleep(50)
+      }
+    }
+    return "still_working"
+  }
 
   async promptAgent(location: NativeLocation, text: string) {
     if (!location.nativePaneId) throw new Error("Agent prompt requires a pane location")
@@ -313,6 +414,23 @@ export class HcAdapter implements Multiplexer {
     return (await this.sessionTerminals(location.nativeSessionId))[0]?.labels[label] || undefined
   }
 
-  /** hc has no notification surface. */
-  async notify() { return false }
+  /** Stored for `hc ls --label` and for `shownLabels`; hc has no sidebar to show them in. */
+  async showLabels(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined) {
+    const wanted = Object.fromEntries(Object.entries(labels).filter(([, value]) => value).map(([key, value]) => [`${SHOWN_LABEL_PREFIX}${key}`, value]))
+    const patch = { ...Object.fromEntries(Object.keys(shown ?? {}).filter((label) => !(label in wanted)).map((label) => [label, ""])), ...Object.fromEntries(Object.entries(wanted).filter(([label, value]) => shown?.[label] !== value)) }
+    if (!Object.keys(patch).length) return false
+    await this.labelSession(location.nativeSessionId, patch)
+    return true
+  }
+
+  /** hc has no notification surface, so delivery is the operator's: CLANKERHOUSE_NOTIFY_COMMAND runs with title and body. */
+  async notify(notice: { title: string; body?: string }) {
+    const command = Bun.env.CLANKERHOUSE_NOTIFY_COMMAND?.trim()
+    if (!command) return false
+    const child = Bun.spawn(["sh", "-c", `${command} "$@"`, "notify", notice.title, notice.body ?? ""], { stdout: "ignore", stderr: "ignore", stdin: "ignore" })
+    const timeout = setTimeout(() => child.kill(), HC_NOTIFY_TIMEOUT_MS)
+    const exitCode = await child.exited
+    clearTimeout(timeout)
+    return exitCode === 0
+  }
 }

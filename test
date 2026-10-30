@@ -18,7 +18,7 @@ unit/static:
   feature-catalogue, TypeScript, Rust
 standalone/end-to-end:
   native-hot, Neovim, Clanker API, orchestration, spawn model, daemon, process owner,
-  lineage actions, workshop labels, Herdr adapter, installer, full TUI
+  lineage actions, workshop labels, Herdr adapter, hc lane, installer, full TUI
 EOF
         exit 0
         ;;
@@ -55,6 +55,8 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
     run "Herdr multiplexer adapter scenario" scripts/qa-herdr
+    # Skips without hc unless HC_REQUIRED is set.
+    run "hc lane scenario" scripts/qa-hc
     run "atomic installer and rollback scenario" scripts/qa-install
     run "complete native TUI interaction scenario" scripts/qa
 fi

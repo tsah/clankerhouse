@@ -370,8 +370,7 @@
         "src/multiplexer/interface.test.ts",
         "src/multiplexer/shell-environment.test.ts",
         "src/multiplexer/herdr.test.ts",
-        "src/paths.test.ts",
-        "src/multiplexer/hc.test.ts"
+        "src/paths.test.ts"
       ],
       "standalone": [
         "scripts/qa-herdr"
@@ -412,6 +411,23 @@
         "Judge that rows untouched for days are visibly dimmer, that state glyphs keep full colour, and that only the working glyph animates",
         "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state",
         "Under Herdr, run `clankers workshop stop` in a done Workshop with a live clanker; confirm its workspace closes, the herdr server's open fds drop by about three per pane, the row stays in the picker without a session, its clanker is closed in `clankers ledger`, and opening the row starts a plain shell"
+      ]
+    },
+    {
+      "id": "hc-lane",
+      "title": "herdr-core lane behind CLANKERHOUSE_MULTIPLEXER=hc: core lifecycle, per-terminal identity, status, interrupt, attach",
+      "core": false,
+      "unit": [
+        "src/multiplexer/hc.test.ts",
+        "src/multiplexer/hc-core.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-hc"
+      ],
+      "manual": [
+        "Run bin/clankerhouse-hc in a plain terminal, open a Workshop from the picker, detach with Ctrl+\\ and confirm the picker returns",
+        "With a real claude in vim editor mode, confirm clankers mux interrupt stops a streaming turn",
+        "SIGKILL the core and confirm the daemon restarts it while clankers keep running"
       ]
     }
   ]

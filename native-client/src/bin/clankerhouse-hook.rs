@@ -37,6 +37,8 @@ fn main() {
 
 struct Context {
     pane: String,
+    /// The hc lane: claims travel over hc's socket instead of Herdr's.
+    hc: bool,
     runtime_dir: PathBuf,
     state_dir: PathBuf,
 }
@@ -46,7 +48,8 @@ fn var(name: &str) -> String {
 }
 
 fn context() -> Result<Option<Context>, String> {
-    let pane = var("HERDR_PANE_ID");
+    let hc = var("CLANKERHOUSE_MULTIPLEXER") == "hc";
+    let pane = var(if hc { "HC_TERMINAL_ID" } else { "HERDR_PANE_ID" });
     if pane.is_empty() {
         return Ok(None);
     }
@@ -71,6 +74,7 @@ fn context() -> Result<Option<Context>, String> {
         .unwrap_or_else(|| format!("{}/.local/state", env::var("HOME").unwrap_or_default()));
     Ok(Some(Context {
         pane,
+        hc,
         runtime_dir: PathBuf::from(format!("{runtime_root}/clankerhouse-{uid}{slug}")),
         state_dir: PathBuf::from(format!("{state_home}/clankerhouse{slug}")),
     }))
@@ -320,7 +324,25 @@ fn herdr_request(method: &str, params: Value) -> Option<Value> {
     if response.get("error").is_some() { None } else { response.get("result").cloned() }
 }
 
+/// hc's JSON-RPC socket, named by the terminal this hook runs in. Same deadline as Herdr's: the hook never waits.
+fn hc_request(method: &str, params: Value) -> Option<Value> {
+    let mut stream = UnixStream::connect(var("HC_TERMINAL_SOCKET")).ok()?;
+    stream.set_read_timeout(Some(HERDR_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(HERDR_TIMEOUT)).ok()?;
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    stream.write_all(format!("{request}\n").as_bytes()).ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    let response: Value = serde_json::from_str(&line).ok()?;
+    response.get("result").cloned()
+}
+
 fn read_claim(ctx: &Context, key: &str) -> Option<String> {
+    if ctx.hc {
+        let result = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
+        let value = result.get("labels")?.get(herdr_token(key))?.as_str()?.to_string();
+        return if value.is_empty() { None } else { Some(value) };
+    }
     let value = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?
         .get("pane")?
         .get("tokens")?
@@ -331,6 +353,11 @@ fn read_claim(ctx: &Context, key: &str) -> Option<String> {
 }
 
 fn pane_path(ctx: &Context) -> Option<PathBuf> {
+    if ctx.hc {
+        let terminal = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
+        let path = terminal.get("foreground").and_then(|f| f.get("cwd")).or(terminal.get("cwd"))?.as_str()?;
+        return if path.is_empty() { None } else { Some(PathBuf::from(path)) };
+    }
     let result = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?;
     let pane = result.get("pane")?;
     let path = ["foreground_cwd", "cwd"].iter().find_map(|key| pane.get(*key)?.as_str().filter(|v| !v.is_empty()).map(str::to_string))?;
@@ -338,6 +365,13 @@ fn pane_path(ctx: &Context) -> Option<PathBuf> {
 }
 
 fn write_claims(ctx: &Context, claims: &BTreeMap<&str, Option<String>>) {
+    if ctx.hc {
+        // An empty value removes a label.
+        let labels: Map<String, Value> =
+            claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value.clone().unwrap_or_default()))).collect();
+        hc_request("terminal.label", json!({ "terminal": ctx.pane, "labels": labels }));
+        return;
+    }
     let tokens: Map<String, Value> =
         claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value))).collect();
     herdr_request("pane.report_metadata", json!({ "pane_id": ctx.pane, "source": "clankerhouse", "tokens": tokens }));

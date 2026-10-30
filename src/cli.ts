@@ -9,8 +9,10 @@ import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
 import { openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
 import { harnessModelArgs, stopOwnedHarness } from "./harness-launch"
-import { openManagedMultiplexer } from "./multiplexer"
-import { MultiplexerResourceExhaustedError, paneLocation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
+import { createMultiplexer, openManagedMultiplexer } from "./multiplexer"
+import { HcAdapter, HcAttachError } from "./multiplexer/hc"
+import { ensureHcCore, hcCoreEnvironment, hcHealth, restartHcCore } from "./multiplexer/hc-core"
+import { MultiplexerResourceExhaustedError, paneLocation, UnsupportedMultiplexerOperation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
@@ -345,10 +347,36 @@ const muxLocation = (parsed: ParsedArgs): NativeLocation => {
  * Runtime-neutral multiplexer operations for shell callers (lifecycle reporters, stop
  * scripts). Every operation goes through the selected Adapter.
  */
+const attachHcTerminal = async (location: NativeLocation) => {
+  const adapter = createMultiplexer()
+  if (!(adapter instanceof HcAdapter)) throw new UnsupportedMultiplexerOperation(adapter.kind, "attach")
+  try {
+    const target = await adapter.attachTarget(location.nativePaneId ?? location.nativeWindowId ?? "")
+    process.exitCode = await Bun.spawn([Bun.env.HC_BIN || "hc", "attach", target], { stdio: ["inherit", "inherit", "inherit"] }).exited
+  } catch (error) {
+    if (!(error instanceof HcAttachError)) throw error
+    console.error(error.message)
+    if (error.transcript.trim()) console.error(`Its last output:\n${error.transcript.trimEnd()}`)
+    process.exitCode = 3
+  }
+}
+
 const runMultiplexerCli = async (parsed: ParsedArgs) => {
   const subcommand = parsed.shift()
   const multiplexer = openManagedMultiplexer()
   if (subcommand === "kind") return console.log(multiplexer.kind)
+  if (subcommand === "instance-id") return console.log(await multiplexer.instanceId())
+  if (subcommand === "hc-env") return console.log(Object.entries(hcCoreEnvironment()).map(([key, value]) => `${key}=${value}`).join("\n"))
+  if (subcommand === "hc-ensure") return console.log(JSON.stringify(await ensureHcCore()))
+  if (subcommand === "hc-restart") return restartHcCore()
+  if (subcommand === "hc-health") {
+    const health = await hcHealth()
+    console.log(JSON.stringify(health))
+    if (!health.reachable) process.exitCode = 1
+    return
+  }
+  if (subcommand === "interrupt") return console.log(await multiplexer.interruptAgent(muxLocation(parsed)))
+  if (subcommand === "attach") return attachHcTerminal(muxLocation(parsed))
   if (subcommand === "capabilities") return console.log(JSON.stringify({ kind: multiplexer.kind, ...multiplexer.capabilities() }))
   if (subcommand === "pane-address-env") return console.log(multiplexer.paneAddressEnv())
   if (subcommand === "observe") return console.log(JSON.stringify(await multiplexer.observe()))

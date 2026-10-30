@@ -3,7 +3,103 @@
 Date: 2026-10-30. Box: puffin (16 cores, 125 GiB, 915 processes). Evaluated: hc 0.1.14 (`dbcdcff`), against Herdr TUI 0.9.3
 (protocol 22). Evaluation only: nothing was migrated, and the live Herdr server and Clankerhouse install were not touched.
 
-## Verdict: NOT YET
+## Lane status (updated 2026-10-30)
+
+The hc lane now runs behind `CLANKERHOUSE_MULTIPLEXER=hc`, with Herdr TUI still the default. Live-session migration is out of
+scope: Tsah will migrate manually once he decides to switch. The Herdr app is being verified separately.
+
+**Verdict for switching: still NOT YET, but the remaining gaps are narrower.** The Clankerhouse side of every issue below is
+fixed or worked around, and a real vim-mode `claude` runs through the lane end to end. What stands between this and a switch:
+the soak has only just started, there is no multi-terminal view on a headless box unless the Herdr app answers that, the keys
+for popups cannot exist on hc, and hc is still a two-week-old preview.
+
+| # | Issue | Outcome | How |
+|---|---|---|---|
+| 1 | Frozen core environment | Fixed | The core starts from an allowlist (`hc-core.ts`). Each `spawn` passes identity, `PATH` and `CLANKERHOUSE_*` explicitly and runs under `env -u` for every identity variable it did not set, so even a polluted core leaks nothing. Health reports pollution. |
+| 2 | Exit sweep kills the daemon | Fixed | The daemon is a **systemd user service**, with a scrubbed `setsid` fallback where no user manager exists. See below. |
+| 3 | Core supervision | Fixed | The daemon polls every 5 s and restarts a dead core in the clean environment, with backoff. `clankers mux hc-health` and `clankerhouse-hc --health` are the health checks. |
+| 4 | `hc server status` starts a core | Fixed | Never called. Liveness uses the socket and JSON-RPC, which cannot start anything. |
+| 5 | `hc interrupt` waits out its timeout | Fixed | `clankers mux interrupt`: ctrl+c with no wait for plain programs; for reporting ones, up to two ESCs with a 400 ms status check each. |
+| 6 | `hc attach` on a finished terminal | Fixed | `clankers mux attach` checks first: it exits 3 with the reason and last output, and writes no terminal queries. |
+| 7 | ESC did not stop Claude | **Root cause found** | Not hc: Claude Code's vim editor mode (`editorMode: vim`). The first ESC leaves INSERT; the second interrupted in 16 ms. `interruptAgent` handles it: 499 ms on a real turn. ctrl+c also works. |
+| 8 | Feature gaps | Mostly closed | See "Feature gaps" below. |
+| 9 | QA and CI | Done | `scripts/lib/qa-hc-server`, `scripts/qa-hc` (in `./test`), and a CI `test-hc` job pinned to hc 0.1.14. CI has not yet run on the branch's latest commit. |
+| 10 | Full `./test` | Passes | All 18 groups, 392 unit tests, with Herdr scenarios and `qa-hc` together. |
+
+**Why systemd for the daemon, not an hc terminal.** `--outlive-parent` or `--no-parent` would survive the starting terminal, but
+the daemon would then live inside the runtime it supervises: a holder death would kill the daemon along with the terminals it
+needs to report on and restart around. A user service stays out of the sweep because the manager, not a terminal, starts it. It
+also gives `Restart=on-failure` for free. Both are proven in `scripts/qa-hc`, and the check was shown to fail when the launcher
+is sabotaged back to plain `nohup`.
+
+**Verified with real programs** (no fakes): a real `claude` 2.1.314 in vim mode, started from a shell carrying
+`CLANKER_ID`, `CLAUDE_CODE_*` and more, received only its own identity; `clankers mux interrupt` stopped a streaming turn; a
+Bash prompt showed `blocked`/`permission` with its message through the adapter; and a real Claude hook wrote its state and claims
+over hc. A real Workshop with a fake harness ran through `clankers workshop spawn`, the daemon, the lifecycle wrapper and the
+owned `systemd-run --scope`, which settles the question left open below: scoped harnesses work on the lane.
+
+### How to use it
+
+```bash
+export CLANKERHOUSE_MULTIPLEXER=hc   # bin/clankerhouse and clankerhouse-native route to bin/clankerhouse-hc
+clankerhouse-hc                      # picker; opening a Workshop attaches, Ctrl+\ returns to the picker
+clankerhouse-hc --repo               # Herdr's Alt-B
+clankerhouse-hc --delete             # Herdr's Alt-D, from inside an hc terminal
+clankerhouse-hc --health             # core and daemon health
+```
+
+Before a real switch, rerun `clankerhouse-install-claude-hooks`, because the live hooks are still gated on `HERDR_PANE_ID` alone.
+Set `CLANKERHOUSE_NOTIFY_COMMAND` for notifications. Use `clankers mux hc-restart`, never `hc server restart`, which would adopt
+the caller's environment. Name any extra variables terminals need in `CLANKERHOUSE_HC_CORE_ENV`.
+
+### Feature gaps
+
+| Gap | Outcome |
+|---|---|
+| Status for claude and pi, including blocked/question | Closed. `agentStatus` gains `blockedKind` (`permission`, `question`, `auth`, `error`, `startup`) and `message`. `claude-code` maps to `claude`. |
+| Trust dialog says nothing | Closed for claude and pi: 30 s of silence reads as `blocked`/`startup`. |
+| Claims at session, window and pane scope | Closed, with no size limits. Window names are labels; each window has one pane. |
+| Process info, cwd, durable ids | Closed. Foreground is the leader only, about 0.5 s stale. |
+| Labels (`showLabels`) | Closed as data, visible in `hc ls --label`. There is no sidebar to show them in. |
+| Notifications | Worked around: `CLANKERHOUSE_NOTIFY_COMMAND` runs with title and body. Nothing is delivered without one. |
+| Focus / open | Worked around: `focus` leaves a request and the launcher attaches. One viewer at a time. |
+| Popups (Alt-K/B/D) | Partly: `clankerhouse-hc` and its flags do the same jobs. **hc cannot bind keys**, so there is no in-terminal shortcut. |
+
+**Cannot be closed on the Clankerhouse side:**
+
+- No side-by-side view or sidebar in a headless terminal. This depends on the Herdr app verification, or a larger native client.
+- `currentLocation` is only the caller's own terminal, and `attached` is always false, so the daemon cannot tell what the operator
+  is looking at. Messages held "while the operator is typing" rely on hc's own 3 s quiet rule instead.
+- `clankers view children` (`showChildAgents`) is unsupported. `clankers list --children-of` covers the information.
+- `sessionRefs` (upstream #15) and pane `activity` for programs with no status. Clankerhouse holds session ids itself.
+- `reportAgentState` has no hc equivalent. Claude and pi do not need it. opencode has no status in hc but still reports to
+  Clankerhouse through its plugin.
+- Dev servers and other daemons started by a harness die with its terminal. This is a behaviour change from Herdr.
+- The holder remains a single point of failure, and old holders run old code until their terminals drain. Only upstream can
+  change this.
+- Eleven existing QA scenarios speak Herdr's socket and were not ported; `qa-hc` covers the lane instead. Codex stayed unverified
+  (not logged in here), though Workshops do not launch it through `harnessCommand`.
+
+## Soak
+
+Running on scratch session `eval-soak`: 4 synthetic agents that emit OSC 7501 and write their true state to a file, with traffic
+every 15 s through `HcAdapter` (prompts, keys, two-ESC interrupts), a check every 10 minutes, and a planned core restart every 6th
+check. Drift compares the adapter's view with each agent's truth file, counting only states settled for 2 s.
+
+```bash
+scripts/soak-hc status   # running or not, and the last check
+scripts/soak-hc stop     # stops the service, its terminals and its core; keeps the log
+scripts/soak-hc report   # rewrites the table below from the log
+```
+
+The log is `soak/hc-soak.jsonl`, with service output in `soak/hc-soak.out`. It is git-ignored and lives in this worktree, so the
+soak must be stopped before the worktree is removed. It is capped at 25% CPU and 256 MB.
+
+<!-- soak:start -->
+No checks recorded yet.
+<!-- soak:end -->
+
+## Original verdict (first evaluation): NOT YET
 
 **The runtime is good enough. The product around it is not, yet.** hc beat expectations on everything measurable:
 latency, restart and upgrade survival, labels, and events. Two presumed blockers turned out not to be blockers: **Claude Code
@@ -98,8 +194,8 @@ Gaps and caveats:
 
 - **The trust dialog reports nothing:** `status:null, reported:false` until it is answered. Every new folder hits this,
   so hc shows a stuck clanker as blank. Worktrees need pre-trust, or a "no first report within N seconds" rule.
-- `hc interrupt` and `hc keys esc` did not stop a streaming Claude turn. **A raw ESC through a plain pty with no hc involved
-  behaved the same**, so this is not an hc bug. The cause is unresolved; re-check before relying on interrupt to steer.
+- `hc interrupt` and `hc keys esc` did not stop a streaming Claude turn. **Resolved later:** it was Claude Code's vim editor
+  mode, not hc. See "Lane status".
 - pi reports natively (`app=pi`, idle at startup).
 - opencode reported nothing at startup, so it needs a plugin. Codex stopped at a login screen here, so it is unverified.
 - A hook fallback works if ever needed: `printf '\e]7501;state=idle:app=hook\e\\' > /dev/pts/N` from outside the program set
@@ -147,14 +243,15 @@ Gaps and caveats:
 - **Exit sweep.** When a terminal ends, hc kills every process carrying its `HC_SCOPE` token, even under `nohup` or `setsid`
   (confirmed). `bin/clankerhouse-herdr:84` starts the daemon with `nohup`, so a daemon started from a clanker dies with that
   clanker. The daemon needs a systemd unit. Dropping `HC_SCOPE` plus `setsid`, or a `systemd-run --user` service, escapes the
-  sweep (confirmed). The `--scope` form in `src/harness-launch.ts` keeps the caller's environment and was not tested, so
-  check it. Dev servers started by agents die too, which may be
+  sweep (confirmed). The `--scope` form in `src/harness-launch.ts` was tested later and works on the lane. Dev servers started by agents die too, which may be
   desirable but is a behaviour change. The sweep is not in the user docs.
 - **Parent cascade and notes.** Clankers must always use `no_parent` and `no_notify`, or hc will type into harnesses.
 - **Upgrade discipline.** Old holders run old code until their terminals drain, so long-lived clankers pin old holder
   binaries for days. The holder protocol has to stay compatible for that long.
 
 ## Bugs and upstream drafts (not filed)
+
+Clankerhouse works around all of these. They remain worth filing; Tsah decides.
 
 Severity is for Clankerhouse. Bugs 1-3 reproduce on 0.1.14.
 
@@ -196,18 +293,17 @@ Severity is for Clankerhouse. Bugs 1-3 reproduce on 0.1.14.
 
 > - Last-output timestamp on the terminal record, for activity and staleness on programs with no status.
 > - A status setter in the API, for wrappers that cannot reach the pty.
+> - `terminal.run` to unset variables, not only set them. Today removing an inherited variable takes an `env -u` wrapper.
 > - `hc ls --json` to include labels and parent: its summary omits them, although `--label` filters on them and `terminal.list` has them.
 > - A first-report timeout or a "not reported yet" state for agents held at a startup dialog.
 
 Ruled out as hc bugs: fd growth with connections (my harness), stale holder sockets (reaped on next start), Claude ignoring ESC
-(same on a plain pty), and status ignoring `msg=text` (the field must be base64, and an invalid report is dropped whole).
+(vim editor mode), and status ignoring `msg=text` (the field must be base64, and an invalid report is dropped whole).
 
 ## Spike: `HcAdapter`
 
-`src/multiplexer/hc.ts` (318 lines) implements the Interface; `CLANKERHOUSE_MULTIPLEXER=hc` selects it and Herdr stays the
-default. `src/multiplexer/hc.test.ts` runs 6 tests against a real scratch core and passes: session grouping, Claims, spawn env,
-status, `changes()`, restart durability, and `ManagedMultiplexer`. The existing multiplexer tests still pass (46 in total). The
-full `./test` suite was not run, because it starts QA herdr servers on the live box.
+This section describes the first spike; "Lane status" has the current state. `src/multiplexer/hc.ts` implements the Interface and
+`CLANKERHOUSE_MULTIPLEXER=hc` selects it, with Herdr as the default.
 
 What the spike showed:
 

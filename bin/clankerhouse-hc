@@ -6,6 +6,8 @@
 #   clankerhouse-hc [picker args]   run the picker
 #   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
+#   clankerhouse-hc --popup [--repo|--delete]  the picker in a Herdr app popup: exits on a choice, leaving it for the mod
+#   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
 #   clankerhouse-hc --ensure-server start the core and daemon, then exit
 #   clankerhouse-hc --stop-server   stop the daemon; the core and its terminals keep running
 #   clankerhouse-hc --health        print core and daemon health; exit 1 when either is down
@@ -93,6 +95,13 @@ start_daemon() {
 }
 
 case "${1:-}" in
+    --report-focus)
+        [[ ${2:-} =~ ^t[0-9a-z]+$ ]] || { echo "--report-focus takes a terminal address on this machine" >&2; exit 2; }
+        mkdir -p -m 700 "$STATE_DIR"
+        printf '%s\n' "$2" >"$STATE_DIR/hc-focus.tmp"
+        mv "$STATE_DIR/hc-focus.tmp" "$STATE_DIR/hc-focus"
+        exit 0
+        ;;
     --stop-server) stop_daemon; exit 0 ;;
     --health)
         status=0
@@ -129,16 +138,37 @@ flock -u 9
 exec 9>&-
 
 [[ ${1:-} == "--ensure-server" ]] && exit 0
+popup=false
+if [[ ${1:-} == "--popup" ]]; then
+    popup=true
+    shift
+    # `hc run` copies the caller's TERM, here whatever the Herdr app was started with.
+    export TERM=xterm-256color COLORTERM=truecolor
+    # The popup's own terminal is no session: the picker's current one is what it opened over.
+    CLANKERHOUSE_CURRENT_SESSION=$("$CLANKERS" mux current-location | sed -n 's/.*"nativeSessionId":"\([^"]*\)".*/\1/p')
+    export CLANKERHOUSE_CURRENT_SESSION
+fi
 if [[ ${1:-} == "--repo" ]]; then
     export CLANKERHOUSE_MODE=spawn
     shift
 fi
 if [[ ${1:-} == "--delete" ]]; then
     current=$("$CLANKERS" mux current-location | sed -n 's/.*"nativeSessionId":"\([^"]*\)".*/\1/p')
-    [[ -n "$current" ]] || { echo "Refusing delete outside an hc terminal: no current session." >&2; exit 1; }
+    [[ -n "$current" ]] || { echo "Refusing delete: no current session." >&2; exit 1; }
     export CLANKERHOUSE_CURRENT_SESSION="$current"
     shift
     set -- --delete-current "$@"
+fi
+
+if [[ "$popup" == true ]]; then
+    rm -f "$ATTACH_FILE"
+    status=0
+    "$NATIVE_BINARY" "$@" || status=$?
+    if [[ -s "$ATTACH_FILE" ]]; then
+        "${HC_BIN:-hc}" label "$HC_TERMINAL_ID" "ch_popup_target=$(<"$ATTACH_FILE")" >/dev/null
+        rm -f "$ATTACH_FILE"
+    fi
+    exit "$status"
 fi
 
 while :; do

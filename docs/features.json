@@ -419,7 +419,8 @@
       "core": false,
       "unit": [
         "src/multiplexer/hc.test.ts",
-        "src/multiplexer/hc-core.test.ts"
+        "src/multiplexer/hc-core.test.ts",
+        "src/herdr-app-config.test.ts"
       ],
       "standalone": [
         "scripts/qa-hc"

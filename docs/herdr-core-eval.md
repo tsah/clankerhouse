@@ -3,15 +3,54 @@
 Date: 2026-10-30. Box: puffin (16 cores, 125 GiB, 915 processes). Evaluated: hc 0.1.14 (`dbcdcff`), against Herdr TUI 0.9.3
 (protocol 22). Evaluation only: nothing was migrated, and the live Herdr server and Clankerhouse install were not touched.
 
+## Desktop app path (updated 2026-10-31)
+
+Tsah's decision: use the Herdr desktop app (Omarchy now, macOS later) and port the TUI experience to it: clean terminal, no
+sidebar, the switcher as a popup, the same Alt keys. Setup and the key table are in [herdr-app.md](herdr-app.md); the config is in
+`contrib/herdr-app/`.
+
+**Result: the experience works on real herdr-app 0.1.10 against an hc machine.** Tested in the real app, on puffin, under Xvfb
+with a software Vulkan driver, with real X11 key presses and scratch sessions, against a real lane over `hc machine add --via`.
+`herdr-app check` passes.
+
+| Tested for real | Result |
+|---|---|
+| Bare layout | Full-window terminal, no sidebar, tab bar or pane chrome, no layout errors |
+| Adoption | `herdr.space`/`herdr.tab` labels gave every clanker a space and tab; hc keep turned on |
+| Alt-K | Popup opens on the machine, the current session is marked, Enter switches space and focus, Esc closes, the popup terminal is removed |
+| Alt-D | Confirmation names the focused session; `y` deletes it and its space closes |
+| Alt-B | Opens at repository selection. **Creating a branch from it was not tested** (no repos or harness on scratch) |
+| Other chords | Alt-T, Alt-W, Alt-Enter, Alt-Shift-Enter, Ctrl-Alt-Left, Alt-Left, Alt-2, Alt-Shift-Left, Alt-Up, Alt-Down |
+| Pass-through | Alt-J, Alt-H and Alt-[ reached the program as `^[j ^[h ^[[` |
+| Focus signal | The mod reports focus to `$runtime/hc-focus`; `clankers mux current-location` follows it, and it goes stale 3 minutes after the window closes |
+| A tab opened in the app | Joins its Clankerhouse session by `herdr.space` |
+| A broken launcher path | An error toast, and the next attempt works |
+| `TERM` | `xterm-256color`/`truecolor` in clanker terminals |
+| Core restart with keep on | Same pid and live |
+
+**Not tested:** a real ssh link and its latency, Hyprland or any real compositor, macOS, Alt-O, Alt-G (written, not pressed), and
+the installer's macOS branches. Tsah needs to verify these on the laptop.
+
+**What this closes:** the multi-terminal view on a headless box, popups with no key binding, and the daemon not knowing what the
+operator is looking at (it now gets focus from the app, while a window is open).
+
+**Findings from the Groky test** (Herdr app 0.1.9 on puffin's scratch `groky-app-test`, relayed): the pane-less terminal problem
+is handled by adoption labels on every clanker. `TERM` is now set explicitly. Status lag is an app sidebar issue, and this layout
+has no sidebar, though toasts may share it. The drafts are under "Herdr app issues" below.
+
 ## Lane status (updated 2026-10-30)
 
 The hc lane now runs behind `CLANKERHOUSE_MULTIPLEXER=hc`, with Herdr TUI still the default. Live-session migration is out of
 scope: Tsah will migrate manually once he decides to switch. The Herdr app is being verified separately.
 
-**Verdict for switching: still NOT YET, but the remaining gaps are narrower.** The Clankerhouse side of every issue below is
-fixed or worked around, and a real vim-mode `claude` runs through the lane end to end. What stands between this and a switch:
-the soak has only just started, there is no multi-terminal view on a headless box unless the Herdr app answers that, the keys
-for popups cannot exist on hc, and hc is still a two-week-old preview.
+**Verdict for switching (updated 2026-10-31): still NOT YET, and the cockpit question is now answered in principle.** The
+Clankerhouse side of every issue below is fixed or worked around, and a real vim-mode `claude` runs through the lane end to end.
+The Herdr app supplies the multi-terminal view and the keys. What stands between this and a switch: laptop verification over real
+ssh, the soak, the qa-hc failure below, and hc being a two-week-old preview.
+
+**Open on 2026-10-31: `scripts/qa-hc` fails locally** at "a daemon started from a terminal survives that terminal's exit sweep",
+with 24 checks passing before it. A daemon restarted mid-scenario never creates its socket. The same failure happens on unmodified
+commit 09e6791, so the app work did not introduce it, and the cause is not yet known.
 
 | # | Issue | Outcome | How |
 |---|---|---|---|
@@ -62,14 +101,16 @@ the caller's environment. Name any extra variables terminals need in `CLANKERHOU
 | Process info, cwd, durable ids | Closed. Foreground is the leader only, about 0.5 s stale. |
 | Labels (`showLabels`) | Closed as data, visible in `hc ls --label`. There is no sidebar to show them in. |
 | Notifications | Worked around: `CLANKERHOUSE_NOTIFY_COMMAND` runs with title and body. Nothing is delivered without one. |
-| Focus / open | Worked around: `focus` leaves a request and the launcher attaches. One viewer at a time. |
-| Popups (Alt-K/B/D) | Partly: `clankerhouse-hc` and its flags do the same jobs. **hc cannot bind keys**, so there is no in-terminal shortcut. |
+| Focus / open | Worked around: `focus` leaves a request and the launcher attaches, one viewer at a time. In the Herdr app, the mod moves focus. |
+| Popups (Alt-K/B/D) | Closed in the Herdr app. In a plain terminal `clankerhouse-hc` does the same jobs, with no shortcut, since **hc cannot bind keys**. |
 
 **Cannot be closed on the Clankerhouse side:**
 
-- No side-by-side view or sidebar in a headless terminal. This depends on the Herdr app verification, or a larger native client.
-- `currentLocation` is only the caller's own terminal, and `attached` is always false, so the daemon cannot tell what the operator
-  is looking at. Messages held "while the operator is typing" rely on hc's own 3 s quiet rule instead.
+- No side-by-side view in a headless terminal. The Herdr app supplies it.
+- With no Herdr app window open, `currentLocation` is only the caller's own terminal. `attached` is always false, so messages held
+  "while the operator is typing" rely on hc's own 3 s quiet rule.
+- A lost terminal behaves differently once adopted: the app turns on hc keep, so after a holder loss a clanker becomes a shell at
+  the same address, with its claims still on it. Its harness is gone and is not re-run. A core restart is unaffected.
 - `clankers view children` (`showChildAgents`) is unsupported. `clankers list --children-of` covers the information.
 - `sessionRefs` (upstream #15) and pane `activity` for programs with no status. Clankerhouse holds session ids itself.
 - `reportAgentState` has no hc equivalent. Claude and pi do not need it. opencode has no status in hc but still reports to
@@ -314,6 +355,44 @@ Severity is for Clankerhouse. Bugs 1-3 reproduce on 0.1.14.
 Ruled out as hc bugs: fd growth with connections (my harness), stale holder sockets (reaped on next start), Claude ignoring ESC
 (vim editor mode), and status ignoring `msg=text` (the field must be base64, and an invalid report is dropped whole).
 
+### Herdr app issues (drafts, not filed)
+
+From the Groky test on 0.1.9:
+
+> **1. Alternate screen is not restored on exit.** Leaving a full-screen program (`top`, then `q`) leaves its last frame on screen.
+
+> **2. A terminal with no pane cannot be reached.** `hc run --bg` with no pane does not appear in Go to, the sidebar or Agents, so
+> it cannot be opened from the UI. Request: list such terminals somewhere.
+
+> **3. Sidebar status can lag the pane.** It showed "Needs you" after the program reported `state=done`.
+
+> **5. Minor.** Palette search matches too loosely, and welcome page 1 does not scroll.
+
+(Groky's item 4, `hc run` copying `TERM`, is handled in the adapter.)
+
+Feature requests from the port:
+
+> **A popup that runs a command.** A keys.json action that opens a program in a popup on a named machine, like the Herdr TUI's
+> `[[keys.command]]` with `type = "popup"`. Today this takes a mod, a hidden layout block, and polling to learn when it ended.
+
+> **Overlay close notification.** A way for a mod to await an overlay or its terminal ending, with the exit code and labels.
+
+> **Mod commands with no shown copy.** `<mod>.<command>` reaches shown copies only, so a keyboard-only mod needs a 0 px block in the
+> layout. Request: `"background": true` in mod.json, or start a copy on first command.
+
+> **A command to resize a split** (existing #117). The TUI's Ctrl-Alt-Shift-arrows have nothing to bind to.
+
+> **Copy mode.** A keyboard scrollback and selection mode to bind, like the TUI's Alt-J.
+
+> **Move a tab relative to itself.** `tab.move` takes an absolute index, so "move left" needs a mod. `tab.move:left` would be enough.
+
+> **Focus on the core.** A per-client focused terminal in the core's API, so a remote core can read it without a mod reporting it.
+
+> **Keep without replace.** A way to adopt a terminal without turning on hc keep, for programs that should simply end when lost.
+
+Also seen: `hc machine add` refuses a name equal to the local hostname with `name_taken`, while `hc machine ls` shows nothing by
+that name. The message should say why.
+
 ## Spike: `HcAdapter`
 
 This section describes the first spike; "Lane status" has the current state. `src/multiplexer/hc.ts` implements the Interface and
@@ -348,8 +427,8 @@ Total: about 2.5-3.5 weeks if the Herdr app works as the cockpit, and about 5-6 
    the TUI is still maintained, so nothing forces a move.
 2. **Cheap prep regardless of runtime** (worthwhile on their own): move the daemon under a systemd unit, and finish moving
    callers behind the Interface so `HERDR_*` stops leaking outside the Adapter.
-3. **Answer the cockpit question next (half a day, needs Tsah).** Try the Herdr app on a laptop against puffin with
-   `hc machine add`. This decides between the 3-week and 6-week plans, and is the main unknown left.
+3. **Answer the cockpit question next (half a day, needs Tsah).** Follow [herdr-app.md](herdr-app.md) on the Omarchy laptop
+   against puffin. The port works in the real app here; real ssh, Hyprland and daily use are the unknowns left.
 4. **Re-evaluate when** all of these hold: the cockpit is settled; #20/#21 are fixed; the API has gone 60 days without a protocol
    generation change or leaves preview; and a soak passes (below). Check roughly in January 2027.
 5. **Soak before committing:** one dedicated hc session with 20-30 real clankers for two weeks, recording fd growth, RSS, holder

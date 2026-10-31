@@ -62,6 +62,9 @@ scenario() {
     check "core answers" contains "$health" '"reachable":true'
     check "core carries no identity" contains "$health" '"polluted":[]'
     check "daemon reports healthy" contains "$("$launcher" --health)" '"daemon":"healthy"'
+    "$launcher" --report-focus t42
+    check "a focus report lands in the runtime directory" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-focus")" = t42
+    check "a focus report refuses anything but an address" test "$("$launcher" --report-focus ../x >/dev/null 2>&1; echo $?)" = 2
     daemon_pid=$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/server.pid")
     check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|CLAUDE_CODE_CHILD_SESSION)='"
 

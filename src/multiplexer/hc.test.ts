@@ -3,13 +3,14 @@
  * is not installed unless HC_REQUIRED is set, which is how CI's hc lane proves it ran.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { HC_INTERRUPT_STEP_MS, HC_STARTUP_SILENCE_MS, HC_UNSET_ON_SPAWN, HcAdapter, HcAttachError, hcRequest, hcSocketPath, type HcRequest } from "./hc"
+import { HC_FOCUS_STALE_MS, HC_INTERRUPT_STEP_MS, HC_STARTUP_SILENCE_MS, HC_UNSET_ON_SPAWN, HcAdapter, HcAttachError, hcRequest, hcSocketPath, type HcRequest } from "./hc"
 import { hcCoreEnvironment } from "./hc-core"
 import { paneLocation, sessionLocation } from "./interface"
 import { ManagedMultiplexer } from "./managed"
+import { runtimeDirFor } from "../paths"
 
 const hc = Bun.env.HC_BIN || Bun.which("hc")
 if (Bun.env.HC_REQUIRED && !hc) throw new Error("HC_REQUIRED is set but hc is not installed")
@@ -142,6 +143,64 @@ os.read(0, 16)
     await settle(500)
     expect(await adapter.interruptAgent(paneLocation(vim.nativeSessionId, vim.nativeWindowId, vim.nativePaneId))).toBe("stopped")
     await adapter.kill(sessionLocation(vim.nativeSessionId))
+  })
+
+  test("clanker terminals carry the Herdr app's adoption labels and an explicit terminal type", async () => {
+    const created = await adapter.spawn({ scope: "session", name: "app", cwd: "/tmp", launch: { kind: "argv", argv: ["sh", "-c", 'echo "term=$TERM/$COLORTERM"; sleep 60'] } })
+    const window = await adapter.spawn({ scope: "window", nativeSessionId: created.nativeSessionId, name: "second", cwd: "/tmp" })
+    await settle(300)
+    const read = hcRequest(socketPath)
+    const first = await read("terminal.get", { terminal: created.nativePaneId })
+    const second = await read("terminal.get", { terminal: window.nativePaneId })
+    expect(first.labels["herdr.space"]).toBe(created.nativeSessionId)
+    expect(second.labels["herdr.space"]).toBe(created.nativeSessionId)
+    expect(first.labels["herdr.tab"]).toBeTruthy()
+    expect(second.labels["herdr.tab"]).not.toBe(first.labels["herdr.tab"])
+    expect((await read("terminal.read", { terminal: created.nativePaneId })).text).toContain("term=xterm-256color/truecolor")
+    await adapter.kill(sessionLocation(created.nativeSessionId))
+  })
+
+  test("a tab the app opens joins its session, and a popup is no session at all", async () => {
+    const created = await adapter.spawn({ scope: "session", name: "grouped", cwd: "/tmp" })
+    const read = hcRequest(socketPath)
+    const tab = await read("terminal.run", { cwd: "/tmp", argv: ["sleep", "60"], labels: { "herdr.space": created.nativeSessionId, "herdr.tab": "from-the-app" }, no_parent: true, no_notify: true })
+    const popup = await read("terminal.run", { cwd: "/tmp", argv: ["sleep", "60"], labels: { ch_popup: "1" }, no_parent: true, no_notify: true })
+    const sessions = (await adapter.observe()).sessions
+    expect(sessions.find((candidate) => candidate.id === created.nativeSessionId)!.windows.map((window) => window.id)).toContain(tab.address ?? tab.terminal.address)
+    expect(sessions.some((candidate) => candidate.id === (popup.address ?? popup.terminal.address))).toBe(false)
+    await read("terminal.kill", { terminal: popup.address ?? popup.terminal.address })
+    await adapter.kill(sessionLocation(created.nativeSessionId))
+  })
+
+  test("the current location is the Herdr app's reported focus until it goes stale, and a popup stands for it", async () => {
+    const created = await adapter.spawn({ scope: "session", name: "focused", cwd: "/tmp" })
+    const read = hcRequest(socketPath)
+    const popup = await read("terminal.run", { cwd: "/tmp", argv: ["sleep", "60"], labels: { ch_popup: "1" }, no_parent: true, no_notify: true })
+    const saved = { runtime: Bun.env.XDG_RUNTIME_DIR, terminal: Bun.env.HC_TERMINAL_ID }
+    Bun.env.XDG_RUNTIME_DIR = mkdtempSync(join(home, "runtime-"))
+    const runtime = runtimeDirFor()
+    delete Bun.env.HC_TERMINAL_ID
+    try {
+      expect(await adapter.currentLocation()).toBeUndefined()
+      mkdirSync(runtime, { recursive: true })
+      writeFileSync(join(runtime, "hc-focus"), `${created.nativePaneId}\n`)
+      expect((await adapter.currentLocation())?.nativeSessionId).toBe(created.nativeSessionId)
+      Bun.env.HC_TERMINAL_ID = popup.address ?? popup.terminal.address
+      expect((await adapter.currentLocation())?.nativePaneId).toBe(created.nativePaneId)
+      Bun.env.HC_TERMINAL_ID = created.nativePaneId
+      expect((await adapter.currentLocation())?.nativePaneId).toBe(created.nativePaneId)
+      delete Bun.env.HC_TERMINAL_ID
+      const stale = new Date(Date.now() - HC_FOCUS_STALE_MS - 1000)
+      utimesSync(join(runtime, "hc-focus"), stale, stale)
+      expect(await adapter.currentLocation()).toBeUndefined()
+    } finally {
+      if (saved.runtime === undefined) delete Bun.env.XDG_RUNTIME_DIR
+      else Bun.env.XDG_RUNTIME_DIR = saved.runtime
+      if (saved.terminal === undefined) delete Bun.env.HC_TERMINAL_ID
+      else Bun.env.HC_TERMINAL_ID = saved.terminal
+    }
+    await read("terminal.kill", { terminal: popup.address ?? popup.terminal.address })
+    await adapter.kill(sessionLocation(created.nativeSessionId))
   })
 
   test("attach refuses a finished terminal with its reason and last output", async () => {

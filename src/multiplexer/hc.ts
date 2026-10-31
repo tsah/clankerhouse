@@ -5,7 +5,7 @@
  * so a session ends with its last terminal, as a herdr workspace does. Core lifecycle lives in `hc-core.ts`.
  */
 import { randomUUID } from "node:crypto"
-import { mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
 import {
@@ -22,6 +22,13 @@ const SESSION_LABEL = "ch_session"
 const SESSION_NAME_LABEL = "ch_session_name"
 const WINDOW_NAME_LABEL = "ch_window_name"
 const PANE_NAME_LABEL = "ch_pane_name"
+/** Herdr app adoption: a terminal with these labels gets a pane in that space and tab, so no clanker is ever pane-less there. */
+const APP_SPACE_LABEL = "herdr.space"
+const APP_TAB_LABEL = "herdr.tab"
+/** A picker in a Herdr app popup: not a session, and where the mod finds what was picked. */
+export const HC_POPUP_LABEL = "ch_popup"
+/** The Herdr app mod refreshes `hc-focus` every minute while the window is open; older than this, the window is gone. */
+export const HC_FOCUS_STALE_MS = 180_000
 /** Workshop Labels on session terminals; hc has no sidebar, so these serve `hc ls --label` and `shownLabels`. */
 const SHOWN_LABEL_PREFIX = "lbl_"
 /** The lane's session, so Clankerhouse never shares a core with a person's own `hc` use. */
@@ -99,6 +106,8 @@ interface HcForeground { pid: number; name?: string; argv?: string[]; cwd?: stri
 interface HcTerminal { address: string; name?: string | null; argv: string[]; cwd: string; pid: number | null; state: "live" | "finished"; reason?: string | null; exit_code?: number | null; title?: string; created_ms: number; reported?: boolean; status_ms?: number | null; status?: { state: string; app?: string; kind?: string; msg?: string } | null; labels: Record<string, string>; foreground?: HcForeground | null }
 
 /** Identity a terminal must never take from the core's environment. `spawn` unsets whichever the caller did not set. */
+/** `hc run` copies the caller's TERM, and a daemon has none or `dumb`, which breaks prompts like starship. */
+export const HC_TERMINAL_TYPE = { TERM: "xterm-256color", COLORTERM: "truecolor" }
 export const HC_UNSET_ON_SPAWN = ["CLANKER_ID", "CLANKER_SESSION_ID", "CLANKERHOUSE_WORKSHOP_ID", "CLANKERHOUSE_PARENT_WORKSHOP_ID", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
 
 /** `env -u` is the only way to remove a variable from a terminal: hc's `env` parameter can only set them. */
@@ -126,6 +135,8 @@ const agentStatusOf = (word: string | undefined): RuntimeAgentStatus => {
   if (word === "working" || word === "blocked" || word === "idle" || word === "done") return word
   return word === "error" ? "blocked" : "unknown"
 }
+
+const sessionOf = (terminal: HcTerminal) => terminal.labels[SESSION_LABEL] ?? terminal.labels[APP_SPACE_LABEL] ?? terminal.address
 
 const claimsFromLabels = (labels: Record<string, string>): ClaimMap => {
   const claims: ClaimMap = {}
@@ -187,10 +198,10 @@ export class HcAdapter implements Multiplexer {
     try { return `hc:${(await this.request("server.status")).pid}` } catch { return undefined }
   }
 
-  private async terminals() { return (await this.request("terminal.list")).terminals as HcTerminal[] }
+  private async terminals() { return ((await this.request("terminal.list")).terminals as HcTerminal[]).filter((terminal) => !terminal.labels[HC_POPUP_LABEL]) }
 
   /** One list call carries labels, status and foreground for every terminal. */
-  private async sessionTerminals(sessionId: string) { return (await this.terminals()).filter((terminal) => (terminal.labels[SESSION_LABEL] ?? terminal.address) === sessionId) }
+  private async sessionTerminals(sessionId: string) { return (await this.terminals()).filter((terminal) => sessionOf(terminal) === sessionId) }
 
   /** No per-pane requests: `terminal.list` has everything, so the `processInfo` options change nothing here. */
   async observe(): Promise<MultiplexerSnapshot> {
@@ -198,7 +209,7 @@ export class HcAdapter implements Multiplexer {
     const now = this.now()
     const grouped = new Map<string, HcTerminal[]>()
     for (const terminal of terminals) {
-      const id = terminal.labels[SESSION_LABEL] ?? terminal.address
+      const id = sessionOf(terminal)
       grouped.set(id, [...(grouped.get(id) ?? []), terminal])
     }
     const sessions = [...grouped].map(([id, members]): MultiplexerSession => {
@@ -303,23 +314,38 @@ export class HcAdapter implements Multiplexer {
     }
   }
 
-  /** hc has no focus and no client notion, so the only location it can name is the terminal this process runs in. */
+  /** The terminal the Herdr app last reported focused; hc itself has no focus. */
+  private reportedFocus() {
+    try {
+      const path = `${runtimeDirFor()}/hc-focus`
+      if (this.now() - statSync(path).mtimeMs > HC_FOCUS_STALE_MS) return undefined
+      return readFileSync(path, "utf8").trim() || undefined
+    } catch { return undefined }
+  }
+
+  /** The terminal this process runs in, else what the Herdr app has focused. A popup picker is neither: it stands for what it opened over. */
   async currentLocation(): Promise<CurrentLocation | undefined> {
-    const address = Bun.env.HC_TERMINAL_ID?.trim()
-    if (!address) return undefined
-    const terminal = await this.request("terminal.get", { terminal: address }) as HcTerminal
-    return { kind: "hc", instanceId: await this.instanceId(), nativeSessionId: terminal.labels[SESSION_LABEL] ?? address, nativeWindowId: address, nativePaneId: address }
+    const own = Bun.env.HC_TERMINAL_ID?.trim()
+    const ownTerminal = own ? await this.request("terminal.get", { terminal: own }) as HcTerminal : undefined
+    if (ownTerminal && !ownTerminal.labels[HC_POPUP_LABEL]) return this.locationOf(ownTerminal)
+    const reported = this.reportedFocus()
+    if (!reported) return undefined
+    try { return await this.locationOf(await this.request("terminal.get", { terminal: reported }) as HcTerminal) } catch { return undefined }
+  }
+
+  private async locationOf(terminal: HcTerminal): Promise<CurrentLocation> {
+    return { kind: "hc", instanceId: await this.instanceId(), nativeSessionId: sessionOf(terminal), nativeWindowId: terminal.address, nativePaneId: terminal.address }
   }
 
   /** Labels land atomically with the terminal, so a pane is never observable without its Claims. `no_parent` opts out of hc's parent cascade and notes. */
   async spawn(request: SpawnRequest): Promise<SpawnResult> {
     const sessionId = request.scope === "session" ? randomUUID() : request.nativeSessionId
     const inherited = request.scope === "window" ? (await this.sessionTerminals(sessionId))[0]?.labels ?? {} : {}
-    const labels: Record<string, string> = { ...Object.fromEntries(Object.entries(inherited).filter(([label]) => claimScopeOf(claimKeyByLabel.get(label) ?? "terminalId") === "session")), [SESSION_LABEL]: sessionId }
+    const labels: Record<string, string> = { ...Object.fromEntries(Object.entries(inherited).filter(([label]) => claimScopeOf(claimKeyByLabel.get(label) ?? "terminalId") === "session")), [SESSION_LABEL]: sessionId, [APP_SPACE_LABEL]: sessionId, [APP_TAB_LABEL]: randomUUID() }
     if (request.scope === "session") labels[SESSION_NAME_LABEL] = request.name
     const windowName = request.scope === "session" ? request.windowName : request.name
     if (windowName) labels[WINDOW_NAME_LABEL] = windowName
-    const env = { ...laneEnvironment(), CLANKERHOUSE_MULTIPLEXER: "hc", ...request.env }
+    const env = { ...laneEnvironment(), ...HC_TERMINAL_TYPE, CLANKERHOUSE_MULTIPLEXER: "hc", ...request.env }
     const argv = scrubbedArgv(request.launch?.kind === "argv" ? request.launch.argv : undefined, env)
     const created = await this.request("terminal.run", { cwd: request.cwd, env, labels, argv, no_parent: true, no_notify: true }) as { address?: string; terminal?: HcTerminal }
     const address = (created.terminal?.address ?? created.address)!

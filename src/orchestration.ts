@@ -29,11 +29,14 @@ export interface ClankerReportRecord {
   payload: Record<string, unknown> | null
 }
 
-export type MessageState = "queued" | "delivered" | "acked" | "orphaned"
+/** `unconfirmed`: handed over, but no acknowledgement came within ACK_TIMEOUT_MS; it may or may not have been seen. */
+export type MessageState = "queued" | "delivered" | "acked" | "orphaned" | "unconfirmed"
 export type StoredMessageState = MessageState
 
 /** A message whose recipient stays missing this long is orphaned for good and no longer waited for. */
 export const ORPHAN_AFTER_MS = 30 * 60_000
+/** A delivered message this old stops holding its clanker's queue. It is never resent: retyping could run it twice. */
+export const ACK_TIMEOUT_MS = 10 * 60_000
 
 export interface StoredMessage {
   messageId: string
@@ -54,9 +57,19 @@ export const orchestrationStatePath = () => `${stateDirFor()}/orchestration.sqli
 
 export const generatedMessageId = () => `msg-${randomUUID()}`
 
+const trimAscii = (text: string) => text.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "")
+
+/** Claude Code hands a pasted prompt to hooks as one `<pasted_content id="…">` block; the id on both tags must agree. */
+const unwrapPastedContent = (text: string) => {
+  const open = /^<pasted_content id="([^"\n]*)">\n/.exec(text)
+  if (!open) return text
+  const close = `\n</pasted_content id="${open[1]}">`
+  return text.endsWith(close) ? text.slice(open[0].length, -close.length) : text
+}
+
 /** Must match `prompt_sha256` in `native-client/src/bin/clankerhouse-hook.rs`. */
 export const promptSha256 = (text: string) =>
-  createHash("sha256").update(text.replace(/\r\n/g, "\n").replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "")).digest("hex")
+  createHash("sha256").update(trimAscii(unwrapPastedContent(trimAscii(text.replace(/\r\n/g, "\n"))))).digest("hex")
 
 export class ReportInputError extends Error {
   constructor(message: string) {
@@ -295,6 +308,12 @@ export class OrchestrationStore {
   orphanMessagesFor(clankerIds: readonly string[]): StoredMessage[] {
     if (!clankerIds.length) return []
     const rows = this.db.query(`UPDATE messages SET state = 'orphaned' WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
+    return rows.map(messageFromRow)
+  }
+
+  /** Give up on deliveries unacknowledged for `timeoutMs`, so one lost ack cannot block a queue forever. */
+  expireUnacknowledged(now = Date.now(), timeoutMs = ACK_TIMEOUT_MS): StoredMessage[] {
+    const rows = this.db.query("UPDATE messages SET state = 'unconfirmed' WHERE state = 'delivered' AND delivered_at <= ?1 RETURNING *").all(now - timeoutMs) as MessageRow[]
     return rows.map(messageFromRow)
   }
 

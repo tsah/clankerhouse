@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  MAX_PAYLOAD_BYTES, ORPHAN_AFTER_MS, OrchestrationStore, advanceWatchCursor, computeWatchEvents, initialWatchCursor, parseReportPayload, parseReportState, promptSha256,
+  ACK_TIMEOUT_MS, MAX_PAYLOAD_BYTES, ORPHAN_AFTER_MS, OrchestrationStore, advanceWatchCursor, computeWatchEvents, initialWatchCursor, parseReportPayload, parseReportState, promptSha256,
   readWatchCursor, readyForDelivery, reportAddressee, sendStatusOf, settleWatchCursor, writeWatchCursor, clankerBusy,
   type WatchCursor, type WatchEvent, type WatchView, type WatchedClanker,
 } from "./orchestration"
@@ -73,6 +73,9 @@ describe("queued prompt delivery", () => {
     const sha = (text: string) => createHash("sha256").update(text).digest("hex")
     expect(promptSha256("abc")).toBe(sha("abc"))
     expect(promptSha256("\n  a\r\nb \t\n")).toBe(sha("a\nb"))
+    expect(promptSha256('\n\n<pasted_content id="600e">\nline 1\nline 2\n</pasted_content id="600e">\n')).toBe(sha("line 1\nline 2"))
+    expect(promptSha256('typed <pasted_content id="a">\nx\n</pasted_content id="a">\n')).toBe(sha('typed <pasted_content id="a">\nx\n</pasted_content id="a">'))
+    expect(promptSha256('<pasted_content id="a">\nx\n</pasted_content id="b">')).toBe(sha('<pasted_content id="a">\nx\n</pasted_content id="b">'))
   })
 
   test("queues behind busy, focused, or waiting clankers and delivers one unacknowledged message at a time in order", () => {
@@ -105,6 +108,22 @@ describe("queued prompt delivery", () => {
     expect(store.claimNextDelivery("clanker-c", 4)!.messageId).toBe(second.messageId)
     store.acknowledge("clanker-c", [{ sha256: promptSha256("second"), generation: 5 }])
     expect(store.claimNextDelivery("clanker-c", 5)!.messageId).toBe(third.messageId)
+    store.close()
+  })
+
+  test("an unacknowledged delivery expires to unconfirmed, freeing the queue without resending it", () => {
+    const store = OrchestrationStore.open(`${temporary()}/expiry.sqlite3`)
+    const stuck = store.admitMessage({ clankerId: "clanker-x", text: "first", busy: false, afterGeneration: 1, now: 1_000 })
+    const next = store.admitMessage({ clankerId: "clanker-x", text: "second", busy: true, afterGeneration: 1, now: 1_001 })
+    const fresh = store.admitMessage({ clankerId: "clanker-y", text: "other", busy: false, afterGeneration: 1, now: 1_000 + ACK_TIMEOUT_MS })
+    expect(store.claimNextDelivery("clanker-x", 1, 1_002)).toBeUndefined()
+
+    expect(store.expireUnacknowledged(1_000 + ACK_TIMEOUT_MS - 1)).toEqual([])
+    expect(store.expireUnacknowledged(1_000 + ACK_TIMEOUT_MS).map((message) => message.messageId)).toEqual([stuck.messageId])
+    expect(store.message(stuck.messageId)).toMatchObject({ state: "unconfirmed" })
+    expect(store.message(fresh.messageId)).toMatchObject({ state: "delivered" })
+    expect(store.pendingMessages("clanker-x").map((message) => message.messageId)).toEqual([next.messageId])
+    expect(store.claimNextDelivery("clanker-x", 1)!.messageId).toBe(next.messageId)
     store.close()
   })
 

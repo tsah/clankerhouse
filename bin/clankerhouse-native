@@ -2,4 +2,5 @@
 # Compatibility name for the native picker; the Herdr launcher supervises the daemon.
 set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ "${CLANKERHOUSE_MULTIPLEXER:-}" != hc ] || exec "$script_dir/clankerhouse-hc" "$@"
 exec "$script_dir/clankerhouse-herdr" "$@"

@@ -71,6 +71,10 @@ export class ManagedMultiplexer {
     if (!this.capabilities().agentPrompt || !this.adapter.promptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent prompt")
     return this.adapter.promptAgent(location, text)
   }
+  interruptAgent(location: NativeLocation) {
+    if (!this.adapter.interruptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent interrupt")
+    return this.adapter.interruptAgent(location)
+  }
   claim(location: NativeLocation, key: ClaimKey, value: string | null) { return this.adapter.claim(location, key, value) }
   readClaim(location: NativeLocation, key: ClaimKey) { return this.adapter.readClaim(location, key) }
   paneAddressEnv() { return this.adapter.paneAddressEnv() }

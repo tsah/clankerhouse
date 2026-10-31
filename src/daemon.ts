@@ -18,6 +18,7 @@ import { advanceProjection, parseProjectionSnapshot } from "./projection"
 import type { ProjectionSnapshot } from "./projection"
 import { planRepositoryIdentities, readRepositoryIdentityCache, writeRepositoryIdentityCache } from "./repository-cache"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
+import { ensureHcCore, superviseHcCore } from "./multiplexer/hc-core"
 import { instanceSlug, runtimeDirFor, stateHomeDefault } from "./paths"
 import { paneLocation, sessionLocation } from "./multiplexer/interface"
 import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
@@ -586,7 +587,13 @@ const serverProgram = Effect.gen(function* () {
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   producerLease = yield* Effect.tryPromise({
-    try: async () => acquireProducerLease(`${runtimeDir}/producer.lease`, await daemonMultiplexer().instanceId()),
+    try: async () => {
+      if (daemonMultiplexer().kind === "hc") {
+        await ensureHcCore()
+        void superviseHcCore(new AbortController().signal, { log: console.error })
+      }
+      return acquireProducerLease(`${runtimeDir}/producer.lease`, await daemonMultiplexer().instanceId())
+    },
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   projectionSource = producerLease.epoch

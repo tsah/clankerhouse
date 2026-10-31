@@ -46,11 +46,12 @@ scope: Tsah will migrate manually once he decides to switch. The Herdr app is be
 **Verdict for switching (updated 2026-10-31): still NOT YET, and the cockpit question is now answered in principle.** The
 Clankerhouse side of every issue below is fixed or worked around, and a real vim-mode `claude` runs through the lane end to end.
 The Herdr app supplies the multi-terminal view and the keys. What stands between this and a switch: laptop verification over real
-ssh, the soak, the qa-hc failure below, and hc being a two-week-old preview.
+ssh, the soak, the puffin-only qa-hc failure below, and hc being a two-week-old preview.
 
-**Open on 2026-10-31: `scripts/qa-hc` fails locally** at "a daemon started from a terminal survives that terminal's exit sweep",
-with 24 checks passing before it. A daemon restarted mid-scenario never creates its socket. The same failure happens on unmodified
-commit 09e6791, so the app work did not introduce it, and the cause is not yet known.
+**Open on 2026-10-31: `scripts/qa-hc` fails on puffin but passes in CI.** On puffin it stops at "a daemon started from a terminal
+survives that terminal's exit sweep", with 24 checks passing first: a daemon restarted mid-scenario never creates its socket. The
+same failure happens on unmodified commit 09e6791, and it passed here on 2026-10-30. CI's `test-hc` job passes on e6310b3, which
+points at something on puffin. The cause is not yet known.
 
 | # | Issue | Outcome | How |
 |---|---|---|---|

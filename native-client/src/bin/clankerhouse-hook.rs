@@ -372,7 +372,23 @@ fn mark_activity(ctx: &Context, payload: &Value) {
 /// Hash of a submitted prompt, normalized as `promptSha256` in `src/orchestration.ts` is:
 /// CRLF folded to LF and surrounding ASCII whitespace removed.
 fn prompt_sha256(prompt: &str) -> String {
-    sha256_hex(prompt.replace("\r\n", "\n").trim_matches(|c: char| c.is_ascii_whitespace()).as_bytes())
+    let normalized = prompt.replace("\r\n", "\n");
+    let trimmed = normalized.trim_matches(|c: char| c.is_ascii_whitespace());
+    sha256_hex(unwrap_pasted_content(trimmed).trim_matches(|c: char| c.is_ascii_whitespace()).as_bytes())
+}
+
+/// Claude Code hands a pasted prompt to hooks as one `<pasted_content id="…">` block, and
+/// that block is the prompt's whole text for a Multiplexer paste. The id on both tags must agree.
+fn unwrap_pasted_content(prompt: &str) -> &str {
+    let unwrap = || {
+        let rest = prompt.strip_prefix("<pasted_content id=\"")?;
+        let (id, rest) = rest.split_once("\">\n")?;
+        if id.contains('\n') {
+            return None;
+        }
+        rest.strip_suffix(&format!("\n</pasted_content id=\"{id}\">"))
+    };
+    unwrap().unwrap_or(prompt)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -436,6 +452,9 @@ mod tests {
     fn prompt_hash_ignores_line_endings_and_surrounding_whitespace() {
         assert_eq!(prompt_sha256("abc"), sha256_hex(b"abc"));
         assert_eq!(prompt_sha256("\n  a\r\nb \t\n"), sha256_hex(b"a\nb"));
+        assert_eq!(prompt_sha256("\n\n<pasted_content id=\"600e\">\nline 1\nline 2\n</pasted_content id=\"600e\">\n"), sha256_hex(b"line 1\nline 2"));
+        assert_eq!(prompt_sha256("typed <pasted_content id=\"a\">\nx\n</pasted_content id=\"a\">\n"), sha256_hex(b"typed <pasted_content id=\"a\">\nx\n</pasted_content id=\"a\">"));
+        assert_eq!(prompt_sha256("<pasted_content id=\"a\">\nx\n</pasted_content id=\"b\">"), sha256_hex(b"<pasted_content id=\"a\">\nx\n</pasted_content id=\"b\">"));
     }
 
     #[test]

@@ -482,11 +482,15 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
     if (!store.hasPendingMessages()) return { delivered, acked, failed }
     const records = await discoverRecords(multiplexer, true)
     store.reconcileRecipients(new Set(records.map((record) => record.id)))
-    for (const clankerId of new Set(store.pendingMessages().map((message) => message.clankerId))) {
+    const recipients = [...new Set(store.pendingMessages().map((message) => message.clankerId))].flatMap((clankerId) => {
       const matches = records.filter((record) => record.id === clankerId)
-      if (matches.length !== 1) continue
-      const clanker = matches[0]!
-      acked.push(...store.acknowledge(clankerId, promptObservations(clanker.report)).map((message) => message.messageId))
+      return matches.length === 1 ? matches : []
+    })
+    for (const clanker of recipients) acked.push(...store.acknowledge(clanker.id, promptObservations(clanker.report)).map((message) => message.messageId))
+    // After this pass's acks, so a hook report that arrived in time still wins over the timeout.
+    store.expireUnacknowledged()
+    for (const clanker of recipients) {
+      const clankerId = clanker.id
       if (clanker.capabilities.send !== "multiplexer-prompt" || !readyForDelivery(clanker)) continue
       const claimed = store.claimNextDelivery(clankerId, clanker.generation)
       if (!claimed) continue
@@ -555,6 +559,7 @@ export async function waitForMessage(id: string, messageId: string, options: { t
     const { status, record, afterGeneration } = await messageStatus(messageId, multiplexer)
     if (status.clankerId !== id) throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was sent to ${status.clankerId}, not ${id}`, 3)
     if (status.state === "orphaned") throw new ClankerApiError("NOT_FOUND", `Clanker ${id} disappeared; message ${messageId} is orphaned and will not be delivered elsewhere`, 3)
+    if (status.state === "unconfirmed") throw new ClankerApiError("UNAVAILABLE", `Message ${messageId} was handed to clanker ${id} but never acknowledged; it was not resent, so check the clanker before sending it again`, 5)
     if (record && status.state === "acked") {
       const settled = status.startedGeneration === null ? record.settledGeneration > afterGeneration : record.settledGeneration >= status.startedGeneration
       if (settled) {

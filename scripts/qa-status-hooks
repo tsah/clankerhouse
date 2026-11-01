@@ -1,0 +1,232 @@
+#!/bin/bash
+
+# Status hooks end to end in an isolated Herdr server, state, runtime, and config: a real daemon
+# turns lifecycle hooks, Reports, stuck messages, markers, and pane deaths into webhook posts at a
+# local receiver, retries through an outage, and keeps its spool across a daemon restart.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-herdr-server
+. "$repo/scripts/lib/qa-herdr-server"
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-status-hooks-$uid-$$"}")
+[[ "$root" =~ ^/tmp/qa-clankerhouse-status-hooks-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe QA root: $root" >&2; exit 2; }
+marker="$root.clankerhouse-qa-owned"
+if [[ -e "$root" && ! -f "$marker" ]]; then echo "Refusing unowned QA root: $root" >&2; exit 2; fi
+rm -rf -- "$root"
+runtime="$root/runtime"
+state_home="$root/state"
+mkdir -p "$runtime" "$state_home" "$root/home" "$root/data"
+touch "$marker"
+server_pid=""
+receiver_pid=""
+
+cleanup() {
+    for pid in "$server_pid" "$receiver_pid"; do
+        if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    qa_herdr_stop
+    if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
+}
+trap cleanup EXIT INT TERM
+unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID CLANKER_ID CLANKERHOUSE_WORKSHOP_ID CLANKERHOUSE_PARENT_WORKSHOP_ID
+herdr_status=0
+qa_herdr_start "$root/herdr" || herdr_status=$?
+[[ "$herdr_status" != 77 ]] || exit 0
+[[ "$herdr_status" == 0 ]] || exit "$herdr_status"
+
+fail() { echo "Clankerhouse status hooks QA failed: $*" >&2; [[ -f "$root/server.log" ]] && tail -20 "$root/server.log" >&2; exit 1; }
+json_assert() { python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert eval(sys.argv[1], {"data": data}), (sys.argv[1], data)' "$1"; }
+
+config="$root/home/hooks.toml"
+qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$root/data"
+    "HERDR_ENV=" "HERDR_PANE_ID=" "CLANKERHOUSE_INSTANCE=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=" "CLANKERHOUSE_HOOKS_CONFIG=$config")
+api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
+mux() { api mux "$@"; }
+json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env HERDR_PANE_ID="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
+
+# The receiver appends each post to a file and answers with the status in a control file.
+inbox="$root/inbox.jsonl"
+answer="$root/answer"
+echo 200 >"$answer"
+: >"$inbox"
+port_file="$root/port"
+ANSWER="$answer" INBOX="$inbox" PORT_FILE="$port_file" bun --eval '
+  import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (request) => {
+    const body = await request.json()
+    const status = Number(readFileSync(process.env.ANSWER, "utf8"))
+    appendFileSync(process.env.INBOX, JSON.stringify({ status, key: request.headers.get("x-sender-key"), path: new URL(request.url).pathname, body }) + "\n")
+    return new Response("", { status })
+  } })
+  writeFileSync(process.env.PORT_FILE, String(server.port))
+  await new Promise(() => {})
+' >/dev/null 2>&1 &
+receiver_pid=$!
+for _ in {1..200}; do [[ -s "$port_file" ]] && break; sleep 0.02; done
+[[ -s "$port_file" ]] || fail "receiver did not start"
+
+cat >"$config" <<EOF
+[detect]
+debounce_seconds = 0.3
+exit_grace_seconds = 1
+stuck_message_seconds = 1
+
+[delivery]
+retry_base_seconds = 0.3
+retry_max_seconds = 1
+
+[[sinks]]
+name = "groky"
+url = "http://127.0.0.1:$(cat "$port_file")/routine/sekret-path"
+[sinks.headers]
+X-Sender-Key = "sekret-key"
+EOF
+
+# A world-readable config is refused.
+chmod 644 "$config"
+api hooks status --json | json_assert 'data["config"]["state"] == "invalid" and "chmod 600" in data["config"]["error"]'
+set +e; api hooks test >/dev/null 2>&1; code=$?; set -e
+[[ $code -ne 0 ]] || fail "hooks test accepted a world-readable config"
+chmod 600 "$config"
+echo "PASS: a config other users can read is refused"
+
+api hooks test | json_assert 'data[0]["sink"] == "groky" and data[0]["ok"] and data[0]["status"] == 200'
+json_assert 'data["body"]["type"] == "hooks.test" and data["key"] == "sekret-key" and data["path"] == "/routine/sekret-path"' <"$inbox"
+status=$(api hooks status)
+grep -q "groky delivered hooks.test" <<<"$status" || fail "hooks status omits the sample: $status"
+if grep -q sekret <<<"$status$(api hooks status --json)"; then fail "hooks status leaked a secret"; fi
+: >"$inbox"
+echo "PASS: hooks test posts a sample and hooks status shows it without secrets"
+
+repository="$root/repo"
+git init -q -b main "$repository"
+git -C "$repository" -c user.name=QA -c user.email=qa@example.invalid commit -qm fixture --allow-empty
+"${qa_env[@]}" bun --eval '
+  const [modulePath, path] = process.argv.slice(1)
+  const { identifyWorkshopSync, registerWorkshop } = await import(modulePath)
+  registerWorkshop(identifyWorkshopSync(path), { parentWorkshopId: null })
+' "$repo/src/workshop.ts" "$repository"
+api workshop label set --cwd "$repository" "title=Status QA" >/dev/null
+
+clanker=clanker-qa-status
+spawned=$(mux spawn --new-session qa-status --name claude --cwd "$repository" -- sleep 600)
+mux claim --session "$(json_field nativeSessionId <<<"$spawned")" worktreePath "$repository"
+pane=$(json_field nativePaneId <<<"$spawned")
+mux claim --pane "$pane" harness claude
+mux claim --pane "$pane" clankerId "$clanker"
+hook "$pane" "$clanker" idle '{"hook_event_name":"SessionStart"}'
+
+start_daemon() {
+    "${qa_env[@]}" env CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_REFRESH_MS=200 \
+        bun run "$repo/src/daemon.ts" --server >>"$root/server.log" 2>&1 &
+    server_pid=$!
+    for _ in {1..600}; do
+        [[ -S "$runtime/clankerhouse-$uid-herdr/daemon.sock" ]] && return 0
+        kill -0 "$server_pid" 2>/dev/null || fail "daemon exited during startup"
+        sleep 0.05
+    done
+    fail "daemon socket did not appear"
+}
+stop_daemon() { kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""; }
+await_post() {
+    local type=$1 min=${2:-1}
+    for _ in {1..300}; do
+        [[ "$(grep -c "\"type\":\"$type\"" "$inbox" || true)" -ge "$min" ]] && return 0
+        sleep 0.05
+    done
+    cat "$inbox" >&2
+    fail "no $type post arrived"
+}
+last_post() { grep "\"type\":\"$1\"" "$inbox" | tail -1; }
+await_baseline() {
+    # The daemon's first observation sets the baseline; everything already true stays quiet.
+    for _ in {1..300}; do
+        bun --eval 'import { Database } from "bun:sqlite"; const db = new Database(process.argv[1], { readonly: true }); process.exit(db.query("SELECT 1 FROM meta").get() ? 0 : 1)' "$state_home/clankerhouse-herdr/status-events.sqlite3" 2>/dev/null && return 0
+        sleep 0.05
+    done
+    fail "the daemon never recorded its baseline"
+}
+
+start_daemon
+await_baseline
+sleep 0.5
+[[ ! -s "$inbox" ]] || fail "the baseline published events: $(cat "$inbox")"
+echo "PASS: enabling hooks replays nothing"
+
+hook "$pane" "$clanker" working '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'
+hook "$pane" "$clanker" done '{"hook_event_name":"Stop","background_tasks":[]}'
+await_post clanker.settled
+last_post clanker.settled | json_assert "data['key'] == 'sekret-key' and data['body']['clankerId'] == '$clanker' and data['body']['newState'] == 'done' and data['body']['workshop'] == 'Status QA' and data['body']['title'] == 'Status QA' and data['body']['repo'] == 'repo' and data['body']['branch'] == 'main' and data['body']['worktree'] == '$repository' and data['body']['pane'] == '$pane' and data['body']['harness'] == 'claude' and data['body']['dedupeKey']"
+echo "PASS: a settled turn posts the full payload"
+
+hook "$pane" "$clanker" working '{"hook_event_name":"UserPromptSubmit","prompt":"more"}'
+sleep 0.8
+hook "$pane" "$clanker" blocked '{"hook_event_name":"Notification"}'
+await_post clanker.blocked
+last_post clanker.blocked | json_assert "data['body']['oldState'] in ('working', 'done') and data['body']['newState'] == 'blocked'"
+hook "$pane" "$clanker" working '{"hook_event_name":"PostToolUse"}'
+sleep 0.05
+hook "$pane" "$clanker" blocked '{"hook_event_name":"Notification"}'
+sleep 0.05
+hook "$pane" "$clanker" working '{"hook_event_name":"PostToolUse"}'
+sleep 1
+[[ "$(grep -c '"type":"clanker.blocked"' "$inbox")" == 1 ]] || fail "a flap within the debounce was published"
+echo "PASS: blocked posts once and a flap inside the debounce is dropped"
+
+(cd "$repository" && "${qa_env[@]}" env CLANKER_ID="$clanker" "$repo/bin/clankers" report --state done --no-parent --message "Shipped https://github.com/example/repo/pull/42") >/dev/null
+await_post report.done
+last_post report.done | json_assert "data['body']['prUrl'] == 'https://github.com/example/repo/pull/42' and 'Shipped' in data['body']['summary']"
+echo "PASS: a done Report posts with its PR URL"
+
+mkdir -p "$repository/temp/aws"
+touch "$repository/temp/aws/login-pending"
+await_post marker.aws-login-pending
+last_post marker.aws-login-pending | json_assert "data['body']['newState'] == 'present' and data['body']['details']['path'] == 'temp/aws/login-pending'"
+echo "PASS: an AWS login marker posts when it appears"
+
+"${qa_env[@]}" bun --eval '
+  const [modulePath, clanker] = process.argv.slice(1)
+  const { withOrchestrationStore } = await import(modulePath)
+  withOrchestrationStore((store) => store.insertMessage({ clankerId: clanker, text: "Stuck prompt", delivery: "immediate", state: "delivered", afterGeneration: 999 }))
+' "$repo/src/orchestration.ts" "$clanker"
+await_post message.stuck
+last_post message.stuck | json_assert "data['body']['clankerId'] == '$clanker' and data['body']['details']['messageId'].startswith('msg-')"
+echo "PASS: a message stuck in delivered posts"
+
+# An outage: the post fails, the daemon restarts, and the spool delivers the same event afterwards.
+echo 503 >"$answer"
+hook "$pane" "$clanker" done '{"hook_event_name":"Stop","background_tasks":[]}'
+await_post clanker.settled 2
+api hooks status --json | json_assert 'data["totals"][0]["pending"] >= 1 and any(row["state"] == "pending" and row["lastError"] == "HTTP 503" for row in data["recent"])'
+stop_daemon
+echo 200 >"$answer"
+start_daemon
+for _ in {1..200}; do
+    pending=$(api hooks status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["totals"][0]["pending"])')
+    [[ "$pending" == 0 ]] && break
+    sleep 0.05
+done
+[[ "$pending" == 0 ]] || fail "the spool did not drain after the restart"
+python3 - "$inbox" <<'EOF'
+import json, sys
+posts = [json.loads(line) for line in open(sys.argv[1])]
+settled = [post for post in posts if post["body"]["type"] == "clanker.settled"]
+last = settled[-1]
+same = [post for post in settled if post["body"]["dedupeKey"] == last["body"]["dedupeKey"]]
+assert last["status"] == 200 and len(same) >= 2 and same[0]["status"] == 503, settled
+accepted = [post["body"]["dedupeKey"] for post in posts if post["status"] == 200]
+assert len(accepted) == len(set(accepted)), accepted
+EOF
+echo "PASS: an outage retries the same dedupe key through a daemon restart and nothing is accepted twice"
+
+hook "$pane" "$clanker" working '{"hook_event_name":"UserPromptSubmit","prompt":"last"}'
+sleep 0.8
+mux kill --pane "$pane"
+await_post clanker.crashed
+last_post clanker.crashed | json_assert "data['body']['clankerId'] == '$clanker' and data['body']['newState'] == 'exited' and data['body']['oldState'] == 'working' and data['body']['repo'] == 'repo'"
+echo "PASS: a clanker that dies mid-turn posts crashed with its remembered facts"
+
+api --help | grep -q "clankers hooks status" || fail "help omits hooks"
+echo "Clankerhouse status hooks QA passed: config privacy, sample and status, baseline, settled, blocked, debounce, Reports, markers, stuck messages, retry through a restart, and crash detection."

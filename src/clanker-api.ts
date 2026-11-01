@@ -237,9 +237,9 @@ type RecordSource = "daemon" | "multiplexer"
 
 interface DiscoveredRecords { records: ClankerRecord[]; source: RecordSource }
 
-const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, strict: boolean, allowDaemon: boolean): Promise<DiscoveredRecords> => {
+const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, strict: boolean, allowDaemon: boolean, observed?: PaneMetadata[]): Promise<DiscoveredRecords> => {
   const multiplexer = injected ?? openManagedMultiplexer()
-  let rows: PaneMetadata[] | undefined = allowDaemon && !injected ? await daemonPaneMetadata(multiplexer) : undefined
+  let rows: PaneMetadata[] | undefined = observed ?? (allowDaemon && !injected ? await daemonPaneMetadata(multiplexer) : undefined)
   const source: RecordSource = rows ? "daemon" : "multiplexer"
   if (!rows) {
     try { rows = await discoverPaneMetadata(multiplexer) }
@@ -289,8 +289,8 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
   return { records: records.filter((record) => !harnessExited(record.pane, record.id)), source }
 }
 
-const discoverRecords = async (multiplexer?: ManagedMultiplexer, strict = false) =>
-  (await discoverRecordsFrom(multiplexer, strict, true)).records
+const discoverRecords = async (multiplexer?: ManagedMultiplexer, strict = false, observed?: PaneMetadata[]) =>
+  (await discoverRecordsFrom(multiplexer, strict, true, observed)).records
 
 /** Records that satisfy `found`, observing the Multiplexer directly when the daemon's herd does not have them yet. */
 const discoverRecordsWhere = async (multiplexer: ManagedMultiplexer | undefined, strict: boolean, found: (records: ClankerRecord[]) => boolean) => {
@@ -306,10 +306,11 @@ const canonicalFilterPath = (cwd: string) => {
   return realpathSafe(git.exitCode === 0 ? git.stdout.toString().trim() : cwd)
 }
 
-type ListOptions = { cwd?: string; multiplexer?: ManagedMultiplexer; strict?: boolean }
+/** `panes` is an observation the caller already holds, as the daemon does; nothing observes again. */
+type ListOptions = { cwd?: string; multiplexer?: ManagedMultiplexer; strict?: boolean; panes?: PaneMetadata[] }
 
 const listRecords = async (options: ListOptions) => {
-  const records = await discoverRecords(options.multiplexer, options.strict)
+  const records = await discoverRecords(options.multiplexer, options.strict, options.panes)
   if (!options.cwd) return records
   const cwd = canonicalFilterPath(options.cwd)
   return records.filter((clanker) => (clanker.worktreePath ? realpathSafe(clanker.worktreePath) : canonicalFilterPath(clanker.cwd)) === cwd)

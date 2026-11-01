@@ -127,7 +127,7 @@ export const claudeTranscriptPath = (sessionId: string, cwds: readonly string[],
 }
 
 /** The hook records the transcript path; hooks that predate it leave only the session id to find it by. */
-const liveClaudeText = (clanker: ClankerInfo, facts: Pick<ClankerReportFacts, "harnessSessionId" | "transcriptPath">) => {
+export const liveClaudeText = (clanker: Pick<ClankerInfo, "cwd" | "worktreePath">, facts: Pick<ClankerReportFacts, "harnessSessionId" | "transcriptPath">) => {
   const path = facts.transcriptPath || (facts.harnessSessionId ? claudeTranscriptPath(facts.harnessSessionId, [clanker.cwd, clanker.worktreePath].filter(Boolean)) : undefined)
   return path ? lastClaudeTranscriptText(path) : null
 }

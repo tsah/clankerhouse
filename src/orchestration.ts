@@ -211,6 +211,11 @@ export class OrchestrationStore {
     return rows.map(reportFromRow)
   }
 
+  /** Every Report after `seq`, in order. */
+  reportsSince(seq: number): ClankerReportRecord[] {
+    return (this.db.query("SELECT * FROM reports WHERE seq > ?1 ORDER BY seq").all(seq) as ReportRow[]).map(reportFromRow)
+  }
+
   insertMessage(input: { messageId?: string; clankerId: string; text: string; delivery: StoredMessage["delivery"]; state: StoredMessageState; afterGeneration: number; now?: number; startedGeneration?: number | null }): StoredMessage {
     const now = input.now ?? Date.now()
     const messageId = input.messageId ?? generatedMessageId()

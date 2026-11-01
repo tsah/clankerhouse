@@ -152,6 +152,85 @@ The local daemon Interface exposes health/status, snapshot/subscription, project
 
 The `Alt-K` Herdr binding launches Clankerhouse.
 
+## Status hooks
+
+The daemon can push clanker status to outside systems instead of being polled. Hooks are off until a config exists at `~/.config/clankerhouse/hooks.toml` (or under `$XDG_CONFIG_HOME`; a named instance reads `hooks-<instance>.toml`, and `CLANKERHOUSE_HOOKS_CONFIG` overrides the path). The file holds secrets, so it must be `chmod 600`; a file others can read is refused. It lives outside every repository, and `.gitignore` covers the name in case a copy lands in the checkout.
+
+```toml
+[[sinks]]
+name = "groky"
+url = "https://example.invalid/routines/ROUTINE/webhook"
+events = ["clanker.*", "report.*", "message.stuck", "marker.*"]   # optional; default is every event
+[sinks.headers]
+X-Sender-Key = "SECRET"
+
+[[sinks]]                     # optional: one command per event, event JSON on stdin
+name = "local-log"
+kind = "exec"
+argv = ["/home/me/bin/on-clanker-event"]
+
+[detect]                      # all optional; these are the defaults
+debounce_seconds = 5          # a new state must hold this long, so flapping publishes nothing
+exit_grace_seconds = 20       # a clanker must stay missing this long
+stuck_message_seconds = 180   # how long a message may sit `delivered` without its ack
+[detect.markers]              # setting this table replaces the default list
+aws-login-pending = "temp/aws/login-pending"
+
+[delivery]                    # all optional; these are the defaults
+timeout_seconds = 10
+retry_base_seconds = 5        # doubles on each failure
+retry_max_seconds = 900
+give_up_after_seconds = 86400
+```
+
+The daemon picks up a new or edited config at its next refresh; a broken edit is logged once and the last good config stays in force. Enabling hooks starts from now and replays nothing, and removing the config forgets the position, so enabling them later also starts from now. Webhook URLs must be `https` (plain `http` only on loopback).
+
+| Event | When | `oldState` → `newState` |
+|---|---|---|
+| `clanker.settled` | A turn finished and the clanker waits for input | `working`/`blocked` → `done`/`idle` |
+| `clanker.blocked` | The harness waits on a permission prompt | → `blocked` |
+| `clanker.exited` | The clanker left while settled, or was closed on purpose | → `exited` |
+| `clanker.crashed` | The clanker vanished mid-turn with no deliberate close | → `exited` |
+| `report.done`, `report.question`, `report.blocked`, `report.failed` | A clanker filed that Report (`working` Reports publish nothing) | null → current lifecycle state |
+| `message.stuck` | A message stayed `delivered` with no acknowledgement | `delivered` → `delivered` |
+| `marker.<name>` | A Marker file appeared in a live clanker's worktree, and again if it returns after going away | `absent` → `present` |
+
+Seeing a finished clanker (`done` → `idle`) publishes nothing. A turn start publishes nothing either; the next event says where it ended up. `oldState` is the last state detection settled on, so a state that lasted less than the debounce never appears. `clanker.crashed` is an inference, since the harness wrapper records no exit status: killing a working clanker's pane by hand counts as a crash. Codex clankers report no lifecycle state, so they publish only Reports.
+
+Each webhook is a `POST` of this JSON, with `content-type: application/json`, `x-clankerhouse-event`, `x-clankerhouse-dedupe-key`, and the configured headers:
+
+```json
+{
+  "version": 1,
+  "id": "3e319db1-3a77-401a-8d1f-6a24448297ff",
+  "dedupeKey": "clanker.settled:clanker-3f1c:1793565333775",
+  "type": "clanker.settled",
+  "timestamp": "2026-11-01T20:35:33.775Z",
+  "at": 1793565333775,
+  "host": "puffin",
+  "clankerId": "clanker-3f1c",
+  "workshopId": "f840979a-c2a0-4e35-ac86-6e4cfe5ca396",
+  "workshop": "Push clanker status events to webhooks",
+  "title": "Push clanker status events to webhooks",
+  "repo": "clankerhouse",
+  "branch": "status-hooks",
+  "worktree": "/home/me/clankerhouse.status-hooks",
+  "pane": "w2:p2",
+  "harness": "claude",
+  "oldState": "working",
+  "newState": "done",
+  "summary": "All tests pass; the branch is ready for review.",
+  "prUrl": null,
+  "details": { "settledGeneration": 4 }
+}
+```
+
+`workshop` is the title, else the branch. `title`, `repo`, `branch`, `worktree`, `pane`, `harness`, `summary`, and `prUrl` can each be null; a Report's clanker that was never seen alive may have only its Workshop's facts. `summary` is a one-line excerpt of at most 500 characters of the clanker's last assistant text, else its last Report, so it leaves the host: point sinks only at systems allowed to read it. `prUrl` is the first pull-request URL found in the Report's payload (`prUrl`, `pr_url`, `pr`), the Workshop's `pr`, `pr_url`, or `_pr` label, or the clanker's words; Clankerhouse never asks the forge. `details` holds what is specific to the event: `seq`, `reportState`, `to`, and `payload` for Reports, `messageId`, `deliveredAt`, and `stuckSeconds` for stuck messages, `path` for Markers, `closedReason` for exits. Marker contents are never read or sent.
+
+Events and deliveries are spooled in `status-events.sqlite3` in the instance state directory, together with the detection position, so a daemon restart neither loses nor repeats a transition, and pending deliveries continue. Delivery is at least once: a receiver drops a `dedupeKey` it has already seen. A timeout, a network failure, a 408, 425, 429, or 5xx, or a command's nonzero exit retries with backoff, honouring `Retry-After`, and pauses only that sink. Any other response, including a redirect, which is never followed so a key cannot reach another host, fails that event for good. A delivery past `give_up_after_seconds` fails too. Finished events are forgotten after 14 days.
+
+`clankers hooks test [--sink NAME]` sends one sample (`type` `hooks.test`, `test` true) to each sink, ignoring its `events` filter and never retrying, and exits nonzero if one failed. `clankers hooks status [--json] [--limit N]` shows the config's state, totals per sink, and recent deliveries with their last error and next attempt; it shows a sink's host and header names, never its URL path or header values. The daemon logs delivery failures to its own log the same way.
+
 ## The clanker ledger and restarts
 
 Clankerhouse does not relaunch anything on its own after a restart. Instead, every Pi, Claude, and OpenCode clanker it launches or sees is recorded in the clanker ledger, `$XDG_STATE_HOME/clankerhouse-herdr/clankers.sqlite3`: its Workshop and cwd, harness, launch options (profile, model, resource class), original task, and the harness session it is running. The session follows the harness, so after `/clear`, `/new`, or a resume the ledger names the conversation the pane actually holds. Pi and Claude get preallocated session IDs at launch; OpenCode's `ses_…` ID is recorded once its plugin binds it. Codex is not recorded because it has no exact resume contract.

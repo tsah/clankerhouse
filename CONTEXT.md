@@ -86,6 +86,18 @@ A Workshop whose live resources were released on purpose with `clankers workshop
 
 An executable Clankerhouse runs inside the Workshop: either tracked in the target repository at `.clankerhouse/hooks/<event>`, or kept by the operator per project at `~/.config/clankerhouse/hooks/<project>/<event>`. The repository's hook wins when both exist. `labels-changed` runs detached after a Label actually changes and cannot fail that change. `done` replaces the built-in delete-key rule for that repository: exit `0` means the repository handled the key, exit `1` leaves Clankerhouse's destroy confirmation, and any other exit is reported as a failure. `post-create` runs detached in its own resource-limited scope once a new worktree Workshop exists, so the repository can prepare it; its output and exit status go to a log, never to the create. Repository-specific workflow lives in these scripts, never in Clankerhouse.
 
+## Status Event
+
+A published fact about a Clanker, derived by the daemon from Observations and Reports for something outside the host: a turn settled, it blocked, it filed a Report, it exited or crashed, a message stuck in `delivered`, or a Marker appeared in its worktree. A Status Event never changes any Clanker or Workshop; it only announces. `done` and `idle` are one phase here, because the difference between them is whether the operator has looked.
+
+## Sink
+
+A configured destination for Status Events, kept in the operator's private config outside any repository: a webhook or a command. A Sink chooses which event types it wants and gets each at least once, carrying a dedupe key that stays the same across retries. What an event means, and what to do about it, belongs to whatever receives it.
+
+## Marker
+
+A named path inside a worktree whose appearance is announced as a Status Event, such as `temp/aws/login-pending`. Clankerhouse sees only that the file exists, never reads it, and gives it no meaning.
+
 ## Observation
 
 A timestamped fact reported by an external runtime Adapter, such as multiplexer topology, process presence, lifecycle state, or Git state. Clankerhouse preserves and correlates Observations but does not own the external reality they describe. Failure to validate an Observation reduces its confidence or prevents it from establishing managed identity; it does not erase the observed fact. Current Multiplexer Locations are Observations rather than durable present-tense truth.

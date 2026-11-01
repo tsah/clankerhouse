@@ -412,6 +412,25 @@
         "With Workshops from several projects listed, judge that the project colour of the row names tells them apart at a glance and never reads as a state",
         "Under Herdr, run `clankers workshop stop` in a done Workshop with a live clanker; confirm its workspace closes, the herdr server's open fds drop by about three per pane, the row stays in the picker without a session, its clanker is closed in `clankers ledger`, and opening the row starts a plain shell"
       ]
+    },
+    {
+      "id": "status-hooks",
+      "title": "Status Events pushed to webhook and exec sinks from a durable outbox",
+      "core": true,
+      "unit": [
+        "src/status-events.test.ts",
+        "src/status-sinks.test.ts",
+        "src/status-hooks.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-status-hooks"
+      ],
+      "manual": [
+        "With a sink pointed at a throwaway receiver, finish a real Claude turn and confirm one clanker.settled post arrives within seconds, carrying the Workshop title, branch, pane, and the clanker's last words",
+        "Look at the finished clanker's tab and confirm that seeing it posts nothing",
+        "Point a sink at a dead port, run `clankers hooks status`, and judge that it makes the failure and next attempt obvious without showing the URL path or any header value",
+        "Run `clankers hooks test` and confirm the receiver can tell the sample from a real event"
+      ]
     }
   ]
 }

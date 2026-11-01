@@ -25,6 +25,7 @@ import { openDurableRegistry, type DurableRegistry } from "./registry"
 import { legacyRecoveryStatePath, openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { LifecycleMirror } from "./lifecycle-mirror"
+import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
@@ -65,6 +66,7 @@ const liveLifecycleReports = new Map<string, LifecycleObservation>()
 let latestHerd: HerdResult<PaneMetadata> | undefined
 const lifecycleSequences = new Map<string, number>()
 let projectionRefreshScheduled = false
+let statusHooks: StatusHookRuntime | undefined
 let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; managedResources: ReturnType<typeof readManagedResources> } | undefined
 const invalidateProjectionEnrichment = () => { projectionEnrichmentCache = undefined }
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
@@ -441,6 +443,10 @@ const readCache = () => readCachePayload()?.sessions
 const refreshProjectionSnapshot = () => {
   if (!projectionRefreshInFlight) {
     projectionRefreshInFlight = Effect.runPromise(collectSessions.pipe(Effect.flatMap(writeCache)))
+      .then((snapshot) => {
+        void statusHooks?.observed()
+        return snapshot
+      })
       .finally(() => { projectionRefreshInFlight = undefined })
   }
   return projectionRefreshInFlight
@@ -548,6 +554,7 @@ const serverProgram = Effect.gen(function* () {
     cleanup()
     stopHookStateRequests?.()
     stopQueuedDelivery?.()
+    statusHooks?.stop()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
     void closing.finally(() => producerLease?.release()).finally(() => durableRegistry?.close()).finally(() => process.exit(0))
@@ -592,6 +599,10 @@ const serverProgram = Effect.gen(function* () {
   projectionSource = producerLease.epoch
   stopHookStateRequests = watchHookStateRequests(`${runtimeDir}/hook-events`, applyHookStateRequest)
   stopQueuedDelivery = startQueuedDelivery()
+  statusHooks = new StatusHookRuntime({
+    view: liveStatusView({ panes: () => latestHerd?.panes, multiplexer: daemonMultiplexer }),
+    requestObservation: scheduleProjectionRefresh,
+  })
   if (daemonMultiplexer().capabilities().nativeChanges) {
     // Runtimes with a native Change Stream drive refreshes by event; polled runtimes rely on the refresh loop below.
     const changeSignal = new AbortController()

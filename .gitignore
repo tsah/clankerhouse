@@ -8,3 +8,7 @@ __pycache__/
 !.env.example
 native-client/target/
 .qa-artifacts/
+
+# Status hook sinks hold webhook secrets; see ~/.config/clankerhouse/hooks.toml.
+hooks.toml
+hooks-*.toml

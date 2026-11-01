@@ -5,6 +5,7 @@ import { join, resolve } from "node:path"
 import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, listClankers, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
 import { submitReport } from "./report"
+import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
 import { openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
@@ -288,6 +289,41 @@ const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; i
     .filter((row) => !options.interrupted || row.interrupted !== false)
 }
 
+const printHooksStatus = (status: ReturnType<typeof hooksStatus>) => {
+  const { config, totals, recent } = status
+  console.log(`Config: ${config.path} (${config.state})${config.error ? `: ${config.error}` : ""}`)
+  for (const sink of config.sinks) console.log(`Sink ${sink.name}: ${sink.kind} ${"host" in sink ? `${sink.host} [headers: ${sink.headers?.join(", ") || "none"}]` : sink.command} events=${sink.events.join(",")}`)
+  for (const total of totals) console.log(`Totals ${total.sink}: ${total.delivered} delivered, ${total.pending} pending, ${total.failed} failed`)
+  if (recent.length) console.log("Recent deliveries:")
+  for (const row of recent) {
+    const outcome = row.lastError ? `: ${row.lastError}` : row.lastStatus ? ` (HTTP ${row.lastStatus})` : ""
+    const retry = row.state === "pending" && row.nextAttemptAt ? `, next attempt ${new Date(row.nextAttemptAt).toISOString()}` : ""
+    console.log(`${new Date(row.at).toISOString()} ${row.sink} ${row.state} ${row.type} attempts=${row.attempts}${outcome}${retry}`)
+  }
+}
+
+const runHooksCommand = async (parsed: ParsedArgs) => {
+  const hooksUsage = "Usage: clankers hooks status [--json] [--limit N] | test [--sink NAME]"
+  const action = parsed.shift()
+  if (action === "status") {
+    const json = parsed.has("--json")
+    const limit = nonNegativeNumber(parsed.take("--limit"), "--limit")
+    if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${hooksUsage}`)
+    const status = hooksStatus({ limit })
+    return json ? console.log(JSON.stringify(status, null, 2)) : printHooksStatus(status)
+  }
+  if (action === "test") {
+    const sink = parsed.take("--sink")
+    if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${hooksUsage}`)
+    const results = await sendHooksTest({ sink })
+    console.log(JSON.stringify(results))
+    const failed = results.filter((result) => !result.ok).map((result) => result.sink)
+    if (failed.length) throw new ClankerApiError("UNAVAILABLE", `Sample event failed for: ${failed.join(", ")}`, 5)
+    return
+  }
+  throw new Error(hooksUsage)
+}
+
 export const usage = `Usage:
   clankerhouse
   clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--clanker-name NAME] [--resource-class interactive|validation-heavy|untrusted] [--parent ID | --no-parent] [--wait] [--prompt TEXT]
@@ -310,6 +346,8 @@ export const usage = `Usage:
   clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
   clankers view children [WORKSHOP] | clear
+  clankers hooks status [--json] [--limit N]
+  clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers ledger [--state open|closed | --interrupted] [--workshop ID]
   clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
@@ -419,6 +457,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
 
   if (command === "mux") return runMultiplexerCli(parsed)
   if (command === "view") return runViewCommand(parsed)
+  if (command === "hooks") return runHooksCommand(parsed)
 
   if (command === "delete") {
     const kind = parsed.shift()

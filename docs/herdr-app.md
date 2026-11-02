@@ -20,10 +20,10 @@ verified.
 
 ### 1. On puffin
 
-The lane is not deployed, so use the worktree's launcher until it is:
+Start the lane (it runs beside the Herdr TUI lane; the daemon is the `clankerhouse-daemon-hc` user unit):
 
 ```bash
-~/clankerhouse.herdr-core-eval/bin/clankerhouse-hc --ensure-server
+clankerhouse-hc --ensure-server
 ```
 
 ### 2. Install the app
@@ -54,7 +54,7 @@ hc machine ls
 From a checkout on the laptop:
 
 ```bash
-contrib/herdr-app/install --machine puffin --launcher /home/tsah/clankerhouse.herdr-core-eval/bin/clankerhouse-hc
+contrib/herdr-app/install --machine puffin --launcher clankerhouse-hc
 herdr-app do layout.switch --name clankerhouse
 herdr-app check ~/.config/herdr-app/mods/clankerhouse
 ```

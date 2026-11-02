@@ -1,0 +1,57 @@
+#!/bin/bash
+# A continuous soak of the hc lane on a scratch session: a few synthetic agents, traffic through HcAdapter, and a periodic
+# check for leaks, crashes and status drift. Runs as a systemd user service, so it outlives whoever started it.
+#
+#   scripts/soak-hc start [--agents N] [--check-seconds S]   default 4 agents, a check every 600 s
+#   scripts/soak-hc status                                   is it running, and the last check
+#   scripts/soak-hc stop                                     stop it, its terminals and its core; the log stays
+#   scripts/soak-hc report                                   write the log's summary into docs/herdr-core-eval.md
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+unit=clankerhouse-hc-soak.service
+session=eval-soak
+root=/tmp/hc-soak-$(id -u)
+log_dir="$repo/soak"
+log="$log_dir/hc-soak.jsonl"
+export HC_SESSION=$session XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config"
+
+case "${1:-}" in
+    start)
+        shift
+        agents=4 check=600
+        while (($#)); do
+            case "$1" in
+                --agents) agents=${2:?}; shift 2 ;;
+                --check-seconds) check=${2:?}; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 2 ;;
+            esac
+        done
+        systemctl --user is-active --quiet "$unit" && { echo "Soak is already running; scripts/soak-hc stop first" >&2; exit 1; }
+        [[ -S "/run/user/$(id -u)/systemd/private" ]] || { echo "The soak needs a systemd user manager" >&2; exit 1; }
+        mkdir -p -m 700 "$root" && mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$log_dir"
+        systemctl --user reset-failed "$unit" 2>/dev/null || true
+        systemd-run --user --quiet --unit="$unit" --collect "--working-directory=$repo" \
+            --property=CPUQuota=25% --property=MemoryHigh=256M \
+            "--property=StandardOutput=append:$log_dir/hc-soak.out" "--property=StandardError=append:$log_dir/hc-soak.out" \
+            "--setenv=HOME=$HOME" "--setenv=PATH=$PATH" "--setenv=XDG_RUNTIME_DIR=/run/user/$(id -u)" \
+            "--setenv=HC_SESSION=$session" "--setenv=XDG_STATE_HOME=$XDG_STATE_HOME" "--setenv=XDG_CONFIG_HOME=$XDG_CONFIG_HOME" \
+            "--setenv=CLANKERHOUSE_MULTIPLEXER=hc" "--setenv=CLANKERHOUSE_INSTANCE=soak" \
+            -- "$(command -v bun)" scripts/soak-hc-runner.ts --agents "$agents" --check-seconds "$check" --root "$root" --log "$log"
+        echo "Soak started as $unit. Stop it with: scripts/soak-hc stop"
+        ;;
+    status)
+        systemctl --user is-active "$unit" || true
+        [[ -f "$log" ]] && tail -n 1 "$log"
+        ;;
+    stop)
+        systemctl --user stop "$unit" 2>/dev/null || true
+        systemctl --user reset-failed "$unit" 2>/dev/null || true
+        # Scoped to the soak's own session and state, and only when its socket is there: `hc server stop` starts nothing, but a stray core would need this anyway.
+        if [[ -S "/run/user/$(id -u)/herdr-core/$session.sock" ]]; then hc server stop >/dev/null 2>&1 || true; fi
+        rm -rf -- "$root"
+        echo "Soak stopped; log kept at $log"
+        ;;
+    report) exec bun "$repo/scripts/soak-hc-runner.ts" --report --log "$log" --doc "$repo/docs/herdr-core-eval.md" ;;
+    *) sed -n 2,9p "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

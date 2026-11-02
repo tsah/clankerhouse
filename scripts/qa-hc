@@ -1,0 +1,229 @@
+#!/bin/bash
+# The hc lane end to end, on private herdr-core sessions: launcher, daemon, Rust hook, identity, status, interrupt, attach,
+# and the failures that shaped the lane (frozen core environment, exit sweep, dead core, `hc server status`). Needs hc;
+# skips without it unless HC_REQUIRED is set. On a box with a user manager it also proves the systemd-supervised path.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+# shellcheck source=lib/qa-hc-server
+. "$repo/scripts/lib/qa-hc-server"
+
+root=$(mktemp -d /tmp/qa-hc.XXXXXX)
+real_runtime=${XDG_RUNTIME_DIR:-}
+launcher="$repo/bin/clankerhouse-hc"
+clankers="$repo/bin/clankers"
+hook="$repo/native-client/target/release/clankerhouse-hook"
+failures=0
+cleanup() {
+    "$launcher" --stop-server >/dev/null 2>&1 || true
+    qa_hc_stop
+    rm -rf -- "$root"
+}
+trap cleanup EXIT INT TERM
+
+ok() { printf '  ok: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() { local what=$1; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
+contains() { [[ "$1" == *"$2"* ]]; }
+json_field() { python3 -c 'import json,sys
+value = json.load(sys.stdin)
+for key in sys.argv[1:]:
+    value = value[int(key) if key.isdigit() else key] if value is not None else None
+print("" if value is None else value)' "$@"; }
+pane_of() { json_field nativePaneId <<<"$1"; }
+session_of() { json_field nativeSessionId <<<"$1"; }
+wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
+screen_has() { [[ "$(qa_hc read "$1")" == *"$2"* ]]; }
+pane_field() { "$clankers" mux observe | python3 -c '
+import json,sys
+pane=sys.argv[1]
+for session in json.load(sys.stdin)["sessions"]:
+    for window in session["windows"]:
+        for candidate in window["panes"]:
+            if candidate["id"] == pane:
+                print(json.dumps(candidate))
+' "$1" | json_field "${@:2}"; }
+
+set +e
+qa_hc_start "$root/plain"; started=$?
+set -e
+if [[ $started == 77 ]]; then exit 0; fi
+[[ $started == 0 ]] || exit "$started"
+
+scenario() {
+    export CLANKERHOUSE_MULTIPLEXER=hc CLANKERHOUSE_INSTANCE=qa-hc-$$
+    # Everything a clanker's shell would hand a launcher; none of it may reach the core or the daemon.
+    export CLANKER_ID=outsider-clanker CLANKERHOUSE_WORKSHOP_ID=outsider-workshop HERDR_PANE_ID=w9:p9 CLAUDE_CODE_CHILD_SESSION=1
+
+    echo "== launcher starts a clean core and a healthy daemon"
+    "$launcher" --ensure-server
+    health=$("$clankers" mux hc-health)
+    check "core answers" contains "$health" '"reachable":true'
+    check "core carries no identity" contains "$health" '"polluted":[]'
+    check "daemon reports healthy" contains "$("$launcher" --health)" '"daemon":"healthy"'
+    "$launcher" --report-focus t42
+    check "a focus report lands in the runtime directory" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-focus")" = t42
+    check "a focus report refuses anything but an address" test "$("$launcher" --report-focus ../x >/dev/null 2>&1; echo $?)" = 2
+    daemon_pid=$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/server.pid")
+    check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|CLAUDE_CODE_CHILD_SESSION)='"
+
+    echo "== identity is per terminal"
+    script='echo "id=${CLANKER_ID:-none} herdr=${HERDR_PANE_ID:-none} child=${CLAUDE_CODE_CHILD_SESSION:-none}"; exec sleep 300'
+    first=$("$clankers" mux spawn --new-session qa-one --cwd "$root" --env CLANKER_ID=clanker-a -- sh -c "$script")
+    second=$("$clankers" mux spawn --new-session qa-two --cwd "$root" -- sh -c "$script")
+    a=$(pane_of "$first"); b=$(pane_of "$second")
+    check "first terminal sees only its own identity" wait_for 30 screen_has "$a" "id=clanker-a herdr=none child=none"
+    check "second terminal sees none" wait_for 30 screen_has "$b" "id=none herdr=none child=none"
+
+    echo "== claims and sessions"
+    "$clankers" mux claim --pane "$a" clankerId clanker-a
+    "$clankers" mux claim --session "$(session_of "$first")" workshopId "workshop-$(printf 'x%.0s' {1..120})"
+    check "pane claim reads back" test "$("$clankers" mux read-claim --pane "$a" clankerId)" = clanker-a
+    check "a claim longer than a herdr token survives" contains "$("$clankers" mux read-claim --session "$(session_of "$first")" workshopId)" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    check "pane-path resolves" test "$("$clankers" mux pane-path --pane "$a")" = "$root"
+    window=$("$clankers" mux spawn --session "$(session_of "$first")" --name tests --cwd "$root" -- sleep 300)
+    check "a window joins its session" test "$(session_of "$window")" = "$(session_of "$first")"
+
+    echo "== the native hook reaches hc"
+    hooked=$("$clankers" mux spawn --new-session qa-hook --cwd "$root" --env CLANKER_ID=clanker-hook -- sh -c "echo '{\"session_id\":\"s-1\",\"cwd\":\"$root\"}' | '$hook' claude working; echo hook-rc=\$?; exec sleep 300")
+    h=$(pane_of "$hooked")
+    check "hook ran" wait_for 30 screen_has "$h" "hook-rc=0"
+    check "hook wrote its claim over hc" wait_for 30 bash -c "test \"\$('$clankers' mux read-claim --pane $h harness)\" = claude"
+    check "hook recorded the pane's state" test -f "$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/clanker-state/$h.json"
+
+    echo "== status"
+    agent=$("$clankers" mux spawn --new-session qa-agent --cwd "$root" -- sh -c "printf '\\033]7501;state=blocked:kind=question:app=claude-code\\033\\\\'; exec cat")
+    g=$(pane_of "$agent")
+    sleep 0.3
+    check "blocked/question maps through the adapter" test "$(pane_field "$g" agentStatus status)/$(pane_field "$g" agentStatus blockedKind)/$(pane_field "$g" agentStatus agent)" = blocked/question/claude
+    check "process info and cwd are present" test "$(pane_field "$g" currentPath)" = "$root"
+
+    echo "== interrupt does not wait out a timeout"
+    plain=$("$clankers" mux spawn --new-session qa-plain --cwd "$root" -- bash --norc)
+    p=$(pane_of "$plain")
+    sleep 0.3
+    qa_hc send "$p" 'sleep 100; echo after-sleep' >/dev/null
+    sleep 0.3
+    begun=$(date +%s%N)
+    outcome=$("$clankers" mux interrupt --pane "$p")
+    check "plain program: key sent at once" test "$outcome" = sent
+    check "under a second" test $(( ($(date +%s%N) - begun) / 1000000 )) -lt 1000
+    check "the sleep stopped" wait_for 20 screen_has "$p" "after-sleep"
+
+    echo "== attach refuses a finished terminal"
+    gone=$("$clankers" mux spawn --new-session qa-gone --cwd "$root" -- sh -c 'echo last-words; exit 4')
+    sleep 0.3
+    set +e
+    attach_output=$("$clankers" mux attach --pane "$(pane_of "$gone")" 2>&1); attach_rc=$?
+    set -e
+    check "attach exits 3" test "$attach_rc" = 3
+    check "attach names the reason and last output" contains "$attach_output" "last-words"
+    check "attach writes no terminal queries" bash -c '! grep -q "]10;?" <<<"$1"' _ "$attach_output"
+
+    echo "== focus leaves an attach request for the launcher"
+    "$clankers" mux focus --pane "$a"
+    check "request recorded" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-attach")" = "$a"
+    rm -f "$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-attach"
+
+    echo "== a daemon started from a terminal survives that terminal's exit sweep"
+    "$launcher" --stop-server
+    # The terminal runs in the lane with HC_SCOPE set; its exit sweeps what it started.
+    starter=$("$clankers" mux spawn --new-session qa-starter --cwd "$repo" -- sh -c "'$launcher' --ensure-server; echo started; sleep 0.2")
+    check "terminal started the daemon" wait_for 100 screen_has "$(pane_of "$starter")" started
+    wait_for 50 bash -c "! '$clankers' mux observe | grep -q '\"id\":\"$(pane_of "$starter")\"'"
+    sleep 1
+    check "daemon outlived the sweep" contains "$("$launcher" --health)" '"daemon":"healthy"'
+
+    echo "== a dead core comes back in a clean environment; programs live on"
+    core=$(json_field pid <<<"$("$clankers" mux hc-health)")
+    kill -9 "$core"
+    check "supervisor restarted it" wait_for 150 bash -c "'$clankers' mux hc-health 2>/dev/null | grep -q '\"reachable\":true'"
+    check "new core is clean" contains "$("$clankers" mux hc-health)" '"polluted":[]'
+    check "terminals survived" test "$(pane_field "$a" pid)" != ""
+    check "claims survived" test "$("$clankers" mux read-claim --pane "$a" clankerId)" = clanker-a
+}
+
+# A real Workshop: real wt, the real launch path and lifecycle wrapper, a fake harness. Runs under the owning systemd scope
+# when the caller allows it, which is how production launches harnesses.
+workshop_flow() {
+    local label=$1 fixture="$root/fixture-$1" logs="$root/logs-$1"
+    echo "== Workshop flow ($label)"
+    export CLANKERHOUSE_QA_LOG_DIR=$logs
+    mkdir -p "$fixture" "$logs" "$root/worktrees"
+    git init -q -b main "$fixture"
+    git -C "$fixture" config user.name "hc QA"; git -C "$fixture" config user.email qa@example.invalid; git -C "$fixture" config commit.gpgsign false
+    echo fixture >"$fixture/tracked.txt"; git -C "$fixture" add tracked.txt; git -C "$fixture" commit -qm fixture
+    # The daemon launches harnesses, so what the fake needs must be in its environment, by name.
+    export CLANKERHOUSE_HC_CORE_ENV=CLANKERHOUSE_QA_LOG_DIR,CLANKERHOUSE_CLANKERS,CLANKERHOUSE_AUTO_RECOVER,CLANKERHOUSE_PROCESS_OWNER,WORKTRUNK_CONFIG_PATH,WORKTRUNK_SYSTEM_CONFIG_PATH,WORKTRUNK_PROJECT_CONFIG_PATH
+    export CLANKERHOUSE_CLANKERS="$repo/bin/clankers" CLANKERHOUSE_AUTO_RECOVER=0
+    export WORKTRUNK_CONFIG_PATH="$root/wt.toml" WORKTRUNK_SYSTEM_CONFIG_PATH="$root/wt-empty.toml" WORKTRUNK_PROJECT_CONFIG_PATH="$root/wt-empty.toml"
+    printf 'worktree-path = "%s/{{ repo }}.{{ branch | sanitize }}"\n' "$root/worktrees" >"$root/wt.toml"; : >"$root/wt-empty.toml"
+    PATH="$root/bin:$PATH"; export PATH
+    mkdir -p "$root/bin"
+    cat >"$root/bin/pi" <<'SH'
+#!/bin/bash
+env | grep -E '^(CLANKER_ID|CLANKERHOUSE_WORKSHOP_ID|CLANKERHOUSE_MULTIPLEXER|HC_TERMINAL_ID|HERDR_PANE_ID)=' | sort >"$CLANKERHOUSE_QA_LOG_DIR/$CLANKER_ID.env"
+while (($#)); do [[ $1 == --session-id ]] && session=$2; shift; done
+"$CLANKERHOUSE_CLANKERS" mux claim --pane "$HC_TERMINAL_ID" harnessSessionId "$session"
+printf '\033]7501;state=idle:app=pi\033\\'
+exec cat >>"$CLANKERHOUSE_QA_LOG_DIR/$CLANKER_ID.prompts"
+SH
+    chmod +x "$root/bin/pi"
+    "$launcher" --stop-server
+    "$launcher" --ensure-server
+    local spawned clanker terminal
+    spawned=$(cd "$fixture" && "$clankers" workshop spawn --name "lane-$label" --harness pi --no-parent 2>&1) || { fail "workshop spawn: $spawned"; return; }
+    wait_for 100 bash -c "ls '$logs'/*.env >/dev/null 2>&1" || { fail "harness never started: $spawned"; return; }
+    clanker=$(basename "$(ls "$logs"/*.env)" .env)
+    env_log=$(<"$logs/$clanker.env")
+    check "harness got its own identity" contains "$env_log" "CLANKER_ID=$clanker"
+    check "harness is on the lane" contains "$env_log" "CLANKERHOUSE_MULTIPLEXER=hc"
+    check "harness did not inherit the spawner's Herdr pane" bash -c '! grep -q HERDR_PANE_ID <<<"$1"' _ "$env_log"
+    terminal=$(sed -n 's/^HC_TERMINAL_ID=//p' <<<"$env_log")
+    check "terminal carries the clanker claim" wait_for 50 bash -c "test \"\$('$clankers' mux read-claim --pane $terminal clankerId)\" = $clanker"
+    check "status arrives from the harness" wait_for 50 bash -c "'$clankers' mux observe | grep -q '\"agent\":\"pi\"'"
+    check "clankers list shows it" wait_for 100 bash -c "'$clankers' list --cwd '$root/worktrees/fixture-$label.lane-$label' 2>/dev/null | grep -q $clanker"
+    "$clankers" mux kill --pane "$terminal"
+    check "killing the terminal ends the harness" wait_for 50 bash -c "! '$clankers' mux observe | grep -q '\"id\":\"$terminal\"'"
+}
+
+health_starts_nothing() {
+    echo "== health never starts a core"
+    "$launcher" --stop-server
+    qa_hc server stop >/dev/null
+    sleep 0.3
+    set +e
+    "$clankers" mux hc-health >/dev/null; rc=$?
+    set -e
+    check "health reports the core down" test "$rc" = 1
+    check "no core appeared" test ! -S "$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock"
+}
+
+scenario
+export CLANKERHOUSE_PROCESS_OWNER=disabled
+workshop_flow plain
+unset CLANKERHOUSE_PROCESS_OWNER
+health_starts_nothing
+unset CLANKER_ID CLANKERHOUSE_WORKSHOP_ID HERDR_PANE_ID CLAUDE_CODE_CHILD_SESSION
+
+if [[ -n "$real_runtime" && "$real_runtime" == "/run/user/$(id -u)" && -S "$real_runtime/systemd/private" ]]; then
+    echo "== systemd supervision"
+    qa_hc_stop
+    export XDG_RUNTIME_DIR=$real_runtime
+    qa_hc_start "$root/systemd" --systemd
+    export CLANKERHOUSE_INSTANCE=qa-hc-sd-$$
+    unit="clankerhouse-daemon-${CLANKERHOUSE_INSTANCE}.service"
+    "$launcher" --ensure-server
+    check "daemon runs as a user service" systemctl --user is-active --quiet "$unit"
+    pid=$(systemctl --user show -p MainPID --value "$unit")
+    kill -9 "$pid"
+    check "systemd restarted it" wait_for 100 bash -c "new=\$(systemctl --user show -p MainPID --value '$unit'); [[ \$new != 0 && \$new != $pid ]]"
+    check "restarted daemon is healthy" wait_for 100 bash -c "'$launcher' --health >/dev/null 2>&1"
+    workshop_flow scoped
+    "$launcher" --stop-server
+    check "stop leaves no unit" bash -c "! systemctl --user is-active --quiet '$unit'"
+fi
+
+[[ $failures == 0 ]] || { printf '%d hc lane checks failed\n' "$failures" >&2; exit 1; }
+echo "hc lane scenario passed"

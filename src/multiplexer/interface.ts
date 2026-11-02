@@ -66,6 +66,12 @@ export interface RuntimeProcessInfo {
 
 export type RuntimeAgentStatus = "idle" | "working" | "blocked" | "done" | "unknown"
 
+/** Why a harness is blocked, when the runtime knows. */
+export type AgentBlockedKind = "permission" | "question" | "auth" | "error" | "startup"
+
+/** `sent`: a key went to a program with no status, so the effect is unobserved. */
+export type AgentInterruptOutcome = "stopped" | "still_working" | "not_working" | "sent"
+
 export interface MultiplexerPane {
   id: string
   index: string
@@ -89,7 +95,7 @@ export interface MultiplexerPane {
   /** Present only when the Adapter declares `processInfo`. */
   processInfo?: RuntimeProcessInfo
   /** Present only when the Adapter declares `agentStatus`. */
-  agentStatus?: { agent?: string; status: RuntimeAgentStatus }
+  agentStatus?: { agent?: string; status: RuntimeAgentStatus; blockedKind?: AgentBlockedKind; message?: string }
   /** Present only when the Adapter declares `sessionRefs`. */
   sessionRef?: { agent: string; kind: "id" | "path"; value: string; source: string }
 }
@@ -177,6 +183,8 @@ export interface Multiplexer {
   focus(location: NativeLocation): Promise<void>
   /** Submit text through the runtime's validated interactive-harness prompt operation when `agentPrompt` is declared. */
   promptAgent?(location: NativeLocation, text: string): Promise<void>
+  /** Stop the harness's current turn, keeping the harness. */
+  interruptAgent?(location: NativeLocation): Promise<AgentInterruptOutcome>
   /** Mirror a harness lifecycle state into the runtime's `agentStatus`, holding the pane for that harness. */
   reportAgentState?(pane: string, harness: string, state: "idle" | "working" | "blocked", harnessSessionId?: string): Promise<void>
   /** Return a pane held by `reportAgentState` to the runtime's own agent detection. */

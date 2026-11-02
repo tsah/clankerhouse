@@ -1,0 +1,42 @@
+#!/bin/bash
+# Source from a standalone QA scenario to run it against a private herdr-core session. Never touches another core: the
+# session name, state, config and socket are all scratch.
+#
+#   qa_hc_start DIR [--systemd]  Pick a scratch session under DIR and export HC_SESSION, XDG_STATE_HOME and XDG_CONFIG_HOME.
+#                                Plain mode also gives it a private XDG_RUNTIME_DIR, where hc and the lane skip systemd,
+#                                so it works on CI. --systemd keeps the real one, for the supervised path. Returns 77 when
+#                                hc is missing and HC_REQUIRED is unset, so callers can skip.
+#   qa_hc_stop                   Stop that core. Safe to call from an EXIT trap.
+#   qa_hc                        Run the hc CLI against that session.
+
+qa_hc_bin=${HC_BIN:-$(command -v hc || true)}
+qa_hc_session=""
+
+qa_hc_start() {
+    local dir=$1 mode=${2:-}
+    if [[ -z "$qa_hc_bin" ]]; then
+        if [[ -z "${HC_REQUIRED:-}" ]]; then
+            printf 'hc binary not found; skipping (set HC_BIN or HC_REQUIRED to run it).\n' >&2
+            return 77
+        fi
+        printf 'hc binary not found; set HC_BIN or install herdr-core\n' >&2
+        return 1
+    fi
+    qa_hc_session="qa-hc-$$-$RANDOM"
+    export HC_SESSION=$qa_hc_session XDG_STATE_HOME="$dir/state" XDG_CONFIG_HOME="$dir/config" HC_BIN=$qa_hc_bin
+    mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
+    if [[ "$mode" != --systemd ]]; then
+        export XDG_RUNTIME_DIR="$dir/run"
+        mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+    fi
+}
+
+qa_hc_stop() {
+    [[ -n "$qa_hc_session" ]] || return 0
+    [[ "${HC_SESSION:-}" == qa-hc-* ]] && "$qa_hc_bin" server stop >/dev/null 2>&1 || true
+    qa_hc_session=""
+}
+
+qa_hc() {
+    "$qa_hc_bin" "$@"
+}

@@ -1,0 +1,28 @@
+{
+  "id": "root",
+  "type": "column",
+  "titlebar": "none",
+  "movable": false,
+  "theme": "graphite",
+  "terminal_padding": [4, 6],
+  "children": [
+    {
+      "id": "clankerhouse",
+      "type": "block",
+      "size": { "px": 0 },
+      "content": { "mod": "clankerhouse", "props": { "machine": "puffin", "launcher": "clankerhouse-hc" } }
+    },
+    {
+      "id": "main",
+      "type": "block",
+      "content": {
+        "tab": "active",
+        "pane": {
+          "gap": 1,
+          "background": "background",
+          "focus": { "width": 1, "color": "accent" }
+        }
+      }
+    }
+  ]
+}

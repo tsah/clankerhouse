@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Install the Clankerhouse layout, mod and Alt keys into the Herdr app on this computer (the laptop, not the Clankerhouse
+machine). Idempotent. keys.json is the person's own file: only the layout:clankerhouse section is replaced, and the previous
+file is kept as keys.json.pre-clankerhouse.
+
+  contrib/herdr-app/install [--machine puffin] [--launcher clankerhouse-hc]
+"""
+import argparse, json, os, platform, shutil
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+MAC = platform.system() == "Darwin"
+# A `terminal` key beats a `layout:` key, and the macOS defaults keep these for word motion.
+MAC_TERMINAL_KEYS = ("alt-left", "alt-right")
+
+
+def write_json(path, value):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--machine", default="puffin")
+    parser.add_argument("--launcher", default="clankerhouse-hc")
+    options = parser.parse_args()
+    home = Path(os.environ.get("HERDR_APP_HOME") or Path.home() / ".config/herdr-app")
+    keys_path = home / "keys.json"
+    if not keys_path.exists():
+        raise SystemExit(f"{keys_path} is missing: start the Herdr app once first")
+
+    layout = json.loads((HERE / "layouts/clankerhouse.json").read_text())
+    layout["children"][0]["content"]["props"] = {"machine": options.machine, "launcher": options.launcher}
+    if MAC:
+        # The traffic lights would sit on the terminal; the system title bar keeps it clean.
+        del layout["titlebar"]
+    (home / "layouts").mkdir(exist_ok=True)
+    write_json(home / "layouts/clankerhouse.json", layout)
+
+    mod = home / "mods/clankerhouse"
+    mod.mkdir(parents=True, exist_ok=True)
+    for name in ("main.js", "mod.json"):
+        shutil.copyfile(HERE / "mods/clankerhouse" / name, mod / name)
+
+    keys = json.loads(keys_path.read_text())
+    wanted = json.loads((HERE / "keys.clankerhouse.json").read_text())
+    merged = {**keys, **wanted}
+    if MAC:
+        merged["terminal"] = {key: action for key, action in keys.get("terminal", {}).items() if key not in MAC_TERMINAL_KEYS}
+    if merged != keys:
+        backup = keys_path.with_name("keys.json.pre-clankerhouse")
+        if not backup.exists():
+            shutil.copyfile(keys_path, backup)
+        write_json(keys_path, merged)
+
+    if MAC:
+        settings_path = home / "settings.json"
+        settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+        if settings.get("option_as_alt") != "on":
+            write_json(settings_path, {**settings, "option_as_alt": "on"})
+    print(f"Installed into {home}. Switch with: herdr-app do layout.switch --name clankerhouse")
+
+
+if __name__ == "__main__":
+    main()

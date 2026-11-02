@@ -1,0 +1,182 @@
+#!/bin/bash
+# Clankerhouse on the hc lane (CLANKERHOUSE_MULTIPLEXER=hc). hc draws nothing and binds no keys, so this launcher is the
+# operator's way in: it starts the core and daemon, runs the picker, and attaches to what the picker opens. Ctrl+\ detaches
+# back to the picker.
+#
+#   clankerhouse-hc [picker args]   run the picker
+#   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
+#   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
+#   clankerhouse-hc --popup [--repo|--delete]  the picker in a Herdr app popup: exits on a choice, leaving it for the mod
+#   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
+#   clankerhouse-hc --ensure-server start the core and daemon, then exit
+#   clankerhouse-hc --stop-server   stop the daemon; the core and its terminals keep running
+#   clankerhouse-hc --health        print core and daemon health; exit 1 when either is down
+#
+# The daemon runs as a systemd user service, not in an hc terminal: the exit sweep kills anything a terminal started, and
+# a daemon inside hc would die with the holder it needs to report on. Where no user manager is reachable it runs in its
+# own session with a scrubbed environment, which the sweep also leaves alone.
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/../libexec/clankerhouse-env"
+
+export CLANKERHOUSE_MULTIPLEXER=hc
+export CLANKERHOUSE_INSTANCE=${CLANKERHOUSE_INSTANCE:-hc}
+export HC_SESSION=${HC_SESSION:-clankerhouse}
+# shellcheck source=/dev/null
+. "$CLANKERHOUSE_LIBEXEC/clankerhouse-mux"
+
+command -v bun >/dev/null 2>&1 || { echo "Clankerhouse requires bun" >&2; exit 1; }
+command -v "${HC_BIN:-hc}" >/dev/null 2>&1 || { echo "Clankerhouse's hc lane requires hc (herdr-core)" >&2; exit 1; }
+
+cd "$CLANKERHOUSE_HOME" || exit 1
+
+STATE_DIR="$(ch_runtime_dir)"
+LOG_FILE="$STATE_DIR/server.log"
+DAEMON_SOCKET="$STATE_DIR/daemon.sock"
+LOCK_FILE="$STATE_DIR/server.lock"
+ATTACH_FILE="$STATE_DIR/hc-attach"
+NATIVE_BINARY="$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native"
+CLANKERS="$CLANKERHOUSE_BIN_DIR/clankers"
+UNIT="clankerhouse-daemon-${CLANKERHOUSE_INSTANCE//[^A-Za-z0-9_-]/-}.service"
+export CLANKERHOUSE_RUNTIME_DIR="$STATE_DIR"
+
+[[ -x "$NATIVE_BINARY" ]] || { echo "Native client is not built: $NATIVE_BINARY" >&2; exit 1; }
+
+user_manager() {
+    [[ -z "${CLANKERHOUSE_HC_NO_SYSTEMD:-}" && "${XDG_RUNTIME_DIR:-}" == "/run/user/$(id -u)" && -S "$XDG_RUNTIME_DIR/systemd/private" ]]
+}
+
+server_running() {
+    [[ -S "$DAEMON_SOCKET" ]] || return 1
+    "$NATIVE_BINARY" --server-health "$OWNER" >/dev/null 2>&1
+}
+
+stop_daemon() {
+    if user_manager; then
+        systemctl --user stop "$UNIT" 2>/dev/null || true
+        systemctl --user reset-failed "$UNIT" 2>/dev/null || true
+    fi
+    local pid=
+    [[ -r "$STATE_DIR/server.pid" ]] && pid=$(<"$STATE_DIR/server.pid")
+    if [[ "$pid" =~ ^[0-9]+$ ]] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'src/daemon.ts --server'; then
+        kill "$pid" 2>/dev/null || true
+        for _ in {1..100}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    fi
+    rm -f "$DAEMON_SOCKET"
+}
+
+# One explicit environment for both paths, so nothing of the invoking clanker reaches the daemon.
+daemon_env() {
+    "$CLANKERS" mux hc-env
+    printf '%s\n' "CLANKERHOUSE_HOME=$CLANKERHOUSE_HOME" "CLANKERHOUSE_BIN_DIR=$CLANKERHOUSE_BIN_DIR" "CLANKERHOUSE_LIBEXEC=$CLANKERHOUSE_LIBEXEC" "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR"
+    [[ -z "${HC_BIN:-}" ]] || printf 'HC_BIN=%s\n' "$HC_BIN"
+    [[ -z "${CLANKERHOUSE_NOTIFY_COMMAND:-}" ]] || printf 'CLANKERHOUSE_NOTIFY_COMMAND=%s\n' "$CLANKERHOUSE_NOTIFY_COMMAND"
+}
+
+start_daemon() {
+    local bun_path line
+    local -a environment=()
+    bun_path=$(command -v bun)
+    while IFS= read -r line; do environment+=("$line"); done < <(daemon_env)
+    if user_manager; then
+        local -a setenv=()
+        for line in "${environment[@]}"; do setenv+=("--setenv=$line"); done
+        systemctl --user reset-failed "$UNIT" 2>/dev/null || true
+        systemd-run --user --quiet --unit="$UNIT" --collect "--working-directory=$CLANKERHOUSE_HOME" \
+            --property=Restart=on-failure --property=RestartSec=2 --property=KillMode=mixed --property=TimeoutStopSec=10s \
+            "--property=StandardOutput=append:$LOG_FILE" "--property=StandardError=append:$LOG_FILE" \
+            "${setenv[@]}" -- "$bun_path" src/daemon.ts --server
+    else
+        env -i "${environment[@]}" setsid nohup "$bun_path" src/daemon.ts --server >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
+        disown
+    fi
+}
+
+case "${1:-}" in
+    --report-focus)
+        [[ ${2:-} =~ ^t[0-9a-z]+$ ]] || { echo "--report-focus takes a terminal address on this machine" >&2; exit 2; }
+        mkdir -p -m 700 "$STATE_DIR"
+        printf '%s\n' "$2" >"$STATE_DIR/hc-focus.tmp"
+        mv "$STATE_DIR/hc-focus.tmp" "$STATE_DIR/hc-focus"
+        exit 0
+        ;;
+    --stop-server) stop_daemon; exit 0 ;;
+    --health)
+        status=0
+        "$CLANKERS" mux hc-health || status=1
+        OWNER=$("$CLANKERS" mux instance-id 2>/dev/null || true)
+        if [[ -n "$OWNER" ]] && server_running; then echo '{"daemon":"healthy"}'; else echo '{"daemon":"down"}'; status=1; fi
+        exit "$status"
+        ;;
+esac
+
+mkdir -p -m 700 "$STATE_DIR"
+if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -O "$STATE_DIR" ]]; then
+    echo "Refusing unsafe Clankerhouse runtime directory: $STATE_DIR" >&2; exit 1
+fi
+chmod 700 "$STATE_DIR"
+"$CLANKERS" mux hc-ensure >/dev/null
+OWNER=$("$CLANKERS" mux instance-id)
+exec 9>"$LOCK_FILE"
+flock 9
+ready=false
+if server_running; then
+    ready=true
+else
+    stop_daemon
+    rm -f "$STATE_DIR/server.pid" "$STATE_DIR/state.json"
+    start_daemon
+    for _ in {1..1200}; do
+        if server_running; then ready=true; break; fi
+        sleep 0.05
+    done
+fi
+[[ "$ready" == true ]] || { printf 'Clankerhouse hc daemon did not become healthy; see %s\n' "$LOG_FILE" >&2; exit 1; }
+flock -u 9
+exec 9>&-
+
+[[ ${1:-} == "--ensure-server" ]] && exit 0
+popup=false
+if [[ ${1:-} == "--popup" ]]; then
+    popup=true
+    shift
+    # `hc run` copies the caller's TERM, here whatever the Herdr app was started with.
+    export TERM=xterm-256color COLORTERM=truecolor
+    # The popup's own terminal is no session: the picker's current one is what it opened over.
+    CLANKERHOUSE_CURRENT_SESSION=$("$CLANKERS" mux current-location | sed -n 's/.*"nativeSessionId":"\([^"]*\)".*/\1/p')
+    export CLANKERHOUSE_CURRENT_SESSION
+fi
+if [[ ${1:-} == "--repo" ]]; then
+    export CLANKERHOUSE_MODE=spawn
+    shift
+fi
+if [[ ${1:-} == "--delete" ]]; then
+    current=$("$CLANKERS" mux current-location | sed -n 's/.*"nativeSessionId":"\([^"]*\)".*/\1/p')
+    [[ -n "$current" ]] || { echo "Refusing delete: no current session." >&2; exit 1; }
+    export CLANKERHOUSE_CURRENT_SESSION="$current"
+    shift
+    set -- --delete-current "$@"
+fi
+
+if [[ "$popup" == true ]]; then
+    rm -f "$ATTACH_FILE"
+    status=0
+    "$NATIVE_BINARY" "$@" || status=$?
+    if [[ -s "$ATTACH_FILE" ]]; then
+        "${HC_BIN:-hc}" label "$HC_TERMINAL_ID" "ch_popup_target=$(<"$ATTACH_FILE")" >/dev/null
+        rm -f "$ATTACH_FILE"
+    fi
+    exit "$status"
+fi
+
+while :; do
+    rm -f "$ATTACH_FILE"
+    status=0
+    "$NATIVE_BINARY" "$@" || status=$?
+    [[ -s "$ATTACH_FILE" ]] || exit "$status"
+    target=$(<"$ATTACH_FILE")
+    rm -f "$ATTACH_FILE"
+    "$CLANKERS" mux attach --pane "$target" || sleep 2
+done

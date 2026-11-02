@@ -12,3 +12,7 @@ native-client/target/
 # Status hook sinks hold webhook secrets; see ~/.config/clankerhouse/hooks.toml.
 hooks.toml
 hooks-*.toml
+/soak/
+# Written by herdr-app check
+contrib/herdr-app/mods/*/gpui-kit.d.ts
+contrib/herdr-app/mods/*/jsconfig.json

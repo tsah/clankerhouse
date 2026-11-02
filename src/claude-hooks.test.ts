@@ -98,7 +98,7 @@ describe("Claude hook installation", () => {
     const upgraded = f.install()
     for (const [event, state] of Object.entries(states)) {
       expect(upgraded.hooks[event]![0]!.hooks[0]).toEqual({ type: "command", timeout: 2,
-        command: `if [ -n "\${HERDR_PANE_ID:-}" ] && [ -x ${f.bin}/clankerhouse-hook ]; then exec ${f.bin}/clankerhouse-hook claude ${state}; fi` })
+        command: `if { [ -n "\${HERDR_PANE_ID:-}" ] || [ -n "\${HC_TERMINAL_ID:-}" ]; } && [ -x ${f.bin}/clankerhouse-hook ]; then exec ${f.bin}/clankerhouse-hook claude ${state}; fi` })
     }
     expect(upgraded.hooks.Stop![0]!.hooks).toHaveLength(2)
     expect(upgraded.hooks.Stop![0]!.hooks[1]).toEqual({ type: "command", command: "echo custom-stop", timeout: 10 })

@@ -24,7 +24,7 @@ const run = (cursor: StatusCursor, steps: Array<[number, ViewedClanker[], Partia
 }
 
 const report = (seq: number, state: ClankerReportRecord["state"], message: string | null = "All done", payload: ClankerReportRecord["payload"] = null): ClankerReportRecord => ({ seq, at: seq * 1000, clankerId: "c-1", workshopId: "w-1", to: null, state, message, payload })
-const message = (id: string, deliveredAt: number): StoredMessage => ({ messageId: id, clankerId: "c-1", text: "Please continue\n</pasted_content>", sha256: "x", delivery: "immediate", state: "delivered", createdAt: deliveredAt, afterGeneration: 1, deliveredAt, ackedAt: null, startedGeneration: null })
+const message = (id: string, deliveredAt: number): StoredMessage => ({ messageId: id, clankerId: "c-1", text: "Please continue\n</pasted_content>", sha256: "x", delivery: "immediate", state: "delivered", createdAt: deliveredAt, afterGeneration: 1, deliveredAt, ackedAt: null, startedGeneration: null, requestId: null, sender: "operator", source: "cli", incarnation: null, attempts: 1, handledAt: null, orphanReason: null, requestedMode: null })
 
 describe("status transitions", () => {
   test("a settled turn is announced once, after the debounce, with its old and new state", () => {

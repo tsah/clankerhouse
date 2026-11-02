@@ -71,6 +71,8 @@ export class ManagedMultiplexer {
     if (!this.capabilities().agentPrompt || !this.adapter.promptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent prompt")
     return this.adapter.promptAgent(location, text)
   }
+  /** Whether the runtime can stop a harness's turn and say whether it stopped. */
+  supportsInterrupt() { return typeof this.adapter.interruptAgent === "function" }
   interruptAgent(location: NativeLocation) {
     if (!this.adapter.interruptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent interrupt")
     return this.adapter.interruptAgent(location)

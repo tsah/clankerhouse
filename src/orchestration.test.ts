@@ -111,7 +111,7 @@ describe("queued prompt delivery", () => {
   test("reports unacknowledged messages to a vanished clanker as orphaned", () => {
     const store = OrchestrationStore.open(join(temporary(), "orchestration.sqlite3"))
     const queued = store.admitMessage({ clankerId: "clanker-gone", text: "hello", busy: true, afterGeneration: 1 })
-    expect(sendStatusOf(queued, true)).toEqual({ messageId: queued.messageId, clankerId: "clanker-gone", state: "queued", startedGeneration: null })
+    expect(sendStatusOf(queued, true)).toMatchObject({ messageId: queued.messageId, clankerId: "clanker-gone", state: "queued", startedGeneration: null, stage: "queued", observation: "hook" })
     expect(sendStatusOf(queued, false).state).toBe("orphaned")
     store.acknowledge("clanker-gone", [])
     expect(store.claimNextDelivery("clanker-other", 1)).toBeUndefined()

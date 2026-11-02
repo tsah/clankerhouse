@@ -180,6 +180,15 @@ fn run(args: &[String]) -> Result<(), String> {
             state = "working".into();
         }
     }
+    // The messaging socket does not deduplicate, so a sender retries an unacknowledged message
+    // with the same id; a copy this session already took is blocked here instead of run twice.
+    if hook_event.as_deref() == Some("UserPromptSubmit") {
+        let prompt = payload.get("prompt").and_then(Value::as_str).unwrap_or_default();
+        if redelivered(prompt, previous.get("prompts").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()) {
+            println!("{}", json!({ "decision": "block", "reason": "clankerhouse: this message was already delivered" }));
+            return Ok(());
+        }
+    }
     let previous_state = text(&previous, "state");
     let mut generation = previous.get("generation").and_then(Value::as_u64).unwrap_or(0);
     let mut settled = previous.get("settledGeneration").and_then(Value::as_u64).unwrap_or(0);
@@ -197,12 +206,18 @@ fn run(args: &[String]) -> Result<(), String> {
         settled = generation;
     }
     let or_previous = |value: &str, key: &str| if value.is_empty() { previous.get(key).cloned().unwrap_or(Value::Null) } else { json!(value) };
-    // Queued sends are acknowledged by the hash of the prompt that started a turn, so the
+    // Queued sends are acknowledged by the message ids tagged in the prompt that started a turn
+    // (or, for untagged sends from older clients, by its hash), so the
     // last few submissions stay in the record across the hooks that rewrite it.
     let mut prompts: Vec<Value> = previous.get("prompts").and_then(Value::as_array).cloned().unwrap_or_default();
     if hook_event.as_deref() == Some("UserPromptSubmit") {
         if let Some(prompt) = payload.get("prompt").and_then(Value::as_str) {
-            prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation }));
+            let ids = message_ids(prompt);
+            if ids.is_empty() {
+                prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation }));
+            } else {
+                prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation, "messageIds": ids }));
+            }
             let excess = prompts.len().saturating_sub(PROMPT_HISTORY);
             prompts.drain(..excess);
         }
@@ -217,6 +232,8 @@ fn run(args: &[String]) -> Result<(), String> {
         let excess = turns.len().saturating_sub(TURN_HISTORY);
         turns.drain(..excess);
     }
+    let messaging_socket = if harness == "claude" { var("CLAUDE_CODE_MESSAGING_SOCKET") } else { String::new() };
+    let wrapper_incarnation = var("CLANKERHOUSE_HARNESS_INCARNATION");
     let record = json!({
         "harness": harness,
         "clankerId": clanker_id,
@@ -233,6 +250,11 @@ fn run(args: &[String]) -> Result<(), String> {
         "generationStartedAt": started_at,
         "turns": turns,
         "transcriptPath": or_previous(&transcript, "transcriptPath"),
+        // Set by the harness lifecycle wrapper per harness launch; senders fence queued mail on it.
+        // A clanker launched by hand has no wrapper, and its messaging socket is per process.
+        "incarnation": or_previous(&if wrapper_incarnation.is_empty() { messaging_socket.clone() } else { wrapper_incarnation }, "incarnation"),
+        // Claude's own cross-session inbox; clankerhouse delivers messages through it.
+        "messagingSocket": or_previous(&messaging_socket, "messagingSocket"),
     });
     write_atomic(&target, record.to_string().as_bytes())?;
 
@@ -403,6 +425,40 @@ fn mark_activity(ctx: &Context, payload: &Value) {
     let _ = write_atomic(&target, record.to_string().as_bytes());
 }
 
+/// Message ids a clankerhouse sender tagged into a prompt as `[clankerhouse msg-... from ...]`. Claude
+/// may wrap long input in `<pasted_content>`, so ids are found anywhere in the text.
+fn message_ids(prompt: &str) -> Vec<String> {
+    const TAG: &str = "[clankerhouse ";
+    let mut ids = Vec::new();
+    let mut rest = prompt;
+    while let Some(at) = rest.find(TAG) {
+        rest = &rest[at + TAG.len()..];
+        let Some(end) = rest.find(']') else { break };
+        // `[clankerhouse <id> from <sender>]`: the id is the first word.
+        let id = rest[..end].split_whitespace().next().unwrap_or_default();
+        if id.starts_with("msg-") && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_string());
+        }
+        rest = &rest[end..];
+        if ids.len() >= 8 {
+            break;
+        }
+    }
+    ids
+}
+
+/// A clankerhouse message (a prompt that opens with its tag) whose ids were all taken before.
+fn redelivered(prompt: &str, prompts: &[Value]) -> bool {
+    if !prompt.trim_start().starts_with("[clankerhouse msg-") {
+        return false;
+    }
+    let ids = message_ids(prompt);
+    !ids.is_empty()
+        && ids.iter().all(|id| {
+            prompts.iter().any(|seen| seen.get("messageIds").and_then(Value::as_array).is_some_and(|taken| taken.iter().any(|t| t.as_str() == Some(id))))
+        })
+}
+
 /// Hash of a submitted prompt, normalized as `promptSha256` in `src/orchestration.ts` is:
 /// CRLF folded to LF and surrounding ASCII whitespace removed.
 fn prompt_sha256(prompt: &str) -> String {
@@ -464,7 +520,29 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{prompt_sha256, sha256_hex};
+    use super::{message_ids, prompt_sha256, redelivered, sha256_hex};
+    use serde_json::json;
+
+    #[test]
+    fn a_message_taken_before_is_redelivered_and_others_are_not() {
+        let seen = vec![json!({ "sha256": "x", "generation": 1, "messageIds": ["msg-a"] })];
+        assert!(redelivered("[clankerhouse msg-a from op] hi", &seen));
+        assert!(!redelivered("[clankerhouse msg-b from op] hi", &seen));
+        // A human quoting a tag mid-prompt is never blocked.
+        assert!(!redelivered("see [clankerhouse msg-a] above", &seen));
+        assert!(!redelivered("[clankerhouse msg-a] hi", &[]));
+    }
+
+    #[test]
+    fn message_ids_are_found_inline_wrapped_and_deduplicated() {
+        assert_eq!(message_ids("[clankerhouse msg-ab-12] do it"), vec!["msg-ab-12"]);
+        assert_eq!(message_ids("[clankerhouse msg-ab-13 from clanker-x] do it"), vec!["msg-ab-13"]);
+        let wrapped = "\n\n<pasted_content id=\"7\">\n[clankerhouse msg-x1] body [clankerhouse msg-x1]\n</pasted_content id=\"7\">\n";
+        assert_eq!(message_ids(wrapped), vec!["msg-x1"]);
+        assert_eq!(message_ids("[clankerhouse msg-a] then [clankerhouse msg-b]"), vec!["msg-a", "msg-b"]);
+        assert!(message_ids("[clankerhouse not-a-message] [clankerhouse msg-b@d]").is_empty());
+        assert!(message_ids("plain prompt").is_empty());
+    }
 
     #[test]
     fn prompt_hash_ignores_line_endings_and_surrounding_whitespace() {

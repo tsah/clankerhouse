@@ -28,6 +28,11 @@ if [[ -n "$pane" && -n "${CLANKER_ID:-}" ]]; then
     rm -f "$exit_mark"
 fi
 
+# One value per harness launch. The lifecycle hook records it, and queued messages addressed to
+# an earlier launch in the same pane are fenced instead of typed into this one.
+CLANKERHOUSE_HARNESS_INCARNATION="$(date +%s%N)-$$"
+export CLANKERHOUSE_HARNESS_INCARNATION
+
 status=0
 "$@" || status=$?
 

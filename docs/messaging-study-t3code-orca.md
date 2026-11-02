@@ -231,3 +231,74 @@ Incarnation fencing. Idempotent retry keys. Hooks first, screen-scraping as the 
 - **Orca's Enter-timing heuristics.** If herdr needs them, they belong there.
 - **Orca's habit of typing pointers into `working` agents.** The sim shows it drops replies.
 - **Either tool's scale of special-casing.**
+
+## Prototype (2026-11-03, this branch)
+
+Built on the hc lane, after comparing notes with two sibling studies:
+`docs/herdr-messaging-sim.md` (branch `herdr-messaging-sim`) and `docs/acp-experiment.md`
+(branch `acp-messaging-experiment`). All three found that typing into a Claude pane can't be made
+safe without reading the screen, which ADR-0006 rules out. The ACP experiment found the way
+around it: every interactive Claude Code session listens on its own **messaging socket**, and one
+line of JSON delivers a message to it. Nothing is deployed. Pi still uses its own socket.
+
+**Transport.** Claude clankers get messages through their messaging socket. No launch flag is
+needed: Claude opens the socket on its own (`$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`, owner-only)
+and passes its path to hooks as `CLAUDE_CODE_MESSAGING_SOCKET`. The native hook records it as
+`messagingSocket`. A clanker with a live socket reports `send: messaging-socket`. One without
+(an older hook, or bare mode) falls back to being typed into the pane as before. Sessions in
+bypass mode need `crossSessionInbound: accept` in Claude's settings, or each message waits
+behind a Deliver/Deny dialog.
+
+| # | Idea | What was built |
+|---|---|---|
+| 1 | Ack by id, body out of band | Every message starts `[clankerhouse <msg-id> from <sender>]`. The native hook records the tagged ids in each submitted prompt (`messageIds`), and `acknowledge()` matches by id. Over the socket the full text follows the tag, intact at any length. When typed, anything over 3 lines or 500 chars becomes one pointer line to `clankers inbox read <id>`. The hash ack stays for older hooks. |
+| 2 | Idempotent sends | `clankers send --request-id KEY`. A repeat with the same text returns the first message with `replayed: true` and sends nothing. A repeat with different text is `CONFLICT` (exit 2). |
+| 3 | Staged receipts, safe retry | `send-status` reports `stage` (queued → typed → started → settled → handled, or orphaned with an `orphanReason`), plus `attempts`, sender/source and timestamps. A message with no ack after the clanker has been ready for 15 s is resent with the *same* id, at most 3 times. The socket doesn't deduplicate, so the hook does: a prompt that opens with a tag whose id this session already took is blocked (`decision: block`) before it starts a turn. |
+| 4 | Incarnation fencing | The hook records an incarnation per launch: the lifecycle wrapper's, or the messaging socket path for a Claude started by hand. Queued or unacknowledged mail for an earlier launch is orphaned as `harness-replaced`, never sent to the new one. |
+| 5 | Dispatch modes | `--delivery auto\|queue\|follow-up\|steer\|restart`. Receipts carry `requestedMode` and `appliedMode`. `restart` uses the Multiplexer's own interrupt (`hc`'s, which reports whether the turn stopped), then delivers, queue head first. It is offered only where the Multiplexer can interrupt (hc, not herdr) and refused while a permission dialog is up. `steer` is refused. |
+| 6 | Provenance | Each message records `sender` (`CLANKER_ID` or the pane claim, else `operator`) and `source`. The sender is also in the tag. |
+| 7 | Gating | No screen reading. A Claude clanker gets mail only when its hook state is idle or done. Through the socket, focus doesn't matter, because Claude leaves a human's draft alone. A running turn always holds mail, because Claude merges a mid-turn message into that turn and the turn's own reply can be lost. |
+| 8 | Replayable log | A `message_events` table with `seq`. `clankers messages --after SEQ [--clanker ID]`. |
+| 9 | Recipient ack | `clankers inbox [list\|read ID\|ack ID]`. An ack marks the message `handled`. |
+
+**Verification.**
+- `./test --unit` passes: 507 TypeScript tests and the Rust hook tests. `src/messaging.test.ts`
+  covers each item against a stand-in socket, plus the hook's socket recording, incarnation
+  fallback and redelivery block.
+- `scripts/qa-clanker-api` passes, including the ADR-0006 raw-pane guard, now that nothing reads
+  the screen.
+- `scripts/live-messaging-claude` (opt-in, not run by `./test`) starts a real Claude Code 2.1.316
+  on haiku *by hand* (no wrapper) in a private hc core with its own daemon, and checks nine
+  scenarios:
+  1. an inbox send acknowledged by id, and a request-id replay that sends nothing;
+  2. 60 lines (with a stray `</pasted_content>`) arriving intact, no pointer, answered;
+  3. a send to a busy clanker that queues, with both turns keeping their replies;
+  4. a human's half-typed draft still in the box after a message is answered;
+  5. an open `/model` picker: the message waited for it to close and changed nothing;
+  6. a permission dialog: mail is held while blocked, and a raw socket write of "yes" doesn't
+     approve it (the tool never ran);
+  7. a redelivered copy of an acknowledged message is dropped by the hook, with no new turn;
+  8. `restart` through hc's interrupt, answered at once as its own turn;
+  9. mail written to a frozen launch, never acknowledged, is fenced when the terminal
+     relaunches Claude and never reaches the new one.
+
+**Findings from the live runs.**
+- **Messages through the socket have peer authority.** Claude shows each one as "Another Claude
+  session sent a message" and treats it as a teammate's request. It can't approve a permission
+  prompt, which is what makes the dialog race safe. It also means Claude may push back. After a
+  `restart`, Claude records the interrupted tool as declined by the user, and in one run haiku
+  refused a peer's "change of plan" as overriding that decision. A message that doesn't refer
+  back to the interrupted work ran fine.
+- **The transcript lags the Stop hook.** Claude writes the turn's reply to its transcript a few
+  ms after `Stop` fires, so `send --wait` could read the transcript too early and return no
+  result. It now looks again for up to 3 s. The typed path had the same race.
+- **No Stop hook after Escape** (from the herdr prototype) still holds. `restart` works around it
+  because hc reports that the turn stopped. A turn a human interrupts by hand still holds mail
+  until the next prompt.
+
+**Before shipping.**
+- Add `crossSessionInbound: accept` to your Claude user settings (`claude/settings.json` in
+  dotfiles). This is the only setup step. It was tested through `--settings`, not yet from user
+  settings.
+- The message format comes from the binary, not documentation: pin the Claude version in the
+  contract (the live script is the contract test).

@@ -29,7 +29,11 @@ printf '%s' "$message" | clankers send "$clanker_id"
 printf '%s' "$message" | clankers send "$clanker_id" --delivery follow-up
 printf '%s' "$message" | clankers send "$clanker_id" --delivery steer
 printf '%s' "$message" | clankers send "$clanker_id" --wait --timeout 600
-clankers send-status "$message_id"
+printf '%s' "$message" | clankers send "$clanker_id" --request-id "$key"   # safe to retry
+printf '%s' "$message" | clankers send "$clanker_id" --delivery restart    # Claude on hc: interrupt, then deliver
+clankers send-status "$message_id"   # stage: queued|typed|started|settled|handled|orphaned
+clankers inbox read "$message_id"    # as the recipient: the full text of a pointer prompt (typed delivery only)
+clankers inbox ack "$message_id"     # as the recipient: after acting on it
 clankers wait "$clanker_id" --message "$message_id" --timeout 600
 clankers result "$clanker_id" [--generation GENERATION]
 ```
@@ -44,7 +48,10 @@ Rules:
    guess. Reuse an ID returned by a workshop/clanker spawn.
 5. Pi supports native send/result and report waits. Claude supports queued and
    follow-up send, report waits, and result (the final assistant message of
-   that generation, from its transcript); `steer` is unsupported. Codex has no
+   that generation, from its transcript); `steer` is unsupported, and `restart`
+   (where the Multiplexer can interrupt, as hc can) stops the running turn
+   first. Messages reach Claude through its own messaging socket when its hook
+   has reported one, else they are typed into its pane. Codex has no
    lifecycle reports, so it supports status only, as `unknown`; do not wait on it. OpenCode is monitor-only until its native contract is
    verified. Capabilities remain authoritative.
 6. One unsettled external Pi message is admitted at a time. Wait for it before
@@ -53,7 +60,12 @@ Rules:
    with or without `--delivery follow-up`.
    Do not resend: it is delivered in order after the clanker settles. Every send
    returns a `messageId`; wait for exactly that turn with `wait --message`, which
-   avoids returning on the turn that was already running.
+   avoids returning on the turn that was already running. When retrying after a
+   timeout or error, resend with the same `--request-id`: it returns the first
+   message (`replayed: true`) instead of sending twice.
+7a. A prompt beginning `[clankerhouse msg-… from …]` is a message from another
+   clanker or the operator. If it says to read it with `clankers inbox read`,
+   do so, act on it, then run `clankers inbox ack` with that id.
 8. To diagnose a stuck or stale clanker, read `health` from `clankers status`
    instead of /proc or cgroup files: `memory.current` near `memory.high` means
    it is being throttled, `dState` lists pids in uninterruptible sleep, and

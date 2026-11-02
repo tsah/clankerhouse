@@ -9,6 +9,9 @@ import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import { advanceProjection } from "./projection"
 import { startSnapshotServer } from "./transport"
 
+/** The text a prompt carried, without the `[clankerhouse msg-... from ...]` tag. */
+const untagged = (prompt: string) => prompt.replace(/^\[clankerhouse msg-[A-Za-z0-9-]+ from [^\]]+\] /, "")
+
 const roots: string[] = []
 const servers: Array<{ stop: (force?: boolean) => void }> = []
 afterEach(() => {
@@ -208,11 +211,11 @@ describe("Herdr semantic prompt transport", () => {
     expect(listed[0]).toMatchObject({ id: clankerId, harness: "claude", capabilities: { send: "multiplexer-prompt", wait: "reports", result: "transcript", report: true, deliveryModes: ["queued", "followUp"] } })
 
     const receipt = await sendClanker(clankerId, "review this exact change", {}, multiplexer)
-    expect(prompts).toEqual([{ pane: paneId, text: "review this exact change" }])
+    expect(prompts).toEqual([{ pane: paneId, text: `[clankerhouse ${receipt.messageId} from operator] review this exact change` }])
     expect(receipt.messageId).toMatch(/^msg-/)
     expect(receipt).toMatchObject({ clankerId, afterGeneration: 0, observedGeneration: 0, delivery: "immediate" })
     expect(receipt.acceptedAt).toBeGreaterThan(0)
-    expect(await sendStatus(receipt.messageId, multiplexer)).toEqual({ messageId: receipt.messageId, clankerId, state: "delivered", startedGeneration: null })
+    expect(await sendStatus(receipt.messageId, multiplexer)).toMatchObject({ messageId: receipt.messageId, clankerId, state: "delivered", startedGeneration: null, stage: "typed", observation: "hook", attempts: 1 })
 
     await expect(sendClanker(clankerId, "steer this", { delivery: "steer" }, multiplexer)).rejects.toMatchObject({ code: "UNSUPPORTED", exitCode: 4 })
   })
@@ -231,7 +234,7 @@ describe("Herdr semantic prompt transport", () => {
     expect(prompts).toEqual([])
     report("done", 1, 1)
     await deliverQueuedMessages(multiplexer)
-    expect(prompts.map((prompt) => prompt.text)).toEqual(["after this turn"])
+    expect(prompts.map((prompt) => untagged(prompt.text))).toEqual(["after this turn"])
     expect((await sendClanker(clankerId, "now", { delivery: "followUp" }, multiplexer)).delivery).toBe("queued")
   })
 
@@ -314,18 +317,18 @@ describe("Herdr semantic prompt transport", () => {
     pane.focused = false
     await deliverQueuedMessages(multiplexer)
     await deliverQueuedMessages(multiplexer)
-    expect(prompts.map((prompt) => prompt.text)).toEqual(["first answer"])
+    expect(prompts.map((prompt) => untagged(prompt.text))).toEqual(["first answer"])
     expect(await sendStatus(first.messageId, multiplexer)).toMatchObject({ state: "delivered", startedGeneration: null })
 
     report("working", 2, 1, ["first answer"])
-    expect(await sendStatus(first.messageId, multiplexer)).toEqual({ messageId: first.messageId, clankerId, state: "acked", startedGeneration: 2 })
+    expect(await sendStatus(first.messageId, multiplexer)).toMatchObject({ messageId: first.messageId, clankerId, state: "acked", startedGeneration: 2, stage: "started" })
     expect(prompts).toHaveLength(1)
     await expect(waitForMessage(clankerId, first.messageId, { timeoutMs: 0 }, multiplexer)).rejects.toMatchObject({ code: "TIMEOUT", exitCode: 124 })
 
     report("done", 2, 2, ["first answer"])
     const settled = await waitForMessage(clankerId, first.messageId, { timeoutMs: 1_000 }, multiplexer)
     expect(settled).toMatchObject({ id: clankerId, settledGeneration: 2, lastReport: null, message: { state: "acked", startedGeneration: 2 } })
-    expect(prompts.map((prompt) => prompt.text)).toEqual(["first answer", "second answer"])
+    expect(prompts.map((prompt) => untagged(prompt.text))).toEqual(["first answer", "second answer"])
 
     // The clanker disappears before acknowledging the second message: it is kept, never redirected.
     pane.present = false

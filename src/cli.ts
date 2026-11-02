@@ -2,9 +2,9 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, fstatSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, listClankers, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
+import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
-import { submitReport } from "./report"
+import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
@@ -105,9 +105,9 @@ const nonNegativeNumber = (value: string | undefined, flag: string) => {
 
 const clankerDelivery = (value: string | undefined): ClankerDelivery | undefined => {
   if (value === undefined) return undefined
-  if (value === "steer") return "steer"
+  if (value === "steer" || value === "auto" || value === "queue" || value === "restart") return value
   if (value === "follow-up" || value === "followUp") return "followUp"
-  throw new Error("--delivery must be steer or follow-up")
+  throw new Error("--delivery must be auto, queue, follow-up, steer or restart")
 }
 
 const harness = (value: string | undefined): Harness => {
@@ -218,6 +218,18 @@ const runViewCommand = async (parsed: ParsedArgs) => {
   return console.log(JSON.stringify({ view: "children", workshopId: workshop.workshopId, label }))
 }
 
+/**
+ * A settled turn's result. Claude writes its reply to the transcript a moment after the Stop
+ * hook that settles the turn, so a missing transcript result is looked for again briefly.
+ */
+const settledResult = async (id: string, generation: number, attempts = 15) => {
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await resultForClanker(id, generation).catch(() => null)
+    if (result || attempt >= attempts) return result
+    await Bun.sleep(200)
+  }
+}
+
 const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) => {
   if (command === "list") return runListCommand(parsed)
   if (command === "status") return console.log(JSON.stringify(await clankerStatusWithReport(requiredClankerId(parsed))))
@@ -239,23 +251,46 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     if (messageId !== undefined) return console.log(JSON.stringify(await waitForMessage(id, messageId, { timeoutMs })))
     return console.log(JSON.stringify(await waitForClanker(id, { afterGeneration, timeoutMs })))
   }
+  if (command === "inbox") {
+    const action = parsed.shift() ?? "list"
+    const clankerId = parsed.take("--clanker")
+    const all = parsed.has("--all")
+    if (action === "list") return console.log(JSON.stringify(await inboxList({ clankerId, all })))
+    const messageId = parsed.shift()
+    if (!messageId || (action !== "read" && action !== "ack")) throw new Error("Usage: clankers inbox [list [--all] | read MESSAGE_ID | ack MESSAGE_ID] [--clanker ID]")
+    if (action === "read") {
+      const message = await inboxRead(messageId, { clankerId })
+      // Plain text by default, since the reader is usually a harness acting on a pointer prompt.
+      if (parsed.has("--json")) return console.log(JSON.stringify(message))
+      return console.log(`From ${message.sender} (${message.source}), message ${message.messageId}:\n\n${message.text}`)
+    }
+    return console.log(JSON.stringify(await inboxAck(messageId, { clankerId })))
+  }
+  if (command === "messages") {
+    const after = nonNegativeNumber(parsed.take("--after"), "--after") ?? 0
+    const clankerIds = takeAll(parsed, "--clanker")
+    return console.log(JSON.stringify(messageEvents(after, clankerIds.length ? clankerIds : undefined)))
+  }
   if (command === "send") {
     const delivery = clankerDelivery(parsed.take("--delivery"))
+    const requestId = parsed.take("--request-id")
+    const source = parsed.take("--source") ?? "cli"
     const wait = parsed.has("--wait")
     const timeoutSeconds = nonNegativeNumber(parsed.take("--timeout"), "--timeout")
     const textFlag = parsed.take("--text")
     const id = requiredClankerId(parsed)
     const text = textFlag ?? await Bun.stdin.text()
-    const receipt = await sendClanker(id, text, { delivery })
+    const sender = await reportingClankerId().catch(() => "operator")
+    const receipt = await sendClanker(id, text, { delivery, requestId, sender, source })
     if (!wait) return console.log(JSON.stringify(receipt))
     const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
     const status = await clankerCapabilities(id)
-    if (status.capabilities.send === "multiplexer-prompt") {
-      // A prompt-transport message may queue, so wait for the turn it started; the turn's
+    if (status.capabilities.send === "multiplexer-prompt" || status.capabilities.send === "messaging-socket") {
+      // A Claude message may queue, so wait for the turn it started; the turn's
       // Report stands in for a result where the harness keeps no reply.
       const { lastReport, message, ...settled } = await waitForMessage(id, receipt.messageId, { timeoutMs })
       const generation = message.startedGeneration ?? settled.settledGeneration
-      const result = status.capabilities.result ? await resultForClanker(id, generation).catch(() => null) : undefined
+      const result = status.capabilities.result ? await settledResult(id, generation) : undefined
       return console.log(JSON.stringify({ ...receipt, settled, lastReport, ...(result === undefined ? {} : { result }) }))
     }
     const settled = await waitForClanker(id, { afterGeneration: receipt.afterGeneration, timeoutMs })
@@ -265,7 +300,7 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     const generation = nonNegativeNumber(parsed.take("--generation"), "--generation")
     return console.log(JSON.stringify(await resultForClanker(requiredClankerId(parsed), generation)))
   }
-  throw new Error("Usage: clankers list|status|capabilities|wait|send|send-status|result|report|watch ...")
+  throw new Error("Usage: clankers list|status|capabilities|wait|send|send-status|inbox|messages|result|report|watch ...")
 }
 
 const resolveWorkshopPath = (selector: string, cwd = process.cwd()) => {
@@ -356,8 +391,10 @@ export const usage = `Usage:
   clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
-  clankers send CLANKER_ID [--delivery steer|follow-up] [--wait] [--text TEXT]
+  clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait] [--text TEXT]
   clankers send-status MESSAGE_ID
+  clankers inbox [list [--all] | read MESSAGE_ID [--json] | ack MESSAGE_ID] [--clanker ID]
+  clankers messages [--after SEQ] [--clanker ID...]
   clankers result CLANKER_ID [--generation GENERATION]
   clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
@@ -497,7 +534,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
   const command = parsed.shift()
   if (!command || command === "help" || command === "--help" || command === "-h") return console.log(usage)
-  if (["list", "status", "capabilities", "wait", "send", "send-status", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
+  if (["list", "status", "capabilities", "wait", "send", "send-status", "inbox", "messages", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
 
   if (command === "mux") return runMultiplexerCli(parsed)
   if (command === "view") return runViewCommand(parsed)
@@ -696,7 +733,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     return console.log(JSON.stringify(await spawnClanker(selectedHarness, resolveWorkshopPath(selector), prompt, { profile, model, name, wait, resourceClass: selectedResourceClass })))
   }
 
-  throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|send-status|result|report|watch ...")
+  throw new Error("Usage: clankers workshop spawn ... | spawn ... | list|status|capabilities|wait|send|send-status|inbox|messages|result|report|watch ...")
 }
 
 if (import.meta.main) {

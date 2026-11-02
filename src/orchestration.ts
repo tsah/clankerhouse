@@ -48,7 +48,25 @@ export interface StoredMessage {
   deliveredAt: number | null
   ackedAt: number | null
   startedGeneration: number | null
+  /** Caller's idempotency key: a resend with the same key returns this message instead of a new one. */
+  requestId: string | null
+  /** Who sent it: the sending clanker's id, or `operator`. */
+  sender: string
+  /** Which surface sent it (cli, daemon, skill, hook...). */
+  source: string
+  /** Harness launch the sender addressed; delivery to a later launch in the same pane is fenced. */
+  incarnation: string | null
+  /** Hand-offs to the Multiplexer so far; an unacknowledged one is retried with the same id. */
+  attempts: number
+  /** When the recipient ran `clankers inbox ack`, after reading it. */
+  handledAt: number | null
+  orphanReason: string | null
+  /** The dispatch mode the caller asked for. */
+  requestedMode: string | null
 }
+
+/** Stage changes of messages, in order; `seq` lets a caller resume where it stopped. */
+export interface MessageEvent { seq: number; at: number; messageId: string; clankerId: string; stage: string; detail: string | null }
 
 export const orchestrationStatePath = () => `${stateDirFor()}/orchestration.sqlite3`
 
@@ -98,7 +116,10 @@ export const reportAddressee = (input: ReportAddressInput): string | null => {
 }
 
 interface ReportRow { seq: number; at: number; clanker_id: string; workshop_id: string | null; to_id: string | null; state: string; message: string | null; payload: string | null }
-interface MessageRow { message_id: string; clanker_id: string; text: string; sha256: string; delivery: string; state: string; created_at: number; after_generation: number; delivered_at: number | null; acked_at: number | null; started_generation: number | null }
+interface MessageRow {
+  message_id: string; clanker_id: string; text: string; sha256: string; delivery: string; state: string; created_at: number; after_generation: number; delivered_at: number | null; acked_at: number | null; started_generation: number | null
+  request_id: string | null; sender: string | null; source: string | null; incarnation: string | null; attempts: number | null; handled_at: number | null; orphan_reason: string | null; requested_mode: string | null
+}
 
 const reportFromRow = (row: ReportRow): ClankerReportRecord => ({
   seq: row.seq,
@@ -123,7 +144,43 @@ const messageFromRow = (row: MessageRow): StoredMessage => ({
   deliveredAt: row.delivered_at,
   ackedAt: row.acked_at,
   startedGeneration: row.started_generation,
+  requestId: row.request_id ?? null,
+  sender: row.sender ?? "operator",
+  source: row.source ?? "cli",
+  incarnation: row.incarnation || null,
+  attempts: row.attempts ?? 0,
+  handledAt: row.handled_at ?? null,
+  orphanReason: row.orphan_reason ?? null,
+  requestedMode: row.requested_mode ?? null,
 })
+
+export class MessageConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "MessageConflictError"
+  }
+}
+
+/** Harness-tagged prompts stay at most this long and this many lines, so Claude never wraps them in `<pasted_content>`. */
+export const INLINE_MAX_CHARS = 500
+export const INLINE_MAX_LINES = 3
+
+/** The tag the lifecycle hook looks for; it acknowledges the message by id, whatever wraps the prompt. */
+export const messageTag = (message: Pick<StoredMessage, "messageId" | "sender">) => `[clankerhouse ${message.messageId} from ${message.sender}]`
+
+/**
+ * The one prompt typed into the harness for a message. Short text travels inline behind its
+ * tag; anything longer stays in the store and the prompt is a one-line pointer to it.
+ */
+export const promptFor = (message: Pick<StoredMessage, "messageId" | "sender" | "text">, options: { inline?: boolean } = {}): { transport: "inline" | "pointer"; prompt: string } => {
+  const text = message.text.replace(/\r\n/g, "\n").trim()
+  const lines = text.split("\n").length
+  const tag = messageTag(message)
+  // Claude's messaging socket keeps text intact, so only a typed prompt needs the pointer.
+  if (options.inline) return { transport: "inline", prompt: `${tag}\n${text}` }
+  if (lines <= INLINE_MAX_LINES && tag.length + 1 + text.length <= INLINE_MAX_CHARS) return { transport: "inline", prompt: `${tag} ${text}` }
+  return { transport: "pointer", prompt: `${tag} New ${lines}-line message. Read it with \`clankers inbox read ${message.messageId}\`, act on it, then run \`clankers inbox ack ${message.messageId}\`.` }
+}
 
 export interface ReportFilter {
   clankerIds?: readonly string[]
@@ -132,7 +189,7 @@ export interface ReportFilter {
 }
 
 /** A submitted prompt as the lifecycle hook recorded it in the pane report. */
-export interface PromptObservation { sha256: string; generation: number }
+export interface PromptObservation { sha256: string; generation: number; messageIds?: string[] }
 
 export class OrchestrationStore {
   private constructor(readonly db: Database) {}
@@ -172,7 +229,23 @@ export class OrchestrationStore {
     `)
     // When the recipient was first found missing; cleared when it is seen again.
     const columns = db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>
-    if (!columns.some((column) => column.name === "missing_since")) db.exec("ALTER TABLE messages ADD COLUMN missing_since INTEGER")
+    const added: Array<[string, string]> = [
+      ["missing_since", "INTEGER"], ["request_id", "TEXT"], ["sender", "TEXT"], ["source", "TEXT"], ["incarnation", "TEXT"],
+      ["attempts", "INTEGER NOT NULL DEFAULT 0"], ["handled_at", "INTEGER"], ["orphan_reason", "TEXT"], ["requested_mode", "TEXT"],
+    ]
+    for (const [name, type] of added) if (!columns.some((column) => column.name === name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${type}`)
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_request_idx ON messages(clanker_id, request_id) WHERE request_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS message_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        clanker_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS message_events_clanker_idx ON message_events(clanker_id, seq);
+    `)
     return new OrchestrationStore(db)
   }
 
@@ -216,14 +289,47 @@ export class OrchestrationStore {
     return (this.db.query("SELECT * FROM reports WHERE seq > ?1 ORDER BY seq").all(seq) as ReportRow[]).map(reportFromRow)
   }
 
-  insertMessage(input: { messageId?: string; clankerId: string; text: string; delivery: StoredMessage["delivery"]; state: StoredMessageState; afterGeneration: number; now?: number; startedGeneration?: number | null }): StoredMessage {
+  insertMessage(input: { messageId?: string; clankerId: string; text: string; delivery: StoredMessage["delivery"]; state: StoredMessageState; afterGeneration: number; now?: number; startedGeneration?: number | null } & MessageOrigin): StoredMessage {
     const now = input.now ?? Date.now()
     const messageId = input.messageId ?? generatedMessageId()
-    const row = this.db.query(`INSERT INTO messages (message_id, clanker_id, text, sha256, delivery, state, created_at, after_generation, delivered_at, acked_at, started_generation)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING *`)
+    const row = this.db.query(`INSERT INTO messages (message_id, clanker_id, text, sha256, delivery, state, created_at, after_generation, delivered_at, acked_at, started_generation, request_id, sender, source, incarnation, attempts, requested_mode)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) RETURNING *`)
       .get(messageId, input.clankerId, input.text, promptSha256(input.text), input.delivery, input.state, now, input.afterGeneration,
-        input.state === "queued" ? null : now, input.state === "acked" ? now : null, input.startedGeneration ?? null) as MessageRow
+        input.state === "queued" ? null : now, input.state === "acked" ? now : null, input.startedGeneration ?? null,
+        input.requestId ?? null, input.sender ?? "operator", input.source ?? "cli", input.incarnation || null, input.state === "delivered" ? 1 : 0, input.requestedMode ?? null) as MessageRow
+    this.recordEvent(messageId, input.clankerId, "queued", null, now)
+    if (input.state !== "queued") this.recordEvent(messageId, input.clankerId, input.state === "acked" ? "acked" : "typed", null, now)
     return messageFromRow(row)
+  }
+
+  private recordEvent(messageId: string, clankerId: string, stage: string, detail: string | null, at = Date.now()) {
+    this.db.query("INSERT INTO message_events (at, message_id, clanker_id, stage, detail) VALUES (?1, ?2, ?3, ?4, ?5)").run(at, messageId, clankerId, stage, detail)
+  }
+
+  /** Message stage changes after `seq`, optionally for some clankers only. */
+  messageEventsAfter(seq: number, clankerIds?: readonly string[]): MessageEvent[] {
+    const rows = (clankerIds?.length
+      ? this.db.query(`SELECT * FROM message_events WHERE seq > ? AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) ORDER BY seq`).all(seq, ...clankerIds)
+      : this.db.query("SELECT * FROM message_events WHERE seq > ?1 ORDER BY seq").all(seq)) as Array<{ seq: number; at: number; message_id: string; clanker_id: string; stage: string; detail: string | null }>
+    return rows.map((row) => ({ seq: row.seq, at: row.at, messageId: row.message_id, clankerId: row.clanker_id, stage: row.stage, detail: row.detail }))
+  }
+
+  /** The message an earlier send with this idempotency key created, if any. */
+  messageForRequest(clankerId: string, requestId: string): StoredMessage | undefined {
+    const row = this.db.query("SELECT * FROM messages WHERE clanker_id = ?1 AND request_id = ?2").get(clankerId, requestId) as MessageRow | null
+    return row ? messageFromRow(row) : undefined
+  }
+
+  /**
+   * An earlier message with the same idempotency key: returned when the text matches, so a
+   * retry never sends twice, and refused when it does not, so a reused key is never silently
+   * applied to different text.
+   */
+  replayedRequest(clankerId: string, requestId: string | null | undefined, text: string): StoredMessage | undefined {
+    if (!requestId) return undefined
+    const existing = this.messageForRequest(clankerId, requestId)
+    if (existing && existing.sha256 !== promptSha256(text)) throw new MessageConflictError(`Request id ${requestId} was already used for a different message to ${clankerId} (${existing.messageId})`)
+    return existing
   }
 
   /**
@@ -231,11 +337,14 @@ export class OrchestrationStore {
    * earlier messages still wait (so order holds), otherwise claimed for immediate delivery.
    * The check and the insert share one transaction so concurrent senders keep their order.
    */
-  admitMessage(input: { clankerId: string; text: string; busy: boolean; afterGeneration: number; now?: number }): StoredMessage {
+  admitMessage(input: { clankerId: string; text: string; busy: boolean; afterGeneration: number; now?: number } & MessageOrigin): StoredMessage & { replayed: boolean } {
     return this.db.transaction(() => {
+      const replayed = this.replayedRequest(input.clankerId, input.requestId, input.text)
+      if (replayed) return { ...replayed, replayed: true }
       const pending = this.pendingMessages(input.clankerId).length
       const queued = shouldQueue({ busy: input.busy, pending })
-      return this.insertMessage({ clankerId: input.clankerId, text: input.text, delivery: queued ? "queued" : "immediate", state: queued ? "queued" : "delivered", afterGeneration: input.afterGeneration, now: input.now })
+      const { busy: _busy, ...rest } = input
+      return { ...this.insertMessage({ ...rest, delivery: queued ? "queued" : "immediate", state: queued ? "queued" : "delivered" }), replayed: false }
     }).immediate()
   }
 
@@ -244,7 +353,10 @@ export class OrchestrationStore {
     return row ? messageFromRow(row) : undefined
   }
 
-  deleteMessage(messageId: string) { this.db.query("DELETE FROM messages WHERE message_id = ?1").run(messageId) }
+  deleteMessage(messageId: string) {
+    this.db.query("DELETE FROM messages WHERE message_id = ?1").run(messageId)
+    this.db.query("DELETE FROM message_events WHERE message_id = ?1").run(messageId)
+  }
 
   /** Messages not yet acknowledged, oldest first. */
   pendingMessages(clankerId?: string): StoredMessage[] {
@@ -268,8 +380,9 @@ export class OrchestrationStore {
       if (this.db.query("SELECT 1 FROM messages WHERE clanker_id = ?1 AND state = 'delivered' LIMIT 1").get(clankerId)) return undefined
       const row = this.db.query("SELECT * FROM messages WHERE clanker_id = ?1 AND state = 'queued' ORDER BY created_at, rowid LIMIT 1").get(clankerId) as MessageRow | null
       if (!row) return undefined
-      this.db.query("UPDATE messages SET state = 'delivered', delivered_at = ?2, after_generation = ?3 WHERE message_id = ?1").run(row.message_id, now, afterGeneration)
-      return messageFromRow({ ...row, state: "delivered", delivered_at: now, after_generation: afterGeneration })
+      this.db.query("UPDATE messages SET state = 'delivered', delivered_at = ?2, after_generation = ?3, attempts = attempts + 1 WHERE message_id = ?1").run(row.message_id, now, afterGeneration)
+      this.recordEvent(row.message_id, clankerId, "typed", `attempt ${(row.attempts ?? 0) + 1}`, now)
+      return messageFromRow({ ...row, state: "delivered", delivered_at: now, after_generation: afterGeneration, attempts: (row.attempts ?? 0) + 1 })
     }).immediate()
   }
 
@@ -288,8 +401,9 @@ export class OrchestrationStore {
         } else if (row.missing_since === null) {
           this.db.query("UPDATE messages SET missing_since = ?2 WHERE message_id = ?1").run(row.message_id, now)
         } else if (now - row.missing_since >= orphanAfterMs) {
-          this.db.query("UPDATE messages SET state = 'orphaned' WHERE message_id = ?1").run(row.message_id)
-          orphaned.push({ ...messageFromRow(row), state: "orphaned" })
+          this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'recipient-missing' WHERE message_id = ?1").run(row.message_id)
+          this.recordEvent(row.message_id, row.clanker_id, "orphaned", "recipient-missing", now)
+          orphaned.push({ ...messageFromRow(row), state: "orphaned", orphanReason: "recipient-missing" })
         }
       }
       return orphaned
@@ -299,31 +413,94 @@ export class OrchestrationStore {
   /** Orphan every pending message to these clankers at once, because they were stopped on purpose. */
   orphanMessagesFor(clankerIds: readonly string[]): StoredMessage[] {
     if (!clankerIds.length) return []
-    const rows = this.db.query(`UPDATE messages SET state = 'orphaned' WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
+    const rows = this.db.query(`UPDATE messages SET state = 'orphaned', orphan_reason = 'stopped' WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
+    for (const row of rows) this.recordEvent(row.message_id, row.clanker_id, "orphaned", "stopped")
+    return rows.map(messageFromRow)
+  }
+
+  /**
+   * Fence a relaunched harness: pending messages addressed to an earlier launch in the same pane
+   * are orphaned instead of typed into the new one. Either side unknown (an older wrapper) fences nothing.
+   */
+  fenceIncarnation(clankerId: string, incarnation: string | null | undefined, now = Date.now()): StoredMessage[] {
+    if (!incarnation) return []
+    return this.db.transaction(() => {
+      const rows = this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'harness-replaced' WHERE clanker_id = ?1 AND state IN ('queued', 'delivered') AND incarnation IS NOT NULL AND incarnation <> ?2 RETURNING *").all(clankerId, incarnation) as MessageRow[]
+      for (const row of rows) this.recordEvent(row.message_id, clankerId, "orphaned", "harness-replaced", now)
+      return rows.map(messageFromRow)
+    }).immediate()
+  }
+
+  /**
+   * Return typed but unacknowledged messages to the queue once the clanker has been ready
+   * again for `afterMs`: the hand-off evidently never reached the harness. The retry types the
+   * same id, so a late acknowledgement of the first copy still dedupes. After `maxAttempts` a
+   * message stays delivered-unconfirmed and holds the queue for a human.
+   */
+  retryUnacknowledged(clankerId: string, now = Date.now(), afterMs = RETRY_UNACKED_AFTER_MS, maxAttempts = MAX_DELIVERY_ATTEMPTS): StoredMessage[] {
+    return this.db.transaction(() => {
+      const rows = this.db.query("UPDATE messages SET state = 'queued' WHERE clanker_id = ?1 AND state = 'delivered' AND delivered_at <= ?2 AND attempts < ?3 RETURNING *").all(clankerId, now - afterMs, maxAttempts) as MessageRow[]
+      for (const row of rows) this.recordEvent(row.message_id, clankerId, "retrying", `no acknowledgement after attempt ${row.attempts ?? 0}`, now)
+      return rows.map(messageFromRow)
+    }).immediate()
+  }
+
+  /** The recipient's own acknowledgement that it read and handled a message. */
+  markHandled(messageId: string, clankerId: string, now = Date.now()): StoredMessage {
+    return this.db.transaction(() => {
+      const message = this.message(messageId)
+      if (!message || message.clankerId !== clankerId) throw new Error(`No message ${messageId} for clanker ${clankerId}`)
+      if (message.handledAt !== null) return message
+      // Reading the pointer proves delivery, even if the hook's acknowledgement has not landed yet.
+      const state = message.state === "queued" || message.state === "delivered" ? "acked" : message.state
+      this.db.query("UPDATE messages SET handled_at = ?2, state = ?3, acked_at = COALESCE(acked_at, ?2) WHERE message_id = ?1").run(messageId, now, state)
+      if (state !== message.state) this.recordEvent(messageId, clankerId, "acked", "by inbox ack", now)
+      this.recordEvent(messageId, clankerId, "handled", null, now)
+      return { ...message, state, handledAt: now, ackedAt: message.ackedAt ?? now }
+    }).immediate()
+  }
+
+  /** Messages to a clanker it has not acknowledged handling, oldest first. */
+  inbox(clankerId: string, includeHandled = false): StoredMessage[] {
+    const rows = this.db.query(`SELECT * FROM messages WHERE clanker_id = ?1 AND state <> 'orphaned' ${includeHandled ? "" : "AND handled_at IS NULL"} ORDER BY created_at, rowid`).all(clankerId) as MessageRow[]
     return rows.map(messageFromRow)
   }
 
   /** Return a claimed message to the head of its queue after a failed hand-off. */
   requeue(messageId: string) {
-    this.db.query("UPDATE messages SET state = 'queued', delivered_at = NULL WHERE message_id = ?1 AND state = 'delivered'").run(messageId)
+    const row = this.db.query("UPDATE messages SET state = 'queued', delivered_at = NULL WHERE message_id = ?1 AND state = 'delivered' RETURNING clanker_id").get(messageId) as { clanker_id: string } | null
+    if (row) this.recordEvent(messageId, row.clanker_id, "requeued", null)
   }
 
   /**
-   * Acknowledge delivered messages whose hash the clanker's hook recorded in a newer turn.
-   * Each observed prompt acknowledges at most one message.
+   * Acknowledge messages the clanker's hook saw submitted. A prompt tagged with message ids
+   * acknowledges exactly those messages, queued or delivered (a retried hand-off may have landed
+   * after all). An untagged prompt from an older client acknowledges at most one delivered
+   * message whose hash it matches, in a newer turn.
    */
   acknowledge(clankerId: string, prompts: readonly PromptObservation[], now = Date.now()): StoredMessage[] {
     if (!prompts.length) return []
     return this.db.transaction(() => {
-      const delivered = (this.db.query("SELECT * FROM messages WHERE clanker_id = ?1 AND state = 'delivered' ORDER BY delivered_at, rowid").all(clankerId) as MessageRow[]).map(messageFromRow)
-      const used = new Set<number>()
       const acked: StoredMessage[] = []
+      for (const prompt of prompts) {
+        for (const id of prompt.messageIds ?? []) {
+          const row = this.db.query("UPDATE messages SET state = 'acked', acked_at = ?3, started_generation = ?4 WHERE message_id = ?1 AND clanker_id = ?2 AND state IN ('queued', 'delivered') RETURNING *").get(id, clankerId, now, prompt.generation) as MessageRow | null
+          if (!row) continue
+          this.recordEvent(id, clankerId, "acked", `generation ${prompt.generation}`, now)
+          acked.push(messageFromRow(row))
+        }
+      }
+      const delivered = (this.db.query("SELECT * FROM messages WHERE clanker_id = ?1 AND state = 'delivered' ORDER BY delivered_at, rowid").all(clankerId) as MessageRow[]).map(messageFromRow)
+      const used = new Set<number>(prompts.flatMap((prompt, index) => prompt.messageIds?.length ? [index] : []))
       for (const message of delivered) {
-        const index = prompts.findIndex((prompt, at) => !used.has(at) && prompt.sha256 === message.sha256 && prompt.generation > message.afterGeneration)
+        // An older hook records only the hash of what was typed: the raw text, or its tagged prompt.
+        const typed = promptSha256(promptFor(message).prompt)
+        const index = prompts.findIndex((prompt, at) => !used.has(at) && (prompt.sha256 === message.sha256 || prompt.sha256 === typed) && prompt.generation > message.afterGeneration)
         if (index < 0) continue
         used.add(index)
         const startedGeneration = prompts[index]!.generation
         this.db.query("UPDATE messages SET state = 'acked', acked_at = ?2, started_generation = ?3 WHERE message_id = ?1").run(message.messageId, now, startedGeneration)
+        this.recordEvent(message.messageId, clankerId, "acked", `generation ${startedGeneration} (hash)`, now)
         acked.push({ ...message, state: "acked", ackedAt: now, startedGeneration })
       }
       return acked
@@ -337,20 +514,69 @@ export const withOrchestrationStore = <T>(work: (store: OrchestrationStore) => T
   finally { store.close() }
 }
 
+/**
+ * How far a message got, furthest first: `handled` (the recipient acked reading it), `settled`
+ * (the turn it started ended), `started` (the hook saw it submitted, naming the turn), `typed`
+ * (handed to the Multiplexer, not yet confirmed), `queued`, or `orphaned`.
+ */
+export type MessageStage = "queued" | "typed" | "started" | "settled" | "handled" | "orphaned"
+
+/** `hook`: the lifecycle hook confirms submission. `harness`: the harness's own socket reply does. */
+export type DeliveryObservation = "hook" | "harness" | "unsupported"
+
 export interface SendStatus {
   messageId: string
   clankerId: string
   state: MessageState
   startedGeneration: number | null
+  stage: MessageStage
+  observation: DeliveryObservation
+  sender: string
+  source: string
+  requestId: string | null
+  attempts: number
+  orphanReason: string | null
+  at: { queued: number; typed: number | null; acked: number | null; handled: number | null }
 }
 
 /** Public delivery state: an unacknowledged message to a clanker that no longer exists is orphaned. */
-export const sendStatusOf = (message: StoredMessage, clankerPresent: boolean): SendStatus => ({
-  messageId: message.messageId,
-  clankerId: message.clankerId,
-  state: message.state !== "acked" && !clankerPresent ? "orphaned" : message.state,
-  startedGeneration: message.startedGeneration,
-})
+export const sendStatusOf = (message: StoredMessage, clankerPresent: boolean, settledGeneration = 0): SendStatus => {
+  const state: MessageState = message.state !== "acked" && !clankerPresent ? "orphaned" : message.state
+  const settled = state === "acked" && message.startedGeneration !== null && settledGeneration >= message.startedGeneration
+  const stage: MessageStage = state === "orphaned" ? "orphaned"
+    : message.handledAt !== null ? "handled"
+    : settled ? "settled"
+    : state === "acked" ? "started"
+    : state === "delivered" ? "typed"
+    : "queued"
+  return {
+    messageId: message.messageId,
+    clankerId: message.clankerId,
+    state,
+    startedGeneration: message.startedGeneration,
+    stage,
+    observation: message.delivery === "steer" || message.delivery === "followUp" || (message.state === "acked" && message.startedGeneration === null && message.attempts === 0) ? "harness" : "hook",
+    sender: message.sender,
+    source: message.source,
+    requestId: message.requestId,
+    attempts: message.attempts,
+    orphanReason: state === "orphaned" ? message.orphanReason ?? (clankerPresent ? null : "recipient-missing") : null,
+    at: { queued: message.createdAt, typed: message.deliveredAt, acked: message.ackedAt, handled: message.handledAt },
+  }
+}
+
+/** Who and what sent a message, and the idempotency key and harness launch it was addressed with. */
+export interface MessageOrigin {
+  requestId?: string | null
+  sender?: string
+  source?: string
+  incarnation?: string | null
+  requestedMode?: string | null
+}
+
+/** An unacknowledged hand-off is retried once the clanker has been ready this long. */
+export const RETRY_UNACKED_AFTER_MS = 15_000
+export const MAX_DELIVERY_ATTEMPTS = 3
 
 /** The harness is mid-turn or waiting on a permission, or the operator's input focus is on its pane. */
 export const clankerBusy = (input: { state: ClankerState; focused: boolean }) =>

@@ -1,0 +1,211 @@
+#!/bin/bash
+
+# Clanker messaging against a real Claude Code (haiku) on a private hc (herdr-core) session, with
+# its own daemon, state and runtime. Opt-in: it needs Claude's own login and spends a few short
+# haiku turns, so it is not a scripts/qa* scenario and ./test does not run it.
+# See docs/messaging-study-t3code-orca.md.
+#
+# Claude is started directly, as an operator starts it by hand: no clankerhouse wrapper, so its
+# messaging socket is found through the lifecycle hook alone. It runs with --setting-sources
+# project, so the operator's own hooks never fire, and with --settings carrying only this
+# checkout's lifecycle hook, crossSessionInbound and one allow rule. Its credentials are Claude's
+# own; this script never reads them. Claude records the sessions under ~/.claude/projects.
+#
+# Scenarios: inbox send + request-id replay; 60 lines intact; busy send (no merge); a human
+# draft survives; an open /model picker; a permission dialog cannot be answered by a message;
+# a redelivered copy is dropped by the hook; restart through hc's interrupt; fencing a relaunch.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/qa-hc-server
+. "$repo/scripts/lib/qa-hc-server"
+uid=$(id -u)
+root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-chm-$uid-$$"}")
+[[ "$root" =~ ^/tmp/qa-chm-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe QA root: $root" >&2; exit 2; }
+marker="$root.clankerhouse-qa-owned"
+if [[ -e "$root" && ! -f "$marker" ]]; then echo "Refusing unowned QA root: $root" >&2; exit 2; fi
+rm -rf -- "$root"
+# A fixed work directory, so Claude's folder-trust answer from an earlier run is reused.
+work="/tmp/qa-clankerhouse-messaging-work-$uid"
+mkdir -p -m 700 "$root/claude-settings" "$work"
+touch "$marker"
+claude_bin=$(command -v claude) || { echo "claude not found; skipping" >&2; exit 0; }
+
+# Nothing from the operator's live lane may reach the scratch core, daemon or hook.
+for name in $(env | sed -n 's/^\(HC_[A-Z_]*\|HERDR_[A-Z_]*\|CLANKER[A-Z_]*\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$name"; done
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+export CLANKERHOUSE_MULTIPLEXER=hc CLANKERHOUSE_INSTANCE="qa-msg-$$"
+set +e; qa_hc_start "$root/hc"; started=$?; set -e
+[[ $started == 77 ]] && exit 0
+[[ $started == 0 ]] || exit "$started"
+launcher="$repo/bin/clankerhouse-hc"
+old_pid=""
+cleanup() {
+    # Scenario 9 freezes the scratch Claude; never leave it stopped.
+    if [[ -n "$old_pid" ]]; then kill -KILL "$old_pid" 2>/dev/null || true; fi
+    "$launcher" --stop-server >/dev/null 2>&1 || true
+    qa_hc_stop
+    if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
+}
+trap cleanup EXIT INT TERM
+"$launcher" --ensure-server >/dev/null
+
+fail() {
+    echo "Clankerhouse messaging QA failed: $*" >&2
+    echo "--- screen" >&2; screen | tail -25 >&2 || true
+    echo "--- report" >&2; cat "$XDG_RUNTIME_DIR/clankerhouse-$uid-$CLANKERHOUSE_INSTANCE/clanker-state/$pane.json" >&2 2>/dev/null || true
+    exit 1
+}
+pass() { echo "ok - $*"; }
+api() { "$repo/bin/clankers" "$@"; }
+field() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1], {"d": d}))' "$1"; }
+screen() { qa_hc read "$pane" | tail -40; }
+report_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))' "$XDG_RUNTIME_DIR/clankerhouse-$uid-$CLANKERHOUSE_INSTANCE/clanker-state/$pane.json" "$1"; }
+
+hook="$repo/native-client/target/release/clankerhouse-hook"
+[[ -x "$hook" ]] || cargo build --release --quiet --manifest-path "$repo/native-client/Cargo.toml"
+env HOME="$root/claude-settings" CLAUDE_CONFIG_DIR="$root/claude-settings" CLANKERHOUSE_HOOK="$hook" \
+    bash "$repo/bin/clankerhouse-install-claude-hooks" >/dev/null
+python3 - "$root/claude-settings/settings.json" <<'EOF'
+import json, sys
+path = sys.argv[1]
+settings = json.load(open(path))
+# Messages from clankerhouse are not from another Claude session; accept them without a dialog.
+settings["crossSessionInbound"] = "accept"
+settings["permissions"] = {"allow": ["Bash(./slow.sh:*)"]}
+json.dump(settings, open(path, "w"), indent=2)
+EOF
+printf '#!/bin/bash\nfor i in $(seq 1 "$1"); do echo tick $i; sleep 1; done\n' >"$work/slow.sh"
+chmod +x "$work/slow.sh"
+rm -f "$work/approved.txt"
+cat >"$root/launch" <<EOF
+#!/bin/bash
+export PATH=$repo/bin:$(dirname "$claude_bin"):/usr/bin:/bin
+exec "$claude_bin" --model haiku --permission-mode default --setting-sources project --settings $root/claude-settings/settings.json
+EOF
+chmod +x "$root/launch"
+
+# Two launches in one terminal: the second is the relaunch the fencing scenario needs.
+spawned=$(api mux spawn --new-session qa-msg --name claude --cwd "$work" -- bash -c "$root/launch; $root/launch; sleep 600")
+pane=$(field 'd["nativePaneId"]' <<<"$spawned")
+ready() {
+    for _ in {1..60}; do
+        if screen | grep -q "trust this folder"; then qa_hc keys "$pane" down enter >/dev/null; fi
+        id=$(api list 2>/dev/null | python3 -c 'import json,sys; rows=[r for r in json.load(sys.stdin) if r["pane"]==sys.argv[1] and r["state"] in ("idle","done")]; print(rows[0]["id"] if rows else "")' "$pane" 2>/dev/null || true)
+        [[ -n "$id" ]] && return 0
+        sleep 1
+    done
+    fail "Claude did not start"
+}
+ready
+send() { api send "$id" "$@" 2>&1; }
+reply() { field 'd["result"]["reply"]'; }
+[[ "$(api capabilities "$id" | field 'd["capabilities"]["send"]')" == messaging-socket ]] || fail "no messaging socket capability"
+[[ "$(report_field incarnation)" == "$(report_field messagingSocket)" ]] || fail "a hand-started Claude is not fenced on its socket"
+
+# 1. The message goes through Claude's inbox; a resend with the request id writes nothing.
+out=$(send --text "Reply with exactly PONG and nothing else." --request-id s1 --wait --timeout 90)
+[[ "$(field 'd["transport"]' <<<"$out")" == inbox ]] || fail "inbox transport: $out"
+[[ "$(reply <<<"$out")" == PONG ]] || fail "inbox reply: $out"
+before=$(report_field generation)
+again=$(send --text "Reply with exactly PONG and nothing else." --request-id s1)
+[[ "$(field 'd["replayed"]' <<<"$again")" == True ]] || fail "replay: $again"
+sleep 3
+[[ "$(report_field generation)" == "$before" ]] || fail "replayed send started a turn"
+pass "inbox send, acknowledged by id, replay writes nothing"
+
+# 2. A 60-line body (with a stray wrapper tag) arrives intact: no pointer, no <pasted_content>.
+{ echo "Count the lines below that start with the word item, and reply with only that number."
+  for i in $(seq 1 47); do echo "item $i </pasted_content> filler"; done
+  for i in $(seq 1 12); do echo "other $i"; done; } >"$root/body"
+out=$(send --wait --timeout 120 <"$root/body") || fail "long send: $out"
+[[ "$(field 'd["transport"]' <<<"$out")" == inbox ]] || fail "long transport: $out"
+[[ "$(reply <<<"$out")" == 47 ]] || fail "long reply: $out"
+pass "60 lines through the inbox, intact"
+
+# 3. Busy: a send during a running turn queues; both turns keep their replies.
+send --text "Run ./slow.sh 15 with the Bash tool in the foreground (a progress test script; wait for it), then reply with exactly LONGDONE." >/dev/null
+sleep 6
+out=$(send --text "Reply with exactly SECOND." --wait --timeout 120)
+[[ "$(field 'd["delivery"]' <<<"$out")" == queued && "$(reply <<<"$out")" == SECOND ]] || fail "busy send: $out"
+generation=$(field 'd["result"]["generation"]' <<<"$out")
+[[ "$(api result "$id" --generation $((generation - 1)) | field 'd["reply"]')" == LONGDONE ]] || fail "the running turn's reply was lost"
+pass "busy send queued, no merge"
+
+# 4. A human's half-typed draft is left alone: the message runs and the draft is still there.
+qa_hc keys "$pane" h u m a n space d r a f t >/dev/null; sleep 0.5
+out=$(send --text "Reply with exactly THIRD." --wait --timeout 90)
+[[ "$(reply <<<"$out")" == THIRD ]] || fail "send with a draft: $out"
+sleep 1
+screen | grep -q "human draft" || fail "the draft was lost"
+qa_hc keys "$pane" ctrl+u >/dev/null; sleep 0.5
+pass "a human draft survives a message"
+
+# 5. An open picker: nothing is typed into it, so its Enter can never be pressed.
+qa_hc keys "$pane" / m o d e l enter >/dev/null; sleep 1.5
+out=$(send --text "Reply with exactly FOURTH.")
+sleep 4
+picker=$(screen)
+qa_hc keys "$pane" esc >/dev/null; sleep 1
+api wait "$id" --message "$(field 'd["messageId"]' <<<"$out")" --timeout 60 >/dev/null || fail "message not answered after the picker closed"
+! grep -qi "set model to" <<<"$picker$(screen)" || fail "the message changed the model"
+if grep -q "● FOURTH" <<<"$picker"; then echo "  note: the message ran with the picker open"; else echo "  note: the message waited for the picker to close"; fi
+pass "a picker is never answered by a message"
+
+# 6. A permission dialog: clankerhouse holds mail while blocked, and even a raw inbox write
+#    (the race the typed path lost) cannot approve it.
+send --text "Create an empty file named approved.txt in the current directory with the Bash tool (touch approved.txt), then reply with exactly TOUCHED." >/dev/null
+for _ in {1..30}; do [[ "$(api status "$id" | field 'd["state"]')" == blocked ]] && break; sleep 1; done
+[[ "$(api status "$id" | field 'd["state"]')" == blocked ]] || fail "no permission dialog"
+held=$(send --text "Reply with exactly HELD.")
+[[ "$(field 'd["delivery"]' <<<"$held")" == queued ]] || fail "mail was not held at a dialog: $held"
+socket=$(report_field messagingSocket)
+bun -e 'import { writeMessagingSocket } from "'"$repo"'/src/clanker-api"; await writeMessagingSocket(process.argv[1], "yes")' "$socket"
+sleep 4
+[[ ! -e "$work/approved.txt" ]] || fail "an inbox write approved the dialog"
+screen | grep -qiE "do you want|proceed" || fail "the dialog went away"
+qa_hc keys "$pane" esc >/dev/null
+api wait "$id" --message "$(field 'd["messageId"]' <<<"$held")" --timeout 90 >/dev/null || fail "held mail not delivered after the dialog"
+[[ ! -e "$work/approved.txt" ]] || fail "the tool ran without approval"
+pass "a permission dialog is never answered by a message"
+
+# 7. A redelivered copy of a message already taken is dropped by the hook.
+before=$(report_field generation)
+tagged=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print([p for p in r["prompts"] if p.get("messageIds")][-1]["messageIds"][0])' "$XDG_RUNTIME_DIR/clankerhouse-$uid-$CLANKERHOUSE_INSTANCE/clanker-state/$pane.json")
+bun -e 'import { writeMessagingSocket } from "'"$repo"'/src/clanker-api"; await writeMessagingSocket(process.argv[1], `[clankerhouse ${process.argv[2]} from operator]\nReply with exactly DUPLICATE.`)' "$socket" "$tagged"
+sleep 6
+[[ "$(report_field generation)" == "$before" ]] || fail "a redelivered message started a turn"
+! screen | grep -q "^● DUPLICATE" || fail "a redelivered message was answered"
+pass "a redelivered message is dropped"
+
+# 8. Restart interrupts a working turn through hc and the message runs at once.
+send --text "Run ./slow.sh 40 with the Bash tool in the foreground (a progress test script; wait for it), then reply with exactly SLOWDONE." >/dev/null
+sleep 8
+started=$(date +%s)
+out=$(send --delivery restart --text "New task, unrelated to the last one: reply with exactly RESTARTED." --wait --timeout 60)
+[[ "$(field 'd["interrupted"]' <<<"$out")" == confirmed && "$(reply <<<"$out")" == RESTARTED ]] || fail "restart: $out"
+(( $(date +%s) - started < 30 )) || fail "restart waited for the slow turn"
+out=$(send --text "Reply with exactly AFTER." --wait --timeout 60)
+[[ "$(reply <<<"$out")" == AFTER ]] || fail "send after restart: $out"
+pass "restart through hc's interrupt"
+
+# 9. Mail written to one launch but never acknowledged is fenced when the terminal relaunches
+#    Claude, never resent into the new one. This scratch Claude (its pid names its socket under
+#    $root) is frozen so the write lands unread, then killed; the terminal starts the second launch.
+old_socket=$(report_field messagingSocket)
+[[ "$old_socket" == "$root"/* ]] || fail "unexpected socket path $old_socket"
+old_pid=$(basename "$old_socket" .sock)
+[[ "$(readlink "/proc/$old_pid/cwd")" == "$work" ]] || fail "pid $old_pid is not the scratch Claude"
+kill -STOP "$old_pid"
+stale=$(send --text "Reply with exactly STALEMAIL." | field 'd["messageId"]')
+[[ "$(api send-status "$stale" | field 'd["stage"]')" == typed ]] || fail "stale mail was not written"
+kill -KILL "$old_pid"
+sleep 3; ready
+[[ "$(report_field messagingSocket)" != "$old_socket" ]] || fail "the relaunch kept the old socket"
+for _ in {1..10}; do [[ "$(api send-status "$stale" | field 'd["stage"]')" == orphaned ]] && break; sleep 1; done
+[[ "$(api send-status "$stale" | field 'd["orphanReason"]')" == harness-replaced ]] || fail "stale mail was not fenced"
+[[ "$(send --text "Reply with exactly FRESH." --wait --timeout 60 | reply)" == FRESH ]] || fail "new launch did not take new mail"
+! screen | grep -q STALEMAIL || fail "stale mail reached the new launch"
+pass "fencing a relaunched Claude"
+
+echo "Clankerhouse messaging QA passed."

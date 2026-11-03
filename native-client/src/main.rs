@@ -193,6 +193,17 @@ struct RepositoryCacheEntry {
 struct RepositoryRow {
     name: String,
     path: String,
+    common_dir: String,
+    /// Milliseconds since the epoch of the newest durable "opened" or "active"
+    /// activity in any checkout of this repository; 0 when never used.
+    last_used: u64,
+}
+
+#[derive(Deserialize)]
+struct ActivityRecord {
+    path: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -840,6 +851,8 @@ fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<Repository
         let candidate = RepositoryRow {
             name,
             path: session.path.clone(),
+            common_dir: common_dir.clone(),
+            last_used: 0,
         };
         let replace = repositories.get(common_dir).is_none_or(|existing| {
             let existing_main = sessions
@@ -856,6 +869,80 @@ fn repository_rows(cache_path: &Path, sessions: &[SessionRow]) -> Vec<Repository
     let mut rows = repositories.into_values().collect::<Vec<_>>();
     rows.sort_by(|left, right| left.name.cmp(&right.name));
     rows
+}
+
+/// The git common dir of a checkout, read from its `.git` entry without
+/// running git: a main checkout's `.git` directory, or the `gitdir:` a linked
+/// worktree's `.git` file points into (`<common>/worktrees/<name>`).
+fn checkout_common_dir(path: &Path) -> Option<String> {
+    let dot_git = path.join(".git");
+    let metadata = fs::metadata(&dot_git).ok()?;
+    if metadata.is_dir() {
+        return Some(dot_git.to_string_lossy().into_owned());
+    }
+    let raw = fs::read_to_string(&dot_git).ok()?;
+    let gitdir = Path::new(raw.strip_prefix("gitdir:")?.trim());
+    let gitdir = path.join(gitdir);
+    let common = match gitdir.parent() {
+        Some(parent) if parent.file_name().is_some_and(|name| name == "worktrees") => parent.parent()?,
+        _ => &gitdir,
+    };
+    Some(common.to_string_lossy().into_owned())
+}
+
+/// Newest "opened" (Workshop created or opened) and "active" (attached and
+/// focused) activity per repository common dir, from the daemon's durable
+/// activity records. Clanker-report activity is ignored so a busy background
+/// agent does not pin a repository to the top. Only the two relevant record
+/// kinds are read, picked by file name; a path the repository cache does not
+/// know is resolved from its `.git` entry, never by running git. Records for
+/// checkouts that no longer exist cannot be attributed and are skipped.
+fn repository_last_used(
+    activity_dir: &Path,
+    identities: &HashMap<String, String>,
+) -> HashMap<String, u64> {
+    let mut last_used = HashMap::<String, u64>::new();
+    let Ok(entries) = fs::read_dir(activity_dir) else {
+        return last_used;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !(file_name.ends_with("-opened.json") || file_name.ends_with("-active.json")) {
+            continue;
+        }
+        let Ok(raw) = fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<ActivityRecord>(&raw) else {
+            continue;
+        };
+        let Some(common_dir) = identities
+            .get(&record.path)
+            .cloned()
+            .or_else(|| checkout_common_dir(Path::new(&record.path)))
+        else {
+            continue;
+        };
+        let newest = last_used.entry(common_dir).or_default();
+        *newest = (*newest).max(record.updated_at);
+    }
+    last_used
+}
+
+/// Most recently used first; never-used repositories keep name order after them.
+fn order_repositories(rows: &mut [RepositoryRow], last_used: &HashMap<String, u64>) {
+    for row in rows.iter_mut() {
+        row.last_used = last_used.get(&row.common_dir).copied().unwrap_or(0);
+    }
+    rows.sort_by(|left, right| {
+        right
+            .last_used
+            .cmp(&left.last_used)
+            .then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 fn branch_rank(kind: BranchKind) -> u8 {
@@ -1490,9 +1577,12 @@ impl App {
                 Some((repository, score))
             })
             .collect::<Vec<_>>();
+        // Match quality decides under a query, so Enter takes the best match;
+        // recency breaks ties (and is the whole order with no query).
         rows.sort_by(|(left, left_score), (right, right_score)| {
             right_score
                 .cmp(left_score)
+                .then_with(|| right.last_used.cmp(&left.last_used))
                 .then_with(|| left.name.cmp(&right.name))
         });
         rows.into_iter().map(|(repository, _)| repository).collect()
@@ -1574,6 +1664,10 @@ impl App {
     }
 
     fn enter_repository_mode(&mut self) {
+        if let Ok(activity_dir) = activity_dir() {
+            let last_used = repository_last_used(&activity_dir, &self.repository_identities);
+            order_repositories(&mut self.repositories, &last_used);
+        }
         self.mode = Mode::Repository;
         self.query.clear();
         self.unfiltered_selection = None;
@@ -3116,13 +3210,7 @@ fn refresh_repository_cache_if_unavailable(
     Ok(true)
 }
 
-fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<PathBuf, String> {
-    if let Some(explicit) = environment
-        .get("CLANKERHOUSE_RUNTIME_DIR")
-        .filter(|path| !path.trim().is_empty())
-    {
-        return Ok(PathBuf::from(explicit));
-    }
+fn instance_suffix(environment: &HashMap<String, String>) -> Result<String, String> {
     let instance = environment
         .get("CLANKERHOUSE_INSTANCE")
         .map(|value| value.trim())
@@ -3133,17 +3221,48 @@ fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<
     {
         return Err(format!("Invalid CLANKERHOUSE_INSTANCE: {instance}"));
     }
-    let suffix = match instance {
+    Ok(match instance {
         Some("default") => String::new(),
         Some(other) => format!("-{other}"),
         None => "-herdr".to_string(),
-    };
+    })
+}
+
+fn runtime_root_from(environment: &HashMap<String, String>, uid: u32) -> Result<PathBuf, String> {
+    if let Some(explicit) = environment
+        .get("CLANKERHOUSE_RUNTIME_DIR")
+        .filter(|path| !path.trim().is_empty())
+    {
+        return Ok(PathBuf::from(explicit));
+    }
+    let suffix = instance_suffix(environment)?;
     let base = environment
         .get("XDG_RUNTIME_DIR")
         .filter(|path| !path.is_empty())
         .map(String::as_str)
         .unwrap_or("/tmp");
     Ok(PathBuf::from(base).join(format!("clankerhouse-{uid}{suffix}")))
+}
+
+/// Mirrors src/activity.ts: $XDG_STATE_HOME/clankerhouse<instance>/activity.
+fn activity_dir_from(environment: &HashMap<String, String>) -> Result<PathBuf, String> {
+    let state_home = environment
+        .get("XDG_STATE_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            environment
+                .get("HOME")
+                .map(|home| Path::new(home).join(".local/state"))
+        })
+        .ok_or_else(|| "No state home".to_string())?;
+    Ok(state_home
+        .join(format!("clankerhouse{}", instance_suffix(environment)?))
+        .join("activity"))
+}
+
+fn activity_dir() -> Result<PathBuf, String> {
+    activity_dir_from(&env::vars().collect())
 }
 
 fn runtime_root() -> Result<PathBuf, String> {
@@ -3562,6 +3681,134 @@ mod tests {
             Ok(false)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn repository_row(name: &str, path: &str, common_dir: &str) -> RepositoryRow {
+        RepositoryRow {
+            name: name.into(),
+            path: path.into(),
+            common_dir: common_dir.into(),
+            last_used: 0,
+        }
+    }
+
+    fn names(rows: &[&RepositoryRow]) -> Vec<String> {
+        rows.iter().map(|row| row.name.clone()).collect()
+    }
+
+    #[test]
+    fn repository_last_used_reads_opened_and_active_activity_per_repository() {
+        let root = env::temp_dir().join(format!(
+            "clankerhouse-native-repo-activity-test-{}",
+            std::process::id()
+        ));
+        let activity = root.join("activity");
+        let beta = root.join("beta");
+        let beta_feature = root.join("beta.feature");
+        fs::create_dir_all(&activity).unwrap();
+        fs::create_dir_all(beta.join(".git/worktrees/beta.feature")).unwrap();
+        fs::create_dir_all(&beta_feature).unwrap();
+        fs::write(
+            beta_feature.join(".git"),
+            format!("gitdir: {}\n", beta.join(".git/worktrees/beta.feature").display()),
+        )
+        .unwrap();
+        let write = |file: &str, path: &str, at: u64| {
+            fs::write(
+                activity.join(file),
+                format!(r#"{{"path":"{path}","source":"x","updatedAt":{at}}}"#),
+            )
+            .unwrap()
+        };
+        // Cached paths map through the repository cache; the newest record wins.
+        write("a-opened.json", "/alpha/main", 100);
+        write("b-active.json", "/alpha-feature", 300);
+        // Uncached checkouts resolve from their .git entry, linked or main.
+        write("c-opened.json", &beta.to_string_lossy(), 200);
+        write("d-active.json", &beta_feature.to_string_lossy(), 250);
+        // Clanker reports and vanished checkouts are ignored; junk is skipped.
+        write("e-clanker.json", &beta.to_string_lossy(), 900);
+        write("f-opened.json", "/elsewhere/gone", 950);
+        fs::write(activity.join("g-active.json"), "not json").unwrap();
+        let identities = HashMap::from([
+            ("/alpha/main".to_string(), "/alpha/.git".to_string()),
+            ("/alpha-feature".to_string(), "/alpha/.git".to_string()),
+        ]);
+
+        let last_used = repository_last_used(&activity, &identities);
+
+        assert_eq!(
+            last_used,
+            HashMap::from([
+                ("/alpha/.git".to_string(), 300),
+                (beta.join(".git").to_string_lossy().into_owned(), 250),
+            ])
+        );
+        assert!(repository_last_used(&root.join("missing"), &identities).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repositories_sort_by_last_used_with_unused_in_name_order_after() {
+        let mut app = app_with_sessions("[]");
+        app.repositories = vec![
+            repository_row("alpha", "/alpha", "/alpha/.git"),
+            repository_row("beta", "/beta", "/beta/.git"),
+            repository_row("gamma", "/gamma", "/gamma/.git"),
+            repository_row("delta", "/delta", "/delta/.git"),
+        ];
+        let last_used = HashMap::from([
+            ("/gamma/.git".to_string(), 100),
+            ("/beta/.git".to_string(), 500),
+        ]);
+        order_repositories(&mut app.repositories, &last_used);
+
+        assert_eq!(
+            names(&app.filtered_repositories()),
+            ["beta", "gamma", "alpha", "delta"]
+        );
+
+        // Under a query, match quality ranks first: the exact name beats a more
+        // recently used repository that merely contains it.
+        app.repositories.push(repository_row("xalpha", "/xalpha", "/xalpha/.git"));
+        app.repositories.last_mut().unwrap().last_used = 900;
+        app.query = "alpha".into();
+        assert_eq!(names(&app.filtered_repositories()), ["alpha", "xalpha"]);
+
+        // Equally good matches keep recency order.
+        app.repositories.push(repository_row("alphb", "/alphb", "/alphb/.git"));
+        app.repositories.last_mut().unwrap().last_used = 50;
+        app.query = "alph".into();
+        assert_eq!(names(&app.filtered_repositories()), ["alphb", "alpha", "xalpha"]);
+    }
+
+    #[test]
+    fn activity_dir_matches_the_daemon_state_layout() {
+        let environment = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(
+            activity_dir_from(&environment(&[("HOME", "/home/u")])),
+            Ok(PathBuf::from("/home/u/.local/state/clankerhouse-herdr/activity"))
+        );
+        assert_eq!(
+            activity_dir_from(&environment(&[
+                ("HOME", "/home/u"),
+                ("XDG_STATE_HOME", "/state"),
+                ("CLANKERHOUSE_INSTANCE", "hc"),
+            ])),
+            Ok(PathBuf::from("/state/clankerhouse-hc/activity"))
+        );
+        assert_eq!(
+            activity_dir_from(&environment(&[
+                ("HOME", "/home/u"),
+                ("CLANKERHOUSE_INSTANCE", "default"),
+            ])),
+            Ok(PathBuf::from("/home/u/.local/state/clankerhouse/activity"))
+        );
     }
 
     #[test]
@@ -4474,10 +4721,7 @@ mod tests {
     fn branch_selection_constructs_daemon_create_intent() {
         let mut app = app_with_sessions("[]");
         app.mode = Mode::Branch;
-        app.repository = Some(RepositoryRow {
-            name: "repo".into(),
-            path: "/repo".into(),
-        });
+        app.repository = Some(repository_row("repo", "/repo", "/repo/.git"));
         app.branches = vec![BranchRow {
             name: "origin/feature".into(),
             value: "feature".into(),
@@ -4524,7 +4768,7 @@ mod tests {
 
         let mut app = app_with_sessions("[]");
         app.mode = Mode::Branch;
-        app.repository = Some(RepositoryRow { name: "repo".into(), path: "/repo".into() });
+        app.repository = Some(repository_row("repo", "/repo", "/repo/.git"));
         app.branches = vec![BranchRow {
             name: "migrate-opencode-adapter".into(),
             value: "migrate-opencode-adapter".into(),

@@ -304,7 +304,7 @@
         "scripts/qa-lineage-actions",
         "scripts/qa-herdr"
       ],
-      "automatedScope": "Native startup, fresh repository-cache regeneration for the branch popup, cache-independent attach selection, typed intent construction, child routing, additive observation compatibility, and the TUI contract are automated; full native action parity and reconnect remain mandatory manual standalone judgements.",
+      "automatedScope": "Native startup, fresh repository-cache regeneration for the branch popup, repository ordering by durable last use (newest opened or focused activity in any checkout, never-used repositories after in name order, match quality first under a query), cache-independent attach selection, typed intent construction, child routing, additive observation compatibility, and the TUI contract are automated; full native action parity and reconnect remain mandatory manual standalone judgements.",
       "manual": [
         "Capture and inspect the real native screen",
         "Exercise keyboard actions and reconnect",

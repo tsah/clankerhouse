@@ -1,12 +1,13 @@
-// Clankerhouse on the Herdr app: the switcher as a popup, the Alt keys the app has no command for, and the app's focus
-// reported to the Clankerhouse machine. It lives in a 0 px block of the clankerhouse layout, because `<mod>.<command>` keys
-// reach shown copies only. Props: { machine, launcher }: the `hc machine` running Clankerhouse, and clankerhouse-hc there.
+// Clankerhouse on the Herdr app: the switcher as a popup, the Alt keys the app has no command for, the app's focus
+// reported to the Clankerhouse machine, and the current workshop and branch. It lives at the right of the clankerhouse
+// layout's tab bar; it must stay shown, because `<mod>.<command>` keys reach shown copies only. Props: { machine, launcher }: the `hc machine` running Clankerhouse, and clankerhouse-hc there.
 //
 // A popup is a terminal on that machine running `clankerhouse-hc --popup`, labelled ch_popup so Clankerhouse does not take
 // it for a session. The picker's choice comes back as that terminal's ch_popup_target label.
 
-import { View, div } from "gpui-kit";
-import { exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, window } from "herdr";
+import { View, div, svg } from "gpui-kit";
+import { h_flex } from "gpui-base";
+import { exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
 
 const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"] };
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
@@ -20,7 +21,8 @@ export default class Clankerhouse extends View {
     this.popup = null;
     this.reported = null;
     this.reporting = false;
-    cx.timer.every(HEARTBEAT_MS, (cx) => { this.reported = null; this.reportFocus(cx); });
+    this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
+    cx.timer.every(HEARTBEAT_MS, (cx) => { this.reported = null; this.branches.clear(); this.reportFocus(cx); cx.notify(); });
     cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();
@@ -123,8 +125,33 @@ export default class Clankerhouse extends View {
     });
   }
 
+  // The app knows the branch of local panes only; ask the machine for the others, once per folder and heartbeat.
+  branch(pane, cx) {
+    if (pane?.branch) return pane.branch;
+    const { machine } = props() ?? {};
+    if (!pane?.cwd || !local(machine, pane.terminal)) return null;
+    if (!this.branches.has(pane.cwd)) {
+      this.branches.set(pane.cwd, null);
+      cx.spawn(async (cx) => {
+        try {
+          const git = await exec("git", ["branch", "--show-current"], { cwd: pane.cwd, on: machine });
+          if (git.code === 0 && git.stdout.trim()) { this.branches.set(pane.cwd, git.stdout.trim()); cx.notify(); }
+        } catch {
+          // The machine is away; the heartbeat clears the cache and tries again.
+        }
+      });
+    }
+    return this.branches.get(pane.cwd);
+  }
+
   render(cx) {
     this.reportFocus(cx);
-    return div();
+    const t = theme();
+    const space = spaces().find((s) => s.active);
+    const branch = this.branch(panes().find((p) => p.focused), cx) ?? space?.branch;
+    const label = (icon, text) => h_flex().min_w(0).gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13).flex_none()).child(div().truncate().child(text));
+    return h_flex().size_full().min_w(0).px(14).gap(14).justify_end().items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12.4).text_color(t.muted)
+      .when(Boolean(space), (el) => el.child(div().min_w(0).truncate().text_color(t.foreground).child(space.name)))
+      .when(Boolean(branch), (el) => el.child(label("git-branch", branch)));
   }
 }

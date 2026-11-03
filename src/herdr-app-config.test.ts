@@ -36,7 +36,7 @@ describe("Herdr app config", () => {
     expect(readFileSync(join(home, "keys.json"), "utf8")).toBe(once)
     expect(JSON.parse(once)).toMatchObject({ ...mine, "layout:clankerhouse": keys })
     expect(JSON.parse(readFileSync(join(home, "keys.json.pre-clankerhouse"), "utf8"))).toEqual(mine)
-    expect(JSON.parse(readFileSync(join(home, "layouts/clankerhouse.json"), "utf8")).children[0].content.props).toEqual({ machine: "box", launcher: "/opt/clankerhouse-hc" })
+    expect(JSON.parse(readFileSync(join(home, "layouts/clankerhouse.json"), "utf8")).children[0].children[1].content.props).toEqual({ machine: "box", launcher: "/opt/clankerhouse-hc" })
   })
 
   test("the installer refuses a home the app has not started in", () => {

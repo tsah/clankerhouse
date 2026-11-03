@@ -20,6 +20,12 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def find(node, id):
+    if node.get("id") == id:
+        return node
+    return next((found for child in node.get("children", []) if (found := find(child, id))), None)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--machine", default="puffin")
@@ -31,7 +37,7 @@ def main():
         raise SystemExit(f"{keys_path} is missing: start the Herdr app once first")
 
     layout = json.loads((HERE / "layouts/clankerhouse.json").read_text())
-    layout["children"][0]["content"]["props"] = {"machine": options.machine, "launcher": options.launcher}
+    find(layout, "clankerhouse")["content"]["props"] = {"machine": options.machine, "launcher": options.launcher}
     if MAC:
         # The traffic lights would sit on the terminal; the system title bar keeps it clean.
         del layout["titlebar"]

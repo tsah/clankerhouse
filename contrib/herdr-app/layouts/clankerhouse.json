@@ -4,13 +4,41 @@
   "titlebar": "none",
   "movable": false,
   "theme": "graphite",
-  "terminal_padding": [4, 6],
+  "terminal_padding": [
+    4,
+    6
+  ],
   "children": [
     {
-      "id": "clankerhouse",
-      "type": "block",
-      "size": { "px": 0 },
-      "content": { "mod": "clankerhouse", "props": { "machine": "puffin", "launcher": "clankerhouse-hc" } }
+      "id": "top",
+      "type": "row",
+      "size": {
+        "px": 38
+      },
+      "window_drag": true,
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "content": {
+            "mod": "tabs"
+          }
+        },
+        {
+          "id": "clankerhouse",
+          "type": "block",
+          "size": {
+            "px": 360
+          },
+          "content": {
+            "mod": "clankerhouse",
+            "props": {
+              "machine": "puffin",
+              "launcher": "clankerhouse-hc"
+            }
+          }
+        }
+      ]
     },
     {
       "id": "main",
@@ -20,7 +48,10 @@
         "pane": {
           "gap": 1,
           "background": "background",
-          "focus": { "width": 1, "color": "accent" }
+          "focus": {
+            "width": 1,
+            "color": "accent"
+          }
         }
       }
     }

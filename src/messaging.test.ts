@@ -284,7 +284,7 @@ describe("dispatch modes", () => {
     const receipt = await sendClanker(CLANKER, "change of plan", { delivery: "restart" }, multiplexer)
     expect(receipt).toMatchObject({ requestedMode: "restart", appliedMode: "restart", delivery: "immediate", interrupted: "confirmed" })
     expect(pane.interrupts).toBe(1)
-    expect(pane.prompts).toHaveLength(1)
+    expect(pane.prompts).toEqual([`[clankerhouse ${receipt.messageId} from operator, restart] change of plan`])
   })
 
   test("a confirmed interrupt hands over the queue's head first, keeping order", async () => {
@@ -360,6 +360,13 @@ describe("native hook", () => {
     expect(run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "\n<pasted_content id=\"1\">\n[clankerhouse msg-abc-1 from operator] hi\n</pasted_content id=\"1\">" }).exitCode).toBe(0)
     expect(record()).toMatchObject({ incarnation: "launch-1", messagingSocket: "/run/user/1/cc-socks/42.sock" })
     expect(record().prompts.at(-1)).toMatchObject({ generation: 1, messageIds: ["msg-abc-1"] })
+  })
+
+  test("a restart message gets context saying clankerhouse, not the user, interrupted the turn", () => {
+    const { run } = hookRunner({})
+    const restart = run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "[clankerhouse msg-r-1 from operator, restart]\nChange of plan" })
+    expect(JSON.parse(restart.stdout).hookSpecificOutput).toMatchObject({ hookEventName: "UserPromptSubmit", additionalContext: expect.stringContaining("not from the user declining") })
+    expect(run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "[clankerhouse msg-r-2 from operator]\nplain" }).stdout).toBe("")
   })
 
   test("a Claude started by hand is fenced on its messaging socket, and a redelivered message is blocked", () => {

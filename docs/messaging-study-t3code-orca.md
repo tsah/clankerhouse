@@ -255,7 +255,7 @@ behind a Deliver/Deny dialog.
 | 2 | Idempotent sends | `clankers send --request-id KEY`. A repeat with the same text returns the first message with `replayed: true` and sends nothing. A repeat with different text is `CONFLICT` (exit 2). |
 | 3 | Staged receipts, safe retry | `send-status` reports `stage` (queued → typed → started → settled → handled, or orphaned with an `orphanReason`), plus `attempts`, sender/source and timestamps. A message with no ack after the clanker has been ready for 15 s is resent with the *same* id, at most 3 times. The socket doesn't deduplicate, so the hook does: a prompt that opens with a tag whose id this session already took is blocked (`decision: block`) before it starts a turn. |
 | 4 | Incarnation fencing | The hook records an incarnation per launch: the lifecycle wrapper's, or the messaging socket path for a Claude started by hand. Queued or unacknowledged mail for an earlier launch is orphaned as `harness-replaced`, never sent to the new one. |
-| 5 | Dispatch modes | `--delivery auto\|queue\|follow-up\|steer\|restart`. Receipts carry `requestedMode` and `appliedMode`. `restart` uses the Multiplexer's own interrupt (`hc`'s, which reports whether the turn stopped), then delivers, queue head first. It is offered only where the Multiplexer can interrupt (hc, not herdr) and refused while a permission dialog is up. `steer` is refused. |
+| 5 | Dispatch modes | `--delivery auto\|queue\|follow-up\|steer\|restart`. Receipts carry `requestedMode` and `appliedMode`. `restart` uses the Multiplexer's own interrupt (`hc`'s, which reports whether the turn stopped), then delivers, queue head first, tagged `, restart` so the hook can tell Claude the interrupt was clankerhouse's, not a refusal by the user. It is offered only where the Multiplexer can interrupt (hc, not herdr) and refused while a permission dialog is up. `steer` is refused. |
 | 6 | Provenance | Each message records `sender` (`CLANKER_ID` or the pane claim, else `operator`) and `source`. The sender is also in the tag. |
 | 7 | Gating | No screen reading. A Claude clanker gets mail only when its hook state is idle or done. Through the socket, focus doesn't matter, because Claude leaves a human's draft alone. A running turn always holds mail, because Claude merges a mid-turn message into that turn and the turn's own reply can be lost. |
 | 8 | Replayable log | A `message_events` table with `seq`. `clankers messages --after SEQ [--clanker ID]`. |
@@ -285,10 +285,40 @@ behind a Deliver/Deny dialog.
 **Findings from the live runs.**
 - **Messages through the socket have peer authority.** Claude shows each one as "Another Claude
   session sent a message" and treats it as a teammate's request. It can't approve a permission
-  prompt, which is what makes the dialog race safe. It also means Claude may push back. After a
-  `restart`, Claude records the interrupted tool as declined by the user, and in one run haiku
-  refused a peer's "change of plan" as overriding that decision. A message that doesn't refer
-  back to the interrupted work ran fine.
+  prompt, which is what makes the dialog race safe. It also means Claude may push back after a
+  `restart`: it records the interrupted tool as *declined by the user*, and a peer asking it to
+  carry on then looks like getting around the user. See the experiment below.
+
+**Restart experiment (2026-11-03).** Each trial cleared the session, started a 40 s tool call,
+interrupted it through hc, and sent a message by one of these routes:
+- **A:** plain tag.
+- **B:** a `, restart` tag, for which the hook adds context saying clankerhouse interrupted the
+  turn, not the user.
+- **C:** that explanation inside the message text.
+- **T:** typed through hc's prompt call after the interrupt.
+- **S:** no interrupt; written mid-turn and absorbed at the next tool boundary.
+
+Counts are trials that did what the message asked, read by hand:
+
+| Message | Model | A | B | C | T | S |
+|---|---|---|---|---|---|---|
+| "Change of plan: reply RESTARTED" | haiku | 3/6 | 6/6 | 6/6 | | |
+| same | opus | 4/4 | 4/4 | 4/4 | | |
+| "Change of plan: run `./slow.sh 3` instead of 40, then reply RESTARTED" | haiku | 0/5 | 1/5 | | 4/5 | 5/5 |
+| same | opus | 0/3 | 3/3 | | 0/3 | |
+
+What the results show:
+- **Redoing interrupted work is the hard case.** Without help, neither model redid it: Claude
+  read the Escape as you rejecting that exact action.
+- **The hook context (B) fixes it on opus** (3/3), the model clankers run, and helps haiku only
+  a little.
+- **Typing the message (T) did not help opus.** The tag itself (`from operator`) made Claude
+  treat the text as coming from a peer session.
+- **Steering without an interrupt (S) always worked**, because nothing is recorded as declined.
+  It waits for the current tool call to finish, though.
+- **"from operator" invites a reply to a session of that name.** In several runs Claude tried
+  `SendMessage` to "operator", failed, and put the answer in its output anyway.
+
 - **The transcript lags the Stop hook.** Claude writes the turn's reply to its transcript a few
   ms after `Stop` fires, so `send --wait` could read the transcript too early and return no
   result. It now looks again for up to 3 s. The typed path had the same race.

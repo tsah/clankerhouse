@@ -257,6 +257,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "messagingSocket": or_previous(&messaging_socket, "messagingSocket"),
     });
     write_atomic(&target, record.to_string().as_bytes())?;
+    if hook_event.as_deref() == Some("UserPromptSubmit")
+        && payload.get("prompt").and_then(Value::as_str).is_some_and(restart_tagged)
+    {
+        // Claude records the interrupt as the user declining the running tool, and the message
+        // then reads as a peer overriding the user. Say what actually happened.
+        println!("{}", json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": RESTART_CONTEXT } }));
+    }
 
     // Everything below is a side effect of the durable record above.
     let fresh = previous.is_null() || previous_state == "unknown";
@@ -447,6 +454,14 @@ fn message_ids(prompt: &str) -> Vec<String> {
     ids
 }
 
+const RESTART_CONTEXT: &str = "clankerhouse interrupted your previous turn in order to deliver this message (the sender asked for a restart). The interruption came from clankerhouse, not from the user declining your work.";
+
+/// A clankerhouse message sent with `--delivery restart`: its opening tag ends `, restart]`.
+fn restart_tagged(prompt: &str) -> bool {
+    let Some(rest) = prompt.trim_start().strip_prefix("[clankerhouse msg-") else { return false };
+    rest.find(']').is_some_and(|end| rest[..end].ends_with(", restart"))
+}
+
 /// A clankerhouse message (a prompt that opens with its tag) whose ids were all taken before.
 fn redelivered(prompt: &str, prompts: &[Value]) -> bool {
     if !prompt.trim_start().starts_with("[clankerhouse msg-") {
@@ -520,7 +535,14 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_ids, prompt_sha256, redelivered, sha256_hex};
+    use super::{message_ids, prompt_sha256, redelivered, restart_tagged, sha256_hex};
+
+    #[test]
+    fn only_an_opening_restart_tag_counts() {
+        assert!(restart_tagged("[clankerhouse msg-a from op, restart]\nnew task"));
+        assert!(!restart_tagged("[clankerhouse msg-a from op]\nnew task"));
+        assert!(!restart_tagged("quote [clankerhouse msg-a from op, restart]"));
+    }
     use serde_json::json;
 
     #[test]

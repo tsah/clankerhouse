@@ -166,13 +166,15 @@ export const INLINE_MAX_CHARS = 500
 export const INLINE_MAX_LINES = 3
 
 /** The tag the lifecycle hook looks for; it acknowledges the message by id, whatever wraps the prompt. */
-export const messageTag = (message: Pick<StoredMessage, "messageId" | "sender">) => `[clankerhouse ${message.messageId} from ${message.sender}]`
+/** `, restart` tells the lifecycle hook that clankerhouse interrupted the previous turn to deliver it. */
+export const messageTag = (message: Pick<StoredMessage, "messageId" | "sender"> & { requestedMode?: string | null }) =>
+  `[clankerhouse ${message.messageId} from ${message.sender}${message.requestedMode === "restart" ? ", restart" : ""}]`
 
 /**
  * The one prompt typed into the harness for a message. Short text travels inline behind its
  * tag; anything longer stays in the store and the prompt is a one-line pointer to it.
  */
-export const promptFor = (message: Pick<StoredMessage, "messageId" | "sender" | "text">, options: { inline?: boolean } = {}): { transport: "inline" | "pointer"; prompt: string } => {
+export const promptFor = (message: Pick<StoredMessage, "messageId" | "sender" | "text"> & { requestedMode?: string | null }, options: { inline?: boolean } = {}): { transport: "inline" | "pointer"; prompt: string } => {
   const text = message.text.replace(/\r\n/g, "\n").trim()
   const lines = text.split("\n").length
   const tag = messageTag(message)

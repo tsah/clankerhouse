@@ -182,7 +182,7 @@ pass "a redelivered message is dropped"
 send --text "Run ./slow.sh 40 with the Bash tool in the foreground (a progress test script; wait for it), then reply with exactly SLOWDONE." >/dev/null
 sleep 8
 started=$(date +%s)
-out=$(send --delivery restart --text "New task, unrelated to the last one: reply with exactly RESTARTED." --wait --timeout 60)
+out=$(send --delivery restart --text "Change of plan: reply with exactly RESTARTED." --wait --timeout 60)
 [[ "$(field 'd["interrupted"]' <<<"$out")" == confirmed && "$(reply <<<"$out")" == RESTARTED ]] || fail "restart: $out"
 (( $(date +%s) - started < 30 )) || fail "restart waited for the slow turn"
 out=$(send --text "Reply with exactly AFTER." --wait --timeout 60)

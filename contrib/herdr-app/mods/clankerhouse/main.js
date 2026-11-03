@@ -2,6 +2,9 @@
 // reported to the Clankerhouse machine, and the current workshop and branch. It lives at the right of the clankerhouse
 // layout's tab bar; it must stay shown, because `<mod>.<command>` keys reach shown copies only. Props: { machine, launcher }: the `hc machine` running Clankerhouse, and clankerhouse-hc there.
 //
+// Any program on that machine can ask for a popup too (Schlop under herdr-core does): a terminal labelled popup=1 is
+// opened as a dialog and labelled popup_shown=1, so the asker knows someone sees it.
+//
 // A popup is a terminal on that machine running `clankerhouse-hc --popup`, labelled ch_popup so Clankerhouse does not take
 // it for a session. The picker's choice comes back as that terminal's ch_popup_target label.
 
@@ -12,6 +15,7 @@ import { exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run,
 const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"] };
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
+const REQUEST_POLL_MS = 500;
 const PANE_WAIT_TICKS = 40; // A new session's pane appears once the app has seen and adopted its terminal.
 
 const local = (machine, address) => (address?.startsWith(`${machine}/`) ? address.slice(machine.length + 1) : null);
@@ -22,6 +26,9 @@ export default class Clankerhouse extends View {
     this.reported = null;
     this.reporting = false;
     this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
+    this.requests = new Set(); // popup=1 terminals already opened here.
+    // terminals() changing does not re-render this block, so requests are polled.
+    cx.timer.every(REQUEST_POLL_MS, (cx) => this.openRequests(cx));
     cx.timer.every(HEARTBEAT_MS, (cx) => { this.reported = null; this.branches.clear(); this.reportFocus(cx); cx.notify(); });
     cx.spawn(async (cx) => {
       for (;;) {
@@ -142,6 +149,21 @@ export default class Clankerhouse extends View {
       });
     }
     return this.branches.get(pane.cwd);
+  }
+
+  openRequests(cx) {
+    const { machine } = props() ?? {};
+    const live = terminals().filter((t) => t.labels?.popup && t.state === "live" && local(machine, t.address));
+    this.requests = new Set([...this.requests].filter((address) => live.some((t) => t.address === address)));
+    const fresh = live.filter((t) => !t.labels.popup_shown && !this.requests.has(t.address));
+    if (!fresh.length) return;
+    for (const t of fresh) this.requests.add(t.address);
+    cx.spawn(async () => {
+      for (const t of fresh) {
+        openOverlay({ kind: "dialog", modal: true, width: 0.95, height: 0.9, layout: { type: "block", content: { terminal: t.address } } });
+        await hc(["label", t.address, "popup_shown=1"]);
+      }
+    });
   }
 
   render(cx) {

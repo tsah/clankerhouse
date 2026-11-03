@@ -23,6 +23,7 @@ BINDINGS = [
     ("", "CLANKERHOUSE_HERDR_KEY", "alt+k", "Clankerhouse jump"),
     (" --repo", "CLANKERHOUSE_HERDR_SPAWN_KEY", "alt+b", "Clankerhouse open/create branch"),
     (" --delete", "CLANKERHOUSE_HERDR_DELETE_KEY", "alt+d", "Clankerhouse delete current session"),
+    (" --scratch", "CLANKERHOUSE_HERDR_SCRATCH_KEY", "alt+n", "Clankerhouse scratch workshop"),
 ]
 
 

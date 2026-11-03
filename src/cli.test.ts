@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { cliErrorCode, mutationProgressSteps, parseArgs, usage } from "./cli"
+import { cliErrorCode, freeBranch, mutationProgressSteps, parseArgs, scratchTitle, usage } from "./cli"
+import { branchFromTitle } from "./labels"
 import { ClankerApiError } from "./clanker-api"
 import { MultiplexerResourceExhaustedError } from "./multiplexer/interface"
 import { ClankerRegistrationError } from "./workflow"
@@ -23,9 +24,20 @@ describe("cli error codes", () => {
 
 describe("cli usage", () => {
   test("documents every workshop spawn flag and the parent commands", () => {
-    for (const flag of ["--clanker-name", "--resource-class", "--parent ID", "--no-parent", "--wait"]) expect(usage).toContain(flag)
+    for (const flag of ["--clanker-name", "--resource-class", "--parent ID", "--no-parent", "--wait", "--scratch"]) expect(usage).toContain(flag)
     expect(usage).toContain("clankers workshop detach [ID|BRANCH|PATH] [--cwd PATH]")
     expect(usage).toContain("clankers workshop reparent [ID|BRANCH|PATH] --parent ID|BRANCH|PATH [--cwd PATH]")
+  })
+})
+
+describe("scratch workshops", () => {
+  test("are titled by the time they were made and get a free branch", () => {
+    const title = scratchTitle(new Date(2026, 10, 3, 9, 4))
+    expect(title).toBe("scratch 11-03 09:04")
+    expect(branchFromTitle(title)).toBe("scratch-11-03-09-04")
+    const taken = new Set(["scratch-11-03-09-04", "scratch-11-03-09-04-2"])
+    expect(freeBranch("/unused", "scratch-11-03-09-04", (name) => taken.has(name))).toBe("scratch-11-03-09-04-3")
+    expect(freeBranch("/unused", "fresh", () => false)).toBe("fresh")
   })
 })
 

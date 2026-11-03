@@ -75,7 +75,8 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 |---|---|---|
 | Alt-K | Clankerhouse jump | Same, as a popup |
 | Alt-B | Open or create branch | Same, as a popup |
-| Alt-D | Delete current session | Same, as a popup |
+| Alt-D | Delete current session | Same, as a popup; in the picker, Done or delete the selected row |
+| Alt-N | Scratch workshop | Same, as a popup |
 | Alt-O | Go to | App's picker (`mod.open:picker`) |
 | Alt-G | Open current PR | `gh` on puffin, opened in the laptop's browser |
 | Alt-Enter | Split, new pane below | `pane.split:down` |

@@ -97,6 +97,11 @@ flock -u 9
 exec 9>&-
 
 [[ ${1:-} == "--ensure-server" ]] && exit 0
+# Alt-N opens at repository selection for a scratch Workshop.
+if [[ ${1:-} == "--scratch" ]]; then
+    export CLANKERHOUSE_MODE=scratch
+    shift
+fi
 # Alt-B opens directly at repository/branch selection.
 if [[ ${1:-} == "--repo" ]]; then
     export CLANKERHOUSE_MODE=spawn

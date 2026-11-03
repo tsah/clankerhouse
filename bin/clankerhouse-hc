@@ -6,7 +6,8 @@
 #   clankerhouse-hc [picker args]   run the picker
 #   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
-#   clankerhouse-hc --popup [--repo|--delete]  the picker in a Herdr app popup: exits on a choice, leaving it for the mod
+#   clankerhouse-hc --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
+#   clankerhouse-hc --popup [--repo|--delete|--scratch]  the picker in a Herdr app popup: exits on a choice, leaving it for the mod
 #   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
 #   clankerhouse-hc --ensure-server start the core and daemon, then exit
 #   clankerhouse-hc --stop-server   stop the daemon; the core and its terminals keep running
@@ -160,6 +161,10 @@ if [[ ${1:-} == "--popup" ]]; then
 fi
 if [[ ${1:-} == "--repo" ]]; then
     export CLANKERHOUSE_MODE=spawn
+    shift
+fi
+if [[ ${1:-} == "--scratch" ]]; then
+    export CLANKERHOUSE_MODE=scratch
     shift
 fi
 if [[ ${1:-} == "--delete" ]]; then

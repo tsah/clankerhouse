@@ -115,6 +115,8 @@ export interface SpawnClankerOptions {
   wait?: boolean
   resourceClass?: ResourceClass
   multiplexer?: ManagedMultiplexer
+  /** false: the prompt is only the recorded task; the harness starts with no first message. */
+  sendPrompt?: boolean
 }
 
 /** Where a clanker's window opens: its Workshop's session, and a window name free in it. */
@@ -156,8 +158,8 @@ const claimClankerPane = async (placement: ClankerPlacement, location: { nativeS
 }
 
 /** Everything up to the clanker's pane existing; a failure here means no clanker was created. */
-async function launchClanker(harness: Harness, cwd: string, prompt: string, clankerId: string, options: { profile?: string; model?: string; requestedName?: string; resourceClass?: ResourceClass }, multiplexer: ManagedMultiplexer, progress: { registered: boolean }) {
-  const { profile, model, requestedName, resourceClass } = options
+async function launchClanker(harness: Harness, cwd: string, prompt: string, clankerId: string, options: { profile?: string; model?: string; requestedName?: string; resourceClass?: ResourceClass; sendPrompt?: boolean }, multiplexer: ManagedMultiplexer, progress: { registered: boolean }) {
+  const { profile, model, requestedName, resourceClass, sendPrompt = true } = options
   const placement = await clankerPlacement(cwd, requestedName || harness, multiplexer)
   const { id, session, name, launchWorkshop } = placement
   const recorded = harness !== "codex"
@@ -186,7 +188,7 @@ async function launchClanker(harness: Harness, cwd: string, prompt: string, clan
       progress.registered = true
       const unit = clankerUnitName(clankerId)
       ledger.setOwnerUnit(clankerId, unit)
-      argv = harnessCommand({ harness: ledgerHarness, cwd: id.path, prompt, clankerId, harnessSessionId, launchSpec, workshop: launchWorkshop }, unit)
+      argv = harnessCommand({ harness: ledgerHarness, cwd: id.path, prompt: sendPrompt ? prompt : undefined, clankerId, harnessSessionId, launchSpec, workshop: launchWorkshop }, unit)
     } catch (error) {
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
     } finally { ledger?.close() }
@@ -202,13 +204,14 @@ const retireRegistration = (clankerId: string) => {
 }
 
 export async function spawnClanker(harness: Harness, cwd: string, prompt: string, options: SpawnClankerOptions = {}) {
-  const { profile, model, name: requestedName, wait = false, resourceClass } = options
+  const { profile, model, name: requestedName, wait = false, resourceClass, sendPrompt } = options
   harnessModelArgs(harness, model)
+  if (sendPrompt === false && !(harness === "pi" || harness === "claude" || harness === "opencode")) throw new Error(`${harness} cannot start without a first prompt`)
   if (wait && harness === "opencode") throw new Error("OpenCode does not expose a verified lifecycle report transport for waiting")
   const multiplexer = options.multiplexer ?? openManagedMultiplexer()
   const clankerId = generatedClankerId()
   const progress = { registered: false }
-  const launched = await launchClanker(harness, cwd, prompt, clankerId, { profile, model, requestedName, resourceClass }, multiplexer, progress).catch((error) => {
+  const launched = await launchClanker(harness, cwd, prompt, clankerId, { profile, model, requestedName, resourceClass, sendPrompt }, multiplexer, progress).catch((error) => {
     // Nothing runs, so the ledger must not list it as interrupted.
     if (progress.registered) try { retireRegistration(clankerId) } catch {}
     throw error instanceof ClankerRegistrationError ? error : new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })

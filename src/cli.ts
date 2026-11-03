@@ -326,9 +326,23 @@ const runHooksCommand = async (parsed: ParsedArgs) => {
   throw new Error(hooksUsage)
 }
 
+/** A scratch Workshop's title: when it was made, so nobody has to name it. */
+export const scratchTitle = (now = new Date()) => {
+  const two = (value: number) => String(value).padStart(2, "0")
+  return `scratch ${two(now.getMonth() + 1)}-${two(now.getDate())} ${two(now.getHours())}:${two(now.getMinutes())}`
+}
+
+/** `branch`, or `branch-2`, `branch-3`... when the repository already has it. */
+export const freeBranch = (repository: string, branch: string, exists = (name: string) => Bun.spawnSync(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/heads/${name}`]).exitCode === 0) => {
+  let name = branch
+  for (let suffix = 2; exists(name); suffix += 1) name = `${branch}-${suffix}`
+  return name
+}
+
 export const usage = `Usage:
   clankerhouse
   clankers workshop spawn (--title TITLE | --name NAME) --harness HARNESS [--base REF] [--profile NAME] [--model MODEL] [--clanker-name NAME] [--resource-class interactive|validation-heavy|untrusted] [--parent ID | --no-parent] [--wait] [--prompt TEXT]
+  clankers workshop spawn --scratch --harness HARNESS [spawn options]   a throwaway Workshop off the fresh default branch, titled by the time, its harness started with no first message
   clankers workshop ensure [--cwd PATH]
   clankers workshop identity [--cwd PATH]
   clankers workshop label set KEY=VALUE | unset KEY | list [--cwd PATH | --workshop ID|BRANCH|PATH]
@@ -573,16 +587,20 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const subcommand = parsed.shift()
     if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") return console.log(usage)
     if (subcommand === "spawn") {
-      const title = parsed.take("--title")
+      const scratch = parsed.has("--scratch")
+      const title = parsed.take("--title") ?? (scratch ? scratchTitle() : undefined)
       if (title !== undefined && !validLabelValue(title, TITLE_KEY)) throw new Error("--title must be 1-80 characters without control characters")
-      const name = parsed.take("--name") ?? (title ? branchFromTitle(title) : undefined)
+      let name = parsed.take("--name") ?? (title ? branchFromTitle(title) : undefined)
       if (!name) throw new Error("--name or --title is required")
+      if (scratch) name = freeBranch((await identity()).path, name)
       const selectedHarness = harness(parsed.take("--harness"))
       const model = parsed.take("--model")
       const base = parsed.take("--base"); const window = parsed.take("--clanker-name"); const profile = parsed.take("--profile"); const selectedResourceClass = resourceClass(parsed.take("--resource-class")); const wait = parsed.has("--wait"); const parentWorkshopId = parsed.take("--parent"); const noParent = parsed.has("--no-parent")
       if (parentWorkshopId && noParent) throw new Error("--parent and --no-parent are mutually exclusive")
-      const prompt = parsed.take("--prompt") || parsed.args.join(" ") || "Ready for instructions."
+      const given = parsed.take("--prompt") || parsed.args.join(" ")
+      const prompt = given || (scratch ? "Scratch workshop" : "Ready for instructions.")
       const result = await spawnWorkshop(selectedHarness, name, prompt, {
+        sendPrompt: !scratch || Boolean(given),
         base,
         window,
         profile,

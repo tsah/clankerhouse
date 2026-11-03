@@ -3,7 +3,7 @@
 // layout's tab bar; it must stay shown, because `<mod>.<command>` keys reach shown copies only. Props: { machine, launcher }: the `hc machine` running Clankerhouse, and clankerhouse-hc there.
 //
 // Any program on that machine can ask for a popup too (Schlop under herdr-core does): a terminal labelled popup=1 is
-// opened as a dialog and labelled popup_shown=1, so the asker knows someone sees it.
+// opened over the whole window and labelled popup_shown=1, so the asker knows someone sees it.
 //
 // A popup is a terminal on that machine running `clankerhouse-hc --popup`, labelled ch_popup so Clankerhouse does not take
 // it for a session. The picker's choice comes back as that terminal's ch_popup_target label.
@@ -12,7 +12,10 @@ import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
 
-const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"] };
+const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"] };
+// The layout's Alt keys win over the popup's terminal, so pressed again while a popup is open they are passed into it:
+// the picker has its own Alt-D (done or delete the selected row) and Alt-K.
+const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "alt+n" };
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
 const REQUEST_POLL_MS = 500;
@@ -63,7 +66,11 @@ export default class Clankerhouse extends View {
   }
 
   openPopup(mode, cx) {
-    if (this.popup) return;
+    if (this.popup) {
+      const address = this.popupAddress;
+      if (address) cx.spawn(async () => { await hc(["keys", address, POPUP_KEYS[mode]]); });
+      return;
+    }
     const { machine, launcher } = props() ?? {};
     this.popup = mode;
     cx.spawn(async (cx) => {
@@ -76,10 +83,11 @@ export default class Clankerhouse extends View {
         if (started.code !== 0) throw new Error(started.stderr || started.stdout);
         const created = JSON.parse(started.stdout);
         const address = created.terminal?.address ?? created.address;
+        this.popupAddress = address;
         openOverlay({ kind: "dialog", modal: true, width: 0.9, height: 0.8, layout: { type: "block", content: { terminal: address } } });
         cx.timer.after(TICK_MS, (cx) => this.watchPopup(address, cx));
       } catch (error) {
-        this.popup = null;
+        this.popup = this.popupAddress = null;
         this.fail("Clankerhouse popup did not open", error);
       }
     });
@@ -98,7 +106,7 @@ export default class Clankerhouse extends View {
         this.fail("Clankerhouse popup failed", output.stdout.trim());
       }
       await hc(["rm", address]);
-      this.popup = null;
+      this.popup = this.popupAddress = null;
       if (target) this.showTerminal(`${props().machine}/${target}`, PANE_WAIT_TICKS, cx);
     });
   }
@@ -160,7 +168,7 @@ export default class Clankerhouse extends View {
     for (const t of fresh) this.requests.add(t.address);
     cx.spawn(async () => {
       for (const t of fresh) {
-        openOverlay({ kind: "dialog", modal: true, width: 0.95, height: 0.9, layout: { type: "block", content: { terminal: t.address } } });
+        openOverlay({ kind: "dialog", modal: true, frame: "none", width: 1, height: 1, layout: { type: "block", content: { terminal: t.address } } });
         await hc(["label", t.address, "popup_shown=1"]);
       }
     });

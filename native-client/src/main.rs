@@ -367,6 +367,8 @@ struct App {
     worktree_delete: Option<(MutationIntent, String)>,
     reopen_path: Option<String>,
     repository_identities: HashMap<String, String>,
+    /// Repository mode for a scratch Workshop (Alt-N): choosing a repository creates it at once.
+    scratch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -374,6 +376,7 @@ enum AppCommand {
     Close,
     Submit(MutationIntent),
     CreateAndOpen(MutationIntent),
+    Scratch { repository: String },
 }
 
 struct PendingMutation {
@@ -1099,6 +1102,7 @@ impl App {
             worktree_delete: None,
             reopen_path: None,
             repository_identities: HashMap::new(),
+            scratch: false,
         };
         app.repository_identities = repository_identities(&app.cache_path);
         let snapshot: Snapshot = serde_json::from_slice(
@@ -1157,6 +1161,7 @@ impl App {
             worktree_delete: None,
             reopen_path: None,
             repository_identities,
+            scratch: false,
         }
     }
 
@@ -1664,6 +1669,7 @@ impl App {
     }
 
     fn enter_repository_mode(&mut self) {
+        self.scratch = false;
         if let Ok(activity_dir) = activity_dir() {
             let last_used = repository_last_used(&activity_dir, &self.repository_identities);
             order_repositories(&mut self.repositories, &last_used);
@@ -1674,6 +1680,11 @@ impl App {
         self.selected = 0;
         self.error.clear();
         self.clear_action_mode();
+    }
+
+    fn enter_scratch_mode(&mut self) {
+        self.enter_repository_mode();
+        self.scratch = true;
     }
 
     fn clear_action_mode(&mut self) {
@@ -2180,8 +2191,8 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
                 .map(|repository| (repository.name.clone(), repository.path.clone()))
                 .collect();
             (
-                "Clankerhouse · Open or create branch",
-                "Alt-K jump · Enter choose · Esc back",
+                if app.scratch { "Clankerhouse · Scratch workshop" } else { "Clankerhouse · Open or create branch" },
+                if app.scratch { "Alt-K jump · Enter create off the fresh default branch · Esc back" } else { "Alt-K jump · Enter choose · Esc back" },
                 rows,
                 app.filtered_repositories()
                     .get(app.selected)
@@ -2753,6 +2764,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         app.enter_repository_mode();
         return None;
     }
+    if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.enter_scratch_mode();
+        return None;
+    }
     if app.mode == Mode::Repository || app.mode == Mode::Branch || app.mode == Mode::Attach {
         match key.code {
             KeyCode::Esc => {
@@ -2782,6 +2797,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                     .get(app.selected)
                     .cloned()
                     .cloned()?;
+                if app.scratch {
+                    return Some(AppCommand::Scratch { repository: repository.path });
+                }
                 match collect_branches(Path::new(&repository.path)) {
                     Ok(branches) => {
                         app.repository = Some(repository);
@@ -3135,6 +3153,36 @@ fn rpc_retry(
     Err(last_error)
 }
 
+/// Creates a scratch Workshop in `repository` with its harness running, through the CLI that owns
+/// spawning, and returns the harness's window to open.
+fn spawn_scratch(repository: &str) -> Result<Target, String> {
+    let bin = env::var("CLANKERHOUSE_BIN_DIR").map_err(|_| "CLANKERHOUSE_BIN_DIR is not set".to_string())?;
+    let harness = env::var("CLANKERHOUSE_SCRATCH_HARNESS").unwrap_or_else(|_| "claude".into());
+    eprintln!("Creating a scratch Workshop in {repository}…");
+    let output = Command::new(Path::new(&bin).join("clankers"))
+        .args(["workshop", "spawn", "--scratch", "--no-parent", "--harness", &harness])
+        .current_dir(repository)
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .map_err(|error| format!("Unable to run clankers: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("Scratch Workshop failed: {}", if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }));
+    }
+    scratch_target(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn scratch_target(spawned: &str) -> Result<Target, String> {
+    let value: serde_json::Value = serde_json::from_str(spawned).map_err(|error| format!("clankers returned no spawn result: {error}"))?;
+    let text = |key: &str| value.get(key).and_then(|field| field.as_str()).map(str::to_string);
+    let session = text("session").ok_or("clankers did not name the scratch session")?;
+    Ok(match (text("window"), text("pane")) {
+        (Some(window_id), Some(pane)) => Target::Window { session, window_id, pane, management: None, resource_id: None, location: None },
+        _ => Target::Session { session, management: None, resource_id: None, location: None },
+    })
+}
+
 fn daemon_mutation(
     socket_path: &Path,
     intent: &MutationIntent,
@@ -3448,6 +3496,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.confirm_current_deletion().map_err(io::Error::other)?;
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("spawn") {
         app.enter_repository_mode();
+    } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("scratch") {
+        app.enter_scratch_mode();
     }
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let subscription_path = socket_path.clone();
@@ -3481,6 +3531,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| io::Error::other(error).into())
         }
         AppCommand::CreateAndOpen(_) => unreachable!("create flow emitted a non-create intent"),
+        AppCommand::Scratch { repository } => {
+            let target = spawn_scratch(&repository).map_err(io::Error::other)?;
+            daemon_mutation(&socket_path, &MutationIntent::Open { target })
+                .map(|_| ())
+                .map_err(|error| io::Error::other(error).into())
+        }
     }
 }
 
@@ -4160,6 +4216,32 @@ mod tests {
 
     fn alt(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn alt_n_creates_a_scratch_workshop_in_the_chosen_repository() {
+        let mut app = app_with_sessions("[]");
+        app.repositories = vec![repository_row("repo", "/repo", "/repo/.git")];
+        assert_eq!(handle_key(&mut app, alt('n')), None);
+        assert_eq!((app.mode, app.scratch), (Mode::Repository, true));
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Scratch { repository: "/repo".into() })
+        );
+
+        // Alt-K back to the ordinary repository step leaves scratch mode.
+        assert_eq!(handle_key(&mut app, alt('k')), None);
+        assert_eq!((app.mode, app.scratch), (Mode::Repository, false));
+    }
+
+    #[test]
+    fn a_scratch_spawn_opens_its_harness_window() {
+        assert_eq!(
+            scratch_target(r#"{"session":"scratch 11-03 09:04","window":"t9","pane":"t9","clankerId":"c"}"#),
+            Ok(Target::Window { session: "scratch 11-03 09:04".into(), window_id: "t9".into(), pane: "t9".into(), management: None, resource_id: None, location: None })
+        );
+        assert!(scratch_target("not json").is_err());
+        assert!(scratch_target(r#"{"window":"t9"}"#).is_err());
     }
 
     #[test]

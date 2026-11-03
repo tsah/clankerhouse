@@ -3,6 +3,7 @@
     "alt-k": "clankerhouse.jump",
     "alt-b": "clankerhouse.repo",
     "alt-d": "clankerhouse.delete",
+    "alt-n": "clankerhouse.scratch",
     "alt-g": "clankerhouse.open_pr",
     "alt-o": "mod.open:picker",
     "alt-enter": "pane.split:down",

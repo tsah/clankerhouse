@@ -219,7 +219,8 @@
         "Run scripts/live-messaging-claude (real haiku turns on a private hc core with its own daemon; needs Claude's login) and confirm all nine scenarios pass",
         "Start Claude by hand in an hc terminal and send it a 60-line message; confirm `capabilities` shows `send: messaging-socket`, the text arrives intact with no pointer, and `send-status` moves typed → started → settled",
         "Type a draft into an idle Claude clanker's input box, then send to it; confirm the message is answered and the draft is still in the box",
-        "Send with `--delivery restart` to a working Claude clanker on hc; confirm the turn is interrupted once and the message runs as its own turn; a resend with the same `--request-id` returns `replayed: true` and sends nothing"
+        "Send with `--delivery restart` to a working Claude clanker on hc; confirm the turn is interrupted once and the message runs as its own turn; a resend with the same `--request-id` returns `replayed: true` and sends nothing",
+        "Send with `--delivery steer` to a Claude clanker running a two-step tool task; confirm `delivery: steer`, that nothing is interrupted, and that Claude takes the message after the current tool call and skips the second step"
       ]
     },
     {

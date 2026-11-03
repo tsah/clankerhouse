@@ -13,7 +13,8 @@
 #
 # Scenarios: inbox send + request-id replay; 60 lines intact; busy send (no merge); a human
 # draft survives; an open /model picker; a permission dialog cannot be answered by a message;
-# a redelivered copy is dropped by the hook; restart through hc's interrupt; fencing a relaunch.
+# a redelivered copy is dropped by the hook; restart through hc's interrupt; steer mid-turn;
+# fencing a relaunch.
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -41,7 +42,7 @@ set +e; qa_hc_start "$root/hc"; started=$?; set -e
 launcher="$repo/bin/clankerhouse-hc"
 old_pid=""
 cleanup() {
-    # Scenario 9 freezes the scratch Claude; never leave it stopped.
+    # Scenario 10 freezes the scratch Claude; never leave it stopped.
     if [[ -n "$old_pid" ]]; then kill -KILL "$old_pid" 2>/dev/null || true; fi
     "$launcher" --stop-server >/dev/null 2>&1 || true
     qa_hc_stop
@@ -189,9 +190,22 @@ out=$(send --text "Reply with exactly AFTER." --wait --timeout 60)
 [[ "$(reply <<<"$out")" == AFTER ]] || fail "send after restart: $out"
 pass "restart through hc's interrupt"
 
-# 9. Mail written to one launch but never acknowledged is fenced when the terminal relaunches
-#    Claude, never resent into the new one. This scratch Claude (its pid names its socket under
-#    $root) is frozen so the write lands unread, then killed; the terminal starts the second launch.
+# 9. Steer reaches a running turn through the inbox: nothing is interrupted, and Claude takes the
+#    message at its next tool boundary, so the second script run never starts.
+send --text "Run ./slow.sh 10 with the Bash tool in the foreground, then run ./slow.sh 11 the same way (two separate calls; a progress test script), then reply with exactly TWODONE." >/dev/null
+for _ in {1..20}; do screen | grep -q "tick 2" && break; sleep 1; done
+started=$(date +%s)
+out=$(send --delivery steer --text "Change of plan: do not run the script again; reply with exactly STEERED." --wait --timeout 90)
+[[ "$(field 'd["delivery"]' <<<"$out")" == steer && "$(reply <<<"$out")" == STEERED ]] || fail "steer: $out"
+(( $(date +%s) - started < 20 )) || fail "steer waited past the first tool call"
+screen | grep -q "tick 11" && fail "the second script run started after the steer"
+out=$(send --text "Reply with exactly AFTER." --wait --timeout 60)
+[[ "$(reply <<<"$out")" == AFTER ]] || fail "send after steer: $out"
+pass "steer at the next tool boundary"
+
+# 10. Mail written to one launch but never acknowledged is fenced when the terminal relaunches
+#     Claude, never resent into the new one. This scratch Claude (its pid names its socket under
+#     $root) is frozen so the write lands unread, then killed; the terminal starts the second launch.
 old_socket=$(report_field messagingSocket)
 [[ "$old_socket" == "$root"/* ]] || fail "unexpected socket path $old_socket"
 old_pid=$(basename "$old_socket" .sock)

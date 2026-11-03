@@ -246,6 +246,27 @@ describe("messaging socket", () => {
     expect((await inboxList({ clankerId: CLANKER, all: true })).messages.map((message) => message.text)).toEqual(["typed"])
   })
 
+  test("a steer reaches a working clanker at once, ahead of queued mail, and the hook acknowledges it", async () => {
+    const { multiplexer, report, submitted } = setup()
+    const inbox = inboxServer()
+    report("idle", 0, 0, { messagingSocket: inbox.path })
+    await sendClanker(CLANKER, "first", {}, multiplexer)
+    const firstPrompt = (await inbox.contents())[0]!
+    report("working", 1, 0, { messagingSocket: inbox.path, prompts: [submitted(firstPrompt, 1)] })
+    const queued = await sendClanker(CLANKER, "later", {}, multiplexer)
+    const steer = await sendClanker(CLANKER, "change course", { delivery: "steer" }, multiplexer)
+    expect(steer).toMatchObject({ requestedMode: "steer", appliedMode: "steer", delivery: "steer", transport: "inbox", confirmed: true })
+    expect(await inbox.contents()).toEqual([firstPrompt, `[clankerhouse ${steer.messageId} from operator; your final reply is returned to them automatically]\nchange course`])
+    expect(await sendStatus(steer.messageId, multiplexer)).toMatchObject({ state: "delivered", observation: "hook" })
+
+    const steerPrompt = inbox.lines[1]!.message.content
+    report("working", 2, 0, { messagingSocket: inbox.path, prompts: [submitted(firstPrompt, 1), submitted(steerPrompt, 2)] })
+    expect(await sendStatus(steer.messageId, multiplexer)).toMatchObject({ state: "acked", startedGeneration: 2, observation: "hook" })
+    expect(await inbox.contents()).toHaveLength(2)
+    report("done", 2, 2, { messagingSocket: inbox.path, prompts: [submitted(firstPrompt, 1), submitted(steerPrompt, 2)] })
+    expect((await deliverQueuedMessages(multiplexer)).delivered).toEqual([queued.messageId])
+  })
+
   test("an unacknowledged inbox message is rewritten with the same id, at most three times", async () => {
     const { multiplexer, report } = setup()
     const inbox = inboxServer()

@@ -255,7 +255,7 @@ behind a Deliver/Deny dialog.
 | 2 | Idempotent sends | `clankers send --request-id KEY`. A repeat with the same text returns the first message with `replayed: true` and sends nothing. A repeat with different text is `CONFLICT` (exit 2). |
 | 3 | Staged receipts, safe retry | `send-status` reports `stage` (queued → typed → started → settled → handled, or orphaned with an `orphanReason`), plus `attempts`, sender/source and timestamps. A message with no ack after the clanker has been ready for 15 s is resent with the *same* id, at most 3 times. The socket doesn't deduplicate, so the hook does: a prompt that opens with a tag whose id this session already took is blocked (`decision: block`) before it starts a turn. |
 | 4 | Incarnation fencing | The hook records an incarnation per launch: the lifecycle wrapper's, or the messaging socket path for a Claude started by hand. Queued or unacknowledged mail for an earlier launch is orphaned as `harness-replaced`, never sent to the new one. |
-| 5 | Dispatch modes | `--delivery auto\|queue\|follow-up\|steer\|restart`. Receipts carry `requestedMode` and `appliedMode`. `restart` uses the Multiplexer's own interrupt (`hc`'s, which reports whether the turn stopped), then delivers, queue head first, tagged `, restart` so the hook can tell Claude the interrupt was clankerhouse's, not a refusal by the user. It is offered only where the Multiplexer can interrupt (hc, not herdr) and refused while a permission dialog is up. `steer` is refused. |
+| 5 | Dispatch modes | `--delivery auto\|queue\|follow-up\|steer\|restart`. Receipts carry `requestedMode` and `appliedMode`. `restart` uses the Multiplexer's own interrupt (`hc`'s, which reports whether the turn stopped), then delivers, queue head first, tagged `, restart` so the hook can tell Claude the interrupt was clankerhouse's, not a refusal by the user. It is offered only where the Multiplexer can interrupt (hc, not herdr) and refused while a permission dialog is up. `steer` goes straight into Claude's messaging socket, ahead of queued mail, and Claude takes it at its next tool boundary; it is refused when the message would have to be typed. |
 | 6 | Provenance | Each message records `sender` (`CLANKER_ID` or the pane claim, else `operator`) and `source`. The sender is also in the tag. |
 | 7 | Gating | No screen reading. A Claude clanker gets mail only when its hook state is idle or done. Through the socket, focus doesn't matter, because Claude leaves a human's draft alone. A running turn always holds mail, because Claude merges a mid-turn message into that turn and the turn's own reply can be lost. |
 | 8 | Replayable log | A `message_events` table with `seq`. `clankers messages --after SEQ [--clanker ID]`. |
@@ -267,8 +267,8 @@ behind a Deliver/Deny dialog.
   fallback and redelivery block.
 - `scripts/qa-clanker-api` passes, including the ADR-0006 raw-pane guard, now that nothing reads
   the screen.
-- `scripts/live-messaging-claude` (opt-in, not run by `./test`) starts a real Claude Code 2.1.316
-  on haiku *by hand* (no wrapper) in a private hc core with its own daemon, and checks nine
+- `scripts/live-messaging-claude` (opt-in, not run by `./test`) starts a real Claude Code 2.1.317
+  on haiku *by hand* (no wrapper) in a private hc core with its own daemon, and checks ten
   scenarios:
   1. an inbox send acknowledged by id, and a request-id replay that sends nothing;
   2. 60 lines (with a stray `</pasted_content>`) arriving intact, no pointer, answered;
@@ -279,7 +279,9 @@ behind a Deliver/Deny dialog.
      approve it (the tool never ran);
   7. a redelivered copy of an acknowledged message is dropped by the hook, with no new turn;
   8. `restart` through hc's interrupt, answered at once as its own turn;
-  9. mail written to a frozen launch, never acknowledged, is fenced when the terminal
+  9. `steer` during a two-step tool task: nothing is interrupted, Claude takes the message after
+     the first call and never starts the second;
+  10. mail written to a frozen launch, never acknowledged, is fenced when the terminal
      relaunches Claude and never reaches the new one.
 
 **Findings from the live runs.**
@@ -317,7 +319,32 @@ What the results show:
 - **Steering without an interrupt (S) always worked**, because nothing is recorded as declined.
   It waits for the current tool call to finish, though.
 - **"from operator" invites a reply to a session of that name.** In several runs Claude tried
-  `SendMessage` to "operator", failed, and put the answer in its output anyway.
+  `SendMessage` to "operator", failed, and put the answer in its output anyway. The tag
+  experiment below found the cause.
+
+**Steer and tag experiment (2026-11-03).** `steer` now writes straight to the socket while Claude
+works. Claude 2.1.317 queues it and takes it in at the next tool boundary (the transcript logs
+`absorbed_mid_turn`). The hook still acknowledges it by id, so receipts, waits and results work
+as for any message. Claude wraps a mid-turn message in its own reminder, which ends "decide
+whether/how to respond (reply via SendMessage to the `from=` address)". A message to an idle
+Claude gets no such line. So the `SendMessage` attempts come from Claude's wrapper, not from the
+tag, and happen only on steers. The `from=` it names is "unknown": the socket carries no sender.
+
+Three tag forms, on opus. Every trial did what the message asked; the columns count trials
+that also tried `SendMessage`:
+
+| Tag | idle | steer | restart |
+|---|---|---|---|
+| `[clankerhouse msg-… from operator]` | 0/3 | 7/7 | 0/3 |
+| `[clankerhouse msg-…]` | 0/3 | 1/3 | (invalid: `msg-…, restart` broke the id) |
+| `[clankerhouse msg-… from operator; your final reply is returned to them automatically]` | 0/3 | 0/7 | 0/3 |
+
+On haiku, steer only: the plain tag tried `SendMessage` in 2/5 trials, the third form in 0/5.
+With the plain tag, haiku's final replies also carried notes about failing to reply; with the
+third form all five were just the asked-for text.
+
+Steers now carry the third form. Other messages keep the short tag, since Claude adds no
+`SendMessage` hint to them.
 
 - **The transcript lags the Stop hook.** Claude writes the turn's reply to its transcript a few
   ms after `Stop` fires, so `send --wait` could read the transcript too early and return no

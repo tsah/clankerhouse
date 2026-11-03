@@ -48,17 +48,21 @@ Rules:
    guess. Reuse an ID returned by a workshop/clanker spawn.
 5. Pi supports native send/result and report waits. Claude supports queued and
    follow-up send, report waits, and result (the final assistant message of
-   that generation, from its transcript); `steer` is unsupported, and `restart`
-   (where the Multiplexer can interrupt, as hc can) stops the running turn
-   first. Messages reach Claude through its own messaging socket when its hook
-   has reported one, else they are typed into its pane. Codex has no
+   that generation, from its transcript). `steer` needs Claude's messaging
+   socket: the message goes in at once and Claude takes it at its next tool
+   boundary, without stopping the running tool. `restart` (where the
+   Multiplexer can interrupt, as hc can) stops the running turn first; use it
+   only when the current tool call must not finish. Messages reach Claude
+   through its own messaging socket when its hook has reported one, else they
+   are typed into its pane, and then `steer` is refused. Codex has no
    lifecycle reports, so it supports status only, as `unknown`; do not wait on it. OpenCode is monitor-only until its native contract is
    verified. Capabilities remain authoritative.
 6. One unsettled external Pi message is admitted at a time. Wait for it before
    retrying.
 7. A send to a busy, blocked, or focused Claude returns `"delivery": "queued"`,
-   with or without `--delivery follow-up`.
-   Do not resend: it is delivered in order after the clanker settles. Every send
+   with or without `--delivery follow-up`. Do not resend: it is delivered in
+   order after the clanker settles (`--delivery steer` skips that queue and
+   returns `"delivery": "steer"`). Every send
    returns a `messageId`; wait for exactly that turn with `wait --message`, which
    avoids returning on the turn that was already running. When retrying after a
    timeout or error, resend with the same `--request-id`: it returns the first

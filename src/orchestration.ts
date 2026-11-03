@@ -165,10 +165,14 @@ export class MessageConflictError extends Error {
 export const INLINE_MAX_CHARS = 500
 export const INLINE_MAX_LINES = 3
 
-/** The tag the lifecycle hook looks for; it acknowledges the message by id, whatever wraps the prompt. */
-/** `, restart` tells the lifecycle hook that clankerhouse interrupted the previous turn to deliver it. */
+/**
+ * The tag the lifecycle hook looks for; it acknowledges the message by id, whatever wraps the prompt.
+ * `, restart` tells the hook that clankerhouse interrupted the previous turn to deliver it. A steer
+ * arrives mid-turn, where Claude's own wrapper says to answer with SendMessage; the tag says the
+ * reply already goes back, which stopped those attempts (docs/messaging-study-t3code-orca.md).
+ */
 export const messageTag = (message: Pick<StoredMessage, "messageId" | "sender"> & { requestedMode?: string | null }) =>
-  `[clankerhouse ${message.messageId} from ${message.sender}${message.requestedMode === "restart" ? ", restart" : ""}]`
+  `[clankerhouse ${message.messageId} from ${message.sender}${message.requestedMode === "restart" ? ", restart" : message.requestedMode === "steer" ? "; your final reply is returned to them automatically" : ""}]`
 
 /**
  * The one prompt typed into the harness for a message. Short text travels inline behind its
@@ -339,13 +343,15 @@ export class OrchestrationStore {
    * earlier messages still wait (so order holds), otherwise claimed for immediate delivery.
    * The check and the insert share one transaction so concurrent senders keep their order.
    */
-  admitMessage(input: { clankerId: string; text: string; busy: boolean; afterGeneration: number; now?: number } & MessageOrigin): StoredMessage & { replayed: boolean } {
+  /** Queue a message behind a busy recipient or earlier mail; a steer is never queued. */
+  admitMessage(input: { clankerId: string; text: string; busy: boolean; steer?: boolean; afterGeneration: number; now?: number } & MessageOrigin): StoredMessage & { replayed: boolean } {
     return this.db.transaction(() => {
       const replayed = this.replayedRequest(input.clankerId, input.requestId, input.text)
       if (replayed) return { ...replayed, replayed: true }
+      const { busy: _busy, steer, ...rest } = input
+      if (steer) return { ...this.insertMessage({ ...rest, delivery: "steer", state: "delivered" }), replayed: false }
       const pending = this.pendingMessages(input.clankerId).length
       const queued = shouldQueue({ busy: input.busy, pending })
-      const { busy: _busy, ...rest } = input
       return { ...this.insertMessage({ ...rest, delivery: queued ? "queued" : "immediate", state: queued ? "queued" : "delivered" }), replayed: false }
     }).immediate()
   }
@@ -557,7 +563,8 @@ export const sendStatusOf = (message: StoredMessage, clankerPresent: boolean, se
     state,
     startedGeneration: message.startedGeneration,
     stage,
-    observation: message.delivery === "steer" || message.delivery === "followUp" || (message.state === "acked" && message.startedGeneration === null && message.attempts === 0) ? "harness" : "hook",
+    // Pi's socket reply acknowledges at once; a Claude steer is acknowledged by the hook like any prompt.
+    observation: message.state === "acked" && message.startedGeneration === null && message.attempts === 0 ? "harness" : "hook",
     sender: message.sender,
     source: message.source,
     requestId: message.requestId,

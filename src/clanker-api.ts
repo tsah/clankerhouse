@@ -174,7 +174,8 @@ const capabilitiesFor = (harness: ClankerHarness, online: boolean, agentPrompt: 
   send: harness === "pi" && online ? "unix-socket" : harness === "claude" && inbox ? "messaging-socket" : harness === "claude" && agentPrompt ? "multiplexer-prompt" : false,
   result: harness === "pi" ? "reports" : harness === "claude" ? "transcript" : false,
   report: true,
-  deliveryModes: harness === "pi" ? ["steer", "followUp"] : harness === "claude" && (inbox || agentPrompt) ? ["queued", "followUp", ...(interrupt ? ["restart" as const] : [])] : [],
+  // Claude's messaging socket takes a message mid-turn (at the next tool boundary); a typed prompt cannot.
+  deliveryModes: harness === "pi" ? ["steer", "followUp"] : harness === "claude" && (inbox || agentPrompt) ? [...(inbox ? ["steer" as const] : []), "queued", "followUp", ...(interrupt ? ["restart" as const] : [])] : [],
 })
 
 export interface PaneMetadata {
@@ -555,9 +556,9 @@ export async function sendClanker(id: string, text: string, options: SendOptions
   const requested: ClankerDelivery = options.delivery ?? "auto"
   const origin = { requestId: options.requestId ?? null, sender: options.sender ?? "operator", source: options.source ?? "cli", requestedMode: requested }
   if (clanker.capabilities.send === "messaging-socket" || clanker.capabilities.send === "multiplexer-prompt") {
-    // Neither Claude transport can inject into a running turn; a steer is refused rather than
+    // Only the messaging socket reaches a running turn; a typed steer is refused rather than
     // silently becoming a follow-up or an interrupt.
-    if (requested === "steer") throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support steer delivery; use --delivery restart to interrupt the turn, or follow-up`, 4)
+    if (requested === "steer" && !viaInbox(clanker)) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support steer delivery: it has no messaging socket; use --delivery restart to interrupt the turn, or follow-up`, 4)
     if (requested === "restart" && !clanker.capabilities.deliveryModes.includes("restart")) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support restart delivery: its Multiplexer cannot interrupt a turn`, 4)
     if (requested === "restart" && clanker.state === "blocked") throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} is waiting on a permission prompt; restart would answer it, so it is refused`, 5)
     const mux = multiplexer ?? openManagedMultiplexer()
@@ -578,7 +579,8 @@ export async function sendClanker(id: string, text: string, options: SendOptions
       // Claude reports no Stop for an interrupt, so one the Multiplexer saw land counts as
       // settled and the message goes straight in. An unconfirmed one waits for idle.
       const busy = interrupted === "unconfirmed" || (interrupted === undefined && busyFor(clanker)) || (interrupted === "confirmed" && !viaInbox(clanker) && clanker.focused)
-      const message = (() => { try { return store.admitMessage({ clankerId: id, text, busy, afterGeneration: clanker.generation, now: acceptedAt, incarnation, ...origin }) } catch (error) { return conflict(error) } })()
+      // A steer skips the queue: Claude takes it at its next tool boundary, or as a new turn when idle.
+      const message = (() => { try { return store.admitMessage({ clankerId: id, text, busy, steer: requested === "steer", afterGeneration: clanker.generation, now: acceptedAt, incarnation, ...origin }) } catch (error) { return conflict(error) } })()
       const receipt = { clankerId: id, acceptedAt, afterGeneration: clanker.generation, observedGeneration: clanker.generation, messageId: message.messageId, requestedMode: requested, transport: transportOf(clanker, message), replayed: false }
       const restart = interrupted ? { interrupted } : {}
       if (message.state === "queued" && interrupted === "confirmed") {
@@ -590,7 +592,8 @@ export async function sendClanker(id: string, text: string, options: SendOptions
       let confirmed: boolean
       try { confirmed = (await handOff(mux, clanker, message)).confirmed }
       catch (error) { store.deleteMessage(message.messageId); throw error }
-      return { ...receipt, delivery: "immediate", appliedMode: interrupted ? "restart" : "immediate", ...restart, confirmed }
+      const delivery = message.delivery === "steer" ? "steer" : "immediate"
+      return { ...receipt, delivery, appliedMode: interrupted ? "restart" : delivery, ...restart, confirmed }
     } finally { store.close() }
   }
   if (requested === "restart") throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support restart delivery`, 4)

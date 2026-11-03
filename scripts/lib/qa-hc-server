@@ -23,6 +23,8 @@ qa_hc_start() {
         return 1
     fi
     qa_hc_session="qa-hc-$$-$RANDOM"
+    # Run from an hc terminal, its socket would beat the scratch session.
+    unset HC_TERMINAL_SOCKET HC_TERMINAL_ID HC_SCOPE
     export HC_SESSION=$qa_hc_session XDG_STATE_HOME="$dir/state" XDG_CONFIG_HOME="$dir/config" HC_BIN=$qa_hc_bin
     mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
     if [[ "$mode" != --systemd ]]; then

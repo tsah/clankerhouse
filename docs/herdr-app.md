@@ -47,7 +47,9 @@ hc machine add tsah@puffin --name puffin --session clankerhouse
 hc machine ls
 ```
 
-`--session clankerhouse` matters: without it the app connects to puffin's default session and sees none of the lane.
+`--session clankerhouse` matters: without it the app connects to puffin's default session and sees none of the lane, and
+Alt-K/B/D fail with a notification naming the session they ran in. `hc machine` cannot change a session in place: `hc machine
+rm puffin`, then add it again.
 
 ### 4. Install the config
 

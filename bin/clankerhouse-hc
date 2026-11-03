@@ -112,6 +112,16 @@ case "${1:-}" in
         ;;
 esac
 
+# Inside an hc terminal, HC_TERMINAL_SOCKET names that terminal's core and beats HC_SESSION (hcSocketPath). From another
+# session's terminal, such as a Herdr app machine added without --session, the lane would see a foreign core, fail the
+# daemon's owner check, and replace the healthy daemon.
+lane_socket=${HC_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-core/$HC_SESSION.sock}
+if [[ -z "${HC_SOCKET:-}" && -n "${HC_TERMINAL_SOCKET:-}" && "$HC_TERMINAL_SOCKET" != "$lane_socket" ]]; then
+    printf 'This terminal belongs to the hc session at %s, not %s.\n' "$HC_TERMINAL_SOCKET" "$lane_socket" >&2
+    printf 'On the Herdr app, add the machine with: hc machine add <target> --name <name> --session %s\n' "$HC_SESSION" >&2
+    exit 1
+fi
+
 mkdir -p -m 700 "$STATE_DIR"
 if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -O "$STATE_DIR" ]]; then
     echo "Refusing unsafe Clankerhouse runtime directory: $STATE_DIR" >&2; exit 1

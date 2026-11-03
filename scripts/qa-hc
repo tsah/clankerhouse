@@ -67,6 +67,8 @@ scenario() {
     check "a focus report refuses anything but an address" test "$("$launcher" --report-focus ../x >/dev/null 2>&1; echo $?)" = 2
     daemon_pid=$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/server.pid")
     check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|CLAUDE_CODE_CHILD_SESSION)='"
+    check "a popup from another session's terminal refuses" test "$(HC_TERMINAL_SOCKET="$XDG_RUNTIME_DIR/herdr-core/other.sock" "$launcher" --popup >/dev/null 2>&1; echo $?)" = 1
+    check "and leaves the daemon alone" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/server.pid")" = "$daemon_pid"
 
     echo "== identity is per terminal"
     script='echo "id=${CLANKER_ID:-none} herdr=${HERDR_PANE_ID:-none} child=${CLAUDE_CODE_CHILD_SESSION:-none}"; exec sleep 300'

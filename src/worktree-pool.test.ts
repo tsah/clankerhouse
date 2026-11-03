@@ -90,6 +90,21 @@ describe("warm worktree pool", () => {
     expect(await Bun.file(join(claimed!, "tracked")).text()).toBe("three\n")
   })
 
+  test.skipIf(!hasWorktrunk)("claims the spare for a fetched remote default that is ahead of the local one", async () => {
+    const repo = repository("remote-base")
+    await refillSpareWorktree(repo)
+    const local = git(repo, "rev-parse", "main")
+    writeFileSync(join(repo, "tracked"), "fetched\n")
+    git(repo, "commit", "--quiet", "--all", "--message", "only on origin")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(repo, "reset", "--quiet", "--hard", local)
+
+    const claimed = claimSpareWorktree(repo, "from-origin", "origin/main")
+    expect(claimed).toBeDefined()
+    expect(await Bun.file(join(claimed!, "tracked")).text()).toBe("fetched\n")
+    expect(Bun.spawnSync(["git", "-C", repo, "config", "--get", "branch.from-origin.merge"]).exitCode).not.toBe(0)
+  })
+
   test.skipIf(!hasWorktrunk)("leaves the spare intact when the request is not a plain new branch", async () => {
     const repo = repository("decline")
     await refillSpareWorktree(repo)
@@ -97,7 +112,7 @@ describe("warm worktree pool", () => {
 
     expect(claimSpareWorktree(repo, "taken")).toBeUndefined()
     expect(claimSpareWorktree(repo, "feature", "@")).toBeUndefined()
-    expect(claimSpareWorktree(repo, "feature", "origin/main")).toBeUndefined()
+    expect(claimSpareWorktree(repo, "feature", "origin/absent")).toBeUndefined()
     expect(spares(repo)).toHaveLength(1)
     expect(git(repo, "worktree", "list", "--porcelain")).toContain("locked clankerhouse warm spare")
   })

@@ -83,6 +83,12 @@ describe("workshop base", () => {
     expect(freshDefaultBase(clone)).toBeUndefined()
   })
 
+  test("treats Worktrunk's default-branch shortcut like no base", () => {
+    const { clone, tip } = staleClone()
+    expect(workshopBase(clone, "^")).toBe("origin/trunk")
+    expect(git(clone, "rev-parse", "origin/trunk")).toBe(tip)
+  })
+
   test("keeps an explicit base without touching the remote", () => {
     const untouched = () => { throw new Error("git must not run for an explicit base") }
     expect(workshopBase("/nonexistent", "feature/parent", untouched)).toBe("feature/parent")

@@ -1,6 +1,7 @@
 /**
  * The base a new Workshop branch starts from. An explicit base keeps its meaning. Without
- * one, the repository's local default branch is not trusted: nothing keeps it current, so
+ * one, or with Worktrunk's `^` (the default branch, which the picker sends), the repository's
+ * local default branch is not trusted: nothing keeps it current, so
  * the remote's default branch is fetched and the Workshop starts from `origin/<default>`.
  * A failed fetch fails the create rather than falling back to the local ref.
  */
@@ -41,4 +42,4 @@ export const freshDefaultBase = (repository: string, git: GitRunner = runGit(rep
   return `${remote}/${branch}`
 }
 
-export const workshopBase = (repository: string, base?: string, git?: GitRunner) => base || freshDefaultBase(repository, git)
+export const workshopBase = (repository: string, base?: string, git?: GitRunner) => base && base !== "^" ? base : freshDefaultBase(repository, git)

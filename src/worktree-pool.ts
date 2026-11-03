@@ -53,6 +53,7 @@ const readySpares = (commonDir: string) => {
 }
 
 const localBranchExists = (repository: string, branch: string) => run(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).exitCode === 0
+const remoteBranchExists = (repository: string, ref: string) => run(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/remotes/${ref}`]).exitCode === 0
 
 const worktreePathForBranch = (repository: string, branch: string) => {
   const listed = run(["git", "-C", repository, "worktree", "list", "--porcelain"])
@@ -74,9 +75,10 @@ export const claimSpareWorktree = (repository: string, branch: string, base?: st
   if (!commonDir || refillsInFlight.has(commonDir)) return undefined
   const spare = readySpares(commonDir)[0]
   if (!spare) return undefined
-  // Worktrunk's other base shortcuts (@, -, pr:N, mr:N) and remote bases stay with Worktrunk.
+  // A fetched remote default (origin/main) is what most creates start from. Worktrunk's other base
+  // shortcuts (@, -, pr:N, mr:N) stay with Worktrunk.
   const baseBranch = !base || base === "^" ? spare.metadata.defaultBranch : base
-  if (!localBranchExists(repository, baseBranch) || localBranchExists(repository, branch)) return undefined
+  if (!(localBranchExists(repository, baseBranch) || remoteBranchExists(repository, baseBranch)) || localBranchExists(repository, branch)) return undefined
   if (run(["git", "check-ref-format", "--branch", branch]).exitCode !== 0) return undefined
   // Worktrunk owns hook execution and approval; a hooked repository keeps its normal path.
   const hooks = run(["wt", "-C", spare.path, "hook", "show", "--format", "json"])

@@ -1263,7 +1263,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
         const remoteBranch = intent.remoteRef.split("/").slice(1).join("/")
         if (!remoteBranch || remoteBranch !== intent.branch) throw new Error("Selected remote ref does not match its branch")
         const fetched = Bun.spawnSync(["git", "-C", repository, "fetch", "--all", "--prune", "--quiet"], { stdout: "pipe", stderr: "pipe", env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0" } })
-        if (fetched.exitCode !== 0) throw new Error(fetched.stderr.toString().trim() || "Unable to refresh remote branches")
+        // An unreachable remote does not stop the open: the branch as last fetched is checked below.
+        if (fetched.exitCode !== 0) console.error(`Unable to refresh remote branches; opening ${intent.remoteRef} as last fetched: ${fetched.stderr.toString().trim() || `git fetch exited ${fetched.exitCode}`}`)
         const verified = Bun.spawnSync(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/remotes/${intent.remoteRef}`], { stdout: "ignore", stderr: "ignore" })
         if (verified.exitCode !== 0) throw new Error(`Remote branch ${intent.remoteRef} no longer exists`)
         const local = Bun.spawnSync(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/heads/${intent.branch}`], { stdout: "ignore", stderr: "ignore" })

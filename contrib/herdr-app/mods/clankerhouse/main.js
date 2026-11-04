@@ -19,6 +19,7 @@ const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "al
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
 const REQUEST_POLL_MS = 500;
+const NAME_SYNC_MS = 2000;
 const POPUP_START_MS = 20000; // A popup with no terminal after this never started; the next key opens a new one.
 const PANE_WAIT_TICKS = 40; // A new session's pane appears once the app has seen and adopted its terminal.
 
@@ -33,6 +34,7 @@ export default class Clankerhouse extends View {
     this.requests = new Set(); // popup=1 terminals already opened here.
     // terminals() changing does not re-render this block, so requests are polled.
     cx.timer.every(REQUEST_POLL_MS, (cx) => this.openRequests(cx));
+    cx.timer.every(NAME_SYNC_MS, () => this.syncSpaceNames());
     cx.timer.every(HEARTBEAT_MS, (cx) => { this.reported = null; this.branches.clear(); this.reportFocus(cx); cx.notify(); });
     cx.spawn(async (cx) => {
       for (;;) {
@@ -178,6 +180,21 @@ export default class Clankerhouse extends View {
       });
     }
     return this.branches.get(pane.cwd);
+  }
+
+  // A Clankerhouse session is a space here, but the app names a space after its folder; a Workshop's title
+  // (set at creation or renamed in the picker) lives on its terminals as ch_session_name. Mirror it.
+  syncSpaceNames() {
+    const { machine } = props() ?? {};
+    const wanted = new Map();
+    for (const t of terminals()) {
+      const space = t.labels?.["herdr.space"], name = t.labels?.ch_session_name;
+      if (space && name && local(machine, t.address)) wanted.set(`${machine}/${space}`, name);
+    }
+    for (const space of spaces()) {
+      const name = wanted.get(space.id);
+      if (name && space.name !== name) run("space.rename", { id: space.id, name });
+    }
   }
 
   openRequests(cx) {

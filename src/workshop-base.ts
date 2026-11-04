@@ -13,21 +13,34 @@ const remote = "origin"
 export interface GitResult { exitCode: number; stdout: string; stderr: string }
 export type GitRunner = (args: string[]) => GitResult
 
+/** A remote call that takes longer is abandoned: a hanging GitHub ssh login must not hold up a create. */
+export const REMOTE_TIMEOUT_MS = 8_000
+const remoteCommands = new Set(["fetch", "ls-remote"])
+
 const runGit = (repository: string): GitRunner => (args) => {
-  const result = Bun.spawnSync(["git", "-C", repository, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0" } })
-  return { exitCode: result.exitCode, stdout: result.stdout.toString().trim(), stderr: result.stderr.toString().trim() }
+  const result = Bun.spawnSync(["git", "-C", repository, ...args], {
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: Bun.env.GIT_SSH_COMMAND || "ssh -o BatchMode=yes -o ConnectTimeout=5" },
+    ...(remoteCommands.has(args[0]!) ? { timeout: REMOTE_TIMEOUT_MS } : {}),
+  })
+  const timedOut = result.exitCode === null
+  return { exitCode: result.exitCode ?? 124, stdout: result.stdout.toString().trim(), stderr: timedOut ? `git ${args[0]} timed out after ${REMOTE_TIMEOUT_MS / 1000}s` : result.stderr.toString().trim() }
 }
 
 const failure = (result: GitResult, fallback: string) => result.stderr || result.stdout || fallback
 
 /** Waits before each retry of a remote call; a remote that keeps failing fails after the last. */
 export const REMOTE_RETRY_DELAYS_MS = [1_000]
+/** Only a quick failure, such as GitHub refusing a key, is worth another try; a slow one is not. */
+const QUICK_FAILURE_MS = 5_000
 
 const withRetries = (call: () => GitResult, delays: number[]) => {
+  let started = Date.now()
   let result = call()
   for (const delay of delays) {
-    if (result.exitCode === 0) break
+    if (result.exitCode === 0 || Date.now() - started > QUICK_FAILURE_MS) break
     Bun.sleepSync(delay)
+    started = Date.now()
     result = call()
   }
   return result

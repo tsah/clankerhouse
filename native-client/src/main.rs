@@ -2760,7 +2760,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         return None;
     }
 
-    if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
+    // Alt-B as outside the picker: the branch flow's repository step. Alt-K does the same.
+    if matches!(key.code, KeyCode::Char('k') | KeyCode::Char('b')) && key.modifiers.contains(KeyModifiers::ALT) {
         app.enter_repository_mode();
         return None;
     }
@@ -4229,8 +4230,11 @@ mod tests {
             Some(AppCommand::Scratch { repository: "/repo".into() })
         );
 
-        // Alt-K back to the ordinary repository step leaves scratch mode.
+        // Alt-K or Alt-B back to the ordinary repository step leaves scratch mode.
         assert_eq!(handle_key(&mut app, alt('k')), None);
+        assert_eq!((app.mode, app.scratch), (Mode::Repository, false));
+        app.enter_scratch_mode();
+        assert_eq!(handle_key(&mut app, alt('b')), None);
         assert_eq!((app.mode, app.scratch), (Mode::Repository, false));
     }
 

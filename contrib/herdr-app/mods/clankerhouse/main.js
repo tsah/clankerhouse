@@ -19,6 +19,7 @@ const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "al
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
 const REQUEST_POLL_MS = 500;
+const POPUP_START_MS = 20000; // A popup with no terminal after this never started; the next key opens a new one.
 const PANE_WAIT_TICKS = 40; // A new session's pane appears once the app has seen and adopted its terminal.
 
 const local = (machine, address) => (address?.startsWith(`${machine}/`) ? address.slice(machine.length + 1) : null);
@@ -65,14 +66,23 @@ export default class Clankerhouse extends View {
     });
   }
 
+  // A popup this mod thinks is open but that is gone (its terminal ended unseen, or it never started) would
+  // swallow every popup key from then on, forwarded to nothing.
+  popupGone() {
+    if (!this.popupAddress) return Date.now() - this.popupStarted > POPUP_START_MS;
+    return !terminals().some((t) => t.address === this.popupAddress && t.state === "live");
+  }
+
   openPopup(mode, cx) {
+    if (this.popup && this.popupGone()) this.popup = this.popupAddress = null;
     if (this.popup) {
       const address = this.popupAddress;
-      if (address) cx.spawn(async () => { await hc(["keys", address, POPUP_KEYS[mode]]); });
+      if (address) cx.spawn(async () => { await hc(["keys", address, POPUP_KEYS[mode]]).catch(() => {}); });
       return;
     }
     const { machine, launcher } = props() ?? {};
     this.popup = mode;
+    this.popupStarted = Date.now();
     cx.spawn(async (cx) => {
       try {
         for (const stale of terminals().filter((t) => t.labels?.ch_popup && t.address.startsWith(`${machine}/`))) {
@@ -93,20 +103,30 @@ export default class Clankerhouse extends View {
     });
   }
 
-  // The overlay closes itself when its terminal ends; what is left is reading the choice.
+  // The overlay closes itself when its terminal ends; what is left is reading the choice. A failed check is
+  // retried: a watch that stopped would leave the popup marked open.
   watchPopup(address, cx) {
     cx.spawn(async (cx) => {
-      const got = await hc(["get", "--json", address]);
-      const terminal = got.code === 0 ? JSON.parse(got.stdout) : null;
-      const record = terminal?.terminal ?? terminal;
-      if (record?.state === "live") return cx.timer.after(TICK_MS, (cx) => this.watchPopup(address, cx));
-      const target = record?.labels?.ch_popup_target;
-      if (record?.exit_code) {
-        const output = await hc(["read", address, "--lines", "6"]);
-        this.fail("Clankerhouse popup failed", output.stdout.trim());
+      let record;
+      try {
+        const got = await hc(["get", "--json", address]);
+        const terminal = got.code === 0 ? JSON.parse(got.stdout) : null;
+        record = terminal?.terminal ?? terminal;
+      } catch {
+        return cx.timer.after(TICK_MS * 4, (cx) => this.watchPopup(address, cx));
       }
-      await hc(["rm", address]);
-      this.popup = this.popupAddress = null;
+      if (record?.state === "live") return cx.timer.after(TICK_MS, (cx) => this.watchPopup(address, cx));
+      if (this.popupAddress === address) this.popup = this.popupAddress = null;
+      const target = record?.labels?.ch_popup_target;
+      try {
+        if (record?.exit_code) {
+          const output = await hc(["read", address, "--lines", "6"]);
+          this.fail("Clankerhouse popup failed", output.stdout.trim());
+        }
+        await hc(["rm", address]);
+      } catch {
+        // Cleanup only: the next popup removes a leftover ch_popup terminal.
+      }
       if (target) this.showTerminal(`${props().machine}/${target}`, PANE_WAIT_TICKS, cx);
     });
   }

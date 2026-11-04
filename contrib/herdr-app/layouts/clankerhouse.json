@@ -28,7 +28,7 @@
           "id": "clankerhouse",
           "type": "block",
           "size": {
-            "px": 360
+            "px": 640
           },
           "content": {
             "mod": "clankerhouse",

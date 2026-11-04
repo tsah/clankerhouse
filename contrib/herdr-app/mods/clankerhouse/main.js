@@ -29,7 +29,15 @@ const PROJECT_COLORS = ["#5eb4aa", "#a78bfa", "#e882b4", "#d6bc68", "#67c8e6", "
 const LABEL_COLORS = ["#3894a0", "#806cc8", "#ba608c", "#aa8c3c", "#6e9646", "#a8704e"];
 const DONE_GRAY = "#6c7280";
 const ROW_REFRESH_MS = 15000;
-const nameHash = (name) => new TextEncoder().encode(name).reduce((hash, byte) => Math.imul(hash ^ byte, 0x01000193) >>> 0, 0x811c9dc5);
+// FNV-1a over the name's UTF-8 bytes; the app has no TextEncoder.
+const utf8 = (text) => [...text].flatMap((character) => {
+  const code = character.codePointAt(0);
+  if (code < 0x80) return [code];
+  if (code < 0x800) return [0xc0 | (code >> 6), 0x80 | (code & 63)];
+  if (code < 0x10000) return [0xe0 | (code >> 12), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63)];
+  return [0xf0 | (code >> 18), 0x80 | ((code >> 12) & 63), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63)];
+});
+const nameHash = (name) => utf8(name).reduce((hash, byte) => Math.imul(hash ^ byte, 0x01000193) >>> 0, 0x811c9dc5);
 const labelColor = (label) => (label === "done" ? DONE_GRAY : LABEL_COLORS[nameHash(label) % LABEL_COLORS.length]);
 const projectColor = (project) => PROJECT_COLORS[nameHash(project) % PROJECT_COLORS.length];
 const dimmed = (hex, percent) => `#${[1, 3, 5].map((at) => Math.floor((parseInt(hex.slice(at, at + 2), 16) * percent) / 100).toString(16).padStart(2, "0")).join("")}`;

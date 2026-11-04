@@ -67,14 +67,29 @@ describe("workshop base", () => {
   test("fails with the fetch error instead of falling back to the local ref", () => {
     const { clone, remote } = staleClone()
     rmSync(remote, { recursive: true, force: true })
-    expect(() => freshDefaultBase(clone)).toThrow(/Unable to fetch origin\/trunk for the new Workshop's base: .*remote\.git/s)
+    expect(() => freshDefaultBase(clone, undefined, [0, 0])).toThrow(/Unable to fetch origin\/trunk for the new Workshop's base: .*remote\.git/s)
+  })
+
+  test("retries a fetch the remote refuses before giving up", () => {
+    const calls: string[] = []
+    let refusals = 2
+    const flaky = (args: string[]) => {
+      calls.push(args[0]!)
+      if (args[0] === "symbolic-ref") return { exitCode: 0, stdout: "refs/remotes/origin/trunk", stderr: "" }
+      if (args[0] === "fetch" && refusals-- > 0) return { exitCode: 128, stdout: "", stderr: "git@github.com: Permission denied (publickey)." }
+      return { exitCode: 0, stdout: "", stderr: "" }
+    }
+    expect(freshDefaultBase("/unused", flaky, [0, 0])).toBe("origin/trunk")
+    expect(calls.filter((call) => call === "fetch")).toHaveLength(3)
+    refusals = 3
+    expect(() => freshDefaultBase("/unused", flaky, [0, 0])).toThrow(/Permission denied/)
   })
 
   test("fails when the remote's default branch cannot be resolved", () => {
     const { clone, remote } = staleClone()
     git(clone, "remote", "set-head", "origin", "--delete")
     rmSync(remote, { recursive: true, force: true })
-    expect(() => freshDefaultBase(clone)).toThrow(/Unable to resolve origin's default branch/)
+    expect(() => freshDefaultBase(clone, undefined, [0, 0])).toThrow(/Unable to resolve origin's default branch/)
   })
 
   test("leaves a repository without an origin remote to Worktrunk's default", () => {

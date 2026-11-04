@@ -120,8 +120,9 @@ export default class Clankerhouse extends View {
       const target = record?.labels?.ch_popup_target;
       try {
         if (record?.exit_code) {
-          const output = await hc(["read", address, "--lines", "6"]);
-          this.fail("Clankerhouse popup failed", output.stdout.trim());
+          // The error is what the popup printed last; a toast shows only its first lines.
+          const output = await hc(["read", address, "--lines", "12"]);
+          this.fail("Clankerhouse popup failed", output.stdout.trim().split("\n").filter((line) => line.trim()).slice(-3).reverse().join("\n"));
         }
         await hc(["rm", address]);
       } catch {

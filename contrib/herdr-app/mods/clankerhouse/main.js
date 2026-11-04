@@ -23,6 +23,17 @@ const NAME_SYNC_MS = 2000;
 const POPUP_START_MS = 20000; // A popup with no terminal after this never started; the next key opens a new one.
 const PANE_WAIT_TICKS = 40; // A new session's pane appears once the app has seen and adopted its terminal.
 
+// The picker's tag colours (native-client/src/main.rs: PROJECT_COLORS, LABEL_COLORS, name_hash), so a project or
+// label looks the same in the top bar as in Alt-K.
+const PROJECT_COLORS = ["#5eb4aa", "#a78bfa", "#e882b4", "#d6bc68", "#67c8e6", "#a0be6e", "#be96c8", "#c8a082"];
+const LABEL_COLORS = ["#3894a0", "#806cc8", "#ba608c", "#aa8c3c", "#6e9646", "#a8704e"];
+const DONE_GRAY = "#6c7280";
+const ROW_REFRESH_MS = 15000;
+const nameHash = (name) => new TextEncoder().encode(name).reduce((hash, byte) => Math.imul(hash ^ byte, 0x01000193) >>> 0, 0x811c9dc5);
+const labelColor = (label) => (label === "done" ? DONE_GRAY : LABEL_COLORS[nameHash(label) % LABEL_COLORS.length]);
+const projectColor = (project) => PROJECT_COLORS[nameHash(project) % PROJECT_COLORS.length];
+const dimmed = (hex, percent) => `#${[1, 3, 5].map((at) => Math.floor((parseInt(hex.slice(at, at + 2), 16) * percent) / 100).toString(16).padStart(2, "0")).join("")}`;
+
 const local = (machine, address) => (address?.startsWith(`${machine}/`) ? address.slice(machine.length + 1) : null);
 
 export default class Clankerhouse extends View {
@@ -31,10 +42,12 @@ export default class Clankerhouse extends View {
     this.reported = null;
     this.reporting = false;
     this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
+    this.rows = new Map(); // cwd on the machine -> { row, at }: the picker's row for the session holding it.
     this.requests = new Set(); // popup=1 terminals already opened here.
     // terminals() changing does not re-render this block, so requests are polled.
     cx.timer.every(REQUEST_POLL_MS, (cx) => this.openRequests(cx));
     cx.timer.every(NAME_SYNC_MS, () => this.syncSpaceNames());
+    cx.timer.every(ROW_REFRESH_MS, (cx) => cx.notify());
     cx.timer.every(HEARTBEAT_MS, (cx) => { this.reported = null; this.branches.clear(); this.reportFocus(cx); cx.notify(); });
     cx.spawn(async (cx) => {
       for (;;) {
@@ -182,6 +195,28 @@ export default class Clankerhouse extends View {
     return this.branches.get(pane.cwd);
   }
 
+  // The Alt-K row (title, project, labels) of the focused pane's session, refreshed every ROW_REFRESH_MS.
+  sessionRow(pane, cx) {
+    const { machine, launcher } = props() ?? {};
+    if (!pane?.cwd || !local(machine, pane.terminal)) return null;
+    const cached = this.rows.get(pane.cwd);
+    if (!cached || (!cached.loading && Date.now() - cached.at > ROW_REFRESH_MS)) {
+      this.rows.set(pane.cwd, { row: cached?.row ?? null, at: Date.now(), loading: true });
+      cx.spawn(async (cx) => {
+        let row = cached?.row ?? null;
+        try {
+          const got = await exec(launcher, ["--session-row", pane.cwd], { on: machine });
+          if (got.code === 0) row = JSON.parse(got.stdout);
+        } catch {
+          // The machine is away; the next refresh tries again.
+        }
+        this.rows.set(pane.cwd, { row, at: Date.now(), loading: false });
+        cx.notify();
+      });
+    }
+    return this.rows.get(pane.cwd)?.row ?? null;
+  }
+
   // A Clankerhouse session is a space here, but the app names a space after its folder; a Workshop's title
   // (set at creation or renamed in the picker) lives on its terminals as ch_session_name. Mirror it.
   syncSpaceNames() {
@@ -216,10 +251,19 @@ export default class Clankerhouse extends View {
     this.reportFocus(cx);
     const t = theme();
     const space = spaces().find((s) => s.active);
-    const branch = this.branch(panes().find((p) => p.focused), cx) ?? space?.branch;
+    const pane = panes().find((p) => p.focused);
+    const row = this.sessionRow(pane, cx);
+    const branch = row?.branch || this.branch(pane, cx) || space?.branch;
+    const done = Boolean(row?.labels?.includes("done"));
+    // As in the picker: an untitled session drops its "project@" prefix, because the project tag names it.
+    const name = row ? (row.title ?? (row.project && row.name.startsWith(`${row.project}@`) ? row.name.slice(row.project.length + 1) : row.name)) : space?.name;
+    const tag = (text, color) => div().flex_none().text_color(done ? dimmed(color, 70) : color).child(text);
     const label = (icon, text) => h_flex().min_w(0).gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13).flex_none()).child(div().truncate().child(text));
     return h_flex().size_full().min_w(0).px(14).gap(14).justify_end().items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12.4).text_color(t.muted)
-      .when(Boolean(space), (el) => el.child(div().min_w(0).truncate().text_color(t.foreground).child(space.name)))
+      .child(h_flex().min_w(0).gap(7).items_center()
+        .when(Boolean(name), (el) => el.child(div().min_w(0).truncate().text_color(done ? DONE_GRAY : t.foreground).child(name)))
+        .when(Boolean(row?.project && row.project !== name), (el) => el.child(tag(row.project, projectColor(row.project))))
+        .children((row?.labels ?? []).map((text) => tag(text, labelColor(text)))))
       .when(Boolean(branch), (el) => el.child(label("git-branch", branch)));
   }
 }

@@ -10,7 +10,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
+import { closeOverlay, exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
 
 const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"] };
 // The layout's Alt keys win over the popup's terminal, so pressed again while a popup is open they are passed into it:
@@ -47,6 +47,7 @@ const local = (machine, address) => (address?.startsWith(`${machine}/`) ? addres
 export default class Clankerhouse extends View {
   init(_props, cx) {
     this.popup = null;
+    this.resumePopup(cx);
     this.reported = null;
     this.reporting = false;
     this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
@@ -96,8 +97,31 @@ export default class Clankerhouse extends View {
     return !terminals().some((t) => t.address === this.popupAddress && t.state === "live");
   }
 
+  // The open popup is kept in localStorage too: a reload of this mod (an install, an edit) would otherwise forget it,
+  // leaving its overlay open over a finished terminal and every popup key forwarded to it.
+  savePopup() {
+    try {
+      if (this.popupAddress) localStorage.setItem("popup", JSON.stringify({ mode: this.popup, address: this.popupAddress, overlay: this.popupOverlay }));
+      else localStorage.removeItem("popup");
+    } catch {}
+  }
+
+  resumePopup(cx) {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("popup") ?? "null"); } catch {}
+    if (!saved?.address) return;
+    Object.assign(this, { popup: saved.mode, popupAddress: saved.address, popupOverlay: saved.overlay, popupStarted: Date.now() });
+    cx.timer.after(TICK_MS, (cx) => this.watchPopup(saved.address, cx));
+  }
+
+  endPopup() {
+    try { if (this.popupOverlay) closeOverlay(this.popupOverlay); } catch {}
+    this.popup = this.popupAddress = this.popupOverlay = null;
+    this.savePopup();
+  }
+
   openPopup(mode, cx) {
-    if (this.popup && this.popupGone()) this.popup = this.popupAddress = null;
+    if (this.popup && this.popupGone()) this.endPopup();
     if (this.popup) {
       const address = this.popupAddress;
       if (address) cx.spawn(async () => { await hc(["keys", address, POPUP_KEYS[mode]]).catch(() => {}); });
@@ -117,10 +141,11 @@ export default class Clankerhouse extends View {
         const created = JSON.parse(started.stdout);
         const address = created.terminal?.address ?? created.address;
         this.popupAddress = address;
-        openOverlay({ kind: "dialog", modal: true, width: 0.9, height: 0.8, layout: { type: "block", content: { terminal: address } } });
+        this.popupOverlay = openOverlay({ kind: "dialog", modal: true, width: 0.9, height: 0.8, layout: { type: "block", content: { terminal: address } } });
+        this.savePopup();
         cx.timer.after(TICK_MS, (cx) => this.watchPopup(address, cx));
       } catch (error) {
-        this.popup = this.popupAddress = null;
+        this.endPopup();
         this.fail("Clankerhouse popup did not open", error);
       }
     });
@@ -139,7 +164,7 @@ export default class Clankerhouse extends View {
         return cx.timer.after(TICK_MS * 4, (cx) => this.watchPopup(address, cx));
       }
       if (record?.state === "live") return cx.timer.after(TICK_MS, (cx) => this.watchPopup(address, cx));
-      if (this.popupAddress === address) this.popup = this.popupAddress = null;
+      if (this.popupAddress === address) this.endPopup();
       const target = record?.labels?.ch_popup_target;
       try {
         if (record?.exit_code) {

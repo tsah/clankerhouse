@@ -77,6 +77,8 @@ export default class Clankerhouse extends View {
     const { machine, launcher } = props() ?? {};
     const terminal = local(machine, focused()?.terminal);
     if (!terminal || terminal === this.reported || this.reporting) return;
+    // A popup stands over the session it opened from; reporting it would lose that session.
+    if (terminals().some((t) => t.address === focused().terminal && t.labels?.ch_popup)) return;
     this.reporting = true;
     cx.spawn(async (cx) => {
       try {
@@ -128,6 +130,7 @@ export default class Clankerhouse extends View {
       return;
     }
     const { machine, launcher } = props() ?? {};
+    const over = local(machine, focused()?.terminal);
     this.popup = mode;
     this.popupStarted = Date.now();
     cx.spawn(async (cx) => {
@@ -136,7 +139,7 @@ export default class Clankerhouse extends View {
           await hc(["kill", stale.address]);
           await hc(["rm", stale.address]);
         }
-        const started = await hc(["run", "--on", machine, "--bg", "--json", "--no-parent", "--no-notify", "--label", "ch_popup=1", "--", launcher, "--popup", ...POPUPS[mode]]);
+        const started = await hc(["run", "--on", machine, "--bg", "--json", "--no-parent", "--no-notify", "--label", "ch_popup=1", "--", launcher, "--popup", ...(over ? ["--focus", over] : []), ...POPUPS[mode]]);
         if (started.code !== 0) throw new Error(started.stderr || started.stdout);
         const created = JSON.parse(started.stdout);
         const address = created.terminal?.address ?? created.address;

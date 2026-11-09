@@ -7,7 +7,7 @@
 #   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
 #   clankerhouse-hc --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
-#   clankerhouse-hc --popup [--repo|--delete|--scratch]  the picker in a Herdr app popup: exits on a choice, leaving it for the mod
+#   clankerhouse-hc --popup [--focus T] [--repo|--delete|--scratch]  the picker in a Herdr app popup over terminal T: exits on a choice, leaving it for the mod
 #   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
 #   clankerhouse-hc --session-row DIR  print the picker's row (title, project, branch, labels) for the session holding DIR
 #   clankerhouse-hc --ensure-server start the core and daemon, then exit
@@ -96,14 +96,15 @@ start_daemon() {
     fi
 }
 
+report_focus() {
+    [[ $2 =~ ^t[0-9a-z]+$ ]] || { echo "$1 takes a terminal address on this machine" >&2; exit 2; }
+    mkdir -p -m 700 "$STATE_DIR"
+    printf '%s\n' "$2" >"$STATE_DIR/hc-focus.tmp"
+    mv "$STATE_DIR/hc-focus.tmp" "$STATE_DIR/hc-focus"
+}
+
 case "${1:-}" in
-    --report-focus)
-        [[ ${2:-} =~ ^t[0-9a-z]+$ ]] || { echo "--report-focus takes a terminal address on this machine" >&2; exit 2; }
-        mkdir -p -m 700 "$STATE_DIR"
-        printf '%s\n' "$2" >"$STATE_DIR/hc-focus.tmp"
-        mv "$STATE_DIR/hc-focus.tmp" "$STATE_DIR/hc-focus"
-        exit 0
-        ;;
+    --report-focus) report_focus --report-focus "${2:-}"; exit 0 ;;
     --session-row)
         [[ -n ${2:-} ]] || { echo "--session-row takes a folder" >&2; exit 2; }
         # The daemon's snapshot is what the picker draws; the row whose folder holds DIR, deepest first.
@@ -164,6 +165,11 @@ popup=false
 if [[ ${1:-} == "--popup" ]]; then
     popup=true
     shift
+    # The terminal the app had focused when the key was pressed; a focus report can lag a switch by seconds.
+    if [[ ${1:-} == "--focus" ]]; then
+        report_focus --focus "${2:-}"
+        shift 2
+    fi
     # `hc run` copies the caller's TERM, here whatever the Herdr app was started with.
     export TERM=xterm-256color COLORTERM=truecolor
     # The popup's own terminal is no session: the picker's current one is what it opened over.

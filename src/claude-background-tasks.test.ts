@@ -224,6 +224,28 @@ describe("Claude prompt acknowledgement and event recency", () => {
     expect(latest).toMatchObject({ promptSha256: promptSha256("prompt 8"), promptGeneration: 10 })
   })
 
+  test("a prompt absorbed mid-turn joins the running generation; a new prompt id starts one", async () => {
+    const f = fixture()
+    const started = await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt_id: "p1", prompt: "do the task" })
+    expect(started).toMatchObject({ generation: 1, promptId: "p1" })
+    await f.emit("working", { hook_event_name: "PreToolUse" })
+    // A steer through the messaging socket and an hc note pasted while it works both take the turn's id.
+    const steered = await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt_id: "p1", prompt: "[clankerhouse msg-steer from operator] also check y" })
+    expect(steered).toMatchObject({ generation: 1, generationStartedAt: started.generationStartedAt })
+    expect(steered.prompts.at(-1)).toMatchObject({ generation: 1, messageIds: ["msg-steer"] })
+    const noted = await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt_id: "p1", prompt: '<hc from="t7 helper">tests pass</hc>' })
+    expect(noted).toMatchObject({ generation: 1, generationStartedAt: started.generationStartedAt })
+    const settled = await f.emit("done", { hook_event_name: "Stop", background_tasks: [], prompt_id: "p1" })
+    expect(settled).toMatchObject({ generation: 1, settledGeneration: 1 })
+    expect(settled.turns).toEqual([{ generation: 1, startedAt: started.generationStartedAt, settledAt: expect.any(Number) }])
+    // An idle clanker's next prompt is a new turn, whatever sent it.
+    expect(await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt_id: "p2", prompt: '<hc from="t7 helper">done</hc>' })).toMatchObject({ generation: 2, promptId: "p2" })
+    // After an Escape Claude fires no Stop, so the record still says working; the next prompt's new id starts a turn.
+    expect(await f.emit("working", { hook_event_name: "UserPromptSubmit", prompt_id: "p3" })).toMatchObject({ generation: 3, promptId: "p3" })
+    // A Claude that names no prompt id keeps the old rule: every submitted prompt starts a generation.
+    expect(await f.emit("working", { hook_event_name: "UserPromptSubmit" })).toMatchObject({ generation: 4, promptId: null })
+  })
+
   test("every hook event, including each tool call, advances the event time", async () => {
     const f = fixture()
     const times: number[] = []

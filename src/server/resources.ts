@@ -36,7 +36,9 @@ export interface MuxWindow {
   clankerId?: string
   explicitHarness?: string
   harnessSessionId?: string
-  agentStatus?: { agent?: string; status: RuntimeAgentStatus }
+  agentStatus?: { agent?: string; status: RuntimeAgentStatus; blockedKind?: string; message?: string; reportedAt?: number }
+  /** The runtime replaced the harness's program in this pane (hc keep after a loss). */
+  harnessGone?: boolean
 }
 
 export interface DirectoryRow {

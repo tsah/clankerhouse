@@ -82,7 +82,7 @@ describe.skipIf(!hc || !existsSync(socketPath))("hc multiplexer adapter against 
     const created = await adapter.spawn({ scope: "session", name: "status", cwd: "/tmp", launch: { kind: "argv", argv: ["sh", "-c", String.raw`printf '\033]7501;state=blocked:app=claude-code\033\\'; sleep 60`] } })
     await settle(400)
     const pane = (await adapter.observe()).sessions.find((candidate) => candidate.id === created.nativeSessionId)!.windows[0]!.panes[0]!
-    expect(pane.agentStatus).toEqual({ agent: "claude", status: "blocked" })
+    expect(pane.agentStatus).toEqual({ agent: "claude", status: "blocked", reportedAt: expect.any(Number) })
     await adapter.rename(paneLocation(created.nativeSessionId, created.nativeWindowId, created.nativePaneId), "worker")
     await settle()
     expect(seen).toEqual(expect.arrayContaining(["reconnect", "topology", "status", "metadata"]))
@@ -90,6 +90,24 @@ describe.skipIf(!hc || !existsSync(socketPath))("hc multiplexer adapter against 
     abort.abort()
     await consuming
   })
+
+  test("a reporting harness lost under hc keep becomes a shell the adapter calls gone", async () => {
+    const created = await adapter.spawn({ scope: "session", name: "lost", cwd: "/tmp", launch: { kind: "argv", argv: ["sh", "-c", String.raw`printf '\033]7501;state=working:app=claude-code\033\\'; exec sleep 60`] } })
+    const location = paneLocation(created.nativeSessionId, created.nativeWindowId, created.nativePaneId)
+    await adapter.claim(location, "harness", "claude")
+    await settle(300)
+    await hcRequest(socketPath)("terminal.keep", { terminal: created.nativePaneId, keep: true })
+    const paneOf = async () => (await adapter.observe()).sessions.find((candidate) => candidate.id === created.nativeSessionId)?.windows[0]?.panes[0]
+    expect((await paneOf())?.harnessGone).toBeUndefined()
+    const pid = Number((await paneOf())!.pid)
+    // A signal death without an exit code is a loss, which keep answers with a shell after a grace delay.
+    process.kill(pid, "SIGKILL")
+    let pane = await paneOf()
+    for (let waited = 0; waited < 15_000 && !pane?.harnessGone; waited += 250) { await settle(250); pane = await paneOf() }
+    expect(pane).toMatchObject({ harnessGone: true, agentStatus: { status: "unknown" } })
+    expect(Number(pane!.pid)).not.toBe(pid)
+    await adapter.kill(sessionLocation(created.nativeSessionId))
+  }, 20_000)
 
   test("a live terminal survives a core restart with address, Claims and status intact", async () => {
     const created = await adapter.spawn({ scope: "session", name: "durable", cwd: "/tmp", launch: { kind: "argv", argv: ["sh", "-c", String.raw`printf '\033]7501;state=idle:app=pi\033\\'; sleep 60`] } })
@@ -257,6 +275,24 @@ describe("hc status mapping", () => {
     expect((await firstPane(stubbed([silent], HC_STARTUP_SILENCE_MS).adapter)).agentStatus).toMatchObject({ status: "blocked", blockedKind: "startup" })
     const opencode = terminal({ reported: false, labels: { ch_session: "s1", ch_harness: "opencode" } })
     expect((await firstPane(stubbed([opencode], HC_STARTUP_SILENCE_MS).adapter)).agentStatus?.status).toBe("unknown")
+  })
+
+  test("a program's own report says when it was made; a startup silence dates from the end of the window", async () => {
+    const reporting = terminal({ status: { state: "blocked", app: "claude-code", kind: "question" }, status_ms: 4_200 })
+    expect((await firstPane(stubbed([reporting]).adapter)).agentStatus).toEqual({ agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 4_200 })
+    const silent = terminal({ reported: false, created_ms: 100 })
+    expect((await firstPane(stubbed([silent], HC_STARTUP_SILENCE_MS + 100).adapter)).agentStatus?.reportedAt).toBe(HC_STARTUP_SILENCE_MS + 100)
+  })
+
+  test("a harness hc keep replaced with a shell is gone, not silent at startup", async () => {
+    // What a real core shows after keep restarts a lost reporting program: a shell, `reported` false, the old `status_ms`.
+    const replaced = terminal({ argv: ["/bin/bash"], reported: false, status: null, status_ms: 900 })
+    const pane = await firstPane(stubbed([replaced], HC_STARTUP_SILENCE_MS * 2).adapter)
+    expect(pane.harnessGone).toBe(true)
+    expect(pane.agentStatus?.status).toBe("unknown")
+    // A terminal that never reported, and a plain shell's, are not gone.
+    expect((await firstPane(stubbed([terminal({ reported: false })]).adapter)).harnessGone).toBeUndefined()
+    expect((await firstPane(stubbed([terminal({ reported: false, status_ms: 900, labels: { ch_session: "s1" } })]).adapter)).harnessGone).toBeUndefined()
   })
 })
 

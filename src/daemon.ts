@@ -150,6 +150,7 @@ const collectMultiplexerResources = Effect.tryPromise({
       explicitHarness: pane.harness,
       harnessSessionId: pane.harnessSessionId,
       agentStatus: pane.agentStatus,
+      harnessGone: pane.harnessGone,
     }))))
     return { kind: snapshot.kind, instanceId: snapshot.instanceId, serverEpoch, sessions, windows }
   },
@@ -167,7 +168,8 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
   const panes = new Map(windows.map((window) => [window.pane, window]))
   const observed: ObservedClanker[] = sessions.flatMap((session) => session.details.flatMap((detail) => {
     const window = detail.target.type === "window" ? panes.get(detail.target.pane) : undefined
-    if (detail.kind !== "clanker" || !detail.clankerId || !window || harnessExited(window.pane, detail.clankerId)) return []
+    // A pane outliving its harness (an exit mark, or hc keep's shell after a loss) holds no live clanker.
+    if (detail.kind !== "clanker" || !detail.clankerId || !window || window.harnessGone || harnessExited(window.pane, detail.clankerId)) return []
     const workshopPath = session.path || window.currentPath || ""
     if (!workshopPath.startsWith("/")) return []
     return [{

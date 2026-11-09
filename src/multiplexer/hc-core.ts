@@ -79,13 +79,20 @@ export const restartHcCore = (options: { env?: Record<string, string | undefined
 /**
  * Restarts a core that stopped answering. A dead core leaves its terminals running under the holder and nothing restarts
  * it by itself, so one poll is the whole supervisor. Failed starts back off; a recovery resets the delay.
+ *
+ * A polluted core is restarted too, through the allowlist. Any `hc` command run from a clanker while the core is down
+ * starts one in that clanker's environment, and every terminal it starts afterwards (an `hc run` helper, a plain shell)
+ * would inherit `CLANKER_ID` and claim to be that clanker. A restart keeps every terminal running. It is tried once per
+ * polluted stretch: if the next core is still polluted (an operator's `CLANKERHOUSE_HC_CORE_ENV`), it is only reported.
  */
-export const superviseHcCore = (signal: AbortSignal, options: { intervalMs?: number; ensure?: () => Promise<HcHealth>; health?: () => Promise<HcHealth>; log?: (message: string) => void } = {}) => {
+export const superviseHcCore = (signal: AbortSignal, options: { intervalMs?: number; ensure?: () => Promise<HcHealth>; health?: () => Promise<HcHealth>; restart?: () => void; log?: (message: string) => void } = {}) => {
   const intervalMs = options.intervalMs ?? HC_DEFAULT_SUPERVISE_INTERVAL_MS
   const health = options.health ?? (() => hcHealth())
   const ensure = options.ensure ?? (() => ensureHcCore())
+  const restart = options.restart ?? (() => restartHcCore())
   const log = options.log ?? (() => {})
   let failures = 0
+  let cleaned = false
   const sleep = (ms: number) => new Promise<void>((resolve) => {
     const timer = setTimeout(() => { signal.removeEventListener("abort", done); resolve() }, ms)
     const done = () => { clearTimeout(timer); resolve() }
@@ -107,7 +114,16 @@ export const superviseHcCore = (signal: AbortSignal, options: { intervalMs?: num
           await sleep(Math.min(intervalMs * 2 ** failures, HC_MAX_RESTART_BACKOFF_MS))
           continue
         }
-      } else if (current.polluted?.length) log(`hc core ${current.pid} carries identity variables: ${current.polluted.join(" ")}`)
+      } else if (current.polluted?.length) {
+        log(`hc core ${current.pid} carries identity variables: ${current.polluted.join(" ")}`)
+        if (!cleaned) {
+          cleaned = true
+          try {
+            restart()
+            log("hc core restarted with a clean environment; its terminals kept running")
+          } catch (error) { log(`hc core clean restart failed: ${error instanceof Error ? error.message : String(error)}`) }
+        }
+      } else cleaned = false
       await sleep(intervalMs)
     }
   })()

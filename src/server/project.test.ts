@@ -141,6 +141,19 @@ describe("session resource projection", () => {
     expect(project("done", true)).toBe("done")
   })
 
+  test("a newer blocked the harness reported itself shows over its hook; a harness hc keep replaced shows unknown", () => {
+    const project = (window: Partial<MuxWindow>) => projectResources(inputs({
+      sessions: [muxSession({ attached: true })],
+      windows: [muxWindow({ command: "claude", name: "claude", active: false, clankerId: "clanker-1", explicitHarness: "claude", ...window })],
+      clankerReports: [{ clankerId: "clanker-1", harness: "claude", pane: "%1", state: "working", updatedAt: 3_650_000 }],
+    })).sessions[0]?.details[0]?.state
+    expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_650_500 } })).toBe("blocked")
+    expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_649_000 } })).toBe("working")
+    // Herdr's own status is screen detection or Clankerhouse's mirror, never newer evidence.
+    expect(project({ agentStatus: { agent: "claude", status: "blocked" } })).toBe("working")
+    expect(project({ harnessGone: true, agentStatus: { agent: "claude", status: "unknown" } })).toBe("unknown")
+  })
+
   test("projects an OpenCode pane from Herdr runtime status without a service correlation", () => {
     const result = projectResources(inputs({
       sessions: [muxSession()],

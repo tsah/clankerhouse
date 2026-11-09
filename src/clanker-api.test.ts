@@ -289,6 +289,56 @@ describe("Herdr semantic prompt transport", () => {
     expect((await listClankers({ multiplexer })).map((clanker) => clanker.id)).toEqual([clankerId])
   })
 
+  test("a harness's own runtime status refines blocked without moving generations, and a replaced harness is gone", async () => {
+    const reports = isolate()
+    const clankerId = "clanker-claude-runtime"
+    const paneId = "w1:p41"
+    let agentStatus: Record<string, unknown> | undefined
+    let harnessGone = false
+    const adapter = {
+      kind: "herdr",
+      capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
+      observe: async () => ({
+        kind: "herdr", instanceId: "herdr:/tmp/test.sock",
+        sessions: [{ id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
+          id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
+            id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true,
+            claims: { clankerId, harness: "claude" }, agentStatus, ...(harnessGone ? { harnessGone } : {}),
+          }],
+        }] }],
+      }),
+      readClaim: async (_location: unknown, key: string) => key === "clankerId" ? clankerId : undefined,
+    } as unknown as Multiplexer
+    const multiplexer = new ManagedMultiplexer(adapter)
+    const hook = (state: string, updatedAt: number) => writeFileSync(join(reports, "w1_p41.json"), JSON.stringify({ harness: "claude", clankerId, pane: paneId, state, generation: 3, settledGeneration: 2, updatedAt }))
+    const status = () => clankerStatus(clankerId, multiplexer)
+
+    // AskUserQuestion: the hook last saw the tool call start; the harness then reported the question.
+    hook("working", 1_000)
+    agentStatus = { agent: "claude", status: "blocked", blockedKind: "question", message: "red or blue?", reportedAt: 2_000 }
+    expect(await status()).toMatchObject({ state: "blocked", blockedKind: "question", blockedMessage: "red or blue?", generation: 3, settledGeneration: 2 })
+    // A hook event after the report is newer, so the hook stands.
+    agentStatus = { ...agentStatus, reportedAt: 500 }
+    expect(await status()).toMatchObject({ state: "working" })
+    // A startup silence means nothing once the hook has reported.
+    agentStatus = { agent: "claude", status: "blocked", blockedKind: "startup", reportedAt: 5_000 }
+    expect((await status()).state).toBe("working")
+    // An answered permission prompt: the hook stays blocked until the next tool call, the harness says working.
+    hook("blocked", 1_000)
+    agentStatus = { agent: "claude", status: "working", reportedAt: 2_000 }
+    expect(await status()).toMatchObject({ state: "working", generation: 3, settledGeneration: 2 })
+    agentStatus = { agent: "claude", status: "working", reportedAt: 900 }
+    expect((await status()).state).toBe("blocked")
+    // Screen detection or a mirror carries no reportedAt and changes nothing.
+    agentStatus = { agent: "claude", status: "blocked", blockedKind: "question" }
+    hook("working", 1_000)
+    expect((await status()).state).toBe("working")
+
+    harnessGone = true
+    expect(await listClankers({ multiplexer })).toEqual([])
+    await expect(status()).rejects.toMatchObject({ code: "NOT_FOUND" })
+  })
+
   test("queues for a busy or focused Claude, delivers in order after it settles, and acknowledges by hook hash", async () => {
     const reports = isolate()
     const prompts: Array<{ pane: string; text: string }> = []

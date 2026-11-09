@@ -53,11 +53,46 @@ describe("hc core lifecycle", () => {
       intervalMs: 1,
       health: async () => healths.shift() ?? (abort.abort(), up),
       ensure: async () => { if (++ensures === 1) throw new Error("boom"); return up },
+      restart: () => {},
       log: (message) => logs.push(message),
     })
     expect(ensures).toBe(2)
     expect(logs.join("\n")).toContain("restart failed: boom")
     expect(logs.join("\n")).toContain("restarted as pid 2")
     expect(logs.join("\n")).toContain("carries identity variables: CLANKER_ID")
+  })
+
+  test("the supervisor restarts a polluted core cleanly once per polluted stretch", async () => {
+    const abort = new AbortController()
+    const logs: string[] = []
+    const polluted = { ...up, polluted: ["CLANKER_ID"] }
+    // Polluted twice in a row (the restart did not clean it), clean, then polluted again.
+    const healths: HcHealth[] = [polluted, polluted, up, polluted]
+    let restarts = 0
+    await superviseHcCore(abort.signal, {
+      intervalMs: 1,
+      health: async () => healths.shift() ?? (abort.abort(), up),
+      ensure: async () => up,
+      restart: () => { restarts += 1 },
+      log: (message) => logs.push(message),
+    })
+    expect(restarts).toBe(2)
+    expect(logs.filter((line) => line.includes("clean environment"))).toHaveLength(2)
+  })
+
+  test("a failed clean restart is reported, not retried in a loop", async () => {
+    const abort = new AbortController()
+    const logs: string[] = []
+    const polluted = { ...up, polluted: ["CLANKER_ID"] }
+    const healths: HcHealth[] = [polluted, polluted, polluted]
+    let restarts = 0
+    await superviseHcCore(abort.signal, {
+      intervalMs: 1,
+      health: async () => healths.shift() ?? (abort.abort(), up),
+      restart: () => { restarts += 1; throw new Error("nope") },
+      log: (message) => logs.push(message),
+    })
+    expect(restarts).toBe(1)
+    expect(logs.join("\n")).toContain("clean restart failed: nope")
   })
 })

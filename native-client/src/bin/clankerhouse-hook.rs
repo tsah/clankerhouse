@@ -193,7 +193,10 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut generation = previous.get("generation").and_then(Value::as_u64).unwrap_or(0);
     let mut settled = previous.get("settledGeneration").and_then(Value::as_u64).unwrap_or(0);
     let mut started_at = previous.get("generationStartedAt").cloned().unwrap_or(Value::Null);
-    if hook_event.as_deref() == Some("UserPromptSubmit")
+    let prompt_id = text(&payload, "prompt_id");
+    let previous_prompt_id = text(&previous, "promptId");
+    if (hook_event.as_deref() == Some("UserPromptSubmit")
+        && !joins_running_turn(&previous_state, &previous_prompt_id, &prompt_id))
         || (state == "working" && previous_state != "working" && previous_state != "blocked")
     {
         generation += 1;
@@ -248,6 +251,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "promptGeneration": prompts.last().and_then(|prompt| prompt.get("generation")).cloned().unwrap_or(Value::Null),
         "prompts": prompts,
         "generationStartedAt": started_at,
+        // Claude's id for the running turn; a prompt absorbed mid-turn carries the same one.
+        // Every submitted prompt replaces it, so a prompt without one never matches a stale id.
+        "promptId": if hook_event.as_deref() == Some("UserPromptSubmit") {
+            if prompt_id.is_empty() { Value::Null } else { json!(prompt_id) }
+        } else {
+            or_previous(&prompt_id, "promptId")
+        },
         "turns": turns,
         "transcriptPath": or_previous(&transcript, "transcriptPath"),
         // Set by the harness lifecycle wrapper per harness launch; senders fence queued mail on it.
@@ -454,6 +464,15 @@ fn message_ids(prompt: &str) -> Vec<String> {
     ids
 }
 
+/// A prompt Claude takes at a tool boundary of the running turn (a steer through its messaging
+/// socket, text typed while it works, or an `<hc from=...>` note pasted by hc) reports that turn's
+/// `prompt_id`. It joins the running generation instead of starting one, so the turn's start time,
+/// its reply in `clankers result`, and the generation a message started stay together. Without a
+/// `prompt_id` on both sides every submitted prompt starts a generation, as before.
+fn joins_running_turn(previous_state: &str, previous_prompt_id: &str, prompt_id: &str) -> bool {
+    matches!(previous_state, "working" | "blocked") && !prompt_id.is_empty() && prompt_id == previous_prompt_id
+}
+
 const RESTART_CONTEXT: &str = "clankerhouse interrupted your previous turn in order to deliver this message (the sender asked for a restart). The interruption came from clankerhouse, not from the user declining your work.";
 
 /// A clankerhouse message sent with `--delivery restart`: its opening tag ends `, restart]`.
@@ -535,7 +554,27 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_ids, prompt_sha256, redelivered, restart_tagged, sha256_hex};
+    use super::{joins_running_turn, message_ids, prompt_sha256, redelivered, restart_tagged, sha256_hex};
+
+    #[test]
+    fn only_a_prompt_with_the_running_turns_id_joins_it() {
+        assert!(joins_running_turn("working", "p1", "p1"));
+        assert!(joins_running_turn("blocked", "p1", "p1"));
+        // After an Escape Claude fires no Stop, so the state still says working; the next prompt has a new id.
+        assert!(!joins_running_turn("working", "p1", "p2"));
+        assert!(!joins_running_turn("done", "p1", "p1"));
+        assert!(!joins_running_turn("idle", "p1", "p1"));
+        assert!(!joins_running_turn("working", "", ""));
+        assert!(!joins_running_turn("working", "p1", ""));
+    }
+
+    #[test]
+    fn an_hc_note_is_not_a_clankerhouse_message() {
+        let note = "<hc from=\"t7 review\">Two bugs in x.rs [clankerhouse-ish]</hc>";
+        assert!(message_ids(note).is_empty());
+        assert!(!restart_tagged(note));
+        assert!(!redelivered(note, &[]));
+    }
 
     #[test]
     fn only_an_opening_restart_tag_counts() {

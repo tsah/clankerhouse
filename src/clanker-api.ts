@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } 
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 import { clankerHealth, type ClankerHealth } from "./clanker-health"
-import type { ClankerState } from "./model"
+import { withReportedStatus, type ClankerState, type ReportedRuntimeStatus } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
 import { MessageConflictError, OrchestrationStore, clankerBusy, generatedMessageId, promptFor, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type MessageEvent, type PromptObservation, type SendStatus, type StoredMessage } from "./orchestration"
@@ -59,6 +59,9 @@ export interface ClankerInfo {
   cwd: string
   worktreePath: string
   state: ClankerState
+  /** Why a `blocked` clanker is blocked, when the harness reported it through the runtime (`question`, `error`, ...). */
+  blockedKind?: string
+  blockedMessage?: string
   generation: number
   settledGeneration: number
   updatedAt: number
@@ -190,6 +193,10 @@ export interface PaneMetadata {
   cwd: string
   worktreePath: string
   focused?: boolean
+  /** The harness's own status as the runtime holds it; only from runtimes where the program reports it (hc). */
+  runtime?: ReportedRuntimeStatus
+  /** The runtime replaced the harness's program in this pane (hc keep after a loss). */
+  harnessGone?: boolean
 }
 
 /** Cross-process mutex for pane-id allocation, runtime-agnostic (atomic mkdir under the runtime dir). */
@@ -237,6 +244,8 @@ export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMet
       cwd: pane.currentPath,
       worktreePath: claims.worktreePath || session.worktreePath || "",
       focused: pane.focused === true,
+      ...(pane.agentStatus?.reportedAt !== undefined ? { runtime: { status: pane.agentStatus.status, blockedKind: pane.agentStatus.blockedKind, message: pane.agentStatus.message, reportedAt: pane.agentStatus.reportedAt } } : {}),
+      ...(pane.harnessGone ? { harnessGone: true } : {}),
     }]
   })))
 
@@ -295,10 +304,11 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
       && (!candidateReport.harness || candidateReport.harness === row.harness)
       ? candidateReport
       : undefined
-    const state = normalizedState(report?.state)
+    const hookState = normalizedState(report?.state)
     const updatedAt = number(report?.updatedAt)
     const generation = report?.generation === undefined ? updatedAt : number(report.generation)
-    const settledGeneration = number(report?.settledGeneration) || (terminalReport(report ?? {}, state) ? generation : 0)
+    const settledGeneration = number(report?.settledGeneration) || (terminalReport(report ?? {}, hookState) ? generation : 0)
+    const { state, ...blocked } = withReportedStatus({ state: hookState, updatedAt }, row.runtime)
     const online = socketIsOnline(row.socketPath)
     return {
       id,
@@ -311,6 +321,7 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
       cwd: row.cwd,
       worktreePath: row.worktreePath,
       state,
+      ...blocked,
       generation,
       settledGeneration,
       updatedAt,
@@ -322,7 +333,8 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
       report,
     }
   }))
-  return { records: records.filter((record) => !harnessExited(record.pane, record.id)), source }
+  const gone = new Set(rows.filter((row) => row.harnessGone).map((row) => row.pane))
+  return { records: records.filter((record) => !gone.has(record.pane) && !harnessExited(record.pane, record.id)), source }
 }
 
 const discoverRecords = async (multiplexer?: ManagedMultiplexer, strict = false, observed?: PaneMetadata[]) =>

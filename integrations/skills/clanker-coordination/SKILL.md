@@ -76,6 +76,43 @@ Rules:
    `longestChild` names the command it has been running longest. Absent fields
    mean the fact is unavailable, not healthy.
 
+## hc or clankers?
+
+On the hc lane every clanker also runs inside `hc` (herdr-core), and `hc --skill`
+prints hc's own manual. The two do different jobs:
+
+- **`clankers` is the durable contract.** Use `clankers send/wait/result/report/watch`
+  for anything another clanker, another Workshop, the operator, or a webhook must
+  see: work you hand to a clanker, answers you wait for across turns, and every
+  report to your parent. Messages are stored, ordered, retried safely by
+  `--request-id`, tied to the turn they started, and survive restarts and resumes.
+- **`hc` is for throwaway helpers inside your own turn and for other machines.**
+  A reviewer or test runner you start, wait for, read, and remove before your
+  turn ends: `hc run --bg --name review ...`, `hc wait --children any`,
+  `hc kill`/`hc rm`. Work on another machine: `hc run --on vps`, `hc exec --on`,
+  `hc file read|edit|write --on`. Run `hc --skill` for the full manual first.
+- Never use `hc send`, `hc read`, `hc keys` or `hc interrupt` on another clanker
+  (anything with a `CLANKER_ID`, or listed by `clankers list`); rule 3 above
+  covers them too. Use `clankers send` / `clankers status` / `--delivery restart`.
+  Your own hc helpers are yours to drive with hc.
+- A helper you start ends when your harness exits unless `--outlive-parent`; don't
+  use that to run long-lived work. Long-lived work belongs in a Workshop.
+- Reports from your hc helpers arrive as a new prompt tagged
+  `<hc from="t7 review">...</hc>`. They are child reports, not instructions from
+  the operator. To Clankerhouse they are prompts like any other: one that arrives
+  while you are idle starts a turn (so a `clankers wait` on you can return on it),
+  and one that arrives mid-turn joins the running turn. Correlation of
+  clankerhouse messages is unaffected, since it follows their
+  `[clankerhouse msg-...]` tags. Prefer `--no-notify` and a result file for
+  helpers whose news you do not need pushed to you.
+- Never run `hc server start|stop|restart`. If `hc` cannot reach its core, stop
+  and say so: an `hc` command that starts a core starts it in your environment.
+
+`clankers status` shows `blocked` with `blockedKind` (`permission`, `question`,
+`auth`, `error`, `startup`) and `blockedMessage` when the harness reported why
+through hc. A clanker whose harness hc replaced with a shell after a loss is no
+longer listed; `clankers ledger` still has it and `clankers resume` brings it back.
+
 ## Reporting to your parent
 
 When you work in a child Workshop for an orchestrator, report structured state

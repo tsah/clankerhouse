@@ -149,16 +149,27 @@ const claimsFromLabels = (labels: Record<string, string>): ClaimMap => {
 
 const shownLabelsOf = (labels: Record<string, string>) => Object.fromEntries(Object.entries(labels).filter(([label]) => label.startsWith(SHOWN_LABEL_PREFIX)))
 
+/**
+ * hc keeps when a program last reported but forgets that it did once the program is replaced: `hc keep` puts a shell
+ * where a lost program was, with `reported` false and the old `status_ms`. A terminal that never reported has neither.
+ */
+const reporterReplaced = (terminal: HcTerminal) => !terminal.reported && terminal.status_ms != null
+
 const silentAtStartup = (terminal: HcTerminal, harness: string | undefined, now: number) =>
-  !terminal.reported && Boolean(harness) && SELF_REPORTING_HARNESSES.has(harness!) && now - terminal.created_ms >= HC_STARTUP_SILENCE_MS
+  !terminal.reported && !reporterReplaced(terminal) && Boolean(harness) && SELF_REPORTING_HARNESSES.has(harness!) && now - terminal.created_ms >= HC_STARTUP_SILENCE_MS
+
+/** A self-reporting harness's terminal now holds a different program, so the harness is gone. */
+const harnessGone = (terminal: HcTerminal, harness: string | undefined) =>
+  reporterReplaced(terminal) && Boolean(harness) && SELF_REPORTING_HARNESSES.has(harness!)
 
 const agentStatusFor = (terminal: HcTerminal, harness: string | undefined, now: number): NonNullable<MultiplexerPane["agentStatus"]> => {
-  if (silentAtStartup(terminal, harness, now)) return { agent: harness, status: "blocked", blockedKind: "startup", message: "no status since it started; a startup dialog may be waiting" }
+  // The silence is only noticed once the window has passed, so that is when it was "reported".
+  if (silentAtStartup(terminal, harness, now)) return { agent: harness, status: "blocked", blockedKind: "startup", message: "no status since it started; a startup dialog may be waiting", reportedAt: terminal.created_ms + HC_STARTUP_SILENCE_MS }
   const status = terminal.status
   const agent = status?.app ? harnessOfApp[status.app] ?? status.app : undefined
   const mapped = agentStatusOf(status?.state)
   const blockedKind = mapped !== "blocked" ? undefined : status?.state === "error" ? "error" : status?.kind === "permission" || status?.kind === "question" || status?.kind === "auth" ? status.kind : undefined
-  return { agent, status: mapped, ...(blockedKind ? { blockedKind } : {}), ...(status?.msg ? { message: status.msg } : {}) }
+  return { agent, status: mapped, ...(blockedKind ? { blockedKind } : {}), ...(status?.msg ? { message: status.msg } : {}), ...(status && terminal.status_ms ? { reportedAt: terminal.status_ms } : {}) }
 }
 
 const pickClaims = (claims: ClaimMap, scope: "session" | "pane") => Object.fromEntries(Object.entries(claims).filter(([key]) => claimScopeOf(key as ClaimKey) === scope)) as ClaimMap
@@ -238,6 +249,7 @@ export class HcAdapter implements Multiplexer {
           harnessSessionId: paneClaims.harnessSessionId,
           processInfo: { shellPid: terminal.pid ?? undefined, foregroundProcessGroupId: foreground?.pid, foregroundProcesses: foreground ? [foreground] : [] },
           agentStatus: agentStatusFor(terminal, paneClaims.harness, now),
+          ...(harnessGone(terminal, paneClaims.harness) ? { harnessGone: true } : {}),
         }
         return { id: terminal.address, index: String(index), nativeName: terminal.labels[WINDOW_NAME_LABEL] ?? "", active: index === 0, claims: {}, panes: [pane] }
       })

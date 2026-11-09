@@ -94,8 +94,17 @@ export interface MultiplexerPane {
   harnessSessionId?: string
   /** Present only when the Adapter declares `processInfo`. */
   processInfo?: RuntimeProcessInfo
-  /** Present only when the Adapter declares `agentStatus`. */
-  agentStatus?: { agent?: string; status: RuntimeAgentStatus; blockedKind?: AgentBlockedKind; message?: string }
+  /**
+   * Present only when the Adapter declares `agentStatus`. `reportedAt` is set only where the program reports its own
+   * status (hc's OSC 7501), never for a runtime's screen detection or a mirror of Clankerhouse's own state; it says
+   * when the program last reported, so the status can be weighed against the lifecycle hook's.
+   */
+  agentStatus?: { agent?: string; status: RuntimeAgentStatus; blockedKind?: AgentBlockedKind; message?: string; reportedAt?: number }
+  /**
+   * The program that reported status here is gone and the runtime put another in its place (hc keep after a loss
+   * starts a shell). The pane outlives the harness, so the clanker is gone all the same.
+   */
+  harnessGone?: boolean
   /** Present only when the Adapter declares `sessionRefs`. */
   sessionRef?: { agent: string; kind: "id" | "path"; value: string; source: string }
 }

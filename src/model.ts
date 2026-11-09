@@ -89,6 +89,39 @@ interface VisibleTreeNode {
 export const normalizeReportedState = (state: ReportedClankerState, hookEvent?: string): ClankerState =>
   state === "done" && hookEvent === "session_start" ? "idle" : state
 
+/** A status the harness reported about itself through the runtime (hc's OSC 7501), with when it last reported. */
+export interface ReportedRuntimeStatus {
+  status: "idle" | "working" | "blocked" | "done" | "unknown"
+  blockedKind?: string
+  message?: string
+  reportedAt: number
+}
+
+export interface MergedClankerState {
+  state: ClankerState
+  /** Why it is blocked, when the harness said so. */
+  blockedKind?: string
+  blockedMessage?: string
+}
+
+/**
+ * The lifecycle hook stays the authority for turns and generations; the harness's own runtime status refines only
+ * `blocked`, which the hook sees just for permission prompts (ADR-0011). A newer self-reported `blocked` (a question,
+ * an auth or API error) wins over the hook, and a newer `working` ends a hook `blocked` whose prompt was answered. A
+ * startup silence counts only while the hook has never reported, since a hook report proves the harness started.
+ * Nothing here moves a generation, so waits, results and message acknowledgement are unaffected.
+ */
+export const withReportedStatus = (hook: { state: ClankerState; updatedAt: number }, runtime: ReportedRuntimeStatus | undefined): MergedClankerState => {
+  if (!runtime) return { state: hook.state }
+  if (runtime.status === "blocked") {
+    if (runtime.blockedKind === "startup" && hook.updatedAt > 0) return { state: hook.state }
+    if (hook.state !== "blocked" && runtime.reportedAt < hook.updatedAt) return { state: hook.state }
+    return { state: "blocked", ...(runtime.blockedKind ? { blockedKind: runtime.blockedKind } : {}), ...(runtime.message ? { blockedMessage: runtime.message } : {}) }
+  }
+  if (hook.state === "blocked" && runtime.status === "working" && runtime.reportedAt > hook.updatedAt) return { state: "working" }
+  return { state: hook.state }
+}
+
 /**
  * A settled turn stays `done` until the operator has seen it, then shows `idle`. The Multiplexer tracks seen: Herdr
  * reports a settled pane `done` until its tab is viewed, or `idle` when the tab was in view as the turn settled.

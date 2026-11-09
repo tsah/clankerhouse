@@ -1,6 +1,6 @@
 import type { ActivitySource } from "../activity"
 import { labelTags, projectName } from "../labels"
-import { compareProjectedSessions, stateWithSeen } from "../model"
+import { compareProjectedSessions, stateWithSeen, withReportedStatus } from "../model"
 import type { DetailRow, RuntimeObservation, SessionRow } from "../model"
 import type { ResourceRecord } from "../resource-registry"
 import { attachmentCandidatesFromWorkshops, type LineageSnapshot } from "../workshop"
@@ -124,7 +124,10 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const projectedHarness = registeredHarness ?? observedHarness
       if (matchingReport?.updatedAt) effects.push({ type: "markDirectoryActivity", path: sessionPath, source: "clanker", updatedAt: matchingReport.updatedAt, minIntervalMs: 0 })
       const runtimeState = observedHarness ? window.agentStatus?.status : undefined
-      const sourceState = matchingReport?.state ?? observedReport?.state ?? runtimeState ?? "unknown"
+      const hookReport = matchingReport ?? observedReport
+      const reported = window.agentStatus?.reportedAt !== undefined ? { ...window.agentStatus, reportedAt: window.agentStatus.reportedAt } : undefined
+      // A harness its runtime replaced (hc keep after a loss) has no state left to show, whatever its hook last said.
+      const sourceState = window.harnessGone ? "unknown" : hookReport?.state ? withReportedStatus({ state: hookReport.state, updatedAt: hookReport.updatedAt }, reported).state : runtimeState ?? "unknown"
       const updatedAt = matchingReport?.updatedAt ?? observedReport?.updatedAt ?? window.activity * 1000
       const state = stateWithSeen(sourceState, window.agentStatus?.status, focused)
       const observation: RuntimeObservation = matchingReport

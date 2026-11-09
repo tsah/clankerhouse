@@ -25,6 +25,9 @@ describe("Clanker observations", () => {
     expect(parseClankerObservation({ clankerId: "", harness: "pi", pane: "%1", state: "working" })).toEqual({ harness: "pi", pane: "%1", state: "working", updatedAt: 0 })
     expect(parseClankerObservation({ clankerId: "id", harness: "pi", pane: "%1", state: "invented" })).toEqual({ clankerId: "id", harness: "pi", pane: "%1", reportedState: "invented", updatedAt: 0 })
     expect(parseClankerObservation({ clankerId: "id", harness: "pi", state: "working" })).toBeUndefined()
+    // The current turn's start and Claude's transcript, for what the operator is shown (src/needs-me.ts).
+    expect(parseClankerObservation({ clankerId: "id", harness: "claude", pane: "%1", state: "done", generationStartedAt: 40, transcriptPath: "/t.jsonl" }))
+      .toMatchObject({ turnStartedAt: 40, transcriptPath: "/t.jsonl" })
   })
 
   test("selects only the newest current lifecycle observation for each pane", () => {

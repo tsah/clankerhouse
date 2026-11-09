@@ -1,5 +1,6 @@
 import type { MultiplexerLocation } from "./resource-registry"
 import type { AvailableAction } from "./transport/protocol"
+import type { NeedsMe } from "./needs-me"
 
 export interface TargetIdentity {
   management?: "managed" | "unmanaged"
@@ -24,9 +25,9 @@ export interface RuntimeObservation {
   reason?: string
 }
 
-export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation }
+export interface DetailRow { kind: string; harness?: string; status: string; detail: string; title: string; age: string; state: ClankerState; target: Target; updatedAt: number; terminalId?: string; clankerId?: string; observation?: RuntimeObservation; blockedKind?: string; blockedMessage?: string; gone?: boolean }
 export type DirectorySource = "worktree" | "zoxide" | "activity"
-export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string; labels?: string[]; title?: string; project?: string }
+export interface SessionRow { name: string; path: string; branch: string; flags: string; markers: string[]; age: string; recency: number; target: Target; details: DetailRow[]; searchText: string; availableActions?: AvailableAction[]; directorySource?: DirectorySource; activitySource?: string; frecency?: number; workshopId?: string; resourceId?: string; management?: "managed" | "unmanaged"; parentWorkshopId?: string | null; childWorkshopCount?: number; attachmentCandidateWorkshopIds?: string[]; lineageLabel?: string; lineageSearchText?: string; labels?: string[]; title?: string; project?: string; needsMe?: NeedsMe }
 export interface TreeRow {
   key: string
   depth: number

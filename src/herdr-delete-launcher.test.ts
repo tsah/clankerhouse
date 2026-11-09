@@ -148,9 +148,9 @@ describe("Herdr popup installer", () => {
     f.env.CLANKERHOUSE_HERDR_LAUNCHER = launcher
     expect(f.install().exitCode).toBe(0)
     const bindings = readConfig(f.config).keys.command
-    expect(bindings).toHaveLength(5)
+    expect(bindings).toHaveLength(6)
     expect(bindings[0]).toEqual(customBinding)
-    expect(bindings.slice(1).map(binding => binding.command)).toEqual([launcher, `${launcher} --repo`, `${launcher} --delete`, `${launcher} --scratch`])
+    expect(bindings.slice(1).map(binding => binding.command)).toEqual([launcher, `${launcher} --repo`, `${launcher} --delete`, `${launcher} --scratch`, `${launcher} --needs-me`])
     expect(readFileSync(f.config, "utf8")).toContain('custom_setting = "retained"')
     expect(f.install("--uninstall").exitCode).toBe(0)
     expect(readConfig(f.config).keys.command).toEqual([customBinding])
@@ -158,7 +158,7 @@ describe("Herdr popup installer", () => {
     expect(readFileSync(f.config, "utf8")).not.toContain("clankerhouse herdr keybindings (managed)")
   })
 
-  test("installs Alt+D as a native confirmation popup alongside Alt+K, Alt+B and Alt+N", () => {
+  test("installs Alt+D as a native confirmation popup alongside Alt+K, Alt+B, Alt+N and Alt+I", () => {
     const f = fixture()
     const result = f.install()
     expect(result.exitCode, result.stderr.toString()).toBe(0)
@@ -170,6 +170,7 @@ describe("Herdr popup installer", () => {
       { key: "alt+b", type: "popup", command: `${join(repository, "bin", "clankerhouse-herdr")} --repo`, width: "90%", height: "80%" },
       { key: "alt+d", type: "popup", command: `${join(repository, "bin", "clankerhouse-herdr")} --delete`, width: "90%", height: "80%" },
       { key: "alt+n", type: "popup", command: `${join(repository, "bin", "clankerhouse-herdr")} --scratch`, width: "90%", height: "80%" },
+      { key: "alt+i", type: "popup", command: `${join(repository, "bin", "clankerhouse-herdr")} --needs-me`, width: "90%", height: "80%" },
     ])
   })
 
@@ -185,6 +186,7 @@ describe("Herdr popup installer", () => {
       { key: "prefix+b", command: `${launcher} --repo` },
       { key: "alt+d", command: `${launcher} --delete` },
       { key: "alt+n", command: `${launcher} --scratch` },
+      { key: "alt+i", command: `${launcher} --needs-me` },
     ])
   })
 
@@ -192,11 +194,11 @@ describe("Herdr popup installer", () => {
     const f = fixture()
     f.env.CLANKERHOUSE_HERDR_DELETE_KEY = "prefix+shift+d"
     expect(f.install().exitCode).toBe(0)
-    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+k", "alt+b", "prefix+shift+d", "alt+n"])
-    Object.assign(f.env, { CLANKERHOUSE_HERDR_KEY: "alt+u", CLANKERHOUSE_HERDR_SPAWN_KEY: "alt+y", CLANKERHOUSE_HERDR_DELETE_KEY: "alt+e", CLANKERHOUSE_HERDR_SCRATCH_KEY: "alt+s" })
+    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+k", "alt+b", "prefix+shift+d", "alt+n", "alt+i"])
+    Object.assign(f.env, { CLANKERHOUSE_HERDR_KEY: "alt+u", CLANKERHOUSE_HERDR_SPAWN_KEY: "alt+y", CLANKERHOUSE_HERDR_DELETE_KEY: "alt+e", CLANKERHOUSE_HERDR_SCRATCH_KEY: "alt+s", CLANKERHOUSE_HERDR_NEEDS_ME_KEY: "alt+m" })
     expect(f.install().exitCode).toBe(0)
-    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+u", "alt+y", "alt+e", "alt+s"])
-    for (const variable of ["CLANKERHOUSE_HERDR_KEY", "CLANKERHOUSE_HERDR_SPAWN_KEY", "CLANKERHOUSE_HERDR_DELETE_KEY", "CLANKERHOUSE_HERDR_SCRATCH_KEY"]) delete f.env[variable]
+    expect(readConfig(f.config).keys.command.map(binding => binding.key)).toEqual(["alt+u", "alt+y", "alt+e", "alt+s", "alt+m"])
+    for (const variable of ["CLANKERHOUSE_HERDR_KEY", "CLANKERHOUSE_HERDR_SPAWN_KEY", "CLANKERHOUSE_HERDR_DELETE_KEY", "CLANKERHOUSE_HERDR_SCRATCH_KEY", "CLANKERHOUSE_HERDR_NEEDS_ME_KEY"]) delete f.env[variable]
     expect(f.install().stdout.toString()).toContain("already current")
   })
 })

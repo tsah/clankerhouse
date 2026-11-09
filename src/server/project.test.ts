@@ -146,12 +146,14 @@ describe("session resource projection", () => {
       sessions: [muxSession({ attached: true })],
       windows: [muxWindow({ command: "claude", name: "claude", active: false, clankerId: "clanker-1", explicitHarness: "claude", ...window })],
       clankerReports: [{ clankerId: "clanker-1", harness: "claude", pane: "%1", state: "working", updatedAt: 3_650_000 }],
-    })).sessions[0]?.details[0]?.state
-    expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_650_500 } })).toBe("blocked")
-    expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_649_000 } })).toBe("working")
+    })).sessions[0]?.details[0]
+    const state = (window: Partial<MuxWindow>) => project(window)?.state
+    expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", message: "Which env?", reportedAt: 3_650_500 } }))
+      .toMatchObject({ state: "blocked", blockedKind: "question", blockedMessage: "Which env?" })
+    expect(state({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_649_000 } })).toBe("working")
     // Herdr's own status is screen detection or Clankerhouse's mirror, never newer evidence.
-    expect(project({ agentStatus: { agent: "claude", status: "blocked" } })).toBe("working")
-    expect(project({ harnessGone: true, agentStatus: { agent: "claude", status: "unknown" } })).toBe("unknown")
+    expect(state({ agentStatus: { agent: "claude", status: "blocked" } })).toBe("working")
+    expect(project({ harnessGone: true, agentStatus: { agent: "claude", status: "unknown" } })).toMatchObject({ state: "unknown", gone: true })
   })
 
   test("projects an OpenCode pane from Herdr runtime status without a service correlation", () => {

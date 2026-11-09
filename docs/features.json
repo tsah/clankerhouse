@@ -388,6 +388,31 @@
       ]
     },
     {
+      "id": "needs-me",
+      "title": "The Needs-me view (Alt-I) and the Herdr app's need-you count, decided once in the daemon's snapshot",
+      "core": true,
+      "unit": [
+        "src/needs-me.test.ts",
+        "src/server/project.test.ts",
+        "src/server/observations.test.ts",
+        "src/herdr-delete-launcher.test.ts",
+        "src/herdr-app-config.test.ts",
+        "native-client/src/main.rs"
+      ],
+      "standalone": [
+        "scripts/qa-daemon",
+        "scripts/qa"
+      ],
+      "manual": [
+        "Press Alt-I in Herdr and inside the picker; confirm a flat list of only the Workshops that need you, one row each, with the Alt-K row's title, project and label tags in the same colours",
+        "Have a clanker file `clankers report --state question --message ...`; confirm its row shows `asked Nm ago` and the question's first line, and that it leaves the list once a new turn starts",
+        "Leave a clanker on a permission prompt and let another finish in a background tab; confirm `blocked · permission prompt` and `finished, not seen` rows, and that viewing the finished tab removes it",
+        "Confirm a Workshop with a working clanker and nothing asked is not listed, and that an empty list says caught up",
+        "Press Enter on a row and confirm you land on the clanker that needs attention; press Alt-D and confirm Done or deletion exactly as on an Alt-K row; type to filter; Alt-K back to the full map",
+        "In the Herdr app, confirm the top bar's `N need you · M open` matches the view's own count"
+      ]
+    },
+    {
       "id": "workshop-labels",
       "title": "Workshop labels and titles, repository hooks, the built-in done mark, reaper, and Workshop stop",
       "core": true,

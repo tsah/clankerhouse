@@ -127,7 +127,9 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
       const hookReport = matchingReport ?? observedReport
       const reported = window.agentStatus?.reportedAt !== undefined ? { ...window.agentStatus, reportedAt: window.agentStatus.reportedAt } : undefined
       // A harness its runtime replaced (hc keep after a loss) has no state left to show, whatever its hook last said.
-      const sourceState = window.harnessGone ? "unknown" : hookReport?.state ? withReportedStatus({ state: hookReport.state, updatedAt: hookReport.updatedAt }, reported).state : runtimeState ?? "unknown"
+      const merged = hookReport?.state ? withReportedStatus({ state: hookReport.state, updatedAt: hookReport.updatedAt }, reported) : undefined
+      const sourceState = window.harnessGone ? "unknown" : merged ? merged.state : runtimeState ?? "unknown"
+      const blocked = sourceState === "blocked" ? { blockedKind: merged?.blockedKind ?? window.agentStatus?.blockedKind, blockedMessage: merged?.blockedMessage ?? window.agentStatus?.message } : {}
       const updatedAt = matchingReport?.updatedAt ?? observedReport?.updatedAt ?? window.activity * 1000
       const state = stateWithSeen(sourceState, window.agentStatus?.status, focused)
       const observation: RuntimeObservation = matchingReport
@@ -138,7 +140,7 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
             ? { source: "runtime", confidence: "observed", state: sourceState, observedAt }
             : { source: "runtime", confidence: "observed", state: "present", observedAt }
       const status = projectedKind === "window" ? window.command : observedReport ? `reported ${sourceState}` : runtimeState !== undefined ? `runtime ${sourceState}` : ""
-      details.push({ kind: projectedKind, harness: projectedHarness, status, detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, updatedAt, terminalId: managedTerminal?.id, clankerId: registeredHarness ? window.clankerId : undefined, observation })
+      details.push({ kind: projectedKind, harness: projectedHarness, status, detail: "", title: managedTerminal?.displayName || window.name || window.title, age: ageFromTimestamp(window.activity * 1000, observedAt), state, target: { type: "window", session: window.session, windowId: window.id, pane: window.pane, management: terminalManaged ? "managed" : "unmanaged", resourceId: managedTerminal?.id, location }, updatedAt, terminalId: managedTerminal?.id, clankerId: registeredHarness ? window.clankerId : undefined, observation, ...(blocked.blockedKind ? { blockedKind: blocked.blockedKind } : {}), ...(blocked.blockedMessage ? { blockedMessage: blocked.blockedMessage } : {}), ...(window.harnessGone && registeredHarness ? { gone: true } : {}) })
       for (const unmatched of observationReconciliation.unmatchedByPane.get(window.pane) ?? []) {
         const report = unmatched.observation
         if (report === observedReport) continue

@@ -268,6 +268,12 @@ export class OrchestrationStore {
     return (this.db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM reports").get() as { seq: number }).seq
   }
 
+  /** The newest Report of every clanker that filed one, in one read. */
+  latestReports(): ClankerReportRecord[] {
+    const rows = this.db.query("SELECT * FROM reports WHERE seq IN (SELECT MAX(seq) FROM reports GROUP BY clanker_id)").all() as ReportRow[]
+    return rows.map(reportFromRow)
+  }
+
   lastReportFor(clankerId: string): ClankerReportRecord | null {
     const row = this.db.query("SELECT * FROM reports WHERE clanker_id = ?1 ORDER BY seq DESC LIMIT 1").get(clankerId) as ReportRow | null
     return row ? reportFromRow(row) : null

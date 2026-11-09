@@ -112,6 +112,23 @@ struct DetailRow {
     target: Target,
     #[serde(default)]
     observation: Option<RuntimeObservation>,
+    #[serde(default, rename = "clankerId")]
+    clanker_id: Option<String>,
+}
+
+/// Why a Workshop waits on the operator, as the daemon decided it (src/needs-me.ts).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct NeedsMe {
+    reason: String,
+    /// Epoch milliseconds the reason has held since.
+    #[serde(default)]
+    since: f64,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    excerpt: Option<String>,
+    #[serde(default, rename = "clankerId")]
+    clanker_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -169,6 +186,8 @@ struct SessionRow {
     parent_workshop_id: Option<String>,
     #[serde(default, rename = "attachmentCandidateWorkshopIds")]
     attachment_candidate_workshop_ids: Option<Vec<String>>,
+    #[serde(default, rename = "needsMe")]
+    needs_me: Option<NeedsMe>,
 }
 
 #[derive(Deserialize)]
@@ -369,6 +388,8 @@ struct App {
     repository_identities: HashMap<String, String>,
     /// Repository mode for a scratch Workshop (Alt-N): choosing a repository creates it at once.
     scratch: bool,
+    /// Jump mode shows only the Workshops that need the operator (Alt-I), flat and most pressing first.
+    needs_me: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -484,6 +505,79 @@ fn aggregate(states: impl Iterator<Item = ClankerState>) -> ClankerState {
     .unwrap_or(ClankerState::Unknown)
 }
 
+/// The Alt-I sort groups: clankers waiting on the operator, then finished but unseen, then failed or crashed, then
+/// Workshops whose label says it is the operator's move, then Workshops to close or look at. A label can sit for
+/// weeks, so it comes after what a clanker is waiting on now. An unknown reason from a newer daemon sorts last.
+fn needs_me_rank(reason: &str) -> u8 {
+    match reason {
+        "asked" | "blocked" => 0,
+        "finished" => 1,
+        "failed" | "crashed" => 2,
+        "your-move" => 3,
+        _ => 4,
+    }
+}
+
+/// The open Workshops that need the operator, one row each (its most pressing reason), most pressing first and,
+/// within a group, the longest waiting first. A query only filters.
+fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a SessionRow> {
+    let query = query.trim().to_lowercase();
+    let mut chosen: Vec<&SessionRow> = Vec::new();
+    for session in sessions {
+        if session.needs_me.is_none()
+            || !matches!(session.target, Target::Session { .. }) || (!query.is_empty() && search_score(session, &query).is_none()) {
+            continue;
+        }
+        let order = |row: &SessionRow| row.needs_me.as_ref().map(|it| (needs_me_rank(&it.reason), it.since));
+        let same = chosen.iter().position(|known| session.workshop_id.is_some() && known.workshop_id == session.workshop_id);
+        match same {
+            Some(index) => {
+                if order(session).partial_cmp(&order(chosen[index])) == Some(std::cmp::Ordering::Less) {
+                    chosen[index] = session;
+                }
+            }
+            None => chosen.push(session),
+        }
+    }
+    chosen.sort_by(|left, right| {
+        let (left, right) = (left.needs_me.as_ref().unwrap(), right.needs_me.as_ref().unwrap());
+        needs_me_rank(&left.reason)
+            .cmp(&needs_me_rank(&right.reason))
+            .then_with(|| left.since.total_cmp(&right.since))
+    });
+    chosen
+}
+
+/// A short age: 45s, 12m, 3h, 6d.
+fn short_age(milliseconds: f64) -> String {
+    let seconds = (milliseconds.max(0.0) / 1000.0) as u64;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86_400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// Why the row is listed and for how long, in the operator's words.
+fn needs_me_status(reason: &NeedsMe, now_ms: f64) -> String {
+    let age = short_age(now_ms - reason.since);
+    let detail = reason.detail.as_deref().unwrap_or_default();
+    match reason.reason.as_str() {
+        "asked" => format!("asked {age} ago"),
+        "blocked" if !detail.is_empty() => format!("blocked {age} · {detail}"),
+        "blocked" => format!("blocked {age}"),
+        "your-move" => format!("{} {age}", if detail.is_empty() { "your move" } else { detail }),
+        "finished" => format!("finished {age} ago, not seen"),
+        "failed" => format!("failed {age} ago"),
+        "crashed" if detail == "interrupted" => format!("interrupted {age} ago"),
+        "crashed" => format!("crashed {age} ago"),
+        "ready" => format!("clean, idle {age} · ready to close"),
+        "stale" => format!("no activity {age}"),
+        other => format!("{other} {age}"),
+    }
+}
+
 fn session_state(session: &SessionRow) -> ClankerState {
     aggregate(session.details.iter().map(|detail| detail.state))
 }
@@ -592,6 +686,7 @@ fn done_group_row(group: DoneGroup, depth: usize, is_last: bool) -> TreeRow {
             available_actions: Vec::new(),
             parent_workshop_id: None,
             attachment_candidate_workshop_ids: None,
+            needs_me: None,
         },
         detail: None,
         state: ClankerState::Unknown,
@@ -1103,6 +1198,7 @@ impl App {
             reopen_path: None,
             repository_identities: HashMap::new(),
             scratch: false,
+            needs_me: false,
         };
         app.repository_identities = repository_identities(&app.cache_path);
         let snapshot: Snapshot = serde_json::from_slice(
@@ -1162,6 +1258,7 @@ impl App {
             reopen_path: None,
             repository_identities,
             scratch: false,
+            needs_me: false,
         }
     }
 
@@ -1231,6 +1328,27 @@ impl App {
     }
 
     fn rebuild(&mut self, selected_key: Option<&str>) {
+        if self.needs_me {
+            self.rows = needs_me_sessions(&self.sessions, &self.query)
+                .into_iter()
+                .map(|session| TreeRow {
+                    key: target_key(&session.target),
+                    depth: 0,
+                    state: session_state(session),
+                    contains_clanker: session.details.iter().any(|detail| detail.kind == "clanker"),
+                    session: session.clone(),
+                    detail: None,
+                    has_children: false,
+                    is_last: true,
+                    done_group: None,
+                })
+                .collect();
+            self.selected = selected_key
+                .and_then(|key| self.rows.iter().position(|row| row.key == key))
+                .unwrap_or(0)
+                .min(self.rows.len().saturating_sub(1));
+            return;
+        }
         let query = self.query.trim().to_lowercase();
         let mut included = HashSet::new();
         let mut scores = HashMap::new();
@@ -1668,8 +1786,28 @@ impl App {
         }
     }
 
+    /// Alt-I: the flat list of Workshops that need the operator; leaving it (Alt-K) returns to the full map.
+    fn set_needs_me(&mut self, needs_me: bool) {
+        self.mode = Mode::Jump;
+        self.needs_me = needs_me;
+        self.scratch = false;
+        self.query.clear();
+        self.unfiltered_selection = None;
+        self.error.clear();
+        self.clear_action_mode();
+        self.rebuild(None);
+        if needs_me {
+            self.selected = 0;
+        }
+    }
+
     fn enter_repository_mode(&mut self) {
         self.scratch = false;
+        if self.needs_me {
+            // Esc from the repository step lands on the full map, not the flat list.
+            self.needs_me = false;
+            self.rebuild(None);
+        }
         if let Ok(activity_dir) = activity_dir() {
             let last_used = repository_last_used(&activity_dir, &self.repository_identities);
             order_repositories(&mut self.repositories, &last_used);
@@ -1762,6 +1900,18 @@ impl TreeRow {
     fn allows(&self, action: AvailableAction) -> bool {
         self.session.available_actions.contains(&action)
     }
+}
+
+/// Enter on an Alt-I row lands on the clanker that needs attention, when it is still on screen.
+fn needs_me_target(session: &SessionRow) -> Target {
+    session
+        .needs_me
+        .as_ref()
+        .and_then(|reason| reason.clanker_id.as_ref())
+        .and_then(|id| session.details.iter().find(|detail| detail.clanker_id.as_ref() == Some(id)))
+        .map(|detail| detail.target.clone())
+        .filter(|target| matches!(target, Target::Window { .. } | Target::Opencode { .. }))
+        .unwrap_or_else(|| session.target.clone())
 }
 
 fn detail_key(detail: &DetailRow) -> String {
@@ -2451,6 +2601,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_flat_picker(frame, app, &areas);
         return;
     }
+    if app.needs_me {
+        draw_needs_me(frame, app, &areas);
+        return;
+    }
     frame.render_widget(
         Line::from(vec![
             Span::styled(
@@ -2460,7 +2614,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-K branches · Alt-R/A/L/D actions · ←/→ expand · Alt-. done · Enter open · Esc close",
+                "  Alt-K branches · Alt-I needs me · Alt-R/A/L/D actions · ←/→ expand · Alt-. done · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2645,6 +2799,132 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
 }
 
+fn needs_me_glyph(reason: &str) -> (&'static str, Color) {
+    match reason {
+        "asked" | "your-move" => ("?", Color::LightYellow),
+        "blocked" => ("■", Color::Rgb(248, 113, 113)),
+        "finished" => ("✓", Color::Rgb(74, 222, 128)),
+        "failed" | "crashed" => ("✗", Color::Rgb(248, 113, 113)),
+        _ => ("·", Color::Rgb(148, 163, 184)),
+    }
+}
+
+/// `N need you · M open`: open means a live session, and a Workshop counts once (needsMeCounts in src/needs-me.ts).
+fn needs_me_counts(sessions: &[SessionRow]) -> (usize, usize) {
+    let open = sessions
+        .iter()
+        .filter(|session| matches!(session.target, Target::Session { .. }))
+        .map(|session| session.workshop_id.clone().unwrap_or_else(|| session.path.clone()))
+        .collect::<HashSet<_>>();
+    (needs_me_sessions(sessions, "").len(), open.len())
+}
+
+/// One Alt-I row: the Alt-K row's name, project and label tags, why it is listed on the right, and the clanker's
+/// own words on a second line when there are any.
+fn needs_me_item(row: &TreeRow, width: usize, now_ms: f64, current: bool) -> ListItem<'static> {
+    let session = &row.session;
+    let reason = session.needs_me.as_ref();
+    let (glyph, color) = needs_me_glyph(reason.map_or("", |reason| reason.reason.as_str()));
+    let shown = session.title.as_deref().unwrap_or_else(|| name_without_project(session)).to_string();
+    let done = is_done(session);
+    let mut tags = Vec::new();
+    if let Some(project) = session.project.as_deref().filter(|project| *project != shown) {
+        tags.push(Span::styled(format!(" {project}"), Style::default().fg(if done { DONE_GRAY } else { project_color(project) })));
+    }
+    tags.extend(session.labels.iter().map(|label| {
+        let color = label_color(label);
+        Span::styled(format!(" {label}"), Style::default().fg(if done { dimmed(color, 70) } else { color }))
+    }));
+    let status = reason.map(|reason| needs_me_status(reason, now_ms)).unwrap_or_default();
+    let tags_width = tags.iter().map(Span::width).sum::<usize>();
+    let fixed = 3 + tags_width + status.width() + 2;
+    let name = ellipsize(&shown, width.saturating_sub(fixed).max(4));
+    let spacing = width.saturating_sub(3 + name.width() + tags_width + status.width()).max(2);
+    let mut first = vec![
+        Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+        Span::styled(name, row_name_style(row, current, (now_ms / 1000.0) as u64)),
+    ];
+    first.extend(tags);
+    first.extend([Span::raw(" ".repeat(spacing)), Span::styled(status, Style::default().fg(Color::Gray))]);
+    let mut lines = vec![Line::from(first)];
+    if let Some(excerpt) = reason.and_then(|reason| reason.excerpt.as_deref()).filter(|excerpt| !excerpt.is_empty()) {
+        lines.push(Line::from(Span::styled(
+            format!("      “{}”", ellipsize(excerpt, width.saturating_sub(9))),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    ListItem::new(lines)
+}
+
+fn needs_me_height(row: &TreeRow) -> usize {
+    1 + usize::from(row.session.needs_me.as_ref().and_then(|reason| reason.excerpt.as_deref()).is_some_and(|excerpt| !excerpt.is_empty()))
+}
+
+fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled("Clankerhouse · Needs me", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+            Span::styled("  Enter jump · Alt-D done · Alt-K everything · Esc close", Style::default().fg(Color::DarkGray)),
+        ]),
+        areas[0],
+    );
+    let list_area = areas[1];
+    let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0.0, |elapsed| elapsed.as_millis() as f64);
+    let width = list_area.width.saturating_sub(4) as usize;
+    let block = Block::default().borders(Borders::ALL);
+    if app.rows.is_empty() {
+        let message = if app.query.is_empty() { "Caught up: nothing needs you." } else { "No matches" };
+        frame.render_widget(Paragraph::new(format!(" {message}")).style(Style::default().fg(Color::Gray)).block(block), list_area);
+    } else {
+        // Rows grow upward from the prompt, as in Alt-K; keep the selected one in view whatever the rows' heights.
+        let available = list_area.height.saturating_sub(2) as usize;
+        let selected = app.selected.min(app.rows.len() - 1);
+        let mut start = 0;
+        while start < selected && app.rows[start..=selected].iter().map(needs_me_height).sum::<usize>() > available {
+            start += 1;
+        }
+        let mut end = selected + 1;
+        let mut used = app.rows[start..end].iter().map(needs_me_height).sum::<usize>();
+        while end < app.rows.len() && used + needs_me_height(&app.rows[end]) <= available {
+            used += needs_me_height(&app.rows[end]);
+            end += 1;
+        }
+        let items = app.rows[start..end]
+            .iter()
+            .rev()
+            .map(|row| needs_me_item(row, width, now_ms, target_is_session(&row.session.target, &app.current_session)))
+            .collect::<Vec<_>>();
+        let mut state = ListState::default().with_selected(Some(end - selected - 1));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(Style::default().bg(Color::Rgb(30, 58, 95)).fg(Color::White))
+                .highlight_symbol("›"),
+            list_area,
+            &mut state,
+        );
+    }
+    let (footer, footer_color) = if !app.error.is_empty() {
+        (app.error.clone(), Color::LightYellow)
+    } else if let Some(pending) = &app.mutation {
+        let (glyph, color) = state_glyph(ClankerState::Working, app.animation_frame);
+        (format!("{glyph} {} · navigation available", pending.progress), color)
+    } else {
+        (app.selected().map(|row| row.session.path.clone()).unwrap_or_default(), Color::DarkGray)
+    };
+    frame.render_widget(Paragraph::new(footer).style(Style::default().fg(footer_color)), areas[2]);
+    let (needing, open) = needs_me_counts(&app.sessions);
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::LightCyan)),
+            Span::raw(&app.query),
+            Span::raw("_"),
+            Span::raw(format!("  {needing} need you · {open} open")),
+        ]),
+        areas[3],
+    );
+}
+
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     app.error.clear();
     if app.mutation.is_some()
@@ -2760,6 +3040,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         return None;
     }
 
+    // Alt-I from any mode: the Workshops that need the operator. Alt-K there returns to the full map.
+    if key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.set_needs_me(true);
+        return None;
+    }
+    if app.needs_me && app.mode == Mode::Jump && key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.set_needs_me(false);
+        return None;
+    }
     // Alt-B as outside the picker: the branch flow's repository step. Alt-K does the same.
     if matches!(key.code, KeyCode::Char('k') | KeyCode::Char('b')) && key.modifiers.contains(KeyModifiers::ALT) {
         app.enter_repository_mode();
@@ -2877,6 +3166,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     }
 
     if key.modifiers.contains(KeyModifiers::ALT) {
+        // The flat list has no done fold to toggle.
+        if key.code == KeyCode::Char('.') && app.needs_me {
+            return None;
+        }
         if key.code == KeyCode::Char('.') {
             app.show_done = !app.show_done;
             let key = app.selected().map(|row| row.key.clone());
@@ -2961,6 +3254,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
                 return None;
             }
             _ => return None,
+        }
+    }
+
+    if app.needs_me {
+        match key.code {
+            // No lineage or details to unfold in the flat list.
+            KeyCode::Left | KeyCode::Right => return None,
+            KeyCode::Enter => {
+                let row = app.selected()?;
+                return row
+                    .allows(AvailableAction::Open)
+                    .then(|| AppCommand::Submit(MutationIntent::Open { target: needs_me_target(&row.session) }));
+            }
+            _ => {}
         }
     }
 
@@ -3499,6 +3806,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.enter_repository_mode();
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("scratch") {
         app.enter_scratch_mode();
+    } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("needs-me") {
+        app.set_needs_me(true);
     }
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let subscription_path = socket_path.clone();
@@ -4217,6 +4526,84 @@ mod tests {
 
     fn alt(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+    }
+
+    const NEEDS_ME_SESSIONS: &str = r#"[
+        {"name":"working","path":"/working","workshopId":"w0","target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@0","pane":"%0"}}]},
+        {"name":"stale","path":"/stale","workshopId":"w1","target":{"type":"session","session":"stale"},"needsMe":{"reason":"stale","since":1000}},
+        {"name":"finished","path":"/finished","workshopId":"w2","target":{"type":"session","session":"finished"},"needsMe":{"reason":"finished","since":5000,"excerpt":"Done: tests pass."}},
+        {"name":"asked late","path":"/late","workshopId":"w3","target":{"type":"session","session":"late"},"needsMe":{"reason":"asked","since":9000,"excerpt":"Roll back?"}},
+        {"name":"blocked early","path":"/early","workshopId":"w4","target":{"type":"session","session":"early"},"availableActions":["open","delete"],"needsMe":{"reason":"blocked","since":2000,"detail":"permission prompt","clankerId":"c4"},
+         "details":[{"kind":"clanker","state":"blocked","clankerId":"c4","target":{"type":"window","session":"early","windowId":"@4","pane":"%4"}}]},
+        {"name":"crashed","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed"},"needsMe":{"reason":"crashed","since":100,"detail":"interrupted"}},
+        {"name":"crashed twin","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed-2"},"needsMe":{"reason":"ready","since":50}},
+        {"name":"sessionless","path":"/gone","workshopId":"w6","target":{"type":"directory","path":"/gone"},"needsMe":{"reason":"stale","since":1}},
+        {"name":"newer reason","path":"/new","workshopId":"w7","target":{"type":"session","session":"new"},"needsMe":{"reason":"thinking-hard","since":1}},
+        {"name":"labelled","path":"/labelled","workshopId":"w8","target":{"type":"session","session":"labelled"},"needsMe":{"reason":"your-move","since":1,"detail":"needs-input"}}
+    ]"#;
+
+    #[test]
+    fn needs_me_lists_waiting_clankers_first_then_unseen_then_failures_then_the_rest_oldest_first() {
+        let sessions: Vec<SessionRow> = serde_json::from_str(NEEDS_ME_SESSIONS).unwrap();
+        let names = |query: &str| needs_me_sessions(&sessions, query).iter().map(|session| session.name.clone()).collect::<Vec<_>>();
+        // One row per Workshop (its most pressing reason); working and sessionless rows are not listed; a label
+        // comes after what clankers wait on now, and a reason this picker does not know sorts last.
+        assert_eq!(names(""), ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"]);
+        // Typing filters without reordering.
+        assert_eq!(names("e"), ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"].into_iter().filter(|name| name.contains('e')).collect::<Vec<_>>());
+        assert_eq!(names("late"), ["asked late"]);
+        assert_eq!(needs_me_counts(&sessions), (7, 8));
+    }
+
+    #[test]
+    fn needs_me_says_why_and_for_how_long() {
+        let reason = |json: &str| serde_json::from_str::<NeedsMe>(json).unwrap();
+        let now = 10.0 * 86_400_000.0;
+        let at = |ago: f64| format!("{}", now - ago);
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"asked","since":{}}}"#, at(720_000.0))), now), "asked 12m ago");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"blocked","since":{},"detail":"permission prompt"}}"#, at(3_600_000.0))), now), "blocked 1h · permission prompt");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"finished","since":{}}}"#, at(3.0 * 3_600_000.0))), now), "finished 3h ago, not seen");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"crashed","since":{},"detail":"interrupted"}}"#, at(2.0 * 86_400_000.0))), now), "interrupted 2d ago");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"your-move","since":{},"detail":"needs-input"}}"#, at(5.0 * 3_600_000.0))), now), "needs-input 5h");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"ready","since":{},"detail":"clean"}}"#, at(6.0 * 86_400_000.0))), now), "clean, idle 6d · ready to close");
+        assert_eq!(needs_me_status(&reason(&format!(r#"{{"reason":"stale","since":{}}}"#, at(9.0 * 86_400_000.0))), now), "no activity 9d");
+    }
+
+    #[test]
+    fn alt_i_shows_what_needs_me_and_alt_k_returns_to_everything() {
+        let mut app = app_with_sessions(NEEDS_ME_SESSIONS);
+        let everything = app.rows.len();
+        assert_eq!(handle_key(&mut app, alt('i')), None);
+        assert!(app.needs_me);
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(),
+            ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"]);
+        assert!(app.rows.iter().all(|row| row.depth == 0 && row.detail.is_none()));
+
+        // Enter lands on the clanker that needs attention.
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppCommand::Submit(MutationIntent::Open {
+                target: Target::Window { session: "early".into(), window_id: "@4".into(), pane: "%4".into(), management: None, resource_id: None, location: None },
+            }))
+        );
+        // Alt-D on a row marks it Done, as on an Alt-K row.
+        assert_eq!(handle_key(&mut app, alt('d')), Some(AppCommand::Submit(MutationIntent::Done { path: "/early".into() })));
+        app.clear_action_mode();
+
+        // A snapshot refresh keeps the view, and an empty list says caught up rather than vanishing.
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str("[]").unwrap() }, false).unwrap();
+        assert!(app.needs_me && app.rows.is_empty());
+
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str(NEEDS_ME_SESSIONS).unwrap() }, false).unwrap();
+        assert_eq!(handle_key(&mut app, alt('k')), None);
+        assert_eq!((app.mode, app.needs_me, app.rows.len()), (Mode::Jump, false, everything));
+
+        // Alt-I from the repository step too; Alt-B from the view leaves it.
+        app.enter_repository_mode();
+        assert_eq!(handle_key(&mut app, alt('i')), None);
+        assert_eq!((app.mode, app.needs_me), (Mode::Jump, true));
+        assert_eq!(handle_key(&mut app, alt('b')), None);
+        assert_eq!((app.mode, app.needs_me), (Mode::Repository, false));
     }
 
     #[test]

@@ -10,6 +10,10 @@ export interface LifecycleObservation {
   updatedAt: number
   hookEvent?: string
   harnessSessionId?: string
+  /** When the current turn started, as the hook recorded it. */
+  turnStartedAt?: number
+  /** Claude's session transcript, as the hook last reported it. */
+  transcriptPath?: string
 }
 
 export interface OwnedClankerIdentity {
@@ -60,6 +64,8 @@ export const parseClankerObservation = (value: unknown): LifecycleObservation | 
     updatedAt: Number(raw.updatedAt ?? 0) || 0,
     ...(hookEvent ? { hookEvent } : {}),
     ...(text(raw.harnessSessionId) ? { harnessSessionId: text(raw.harnessSessionId) } : {}),
+    ...(Number(raw.generationStartedAt) > 0 ? { turnStartedAt: Number(raw.generationStartedAt) } : {}),
+    ...(text(raw.transcriptPath) ? { transcriptPath: text(raw.transcriptPath) } : {}),
   }
 }
 

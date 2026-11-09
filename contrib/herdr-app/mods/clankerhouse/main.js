@@ -12,10 +12,10 @@ import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { closeOverlay, exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
 
-const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"] };
+const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"], needs_me: ["--needs-me"] };
 // The layout's Alt keys win over the popup's terminal, so pressed again while a popup is open they are passed into it:
 // the picker has its own Alt-D (done or delete the selected row) and Alt-K.
-const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "alt+n" };
+const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "alt+n", needs_me: "alt+i" };
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
 const REQUEST_POLL_MS = 500;
@@ -52,6 +52,7 @@ export default class Clankerhouse extends View {
     this.reporting = false;
     this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
     this.rows = new Map(); // cwd on the machine -> { row, at }: the picker's row for the session holding it.
+    this.counts = null; // { needsMe, open }, which come with every row fetched.
     this.requests = new Set(); // popup=1 terminals already opened here.
     // terminals() changing does not re-render this block, so requests are polled.
     cx.timer.every(REQUEST_POLL_MS, (cx) => this.openRequests(cx));
@@ -242,7 +243,11 @@ export default class Clankerhouse extends View {
         let row = cached?.row ?? null;
         try {
           const got = await exec(launcher, ["--session-row", pane.cwd], { on: machine });
-          if (got.code === 0) row = JSON.parse(got.stdout);
+          if (got.code === 0) {
+            const parsed = JSON.parse(got.stdout);
+            if (typeof parsed?.needsMe === "number") this.counts = { needsMe: parsed.needsMe, open: parsed.open };
+            row = parsed?.name ? parsed : null;
+          }
         } catch {
           // The machine is away; the next refresh tries again.
         }
@@ -300,6 +305,10 @@ export default class Clankerhouse extends View {
         .when(Boolean(name), (el) => el.child(div().min_w(0).truncate().text_color(done ? DONE_GRAY : t.foreground).child(name)))
         .when(Boolean(row?.project && row.project !== name), (el) => el.child(tag(row.project, projectColor(row.project))))
         .children((row?.labels ?? []).map((text) => tag(text, labelColor(text)))))
-      .when(Boolean(branch), (el) => el.child(label("git-branch", branch)));
+      .when(Boolean(branch), (el) => el.child(label("git-branch", branch)))
+      // The Alt-I view's count: Workshops waiting on the operator, of all open ones.
+      .when(Boolean(this.counts), (el) => el.child(div().flex_none()
+        .text_color(this.counts.needsMe > 0 ? t.foreground : t.muted)
+        .child(`${this.counts.needsMe} need you · ${this.counts.open} open`)));
   }
 }

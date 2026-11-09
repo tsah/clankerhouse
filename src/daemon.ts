@@ -7,7 +7,7 @@ import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
 import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
-import { withOrchestrationStore } from "./orchestration"
+import { withOrchestrationStore, type ClankerReportRecord } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { applicationRoot, binPath, libexecPath } from "./installation"
 import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
@@ -36,6 +36,8 @@ import type { MutationExecution, MutationExecutor } from "./transport/operations
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
 import { projectResources } from "./server/project"
+import { READY_AFTER_MS, needsMe, yourMoveLabels } from "./needs-me"
+import { lastClaudeTranscriptText } from "./clanker-list"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
 import { acquireProducerLease, startSnapshotServer } from "./transport"
@@ -68,6 +70,11 @@ let latestHerd: HerdResult<PaneMetadata> | undefined
 const lifecycleSequences = new Map<string, number>()
 let projectionRefreshScheduled = false
 let statusHooks: StatusHookRuntime | undefined
+/** Each clanker's current turn start and transcript, from its hook's report file. */
+const turnFacts = new Map<string, { turnStartedAt?: number; transcriptPath?: string }>()
+/** Interrupted Clankers per Workshop, as of the last ledger sync. */
+let interruptedByWorkshop = new Map<string, Array<{ clankerId: string; at: number }>>()
+const lastTextCache = new Map<string, { key: string; text: string | null }>()
 let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; managedResources: ReturnType<typeof readManagedResources> } | undefined
 const invalidateProjectionEnrichment = () => { projectionEnrichmentCache = undefined }
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
@@ -194,7 +201,14 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
   try {
     const ledger = openClankerLedger()
     let skipped: { clankerId: string; error: string }[]
-    try { skipped = ledger.sync(observed, serverEpoch, missing) } finally { ledger.close() }
+    try {
+      skipped = ledger.sync(observed, serverEpoch, missing)
+      // Open but last seen in an earlier server: running when the host or the Multiplexer went down.
+      interruptedByWorkshop = Map.groupBy(
+        ledger.list({ state: "open" }).filter((row) => !alive.has(row.clankerId) && row.serverEpoch !== serverEpoch).map((row) => ({ clankerId: row.clankerId, at: row.updatedAt, workshopId: row.workshopId })),
+        (row) => row.workshopId,
+      ) as Map<string, Array<{ clankerId: string; at: number }>>
+    } finally { ledger.close() }
     ledgerSyncFailure = ""
     const skippedReport = skipped.map(({ clankerId, error }) => `${clankerId}: ${error}`).join("; ")
     if (skippedReport && skippedReport !== ledgerSkipped) console.error(`Clanker ledger skipped ${skipped.length} clanker(s): ${skippedReport}`)
@@ -364,6 +378,7 @@ const collectClankerReports = Effect.sync(() => {
       try {
         const report = parseClankerObservation(JSON.parse(readFileSync(`${directory}/${entry}`, "utf8")))
         if (report) reports.push(report)
+        if (report?.clankerId && (report.turnStartedAt || report.transcriptPath)) turnFacts.set(report.clankerId, { turnStartedAt: report.turnStartedAt, transcriptPath: report.transcriptPath })
       } catch {}
     }
   }
@@ -417,10 +432,54 @@ const collectSessions = Effect.all([
       })
       for (const effect of projection.effects) applyProjectEffect(effect)
       if (multiplexer.serverEpoch) syncClankerLedger(multiplexer.serverEpoch, projection.sessions, multiplexer.windows)
+      annotateNeedsMe(projection.sessions)
       return projection.sessions
     }))
   }),
 )
+
+/** The newest words of a finished Claude clanker, read again only when its transcript changes. */
+const clankerLastText = (clankerId: string) => {
+  const path = turnFacts.get(clankerId)?.transcriptPath
+  if (!path) return null
+  let key: string
+  try { key = `${path}:${statSync(path).mtimeMs}` } catch { return null }
+  const cached = lastTextCache.get(clankerId)
+  if (cached?.key === key) return cached.text
+  const text = lastClaudeTranscriptText(path)
+  lastTextCache.set(clankerId, { key, text })
+  return text
+}
+
+/** Decides, once per projection, which Workshops need the operator (src/needs-me.ts); a failed read only hides reasons. */
+const annotateNeedsMe = (rows: SessionRow[]) => {
+  let reports = new Map<string, ClankerReportRecord>()
+  try { reports = new Map(withOrchestrationStore((store) => store.latestReports()).map((report) => [report.clankerId, report])) } catch {}
+  const labelled = new Map<string, { value: string; at: number }>()
+  try {
+    for (const { key, value } of yourMoveLabels()) {
+      for (const workshop of workshopsWithLabel(key, value)) {
+        const known = labelled.get(workshop.workshopId)
+        if (!known || workshop.labelledAt < known.at) labelled.set(workshop.workshopId, { value, at: workshop.labelledAt })
+      }
+    }
+  } catch {}
+  const facts = {
+    now: Date.now(),
+    latestReport: (clankerId: string) => reports.get(clankerId),
+    turnStartedAt: (clankerId: string) => turnFacts.get(clankerId)?.turnStartedAt,
+    lastText: clankerLastText,
+    interrupted: (workshopId: string) => interruptedByWorkshop.get(workshopId) ?? [],
+    yourMoveLabel: (workshopId: string) => labelled.get(workshopId),
+    // The Reaper's retention; with reaping off, its default.
+    staleAfterMs: doneTtlMs() ?? doneTtlMs({})!,
+    readyAfterMs: READY_AFTER_MS,
+  }
+  for (const row of rows) {
+    const reason = needsMe(row, facts)
+    if (reason) row.needsMe = reason
+  }
+}
 
 const readCachePayload = () => {
   try {

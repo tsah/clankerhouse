@@ -97,6 +97,11 @@ flock -u 9
 exec 9>&-
 
 [[ ${1:-} == "--ensure-server" ]] && exit 0
+# Alt-I opens at the Workshops that need the operator.
+if [[ ${1:-} == "--needs-me" ]]; then
+    export CLANKERHOUSE_MODE=needs-me
+    shift
+fi
 # Alt-N opens at repository selection for a scratch Workshop.
 if [[ ${1:-} == "--scratch" ]]; then
     export CLANKERHOUSE_MODE=scratch

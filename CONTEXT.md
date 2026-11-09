@@ -64,7 +64,7 @@ An internal record intentionally maintained by Clankerhouse: stable correlation 
 
 ## Label
 
-A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering or identity. Clankerhouse itself understands exactly one Label, Done.
+A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering or identity. Clankerhouse itself understands exactly one Label, Done; the only other Labels it acts on are the operator's "your move" set, which lists a Workshop under Needs Me.
 
 ## Title
 
@@ -73,6 +73,10 @@ The Label `title`: a Workshop's human name, set by the operator when creating it
 ## Done
 
 The built-in Label `status=done`: the operator's statement that active work in a Workshop is finished. It changes nothing external; clankers, sessions, and the worktree stay as they are. The delete key sets it on a worktree Workshop, and pressing the key again on a Done Workshop offers destruction or reopening.
+
+## Needs Me
+
+Why an open Workshop waits on the operator, decided by the daemon once per snapshot and shown by Alt-I and the Herdr app's count: a clanker asked or is blocked (a Report this turn, or blocked on a prompt), finished a turn the operator has not seen, failed, crashed or was interrupted; the Workshop carries a "your move" Label (`stage=needs-input` or `stage=waiting-for-approval` unless the operator configures others); or it is ready to close (nothing running, clean, idle a day) or stale (no activity for the Reaper's retention period). A Workshop has at most one reason, its most pressing. A clanker working with nothing asked is not a reason, and Done drops the label and unseen-finished reasons. Needs Me is presentation: it changes nothing and is never stored.
 
 ## Reaper
 

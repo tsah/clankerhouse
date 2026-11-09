@@ -7,9 +7,11 @@
 #   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
 #   clankerhouse-hc --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
-#   clankerhouse-hc --popup [--focus T] [--repo|--delete|--scratch]  the picker in a Herdr app popup over terminal T: exits on a choice, leaving it for the mod
+#   clankerhouse-hc --needs-me      open at the Workshops that need the operator (Herdr's Alt-I)
+#   clankerhouse-hc --popup [--focus T] [--repo|--delete|--scratch|--needs-me]  the picker in a Herdr app popup over terminal T: exits on a choice, leaving it for the mod
 #   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
-#   clankerhouse-hc --session-row DIR  print the picker's row (title, project, branch, labels) for the session holding DIR
+#   clankerhouse-hc --session-row DIR  print the picker's row (title, project, branch, labels) for the session holding DIR,
+#                                      with the counts for "N need you · M open" (needsMe, open)
 #   clankerhouse-hc --ensure-server start the core and daemon, then exit
 #   clankerhouse-hc --stop-server   stop the daemon; the core and its terminals keep running
 #   clankerhouse-hc --health        print core and daemon health; exit 1 when either is down
@@ -113,7 +115,16 @@ let sessions = []
 try { sessions = JSON.parse(await Bun.file(state).text()).sessions ?? [] } catch {}
 const holds = (path) => path && (folder === path || folder.startsWith(path.endsWith("/") ? path : `${path}/`))
 const row = sessions.filter((session) => holds(session.path)).sort((a, b) => b.path.length - a.path.length)[0]
-console.log(JSON.stringify(row ? { name: row.name, title: row.title ?? null, project: row.project ?? null, branch: row.branch ?? null, labels: row.labels ?? [] } : null))' "$STATE_DIR/state.json" "$2"
+// The daemon decided which rows need the operator (src/needs-me.ts); this only counts, as needsMeCounts does.
+const open = new Set(), needing = new Set()
+for (const session of sessions) {
+  if (session.target?.type !== "session") continue
+  const key = session.workshopId ?? session.path
+  open.add(key)
+  if (session.needsMe) needing.add(key)
+}
+const counts = { needsMe: needing.size, open: open.size }
+console.log(JSON.stringify(row ? { name: row.name, title: row.title ?? null, project: row.project ?? null, branch: row.branch ?? null, labels: row.labels ?? [], ...counts } : counts))' "$STATE_DIR/state.json" "$2"
         ;;
     --stop-server) stop_daemon; exit 0 ;;
     --health)
@@ -182,6 +193,10 @@ if [[ ${1:-} == "--repo" ]]; then
 fi
 if [[ ${1:-} == "--scratch" ]]; then
     export CLANKERHOUSE_MODE=scratch
+    shift
+fi
+if [[ ${1:-} == "--needs-me" ]]; then
+    export CLANKERHOUSE_MODE=needs-me
     shift
 fi
 if [[ ${1:-} == "--delete" ]]; then

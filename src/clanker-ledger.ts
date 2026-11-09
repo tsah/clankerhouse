@@ -87,6 +87,13 @@ export const validateLaunchSpec = (value: unknown): LaunchSpec => {
 export const launchResourceClass = (spec: LaunchSpec): ResourceClass => spec.version === 1 ? "untrusted" : spec.resourceClass
 export const launchModel = (spec: LaunchSpec) => spec.version === 3 ? spec.model : undefined
 
+/**
+ * A Multiplexer name as a ledger label: one trimmed line of at most 256 characters, or `fallback`
+ * when nothing is left (hc terminals and Herdr windows may have no name at all).
+ */
+const displayLabel = (value: string | undefined, fallback: string) =>
+  (value ?? "").replace(/[\0-\x1f\x7f]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, 256).trimEnd() || fallback
+
 const validateInput = (value: LedgerInput): LedgerInput => {
   if (!plainObject(value)) throw new Error("Invalid clanker")
   assertText(value.clankerId, "clanker id", { max: 256 })
@@ -296,25 +303,32 @@ export class ClankerLedger {
   sync(observed: readonly ObservedClanker[], serverEpoch: string, missing: (clankerId: string) => boolean) {
     const now = this.clock()
     const alive = new Set(observed.map((clanker) => clanker.clankerId))
+    const skipped: { clankerId: string; error: string }[] = []
     this.db.transaction(() => {
       for (const clanker of observed) {
         const row = this.get(clanker.clankerId)
-        if (!row) {
-          if (!isLedgerHarness(clanker.harness) || !clanker.harnessSessionId) continue
-          this.record({
-            clankerId: clanker.clankerId,
-            harness: clanker.harness,
-            workshopId: clanker.workshopId,
-            workshopPath: clanker.workshopPath,
-            sessionLabel: clanker.sessionLabel,
-            windowLabel: clanker.windowLabel,
-            cwd: clanker.cwd,
-            harnessSessionId: clanker.harnessSessionId,
-            launchSpec: { version: 1, profile: null },
-            originalTask: "Adopted a live session; continue the most recent unfinished user request.",
-          })
-        } else if (clanker.harnessSessionId && clanker.harnessSessionId !== row.harnessSessionId) {
-          this.bindSession(clanker.clankerId, clanker.harnessSessionId)
+        // Each clanker is validated before it is written, so a bad one is skipped without touching the rest.
+        try {
+          if (!row) {
+            if (!isLedgerHarness(clanker.harness) || !clanker.harnessSessionId) continue
+            this.record({
+              clankerId: clanker.clankerId,
+              harness: clanker.harness,
+              workshopId: clanker.workshopId,
+              workshopPath: clanker.workshopPath,
+              sessionLabel: displayLabel(clanker.sessionLabel, clanker.harness),
+              windowLabel: displayLabel(clanker.windowLabel, clanker.harness),
+              cwd: clanker.cwd,
+              harnessSessionId: clanker.harnessSessionId,
+              launchSpec: { version: 1, profile: null },
+              originalTask: "Adopted a live session; continue the most recent unfinished user request.",
+            })
+          } else if (clanker.harnessSessionId && clanker.harnessSessionId !== row.harnessSessionId) {
+            this.bindSession(clanker.clankerId, clanker.harnessSessionId)
+          }
+        } catch (error) {
+          skipped.push({ clankerId: clanker.clankerId, error: error instanceof Error ? error.message : String(error) })
+          continue
         }
         this.db.query("UPDATE clankers SET state = 'open', closed_reason = NULL, server_epoch = ?2, updated_at = ?3 WHERE clanker_id = ?1 AND (state != 'open' OR server_epoch IS NOT ?2)")
           .run(clanker.clankerId, serverEpoch, now)
@@ -324,6 +338,7 @@ export class ClankerLedger {
         this.end(row.clankerId, "ended")
       }
     }).immediate()
+    return skipped
   }
 }
 

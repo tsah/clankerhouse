@@ -161,6 +161,7 @@ const collectMultiplexerResources = Effect.tryPromise({
 const LEDGER_MISSING_MS = 60_000
 const ledgerMissingSince = new Map<string, number>()
 let ledgerSyncFailure = ""
+let ledgerSkipped = ""
 
 /** Record which clankers are alive, and their current sessions, in the clanker ledger. */
 const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[], windows: readonly MuxWindow[]) => {
@@ -192,8 +193,12 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
   }
   try {
     const ledger = openClankerLedger()
-    try { ledger.sync(observed, serverEpoch, missing) } finally { ledger.close() }
+    let skipped: { clankerId: string; error: string }[]
+    try { skipped = ledger.sync(observed, serverEpoch, missing) } finally { ledger.close() }
     ledgerSyncFailure = ""
+    const skippedReport = skipped.map(({ clankerId, error }) => `${clankerId}: ${error}`).join("; ")
+    if (skippedReport && skippedReport !== ledgerSkipped) console.error(`Clanker ledger skipped ${skipped.length} clanker(s): ${skippedReport}`)
+    ledgerSkipped = skippedReport
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (message !== ledgerSyncFailure) console.error(`Clanker ledger update failed: ${message}`)

@@ -108,6 +108,27 @@ describe("clanker ledger", () => {
     ledger.close()
   })
 
+  test("adopts a harness whose window has no usable name, and one bad clanker never blocks the rest", () => {
+    const { dbPath } = fixture()
+    const ledger = openClankerLedger({ dbPath })
+    ledger.record(clanker({ clankerId: "known" }))
+    const skipped = ledger.sync([
+      observed({ clankerId: "unnamed", windowLabel: "" }),
+      observed({ clankerId: "messy", sessionLabel: "  repo\n", windowLabel: " a\tb\r\n" + "x".repeat(300) }),
+      observed({ clankerId: "bad", harnessSessionId: "s\0" }),
+      observed({ clankerId: "known", harnessSessionId: "session-2" }),
+    ], "epoch-1", () => false)
+    expect(skipped).toEqual([{ clankerId: "bad", error: "Invalid harness session id" }])
+    expect(ledger.get("unnamed")).toMatchObject({ state: "open", windowLabel: "claude", serverEpoch: "epoch-1" })
+    const messy = ledger.get("messy")!
+    expect(messy.sessionLabel).toBe("repo")
+    expect(messy.windowLabel).toStartWith("a b xxx")
+    expect(messy.windowLabel.length).toBe(256)
+    expect(ledger.get("bad")).toBeUndefined()
+    expect(ledger.get("known")).toMatchObject({ harnessSessionId: "session-2", serverEpoch: "epoch-1" })
+    ledger.close()
+  })
+
   test("imports Recovery's records once", () => {
     const { dir, dbPath, legacyPath } = fixture()
     mkdirSync(dir, { recursive: true })

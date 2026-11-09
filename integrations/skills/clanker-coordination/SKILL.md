@@ -132,6 +132,8 @@ printf '%s' '{"error":"tests red"}' | clankers report --state failed
 States are `question`, `blocked`, `done`, `failed`, and `working`. The payload is
 one JSON object of at most 64 KiB. A Report is your declaration; it never
 changes your lifecycle state, and `clankers status` shows it as `lastReport`.
+When your PR merges, report `done`, then mark this Workshop Done yourself (see
+below) as your last action.
 
 ## Routines: waking yourself on a schedule
 
@@ -201,8 +203,9 @@ finished:
 clankers workshop label set status=done
 ```
 
-An orchestrator labels a child Workshop with `--workshop ID|BRANCH|PATH`, which
-works even after the child's worktree was deleted:
+A child Workshop marks itself Done after its PR merges. An orchestrator labels
+only a child that did not, with `--workshop ID|BRANCH|PATH`, which works even
+after the child's worktree was deleted:
 `clankers workshop label set status=done --workshop "$workshop_id"`.
 
 The Label itself changes nothing external, but a project's `labels-changed` hook

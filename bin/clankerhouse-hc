@@ -177,8 +177,10 @@ if [[ ${1:-} == "--popup" ]]; then
     popup=true
     shift
     # The terminal the app had focused when the key was pressed; a focus report can lag a switch by seconds.
+    popup_focus=none
     if [[ ${1:-} == "--focus" ]]; then
         report_focus --focus "${2:-}"
+        popup_focus=$2
         shift 2
     fi
     # `hc run` copies the caller's TERM, here whatever the Herdr app was started with.
@@ -186,6 +188,12 @@ if [[ ${1:-} == "--popup" ]]; then
     # The popup's own terminal is no session: the picker's current one is what it opened over.
     CLANKERHOUSE_CURRENT_SESSION=$("$CLANKERS" mux current-location | sed -n 's/.*"nativeSessionId":"\([^"]*\)".*/\1/p')
     export CLANKERHOUSE_CURRENT_SESSION
+    # What each popup was handed, for when it opens on the wrong row; the last 200 popups.
+    popup_log() {
+        printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$STATE_DIR/popup.log"
+        tail -n 200 "$STATE_DIR/popup.log" >"$STATE_DIR/popup.log.tmp" && mv "$STATE_DIR/popup.log.tmp" "$STATE_DIR/popup.log"
+    }
+    popup_log "open terminal=${HC_TERMINAL_ID:-} focus=$popup_focus reported=$(cat "$STATE_DIR/hc-focus" 2>/dev/null) current=${CLANKERHOUSE_CURRENT_SESSION:-none} args=$*"
 fi
 if [[ ${1:-} == "--repo" ]]; then
     export CLANKERHOUSE_MODE=spawn
@@ -211,6 +219,7 @@ if [[ "$popup" == true ]]; then
     rm -f "$ATTACH_FILE"
     status=0
     "$NATIVE_BINARY" "$@" || status=$?
+    popup_log "close terminal=${HC_TERMINAL_ID:-} status=$status target=$(cat "$ATTACH_FILE" 2>/dev/null)"
     if [[ -s "$ATTACH_FILE" ]]; then
         "${HC_BIN:-hc}" label "$HC_TERMINAL_ID" "ch_popup_target=$(<"$ATTACH_FILE")" >/dev/null
         rm -f "$ATTACH_FILE"

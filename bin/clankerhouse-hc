@@ -106,7 +106,17 @@ report_focus() {
 }
 
 case "${1:-}" in
-    --report-focus) report_focus --report-focus "${2:-}"; exit 0 ;;
+    --report-focus)
+        [[ ${2:-} =~ ^t[0-9a-z]+$ ]] || { echo "--report-focus takes a terminal address on this machine" >&2; exit 2; }
+        # A popup stands over the session it opened from. Older mods report it once its overlay takes focus, which
+        # would overwrite that session before the picker reads it. Ask a running core only; never start one here.
+        if [[ -S ${HC_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-core/$HC_SESSION.sock} ]] \
+            && "${HC_BIN:-hc}" get --json "$2" 2>/dev/null | grep -q '"ch_popup":'; then
+            exit 0
+        fi
+        report_focus --report-focus "$2"
+        exit 0
+        ;;
     --session-row)
         [[ -n ${2:-} ]] || { echo "--session-row takes a folder" >&2; exit 2; }
         # The daemon's snapshot is what the picker draws; the row whose folder holds DIR, deepest first.

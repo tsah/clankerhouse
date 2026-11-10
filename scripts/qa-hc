@@ -67,6 +67,10 @@ scenario() {
     check "a focus report refuses anything but an address" test "$("$launcher" --report-focus ../x >/dev/null 2>&1; echo $?)" = 2
     "$launcher" --popup --focus t43 --check >/dev/null
     check "a popup records the terminal it opened over" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-focus")" = t43
+    popup_terminal=$("$clankers" mux spawn --new-session qa-popup --cwd "$root" -- sleep 300)
+    qa_hc label "$(pane_of "$popup_terminal")" ch_popup=1 >/dev/null
+    "$launcher" --report-focus "$(pane_of "$popup_terminal")"
+    check "a focus report naming a popup keeps the session it opened over" test "$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/hc-focus")" = t43
     check "a popup refuses a focus that is not an address" test "$("$launcher" --popup --focus ../x >/dev/null 2>&1; echo $?)" = 2
     daemon_pid=$(<"$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE/server.pid")
     check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|CLAUDE_CODE_CHILD_SESSION)='"

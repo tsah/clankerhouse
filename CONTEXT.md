@@ -50,6 +50,10 @@ The active pane determines the Workshop that owns an absorbed multiplexer sessio
 
 The durable record of every Pi, Claude, and OpenCode Clanker that Clankerhouse launched or observed in an absorbed Workshop: its Workshop, cwd, harness, launch spec, original task, current harness session (which follows `/clear`, `/new`, and resumes), owner systemd scope, and the Herdr server it was last seen alive in. A row is open while its Clanker runs and closes once the Clanker has been missing for about a minute in the same Herdr server, or when it is closed explicitly or its Workshop is Stopped. The ledger is a record, not a controller: Clankerhouse never relaunches anything from it by itself. Ordinary shell Terminals and Codex are not recorded.
 
+## Routine
+
+A Clanker's own wake-up schedule: a five-field cron expression read in a stored IANA time zone, plus the message the Clanker receives when it fires. A Clanker registers Routines for itself; naming another Clanker is explicit. The daemon delivers each occurrence once through the ordinary send path and queue, never by typing over the operator's input. Routines are Declarations kept with the orchestration store; one ends when its Clanker is closed in the Clanker Ledger.
+
 ## Interrupted Clanker
 
 An open Clanker Ledger row that is not alive and was last seen in an earlier Herdr server: it was running when the host or Herdr went down. An Interrupted Clanker returns only when someone runs `clankers resume`, which continues its exact harness session in its Workshop under the same Clanker identity without replaying a prompt; `clankers ledger close` drops one that should not return. After a restart the operator typically asks a Clanker to read `clankers ledger --interrupted` and resume what still matters.

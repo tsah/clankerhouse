@@ -6,6 +6,7 @@ import { canonicalActivityPath, gitStatusPaths, markDirectoryActivity, newestAct
 import type { ActivityRecord } from "./activity"
 import { selectIndependentRepositoryWorktrees } from "./directory-discovery"
 import { claimSpareWorktree, isSpareWorktreePath, refillSpareWorktree, worktreePoolEnabled } from "./worktree-pool"
+import { fireRoutinesThroughSend } from "./routine-api"
 import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSnapshot, type PaneMetadata } from "./clanker-api"
 import { withOrchestrationStore, type ClankerReportRecord } from "./orchestration"
 import { workshopBase } from "./workshop-base"
@@ -575,6 +576,37 @@ const startQueuedDelivery = () => {
   return () => clearInterval(timer)
 }
 
+// Clanker Routines: every pass fires the Routines whose minute has come, through the same send
+// path and queue as `clankers send`. Cron has minute resolution, so a pass every 15 seconds
+// wakes a clanker within a quarter of a minute of its scheduled time.
+const ROUTINE_PASS_MS = Number(Bun.env.CLANKERHOUSE_ROUTINE_PASS_MS ?? 15_000) || 15_000
+let routinePassRunning = false
+let routinePassFailure = ""
+let stopRoutines: (() => void) | undefined
+const runRoutinePass = () => {
+  if (routinePassRunning) return
+  routinePassRunning = true
+  void fireRoutinesThroughSend(daemonMultiplexer())
+    .then((fired) => {
+      for (const entry of fired) {
+        if (entry.outcome === "fired") console.error(`Routine ${entry.routineId} woke ${entry.clankerId} (${entry.messageId})`)
+        else console.error(`Routine ${entry.routineId} for ${entry.clankerId}: ${entry.outcome}${entry.error ? `: ${entry.error}` : ""}`)
+      }
+      routinePassFailure = ""
+    })
+    .catch((error) => {
+      const failure = error instanceof Error ? error.message : String(error)
+      if (failure !== routinePassFailure) console.error(`Routine pass failed: ${failure}`)
+      routinePassFailure = failure
+    })
+    .finally(() => { routinePassRunning = false })
+}
+const startRoutines = () => {
+  const timer = setInterval(runRoutinePass, ROUTINE_PASS_MS)
+  runRoutinePass()
+  return () => clearInterval(timer)
+}
+
 // Harness lifecycle reports are mirrored into the Multiplexer's agent status (ADR-0007).
 const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter)
 
@@ -621,6 +653,7 @@ const serverProgram = Effect.gen(function* () {
     cleanup()
     stopHookStateRequests?.()
     stopQueuedDelivery?.()
+    stopRoutines?.()
     statusHooks?.stop()
     const closing = snapshotServer?.close() ?? Promise.resolve()
     snapshotServer = undefined
@@ -672,6 +705,7 @@ const serverProgram = Effect.gen(function* () {
   projectionSource = producerLease.epoch
   stopHookStateRequests = watchHookStateRequests(`${runtimeDir}/hook-events`, applyHookStateRequest)
   stopQueuedDelivery = startQueuedDelivery()
+  stopRoutines = startRoutines()
   statusHooks = new StatusHookRuntime({
     view: liveStatusView({ panes: () => latestHerd?.panes, multiplexer: daemonMultiplexer }),
     requestObservation: scheduleProjectionRefresh,

@@ -24,6 +24,7 @@ import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue } from "./labels"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
+import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
 const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
@@ -361,6 +362,42 @@ const runHooksCommand = async (parsed: ParsedArgs) => {
   throw new Error(hooksUsage)
 }
 
+const routineUsage = `Usage:
+  clankers routine add --cron "MIN HOUR DOM MON DOW" (--message TEXT | <TEXT on stdin>) [--name NAME] [--tz ZONE] [--clanker ID]
+  clankers routine list [--clanker ID | --all] [--include-ended]
+  clankers routine show ROUTINE_ID
+  clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
+  clankers routine cancel ROUTINE_ID [--clanker ID]`
+
+const runRoutineCommand = async (parsed: ParsedArgs) => {
+  const action = parsed.shift()
+  if (!action || action === "help" || action === "--help" || action === "-h") return console.log(routineUsage)
+  const clanker = parsed.take("--clanker")
+  const cron = parsed.take("--cron")
+  const messageFlag = parsed.take("--message")
+  const name = parsed.take("--name")
+  const timeZone = parsed.take("--tz")
+  const all = parsed.has("--all")
+  const includeEnded = parsed.has("--include-ended")
+  const routineId = action === "add" || action === "list" ? undefined : parsed.shift()
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${routineUsage}`)
+  if (action === "list") {
+    if (all && clanker !== undefined) throw new Error("--all and --clanker are mutually exclusive")
+    return console.log(JSON.stringify(listRoutines({ clanker, all, includeEnded }, await routineCaller())))
+  }
+  if (action === "add") {
+    if (!cron) throw new Error(`--cron is required\n${routineUsage}`)
+    const message = messageFlag ?? await pipedStdin()
+    if (message === undefined) throw new Error(`--message is required (or pipe the message on stdin)\n${routineUsage}`)
+    return console.log(JSON.stringify(await addRoutine({ cron, message, name, timeZone, clanker }, await routineCaller())))
+  }
+  if (!routineId) throw new Error(`ROUTINE_ID is required\n${routineUsage}`)
+  if (action === "show") return console.log(JSON.stringify(showRoutine(routineId)))
+  if (action === "update") return console.log(JSON.stringify(updateRoutine(routineId, { cron, message: messageFlag, name, timeZone }, await routineCaller(), { clanker })))
+  if (action === "cancel") return console.log(JSON.stringify(cancelRoutine(routineId, await routineCaller(), { clanker })))
+  throw new Error(routineUsage)
+}
+
 /** A scratch Workshop's title: when it was made, so nobody has to name it. */
 export const scratchTitle = (now = new Date()) => {
   const two = (value: number) => String(value).padStart(2, "0")
@@ -399,6 +436,10 @@ export const usage = `Usage:
   clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
   clankers view children [WORKSHOP] | clear
+  clankers routine add --cron "MIN HOUR DOM MON DOW" --message TEXT [--name NAME] [--tz ZONE] [--clanker ID]
+  clankers routine list [--clanker ID | --all] [--include-ended] | show ROUTINE_ID
+  clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
+  clankers routine cancel ROUTINE_ID [--clanker ID]
   clankers hooks status [--json] [--limit N]
   clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
@@ -422,7 +463,12 @@ waits for it to be ready.
 
 workshop detach makes a Workshop top-level, workshop reparent moves it under another Workshop of the
 same repository. Both default to the current Workshop and keep its subtree, clankers, panes, worktree
-and branch; they need the daemon, and a parent inside the Workshop's own subtree is rejected.`
+and branch; they need the daemon, and a parent inside the Workshop's own subtree is rejected.
+
+A routine wakes a clanker on a cron schedule with a message, delivered by the daemon like
+\`clankers send\` (queued while the clanker is busy). It belongs to the calling clanker unless
+--clanker names another. The five cron fields are read in --tz, else CLANKERHOUSE_TIMEZONE, else TZ,
+else the host's zone, resolved when the routine is added and stored with it.`
 
 const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
 
@@ -539,6 +585,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   if (command === "mux") return runMultiplexerCli(parsed)
   if (command === "view") return runViewCommand(parsed)
   if (command === "hooks") return runHooksCommand(parsed)
+  if (command === "routine" || command === "routines") return runRoutineCommand(parsed)
 
   if (command === "delete") {
     const kind = parsed.shift()

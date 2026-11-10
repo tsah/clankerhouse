@@ -20,15 +20,18 @@ mkdir -p "$runtime" "$state_home" "$root/home" "$root/data"
 touch "$marker"
 server_pid=""
 watch_pid=""
+inbox_pid=""
 
 cleanup() {
-    for pid in "$watch_pid" "$server_pid"; do
+    for pid in "$watch_pid" "$server_pid" "$inbox_pid"; do
         if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
     qa_herdr_stop
     if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
 }
 trap cleanup EXIT INT TERM
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
 unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
 herdr_status=0
 qa_herdr_start "$root/herdr" || herdr_status=$?
@@ -80,7 +83,7 @@ child_pane=$(claude_pane qa-child "$root/child" clanker-qa-child)
 hook "$child_pane" clanker-qa-child idle '{"hook_event_name":"SessionStart"}'
 
 start_daemon() {
-    "${qa_env[@]}" env CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
+    "${qa_env[@]}" env CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_ROUTINE_PASS_MS=200 \
         bun run "$repo/src/daemon.ts" --server >>"$root/server.log" 2>&1 &
     server_pid=$!
     for _ in {1..600}; do
@@ -198,5 +201,55 @@ hook "$grandchild_pane" clanker-qa-grandchild done '{"hook_event_name":"Stop","b
     | json_assert "len(data) == 1 and data[0]['type'] == 'reported' and data[0]['state'] == 'failed' and data[0]['to'] == '$child_id'" lines
 echo "PASS: --clanker watch"
 
+# R1: a clanker registers its own routine; it survives a daemon restart and wakes the clanker
+# through the ordinary send path when due.
+routine() { (cd "$root/grandchild" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-grandchild "$repo/bin/clankers" routine "$@"); }
+routine add --cron "0 9 * * 1-5" --tz Europe/Amsterdam --name standup --message "routine wake: check the board" >"$root/routine.json"
+json_assert "data['clankerId'] == 'clanker-qa-grandchild' and data['timeZone'] == 'Europe/Amsterdam' and data['state'] == 'active' and '09:00 Europe/Amsterdam' in data['nextFire']" <"$root/routine.json"
+routine_id=$(json_field routineId <"$root/routine.json")
+set +e; error=$( (cd "$parent" && api routine add --cron "0 9 * * *" --message x) 2>&1 >/dev/null); code=$?; set -e
+[[ $code -eq 2 ]] && printf '%s' "$error" | grep -q -- "--clanker ID" || fail "a routine without an owner was accepted"
+set +e; (routine add --cron "61 * * * *" --message x) >/dev/null 2>&1; code=$?; set -e
+[[ $code -eq 2 ]] || fail "an invalid cron was accepted"
+set +e; (cd "$root/child" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-other "$repo/bin/clankers" routine cancel "$routine_id") >/dev/null 2>&1; code=$?; set -e
+[[ $code -eq 2 ]] || fail "another clanker cancelled a routine it did not name"
+# The grandchild gets a stand-in for Claude's messaging socket that records what it receives.
+inbox_sock="$root/grandchild-inbox.sock"
+bun --eval '
+  const [path, out] = process.argv.slice(1)
+  const { appendFileSync } = await import("node:fs")
+  Bun.listen({ unix: path, socket: { open(s) { s.data = "" }, data(s, d) { s.data += d.toString() }, close(s) { appendFileSync(out, s.data) } } })
+' "$inbox_sock" "$root/grandchild-inbox.jsonl" &
+inbox_pid=$!
+for _ in {1..100}; do [[ -S "$inbox_sock" ]] && break; sleep 0.05; done
+printf '%s' '{"hook_event_name":"SessionStart"}' | "${qa_env[@]}" env HERDR_PANE_ID="$grandchild_pane" CLANKER_ID=clanker-qa-grandchild CLAUDE_CODE_MESSAGING_SOCKET="$inbox_sock" \
+    "$repo/bin/clankerhouse-clanker-state-report" claude idle
+kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
+routine list | json_assert "[r['routineId'] for r in data['routines']] == ['$routine_id']"
+# Bring the next occurrence forward to now, as if 09:00 had come while the daemon was down.
+"${qa_env[@]}" bun --eval '
+  const [modulePath, id] = process.argv.slice(1)
+  const { RoutineStore } = await import(modulePath)
+  const store = RoutineStore.open()
+  store.db.query("UPDATE routines SET next_fire_at = ?2 WHERE routine_id = ?1").run(id, Date.now() - 1000)
+  store.close()
+' "$repo/src/routines.ts" "$routine_id"
+start_daemon
+for _ in {1..200}; do
+    routine show "$routine_id" | json_assert 'data["lastMessageId"] is not None' 2>/dev/null && break
+    sleep 0.05
+done
+routine show "$routine_id" | json_assert 'data["lastOutcome"].startswith("fired") and data["lastError"] is None and data["nextFireAt"] > data["lastFiredAt"]' || fail "the due routine did not fire: $(cat "$root/server.log")"
+wake_id=$(routine show "$routine_id" | json_field lastMessageId)
+"${qa_env[@]}" "$repo/bin/clankers" inbox list --all --clanker clanker-qa-grandchild \
+    | json_assert "[m for m in data['messages'] if m['messageId'] == '$wake_id' and m['sender'] == 'routine:$routine_id' and m['source'] == 'routine' and m['text'] == 'routine wake: check the board']"
+python3 -c 'import json,sys; lines=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; assert len(lines) == 1 and lines[0]["message"]["content"].endswith("routine wake: check the board") and "from routine:" in lines[0]["message"]["content"], lines' "$root/grandchild-inbox.jsonl" \
+    || fail "the wake did not reach the clanker's messaging socket"
+grep -q "Routine $routine_id woke clanker-qa-grandchild" "$root/server.log" || fail "the daemon did not log the wake"
+routine cancel "$routine_id" | json_assert 'data["cancelled"] is True'
+routine list | json_assert 'data["routines"] == []'
+echo "PASS: R1 a clanker's own routine survives a daemon restart and wakes it through the send path"
+
 api --help | grep -q "clankers watch" || fail "help omits watch"
-echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, cursor resume after kill, and the children agent view."
+api --help | grep -q "clankers routine add" || fail "help omits routine"
+echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, cursor resume after kill, the children agent view, and a clanker's own routine firing after a daemon restart."

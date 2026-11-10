@@ -5,6 +5,8 @@
 # HERDR_PANE_ID, repository popup bootstrap, focus, kill). Never touches the user's
 # herdr config or live server.
 set -euo pipefail
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
 
 uid=$(id -u)
 root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-herdr-$uid-$$"}")

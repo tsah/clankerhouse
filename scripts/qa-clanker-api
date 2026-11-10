@@ -31,6 +31,8 @@ cleanup() {
     [[ -f "$root/.qa-owned" ]] && rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
 unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
 herdr_status=0
 qa_herdr_start "$root/herdr" || herdr_status=$?

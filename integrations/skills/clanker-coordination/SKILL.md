@@ -4,6 +4,7 @@ description: >-
   Coordinate existing visible clankers through the Clanker API. Use when the
   user asks to find clankers, inspect status, monitor or wait, send instructions,
   steer, or retrieve results, report your own state to a parent orchestrator,
+  schedule your own wake-ups (routines),
   watch child Workshops, or when told to mark yourself or this Workshop done.
   Never communicate through raw pane input or capture.
 ---
@@ -131,6 +132,31 @@ printf '%s' '{"error":"tests red"}' | clankers report --state failed
 States are `question`, `blocked`, `done`, `failed`, and `working`. The payload is
 one JSON object of at most 64 KiB. A Report is your declaration; it never
 changes your lifecycle state, and `clankers status` shows it as `lastReport`.
+
+## Routines: waking yourself on a schedule
+
+To be woken later with a message (check CI every morning, re-poll a deploy each
+hour), register a routine for yourself. Run it from inside your clanker; it is
+yours by `CLANKER_ID`. Do not pass `--clanker` unless the operator named
+another clanker.
+
+```bash
+clankers routine add --cron "0 9 * * 1-5" --tz Europe/Amsterdam --name standup \
+  --message "Morning: check open PRs and report"
+clankers routine list                  # your routines, with nextFire in their zone
+clankers routine update "$routine_id" --cron "30 8 * * 1-5"   # or --message, --name, --tz
+clankers routine cancel "$routine_id"
+```
+
+The cron is five fields, `minute hour day-of-month month day-of-week` (or
+`@daily`, `@hourly`, ...), read in `--tz`, else `CLANKERHOUSE_TIMEZONE`, else the
+host's zone (often UTC). Pass `--tz` whenever the operator gave a local time, and
+check `nextFire` in the output. When it fires, the daemon sends you the message
+the way `clankers send` would: it arrives as a prompt tagged
+`[clankerhouse msg-… from routine:ROUTINE_ID]`, at once when you are idle, or
+queued until your turn ends. Act on it as an instruction you scheduled for
+yourself. Cancel routines you no longer need; they persist across daemon
+restarts and end only when cancelled or when your clanker is closed.
 
 ## Watching child Workshops
 

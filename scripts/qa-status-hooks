@@ -29,6 +29,8 @@ cleanup() {
     if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
 }
 trap cleanup EXIT INT TERM
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
 unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID CLANKER_ID CLANKERHOUSE_WORKSHOP_ID CLANKERHOUSE_PARENT_WORKSHOP_ID
 herdr_status=0
 qa_herdr_start "$root/herdr" || herdr_status=$?

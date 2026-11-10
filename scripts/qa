@@ -25,6 +25,8 @@ export HOME="$root/home"
 export XDG_DATA_HOME="$root/data"
 # New Worktree fixtures must become visible immediately to the authoritative projection.
 export CLANKERHOUSE_DIRECTORY_REFRESH_MS=1
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
 unset CLANKERHOUSE_INSTANCE HERDR_PANE_ID HERDR_ENV
 # shellcheck source=lib/qa-herdr-server
 . "$repo/scripts/lib/qa-herdr-server"

@@ -224,6 +224,24 @@
       ]
     },
     {
+      "id": "clanker-routines",
+      "title": "Clanker Routines: a clanker's own cron wake-ups delivered through the send queue",
+      "core": true,
+      "unit": [
+        "src/routines.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-orchestration"
+      ],
+      "manual": [
+        "From inside a Claude clanker, run `clankers routine add --cron \"*/2 * * * *\" --tz Europe/Amsterdam --message \"routine ping\"`; confirm `nextFire` shows the next even minute in Amsterdam time and the clanker receives a prompt tagged `from routine:ROUTINE_ID` within about 15 seconds of it",
+        "Type a draft into that clanker's input box before the next occurrence; confirm the wake queues, the draft is untouched, and the wake arrives after focus moves away",
+        "Keep the clanker working across two occurrences; confirm it gets one queued wake, not two, and `routine show` reports skipped-queued",
+        "Restart the daemon with a routine registered; confirm `routine list` still shows it and it fires at its next occurrence",
+        "From another clanker, try `clankers routine cancel ROUTINE_ID`; confirm it is refused until `--clanker OWNER` is given, then cancel the routine"
+      ]
+    },
+    {
       "id": "daemon-transport",
       "title": "Authoritative socket snapshots, subscriptions, refresh, leases, and operations",
       "core": true,

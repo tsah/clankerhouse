@@ -11,7 +11,7 @@ import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSna
 import { withOrchestrationStore, type ClankerReportRecord } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
+import { allWorkshopLabels, attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
 import { workshopStopPlan } from "./workshop-stop"
 import { sessionState } from "./model"
 import type { DetailRow, SessionRow } from "./model"
@@ -37,7 +37,7 @@ import type { MutationExecution, MutationExecutor } from "./transport/operations
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
 import { projectResources } from "./server/project"
-import { READY_AFTER_MS, needsMe, yourMoveLabels } from "./needs-me"
+import { READY_AFTER_MS, SNOOZE_KEY, WAITS_ON_KEY, needsMe, parseSnooze, yourMoveLabels } from "./needs-me"
 import { lastClaudeTranscriptText } from "./clanker-list"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
@@ -465,8 +465,24 @@ const annotateNeedsMe = (rows: SessionRow[]) => {
       }
     }
   } catch {}
+  let labels = new Map<string, Record<string, string>>()
+  try { labels = allWorkshopLabels() } catch {}
+  const open = new Map<string, SessionRow>()
+  for (const row of rows) if (row.workshopId && row.target.type === "session" && !open.has(row.workshopId)) open.set(row.workshopId, row)
+  /** `waits-on` names a Workshop by ID, else by branch (its own project first). Settled is done, or gone. */
+  const waitingOn = (workshopId: string) => {
+    const named = labels.get(workshopId)?.[WAITS_ON_KEY]
+    if (!named) return undefined
+    const own = open.get(workshopId)
+    const other = open.get(named) ?? [...open.values()].filter((row) => row.branch === named && row.workshopId !== workshopId)
+      .toSorted((left, right) => Number(right.project === own?.project) - Number(left.project === own?.project))[0]
+    if (!other?.workshopId || other.workshopId === workshopId || labels.get(other.workshopId)?.[DONE_LABEL.key] === DONE_LABEL.value) return undefined
+    return other.title ?? other.name
+  }
   const facts = {
     now: Date.now(),
+    snooze: (workshopId: string) => parseSnooze(labels.get(workshopId)?.[SNOOZE_KEY]),
+    waitingOn,
     latestReport: (clankerId: string) => reports.get(clankerId),
     turnStartedAt: (clankerId: string) => turnFacts.get(clankerId)?.turnStartedAt,
     lastText: clankerLastText,

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ClankerState, DetailRow, SessionRow } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
-import { firstLine, needsMe, needsMeCounts, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
+import { firstLine, needsMe, needsMeCounts, parseSnooze, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -26,6 +26,8 @@ const facts = (extra: Partial<NeedsMeFacts> = {}): NeedsMeFacts => ({
   turnStartedAt: () => undefined,
   lastText: () => null,
   interrupted: () => [],
+  snooze: () => undefined,
+  waitingOn: () => undefined,
   yourMoveLabel: () => undefined,
   staleAfterMs: 7 * DAY,
   readyAfterMs: DAY,
@@ -117,6 +119,22 @@ describe("needs me", () => {
     expect(needsMe(row([], { workshopId: undefined, recency: 0 }), facts())).toBeUndefined()
   })
 
+  test("a snooze holds until the reason changes or its day runs out", () => {
+    const asked = facts({ latestReport: () => report("question", now - HOUR, "Which?") })
+    const snoozed = (value: string) => needsMe(row([clanker("idle", now - HOUR)]), { ...asked, snooze: () => parseSnooze(value) })
+    expect(snoozed(`asked:${now - HOUR}:${now + DAY}`)).toMatchObject({ reason: "asked", snoozedUntil: now + DAY })
+    // Asked again later: something new.
+    expect(snoozed(`asked:${now - 2 * HOUR}:${now + DAY}`)?.snoozedUntil).toBeUndefined()
+    expect(snoozed(`finished:${now - HOUR}:${now + DAY}`)?.snoozedUntil).toBeUndefined()
+    expect(snoozed(`asked:${now - HOUR}:${now - 1}`)?.snoozedUntil).toBeUndefined()
+    expect(parseSnooze("garbage")).toBeUndefined()
+  })
+
+  test("a Workshop waiting on an unsettled one says so", () => {
+    const waiting = facts({ latestReport: () => report("question", now - HOUR), waitingOn: () => "pr one" })
+    expect(needsMe(row([clanker("idle", now - HOUR)]), waiting)).toMatchObject({ reason: "asked", waitingOn: "pr one" })
+  })
+
   test("counts each open Workshop once", () => {
     const listed = { reason: "asked" as const, since: 1 }
     expect(needsMeCounts([
@@ -125,6 +143,11 @@ describe("needs me", () => {
       row([], { workshopId: "other" }),
       row([], { workshopId: "gone", target: { type: "directory", path: "/g" }, needsMe: listed }),
     ])).toEqual({ needsMe: 1, open: 2 })
+    // Snoozed and waiting rows are listed, not counted.
+    expect(needsMeCounts([
+      row([], { needsMe: { ...listed, snoozedUntil: 2 } }),
+      row([], { workshopId: "w2", needsMe: { ...listed, waitingOn: "x" } }),
+    ])).toEqual({ needsMe: 0, open: 2 })
   })
 
   test("first line and the label setting", () => {

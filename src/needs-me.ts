@@ -23,6 +23,10 @@ export interface NeedsMe {
   excerpt?: string
   /** The clanker that needs attention, so Enter lands on it. */
   clankerId?: string
+  /** Snoozed (Alt-S) until this epoch ms; the snooze holds only while the reason it hid is the same. */
+  snoozedUntil?: number
+  /** The unsettled Workshop this one waits on (its `waits-on` label), by name. */
+  waitingOn?: string
 }
 
 export interface NeedsMeFacts {
@@ -35,6 +39,10 @@ export interface NeedsMeFacts {
   lastText: (clankerId: string) => string | null | undefined
   /** Interrupted Clankers of this Workshop: open in the ledger, last seen in an earlier server. */
   interrupted: (workshopId: string) => ReadonlyArray<{ clankerId: string; at: number }>
+  /** The Workshop's `_snooze` label: the reason it hid, that reason's since, and when it wears off. */
+  snooze: (workshopId: string) => Snooze | undefined
+  /** The name of the Workshop its `waits-on` label names, while that one is open and not done. */
+  waitingOn: (workshopId: string) => string | undefined
   /** Label pairs that mean "your move", with when the Workshop got each. */
   yourMoveLabel: (workshopId: string) => { value: string; at: number } | undefined
   /** No activity for this long makes an open Workshop stale (the Reaper's retention). */
@@ -44,6 +52,20 @@ export interface NeedsMeFacts {
 }
 
 const EXCERPT_LIMIT = 160
+
+/** The hidden label Alt-S writes, `REASON:SINCE:UNTIL` in epoch ms, and the label that names a Workshop it waits on. */
+export const SNOOZE_KEY = "_snooze"
+export const WAITS_ON_KEY = "waits-on"
+
+export interface Snooze { reason: string; since: number; until: number }
+
+export const parseSnooze = (value: string | undefined): Snooze | undefined => {
+  const match = value?.match(/^([a-z-]+):(\d+):(\d+)$/)
+  return match ? { reason: match[1]!, since: Number(match[2]), until: Number(match[3]) } : undefined
+}
+
+/** Snoozed or waiting on another Workshop: still listed, after everything else, and not counted as needing you. */
+export const deferred = (reason: Pick<NeedsMe, "snoozedUntil" | "waitingOn"> | undefined) => Boolean(reason?.snoozedUntil || reason?.waitingOn)
 
 /** The first non-empty line, collapsed and cut to fit one row. */
 export const firstLine = (text: string | null | undefined, limit = EXCERPT_LIMIT) => {
@@ -121,7 +143,14 @@ export const needsMe = (row: SessionRow, facts: NeedsMeFacts): NeedsMe | undefin
       reasons.push({ reason: "stale", since: idleSince })
     }
   }
-  return reasons.toSorted(morePressing)[0]
+  const chosen = reasons.toSorted(morePressing)[0]
+  if (!chosen || !workshopId) return chosen
+  // Something new (another reason, or the same one again later) ends a snooze, and so does its day running out.
+  const snooze = facts.snooze(workshopId)
+  if (snooze && snooze.reason === chosen.reason && snooze.since === Math.round(chosen.since) && facts.now < snooze.until) chosen.snoozedUntil = snooze.until
+  const waitingOn = facts.waitingOn(workshopId)
+  if (waitingOn) chosen.waitingOn = waitingOn
+  return chosen
 }
 
 /** `N need you · M open`: open means a live session, and a Workshop counts once however many it has. */
@@ -132,7 +161,7 @@ export const needsMeCounts = (rows: readonly Pick<SessionRow, "target" | "worksh
     if (row.target.type !== "session") continue
     const key = row.workshopId ?? row.path
     open.add(key)
-    if (row.needsMe) needing.add(key)
+    if (row.needsMe && !deferred(row.needsMe)) needing.add(key)
   }
   return { needsMe: needing.size, open: open.size }
 }

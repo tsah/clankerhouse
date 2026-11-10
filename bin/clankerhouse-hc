@@ -131,7 +131,7 @@ for (const session of sessions) {
   if (session.target?.type !== "session") continue
   const key = session.workshopId ?? session.path
   open.add(key)
-  if (session.needsMe) needing.add(key)
+  if (session.needsMe && !session.needsMe.snoozedUntil && !session.needsMe.waitingOn) needing.add(key)
 }
 const counts = { needsMe: needing.size, open: open.size }
 console.log(JSON.stringify(row ? { name: row.name, title: row.title ?? null, project: row.project ?? null, branch: row.branch ?? null, labels: row.labels ?? [], ...counts } : counts))' "$STATE_DIR/state.json" "$2"

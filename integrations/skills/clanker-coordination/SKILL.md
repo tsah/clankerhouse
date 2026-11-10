@@ -193,6 +193,17 @@ API errors use exit 3 for unknown/ambiguous IDs, 4 for unsupported capabilities,
 ran out of file descriptors; the message names the remedy), and 124 for a
 nondestructive timeout.
 
+## Waiting on another Workshop
+
+When your next step waits on another Workshop's work (its PR must merge first), say
+so with a Label, so the operator's Needs-me view lists you after everything else
+until that Workshop is marked Done:
+
+```bash
+clankers workshop label set waits-on=<other Workshop ID or branch>
+clankers workshop label unset waits-on   # once you no longer wait
+```
+
 ## Marking this Workshop Done
 
 When told to mark yourself or this Workshop done, set the built-in Label from

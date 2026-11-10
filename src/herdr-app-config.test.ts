@@ -14,7 +14,7 @@ describe("Herdr app config", () => {
   })
 
   test("hands back the app's default Alt keys the TUI leaves to programs", () => {
-    for (const key of ["alt-h", "alt-j", "alt-l", "alt-shift-h", "alt-shift-j", "alt-shift-k", "alt-shift-l", "alt-[", "alt-]"]) expect(keys[key]).toBe("terminal")
+    for (const key of ["alt-h", "alt-j", "alt-l", "alt-shift-h", "alt-shift-j", "alt-shift-k", "alt-shift-l", "alt-[", "alt-]", "alt-s"]) expect(keys[key]).toBe("terminal")
   })
 
   test("the mod handles every clankerhouse.* key", () => {

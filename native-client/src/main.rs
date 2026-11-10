@@ -129,6 +129,28 @@ struct NeedsMe {
     excerpt: Option<String>,
     #[serde(default, rename = "clankerId")]
     clanker_id: Option<String>,
+    /// Snoozed with Alt-S until this epoch ms (src/needs-me.ts decides whether it still holds).
+    #[serde(default, rename = "snoozedUntil")]
+    snoozed_until: Option<f64>,
+    /// The unsettled Workshop this one waits on, by name.
+    #[serde(default, rename = "waitingOn")]
+    waiting_on: Option<String>,
+}
+
+impl NeedsMe {
+    /// Snoozed or waiting on another Workshop: listed after everything else.
+    fn deferred(&self) -> bool {
+        self.snoozed_until.is_some() || self.waiting_on.is_some()
+    }
+}
+
+/// How long Alt-S keeps a row down, unless its reason changes first.
+const SNOOZE_MS: f64 = 86_400_000.0;
+
+/// The hidden label Alt-S writes for the row's current reason (src/needs-me.ts parseSnooze), or None to clear it.
+fn snooze_value(reason: &NeedsMe, now_ms: f64) -> Option<String> {
+    (reason.snoozed_until.is_none())
+        .then(|| format!("{}:{}:{}", reason.reason, reason.since.round() as i64, (now_ms + SNOOZE_MS).round() as i64))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -528,7 +550,7 @@ fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a Ses
             || !matches!(session.target, Target::Session { .. }) || (!query.is_empty() && search_score(session, &query).is_none()) {
             continue;
         }
-        let order = |row: &SessionRow| row.needs_me.as_ref().map(|it| (needs_me_rank(&it.reason), it.since));
+        let order = |row: &SessionRow| row.needs_me.as_ref().map(|it| (it.deferred(), needs_me_rank(&it.reason), it.since));
         let same = chosen.iter().position(|known| session.workshop_id.is_some() && known.workshop_id == session.workshop_id);
         match same {
             Some(index) => {
@@ -541,8 +563,9 @@ fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a Ses
     }
     chosen.sort_by(|left, right| {
         let (left, right) = (left.needs_me.as_ref().unwrap(), right.needs_me.as_ref().unwrap());
-        needs_me_rank(&left.reason)
-            .cmp(&needs_me_rank(&right.reason))
+        left.deferred()
+            .cmp(&right.deferred())
+            .then_with(|| needs_me_rank(&left.reason).cmp(&needs_me_rank(&right.reason)))
             .then_with(|| left.since.total_cmp(&right.since))
     });
     chosen
@@ -561,6 +584,15 @@ fn short_age(milliseconds: f64) -> String {
 
 /// Why the row is listed and for how long, in the operator's words.
 fn needs_me_status(reason: &NeedsMe, now_ms: f64) -> String {
+    let status = needs_me_reason_status(reason, now_ms);
+    match (&reason.waiting_on, reason.snoozed_until) {
+        (Some(other), _) => format!("waiting on {other} · {status}"),
+        (None, Some(_)) => format!("snoozed · {status}"),
+        _ => status,
+    }
+}
+
+fn needs_me_reason_status(reason: &NeedsMe, now_ms: f64) -> String {
     let age = short_age(now_ms - reason.since);
     let detail = reason.detail.as_deref().unwrap_or_default();
     match reason.reason.as_str() {
@@ -2864,7 +2896,7 @@ fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
     frame.render_widget(
         Line::from(vec![
             Span::styled("Clankerhouse · Needs me", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
-            Span::styled("  Enter jump · Alt-D done · Alt-K everything · Esc close", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Enter jump · Alt-S snooze · Alt-D done · Alt-K everything · Esc close", Style::default().fg(Color::DarkGray)),
         ]),
         areas[0],
     );
@@ -3179,6 +3211,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         // A done group stands for many Workshops; no single-Workshop action applies to it.
         if app.selected().is_some_and(|row| row.done_group.is_some()) {
             return None;
+        }
+        // Alt-S in Needs Me: down the list for a day, or until something new; again to take it back.
+        if key.code == KeyCode::Char('s') && app.needs_me {
+            let row = app.selected()?;
+            let reason = row.session.needs_me.as_ref()?;
+            if row.session.path.is_empty() {
+                return None;
+            }
+            let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0.0, |elapsed| elapsed.as_millis() as f64);
+            return Some(AppCommand::Submit(MutationIntent::Label {
+                path: row.session.path.clone(),
+                key: "_snooze".into(),
+                value: snooze_value(reason, now_ms),
+            }));
         }
         match key.code {
             KeyCode::Char('r') => {
@@ -4604,6 +4650,35 @@ mod tests {
         assert_eq!((app.mode, app.needs_me), (Mode::Jump, true));
         assert_eq!(handle_key(&mut app, alt('b')), None);
         assert_eq!((app.mode, app.needs_me), (Mode::Repository, false));
+    }
+
+    #[test]
+    fn alt_s_snoozes_and_waiting_rows_go_last() {
+        let mut app = app_with_sessions(r#"[
+            {"name":"snoozed","path":"/snoozed","workshopId":"w1","target":{"type":"session","session":"snoozed"},"needsMe":{"reason":"asked","since":1000,"snoozedUntil":9000}},
+            {"name":"waiting","path":"/waiting","workshopId":"w2","target":{"type":"session","session":"waiting"},"needsMe":{"reason":"asked","since":2000,"waitingOn":"pr one"}},
+            {"name":"stale","path":"/stale","workshopId":"w3","target":{"type":"session","session":"stale"},"needsMe":{"reason":"stale","since":3000}},
+            {"name":"asked","path":"/asked","workshopId":"w4","target":{"type":"session","session":"asked"},"needsMe":{"reason":"asked","since":4000}}
+        ]"#);
+        assert_eq!(handle_key(&mut app, alt('i')), None);
+        let names = app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["asked", "stale", "snoozed", "waiting"]);
+        let status = |name: &str| needs_me_status(app.rows.iter().find(|row| row.session.name == name).unwrap().session.needs_me.as_ref().unwrap(), 4000.0);
+        assert_eq!(status("waiting"), "waiting on pr one · asked 2s ago");
+        assert_eq!(status("snoozed"), "snoozed · asked 3s ago");
+
+        app.selected = app.rows.iter().position(|row| row.session.name == "asked").unwrap();
+        let Some(AppCommand::Submit(MutationIntent::Label { path, key, value: Some(value) })) = handle_key(&mut app, alt('s')) else {
+            panic!("Alt-S snoozes the row");
+        };
+        assert_eq!((path.as_str(), key.as_str()), ("/asked", "_snooze"));
+        assert!(value.starts_with("asked:4000:"), "{value}");
+        // Again on a snoozed row takes the snooze back.
+        app.selected = app.rows.iter().position(|row| row.session.name == "snoozed").unwrap();
+        assert_eq!(
+            handle_key(&mut app, alt('s')),
+            Some(AppCommand::Submit(MutationIntent::Label { path: "/snoozed".into(), key: "_snooze".into(), value: None }))
+        );
     }
 
     #[test]

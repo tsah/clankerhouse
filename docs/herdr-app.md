@@ -116,6 +116,7 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 | Alt-Up / Alt-Down | `agent.prev` / `agent.next` | `space.prev` / `space.next` |
 | Alt-K, Alt-J | `pane.go` | Popup; pass-through |
 | Alt-H, Alt-L, Alt-Shift-H/J/K/L, Alt-[, Alt-] | Pane and tab moves | Pass-through, as in the TUI |
+| Alt-S | Snooze the selected row in Alt-I | Pass-through to the popup |
 
 The app's Ctrl-Shift defaults stay, so `ctrl-shift-p` still opens the palette. Mod commands such as `clankerhouse.jump` are not
 listed in the palette: `commands()` is documented as leaving them out, and that was not checked in the palette itself.

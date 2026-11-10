@@ -427,7 +427,9 @@
         "Leave a clanker on a permission prompt and let another finish in a background tab; confirm `blocked · permission prompt` and `finished, not seen` rows, and that viewing the finished tab removes it",
         "Confirm a Workshop with a working clanker and nothing asked is not listed, and that an empty list says caught up",
         "Press Enter on a row and confirm you land on the clanker that needs attention; press Alt-D and confirm Done or deletion exactly as on an Alt-K row; type to filter; Alt-K back to the full map",
-        "In the Herdr app, confirm the top bar's `N need you · M open` matches the view's own count"
+        "In the Herdr app, confirm the top bar's `N need you · M open` matches the view's own count",
+        "Press Alt-S on a row; confirm it moves last as `snoozed ·`, leaves the count, and comes back up on a new question or after a day; Alt-S again takes it back",
+        "Label a Workshop `waits-on=<branch of another>`; confirm `waiting on <title> ·` at the bottom until the other is marked done"
       ]
     },
     {

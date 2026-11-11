@@ -28,9 +28,12 @@ describe("mutation protocol target set", () => {
       { type: "label", path: "/repo/feature", key: "title", value: "Migrate the adapter" },
       { type: "create", repository: "/repo", branch: "migrate-the-adapter", create: true, title: "Migrate the adapter" },
       { type: "create", repository: "/repo", branch: "spawned", create: true, deferSession: true },
+      { type: "create", repository: "/repo", branch: "child", create: true, deferSession: true, parentWorkshopId: "ws-parent" },
+      { type: "create", repository: "/repo", branch: "top-level", create: true, deferSession: true, parentWorkshopId: null },
     ]) expect(mutation(intent)).toMatchObject({ method: "mutation.submit", params: { intent } })
     expect(mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" })).toMatchObject({ params: { intent: { type: "create", branch: "b" } } })
     expect((mutation({ type: "create", repository: "/repo", branch: "b", create: true, title: "bad\ttitle" }) as { params: { intent: object } }).params.intent).not.toHaveProperty("title")
+    expect((mutation({ type: "create", repository: "/repo", branch: "b", create: true }) as { params: { intent: object } }).params.intent).not.toHaveProperty("parentWorkshopId")
     for (const intent of [
       { type: "label", path: "/repo/feature", key: "Stage", value: "retro" },
       { type: "label", path: "/repo/feature", key: "stage", value: "two words" },

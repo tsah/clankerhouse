@@ -332,6 +332,19 @@ def main():
                 f"Child launch env does not name its Workshop and parent: {child_log}")
         print(f"PASS: child Workshop clanker env names parent {parent['workshopId']}", flush=True)
 
+        # Without --parent, only a Workshop worktree becomes the parent; the main checkout never does.
+        def spawned_parent(name, cwd):
+            spawned = json.loads(cli("workshop", "spawn", "--name", name, "--harness", "claude", cwd=cwd).stdout)
+            details = json.loads(cli("workshop", "show", "--path", spawned["identity"]["path"], cwd=fixtures["workshop"]).stdout)
+            require(wait_log(spawned["clankerId"])["parentWorkshopId"] == (details["parentWorkshopId"] or ""),
+                    f"Launch env and registry disagree on the parent of {name}: {details}")
+            return details["parentWorkshopId"]
+        require(spawned_parent("from-main-checkout", fixtures["workshop"]) is None,
+                "A Workshop spawned from the main checkout was parented to it")
+        require(spawned_parent("from-workshop", child["identity"]["path"]) == child_details["workshopId"],
+                "A Workshop spawned from a Workshop worktree lost its automatic parent")
+        print("PASS: the main checkout is never an automatic parent; a Workshop worktree is", flush=True)
+
         # A registered Workshop with no runtime should also launch directly into one
         # agent tab, even through the ordinary (non-worktree-creating) spawn command.
         dormant = root / "repo-dormant"

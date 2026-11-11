@@ -167,6 +167,10 @@ worker. Re-arm it with the same cursor file after handling each batch; the
 cursor makes it resume exactly where it stopped, including children spawned
 since.
 
+A Workshop spawned from inside your Workshop's worktree is your child. From a
+repository's main checkout a spawn is top-level, so an orchestrator working
+there names itself: `clankers workshop spawn --parent "$CLANKERHOUSE_WORKSHOP_ID" ...`.
+
 ```bash
 clankers watch --children-of . --descendants \
   --cursor-file temp/orchestrator/watch.cursor --once --timeout 3600

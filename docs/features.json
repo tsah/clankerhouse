@@ -116,9 +116,10 @@
         "scripts/qa-herdr",
         "scripts/qa-spawn-model"
       ],
-      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs.",
+      "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A spawn from a Workshop worktree is parented to that Workshop, a spawn from a repository's main checkout is top-level, and an explicit parent is honoured from either. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs.",
       "manual": [
         "Create a Workshop and child",
+        "Spawn a Workshop from a repository's main checkout and confirm it is top-level, then again with --parent and confirm it is a child",
         "Confirm an agent Workshop has only its agent tab, with no extra main shell, and adding an agent preserves existing tabs",
         "Reparent and detach the child",
         "Delete a middle Workshop and confirm its children splice to the available parent",

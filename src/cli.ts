@@ -694,11 +694,11 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
         parentWorkshopId,
         noParent,
         title,
-        daemonCreate: async (branch, base, title) => {
+        daemonCreate: async (branch, base, title, parentWorkshopId) => {
           const repository = (await identity()).path
           // The daemon's create opens a branch's existing worktree; spawn only ever makes a new one, as `wt switch --create` does.
           if (Bun.spawnSync(["git", "-C", repository, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).exitCode === 0) throw new Error(`Branch '${branch}' already exists`)
-          const routed = await routeCompatibilityMutation({ type: "create", repository, branch, create: true, base, title, deferSession: true }, { timeoutMs: workshopCreateTimeoutMs })
+          const routed = await routeCompatibilityMutation({ type: "create", repository, branch, create: true, base, title, deferSession: true, ...(parentWorkshopId === undefined ? {} : { parentWorkshopId }) }, { timeoutMs: workshopCreateTimeoutMs })
           if (!routed) return undefined
           const path = (routed.result as { path?: unknown } | undefined)?.path
           if (typeof path !== "string" || !path) throw new Error(`Daemon created '${branch}' but did not return a worktree path`)

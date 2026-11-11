@@ -11,7 +11,7 @@ import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSna
 import { withOrchestrationStore, type ClankerReportRecord } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { allWorkshopLabels, attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
+import { allWorkshopLabels, attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, isLinkedWorktreeSync, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
 import { workshopStopPlan } from "./workshop-stop"
 import { sessionState } from "./model"
 import type { DetailRow, SessionRow } from "./model"
@@ -878,14 +878,6 @@ const dumpCachedState = Effect.sync(() => {
   console.log(JSON.stringify(readCache() ?? [], null, 2))
 })
 
-const isLinkedWorktreeSync = (path: string) => {
-  if (!path || !existsSync(expandHome(path))) return false
-  const result = Bun.spawnSync(["git", "-C", expandHome(path), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { stdout: "pipe", stderr: "ignore" })
-  if (result.exitCode !== 0) return false
-  const [gitDir, commonDir] = result.stdout.toString().trim().split("\n")
-  return Boolean(gitDir && commonDir && gitDir !== commonDir)
-}
-
 interface DeleteCommandResult { exitCode: number; stdout: string; stderr: string }
 type DeleteProgressReporter = (step: string) => void
 const deleteProgressPrefix = "CLANKERHOUSE_PROGRESS\t"
@@ -1171,7 +1163,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
   if (intent.type === "delete") {
     if (stage === "identity.validated") {
       if (intent.kind === "worktree") {
-        if (!intent.path || !isLinkedWorktreeSync(intent.path)) throw new Error("Selected path is not a linked worktree")
+        if (!intent.path || !isLinkedWorktreeSync(expandHome(intent.path))) throw new Error("Selected path is not a linked worktree")
         const path = realpathSync(expandHome(intent.path))
         const session = await exactSession({ session: intent.session })
         const sessionPath = session?.[3] || session?.[4] || session?.[5]

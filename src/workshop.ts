@@ -329,6 +329,18 @@ export const identifyWorkshopSync = (cwd = process.cwd()): LineageIdentity => {
   return { path, commonDir: canonicalPath(resolve(path, common.stdout.toString().trim())), branch: branch.stdout.toString().trim() || "detached" }
 }
 
+/**
+ * Whether `path` is inside a linked worktree, which every Workshop that Clankerhouse creates is.
+ * False for a repository's main checkout (its primary worktree) and for a path outside any worktree.
+ */
+export const isLinkedWorktreeSync = (path: string) => {
+  if (!path || !existsSync(path)) return false
+  const result = Bun.spawnSync(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { stdout: "pipe", stderr: "ignore" })
+  if (result.exitCode !== 0) return false
+  const [gitDir, commonDir] = result.stdout.toString().trim().split("\n")
+  return Boolean(gitDir && commonDir && gitDir !== commonDir)
+}
+
 export const persistWorkshopLineage = (identity: LineageIdentity, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; dbPath?: string } = {}) => {
   const mode = options.mode ?? lineageMode()
   if (mode === "off") return undefined

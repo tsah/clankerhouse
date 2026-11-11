@@ -7,7 +7,7 @@ import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession 
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { clankerUnitName, harnessCommand, harnessModelArgs, resumeLaunch, workshopEnvironment, type WorkshopLaunchIdentity } from "./harness-launch"
 import { openClankerLedger, pathWorkshopId, type ClankerLedger, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
-import { lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
+import { isLinkedWorktreeSync, lineageMode, persistWorkshopLineage, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { workshopBase } from "./workshop-base"
 import { TITLE_KEY } from "./labels"
 import { dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hooks"
@@ -256,8 +256,11 @@ export async function resumeClanker(clankerId: string, options: { prompt?: strin
   } finally { ledger.close() }
 }
 
-/** Creates the worktree through the daemon, or returns undefined when no daemon serves this client. */
-export type DaemonWorktreeCreate = (branch: string, base?: string, title?: string) => Promise<string | undefined>
+/**
+ * Creates the worktree through the daemon, or returns undefined when no daemon serves this client.
+ * `parentWorkshopId` is the lineage this client will give the Workshop, for the daemon's operation record.
+ */
+export type DaemonWorktreeCreate = (branch: string, base?: string, title?: string, parentWorkshopId?: string | null) => Promise<string | undefined>
 
 const createWorktreeDirectly = async (branch: string, base?: string) => {
   const start = workshopBase(process.cwd(), base)
@@ -272,7 +275,7 @@ const createWorktreeDirectly = async (branch: string, base?: string) => {
 
 export async function createWorkshop(branch: string, base?: string, options: { parentWorkshopId?: string | null; preserveParent?: boolean; mode?: LineageMode; deferSession?: boolean; multiplexer?: ManagedMultiplexer; daemonCreate?: DaemonWorktreeCreate; title?: string } = {}) {
   // The daemon's create claims a warm spare and runs the post-create hook; without it Worktrunk creates the worktree here.
-  const path = await options.daemonCreate?.(branch, base, options.title) ?? await createWorktreeDirectly(branch, base)
+  const path = await options.daemonCreate?.(branch, base, options.title, options.parentWorkshopId) ?? await createWorktreeDirectly(branch, base)
   const id = await identity(path)
   if (options.deferSession) {
     // The first Clanker creates the runtime session with its own initial tab.
@@ -305,9 +308,15 @@ const explicitParentRecord = (parentWorkshopId: string) => {
   throw new Error(`Unknown workshop parent id: ${parentWorkshopId}`)
 }
 
+/**
+ * The Workshop a spawn was invoked from, which becomes the new Workshop's parent. A repository's main
+ * checkout is where work is started from, not a Workshop that owns what it starts, so it is never a
+ * parent this way: null. Undefined when the invoking Workshop cannot be captured in best-effort mode.
+ */
 const captureAutomaticParent = async (mode: LineageMode, multiplexer: ManagedMultiplexer) => {
   try {
     const parentIdentity = await identity(process.cwd())
+    if (!isLinkedWorktreeSync(parentIdentity.path)) return null
     const record = persistWorkshopLineage(parentIdentity, { mode })
     const target = await invokingSessionTarget(multiplexer)
     if (target && record) {
@@ -335,6 +344,7 @@ export async function resolveWorkshopParent(options: { parentWorkshopId?: string
     return { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const
   }
   const parent = await captureAutomaticParent(mode, multiplexer)
+  if (parent === null) return { mode, parentWorkshopId: null, preserveParent: false } as const
   return parent ? { mode, parentWorkshopId: parent.workshopId, preserveParent: false } as const : { mode, preserveParent: true } as const
 }
 

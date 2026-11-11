@@ -290,6 +290,13 @@ assert s["resourceId"] and s["workshopId"], s
 ' "$session_id" || fail "absorption did not stamp session claims"
 
 step "Automatic Workshop parent capture follows the invoking pane, not global Herdr focus"
+# The invoking Workshop is a linked worktree: a main checkout never becomes a parent this way.
+invoker_worktree="$root/parent-capture"
+git -C "$work" worktree add -q -b qa-parent-capture "$invoker_worktree"
+invoker_spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-parent-capture --name main --cwd "$invoker_worktree")
+invoker_session_id=$(printf '%s' "$invoker_spawned" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
+invoker_window=$("${common_env[@]}" "$clankers" mux spawn --session "$invoker_session_id" --name pi --cwd "$invoker_worktree" -- sleep 120)
+invoker_pane_id=$(printf '%s' "$invoker_window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])')
 focused_elsewhere="$root/focused-elsewhere"
 mkdir -p "$focused_elsewhere"
 focused_spawned=$("${common_env[@]}" "$clankers" mux spawn --new-session qa-focused-elsewhere --name main --cwd "$focused_elsewhere")
@@ -299,7 +306,7 @@ cat >"$root/resolve-parent.ts" <<TS
 import { resolveWorkshopParent } from "file://$repo/src/workflow.ts"
 console.log(JSON.stringify(await resolveWorkshopParent({}, "strict")))
 TS
-parent_result=$(cd "$work" && "${common_env[@]}" HERDR_PANE_ID="$pane_id" bun "$root/resolve-parent.ts") \
+parent_result=$(cd "$invoker_worktree" && "${common_env[@]}" HERDR_PANE_ID="$invoker_pane_id" bun "$root/resolve-parent.ts") \
     || fail "automatic parent capture failed from the invoking Herdr pane"
 parent_workshop_id=$(printf '%s' "$parent_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["parentWorkshopId"])')
 "${common_env[@]}" "$clankers" mux observe | python3 -c '
@@ -310,9 +317,19 @@ focused=[s for s in snap["sessions"] if s["id"]==sys.argv[2]][0]
 assert origin["workshopId"]==sys.argv[3], origin
 assert os.path.realpath(origin["worktreePath"])==os.path.realpath(sys.argv[4]), origin
 assert not focused.get("workshopId") and not focused.get("worktreePath"), focused
-' "$session_id" "$focused_session_id" "$parent_workshop_id" "$work" \
+' "$invoker_session_id" "$focused_session_id" "$parent_workshop_id" "$invoker_worktree" \
     || fail "automatic parent capture corrupted the globally focused Herdr workspace"
+
+step "The main checkout is never an automatic Workshop parent"
+main_result=$(cd "$work" && "${common_env[@]}" HERDR_PANE_ID="$pane_id" bun "$root/resolve-parent.ts") \
+    || fail "parent resolution failed from the main checkout"
+printf '%s' "$main_result" | python3 -c '
+import json,sys
+resolved=json.load(sys.stdin)
+assert resolved["parentWorkshopId"] is None and resolved["preserveParent"] is False, resolved
+' || fail "the main checkout became an automatic Workshop parent: $main_result"
 "${common_env[@]}" "$clankers" mux kill --session "$focused_session_id"
+"${common_env[@]}" "$clankers" mux kill --session "$invoker_session_id"
 
 step "Focus and kill through the Adapter"
 "${common_env[@]}" "$clankers" mux focus --session "$session_id" --window "$(printf '%s' "$window" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeWindowId"])')" --pane "$pane_id"

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ClankerRegistrationError, completeWorkshopRegistration, invokingSessionTarget, resolveWorkshopParent, rollbackCreatedWorkshop, spawnClanker, spawnWorkshop } from "./workflow"
@@ -51,6 +51,73 @@ describe("workshop parent resolution", () => {
   test("rejects unknown explicit parents in enabled modes", async () => {
     await expect(resolveWorkshopParent({ parentWorkshopId: missingParentId }, "best-effort")).rejects.toThrow(/Unknown workshop parent id/)
     await expect(resolveWorkshopParent({ parentWorkshopId: missingParentId }, "strict")).rejects.toThrow(/Unknown workshop parent id/)
+  })
+})
+
+describe("automatic workshop parent", () => {
+  const roots: string[] = []
+  afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+
+  const fixture = () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-automatic-parent-")))
+    roots.push(root)
+    const main = join(root, "repo")
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-C", main, "-c", "user.name=test", "-c", "user.email=test@example.invalid", ...args], { stdout: "ignore", stderr: "pipe" })
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+    }
+    Bun.spawnSync(["git", "init", "-q", "-b", "master", main])
+    git("commit", "-q", "--allow-empty", "-m", "init")
+    const worktree = (branch: string) => { git("worktree", "add", "-q", "-b", branch, join(root, branch)); return join(root, branch) }
+    // Stands in for `clankers workshop spawn` up to the clanker launch, in its own process because
+    // the Workshop state path is fixed when its module loads.
+    const script = join(root, "spawn.ts")
+    writeFileSync(script, `
+      import { createWorkshop, resolveWorkshopParent } from ${JSON.stringify(join(import.meta.dir, "workflow.ts"))}
+      import { identifyWorkshopSync, registerWorkshop, workshopForId, workshopForPath } from ${JSON.stringify(join(import.meta.dir, "workshop.ts"))}
+      const [created, parentPath, noParent] = process.argv.slice(2)
+      const multiplexer = { adapter: { insideRuntime: () => false } } as never
+      const parentWorkshopId = parentPath ? registerWorkshop(identifyWorkshopSync(parentPath)).workshopId : undefined
+      const parent = await resolveWorkshopParent({ parentWorkshopId, noParent: noParent === "no-parent" }, "strict", multiplexer)
+      let recorded: unknown = "not called"
+      const workshop = await createWorkshop("unused", undefined, { ...parent, deferSession: true, multiplexer, daemonCreate: async (_branch, _base, _title, parentId) => { recorded = parentId ?? null; return created } })
+      const parentId = workshopForPath(workshop.identity.path)?.parentWorkshopId ?? null
+      console.log(JSON.stringify({
+        parentPath: parentId ? workshopForId(parentId)?.canonicalPath : null,
+        recordedByDaemon: recorded === parentId,
+        invokerRegistered: Boolean(workshopForPath(identifyWorkshopSync().path)),
+      }))
+    `)
+    const spawn = (cwd: string, created: string, parentPath = "", noParent = "") => {
+      const env = { ...Bun.env, HOME: root, XDG_STATE_HOME: join(root, "state"), XDG_RUNTIME_DIR: join(root, "runtime"), CLANKERHOUSE_INSTANCE: "unit" }
+      const run = Bun.spawnSync(["bun", script, created, parentPath, noParent], { cwd, env, stdout: "pipe", stderr: "pipe" })
+      expect(run.exitCode, run.stderr.toString()).toBe(0)
+      return JSON.parse(run.stdout.toString().trim().split("\n").at(-1)!) as { parentPath: string | null; recordedByDaemon: boolean; invokerRegistered: boolean }
+    }
+    return { main, worktree, spawn }
+  }
+
+  test("a spawn from the main checkout gets no parent", () => {
+    const { main, worktree, spawn } = fixture()
+    // The main checkout is not even registered as a Workshop on the way.
+    expect(spawn(main, worktree("from-main"))).toEqual({ parentPath: null, recordedByDaemon: true, invokerRegistered: false })
+    mkdirSync(join(main, "src"))
+    expect(spawn(join(main, "src"), worktree("from-main-subdirectory"))).toMatchObject({ parentPath: null, recordedByDaemon: true })
+  })
+
+  test("a spawn from a Workshop worktree is parented to that Workshop", () => {
+    const { worktree, spawn } = fixture()
+    const invoker = worktree("invoker")
+    expect(spawn(invoker, worktree("child"))).toEqual({ parentPath: invoker, recordedByDaemon: true, invokerRegistered: true })
+    mkdirSync(join(invoker, "src"))
+    expect(spawn(join(invoker, "src"), worktree("child-from-subdirectory"))).toMatchObject({ parentPath: invoker, recordedByDaemon: true })
+  })
+
+  test("an explicit parent is used from the main checkout, and --no-parent wins inside a Workshop", () => {
+    const { main, worktree, spawn } = fixture()
+    const named = worktree("named-parent")
+    expect(spawn(main, worktree("explicit"), named)).toMatchObject({ parentPath: named, recordedByDaemon: true })
+    expect(spawn(named, worktree("top-level"), "", "no-parent")).toMatchObject({ parentPath: null, recordedByDaemon: true })
   })
 })
 

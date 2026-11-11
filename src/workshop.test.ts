@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, 
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, changeWorkshopLabel, detachWorkshopFromParent, identifyWorkshopSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
+import { attachWorkshopToParent, attachmentCandidatesForWorkshop, bootstrapRepositoryFromManifests, changeWorkshopLabel, detachWorkshopFromParent, identifyWorkshopSync, isLinkedWorktreeSync, persistWorkshopLineage, projectSnapshot, readLineageSnapshot, reconcileRepositoryWorkshops, registerWorkshop, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 
 const roots: string[] = []
 afterEach(() => {
@@ -376,6 +376,23 @@ describe("workshop lineage store", () => {
     registerWorkshop(workshops.child, { dbPath, parentWorkshopId: main.workshopId })
     registerWorkshop(workshops.grandchild, { dbPath, parentWorkshopId: main.workshopId })
     expect(readLineageSnapshot(dbPath).byPath.get(workshops.main.path)?.childWorkshopCount).toBe(2)
+  })
+})
+
+describe("linked worktrees", () => {
+  test("tells a Workshop worktree from the repository's main checkout", () => {
+    const { root, repo, workshops } = fixture()
+    expect(isLinkedWorktreeSync(workshops.child.path)).toBe(true)
+    expect(isLinkedWorktreeSync(repo)).toBe(false)
+    // The main checkout stays one whatever branch it is on, and from any directory inside it.
+    git(repo, "switch", "-q", "-c", "feature")
+    mkdirSync(join(repo, "nested"))
+    mkdirSync(join(workshops.child.path, "nested"))
+    expect(isLinkedWorktreeSync(join(repo, "nested"))).toBe(false)
+    expect(isLinkedWorktreeSync(join(workshops.child.path, "nested"))).toBe(true)
+    expect(isLinkedWorktreeSync(root)).toBe(false)
+    expect(isLinkedWorktreeSync(join(root, "missing"))).toBe(false)
+    expect(isLinkedWorktreeSync("")).toBe(false)
   })
 })
 

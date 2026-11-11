@@ -275,6 +275,24 @@ enum Mode {
     DeleteConfirm,
 }
 
+/// What the one Workshop list (Mode::Jump) shows; Alt plus a letter switches, so plain letters stay the query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    /// Alt-F: every target, as a tree by lineage.
+    Flat,
+    /// Alt-I: only the Workshops that need the operator, the freshest first.
+    NeedsMe,
+    /// Alt-E: the same rows, the longest waiting (eldest) first.
+    Eldest,
+}
+
+impl View {
+    /// One of the two sorted lists of Workshops that need the operator.
+    fn waiting(self) -> bool {
+        self != View::Flat
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum DeleteKind {
@@ -410,8 +428,8 @@ struct App {
     repository_identities: HashMap<String, String>,
     /// Repository mode for a scratch Workshop (Alt-N): choosing a repository creates it at once.
     scratch: bool,
-    /// Jump mode shows only the Workshops that need the operator (Alt-I), flat and most pressing first.
-    needs_me: bool,
+    /// What Jump mode lists: everything (Alt-F), or the Workshops that need the operator (Alt-I, Alt-E).
+    view: View,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -527,9 +545,10 @@ fn aggregate(states: impl Iterator<Item = ClankerState>) -> ClankerState {
     .unwrap_or(ClankerState::Unknown)
 }
 
-/// The Alt-I sort groups: clankers waiting on the operator, then finished but unseen, then failed or crashed, then
-/// Workshops whose label says it is the operator's move, then Workshops to close or look at. A label can sit for
-/// weeks, so it comes after what a clanker is waiting on now. An unknown reason from a newer daemon sorts last.
+/// How pressing a reason is: clankers waiting on the operator, then finished but unseen, then failed or crashed, then
+/// a label that says it is the operator's move, then Workshops to close or look at. It picks the one row of a
+/// Workshop with several sessions and breaks ties of age; age itself orders the list. An unknown reason from a
+/// newer daemon ranks last.
 fn needs_me_rank(reason: &str) -> u8 {
     match reason {
         "asked" | "blocked" => 0,
@@ -540,9 +559,10 @@ fn needs_me_rank(reason: &str) -> u8 {
     }
 }
 
-/// The open Workshops that need the operator, one row each (its most pressing reason), most pressing first and,
-/// within a group, the longest waiting first. A query only filters.
-fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a SessionRow> {
+/// The open Workshops that need the operator, one row each (its most pressing reason). Snoozed and waiting-on rows
+/// come after everything else; otherwise age alone orders them: the freshest reason first (Alt-I), so the long
+/// waiters surface only when nothing is newer, or the longest waiting first (Alt-E). A query only filters.
+fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str, eldest_first: bool) -> Vec<&'a SessionRow> {
     let query = query.trim().to_lowercase();
     let mut chosen: Vec<&SessionRow> = Vec::new();
     for session in sessions {
@@ -563,10 +583,11 @@ fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a Ses
     }
     chosen.sort_by(|left, right| {
         let (left, right) = (left.needs_me.as_ref().unwrap(), right.needs_me.as_ref().unwrap());
+        let age = left.since.total_cmp(&right.since);
         left.deferred()
             .cmp(&right.deferred())
+            .then(if eldest_first { age } else { age.reverse() })
             .then_with(|| needs_me_rank(&left.reason).cmp(&needs_me_rank(&right.reason)))
-            .then_with(|| left.since.total_cmp(&right.since))
     });
     chosen
 }
@@ -589,6 +610,15 @@ fn needs_me_status(reason: &NeedsMe, now_ms: f64) -> String {
         (Some(other), _) => format!("waiting on {other} · {status}"),
         (None, Some(_)) => format!("snoozed · {status}"),
         _ => status,
+    }
+}
+
+/// What keeps a row down the needs-me lists, for the flat list's right column; empty when nothing does.
+fn deferred_status(reason: &NeedsMe) -> String {
+    match (&reason.waiting_on, reason.snoozed_until) {
+        (Some(other), _) => format!("waiting on {other}"),
+        (None, Some(_)) => "snoozed".into(),
+        _ => String::new(),
     }
 }
 
@@ -1230,7 +1260,7 @@ impl App {
             reopen_path: None,
             repository_identities: HashMap::new(),
             scratch: false,
-            needs_me: false,
+            view: View::Flat,
         };
         app.repository_identities = repository_identities(&app.cache_path);
         let snapshot: Snapshot = serde_json::from_slice(
@@ -1290,7 +1320,7 @@ impl App {
             reopen_path: None,
             repository_identities,
             scratch: false,
-            needs_me: false,
+            view: View::Flat,
         }
     }
 
@@ -1360,8 +1390,8 @@ impl App {
     }
 
     fn rebuild(&mut self, selected_key: Option<&str>) {
-        if self.needs_me {
-            self.rows = needs_me_sessions(&self.sessions, &self.query)
+        if self.view.waiting() {
+            self.rows = needs_me_sessions(&self.sessions, &self.query, self.view == View::Eldest)
                 .into_iter()
                 .map(|session| TreeRow {
                     key: target_key(&session.target),
@@ -1818,26 +1848,31 @@ impl App {
         }
     }
 
-    /// Alt-I: the flat list of Workshops that need the operator; leaving it (Alt-K) returns to the full map.
-    fn set_needs_me(&mut self, needs_me: bool) {
+    /// Alt-I, Alt-E, Alt-F: the Workshop list in that view. Between views of the list the query is kept; a sorted
+    /// view starts at its first row, and the flat one stays on the Workshop that was selected.
+    fn set_view(&mut self, view: View) {
+        let within = self.mode == Mode::Jump;
+        let selected = self.selected().filter(|_| within && !view.waiting()).map(|row| target_key(&row.session.target));
         self.mode = Mode::Jump;
-        self.needs_me = needs_me;
+        self.view = view;
         self.scratch = false;
-        self.query.clear();
+        if !within {
+            self.query.clear();
+        }
         self.unfiltered_selection = None;
         self.error.clear();
         self.clear_action_mode();
-        self.rebuild(None);
-        if needs_me {
+        self.rebuild(selected.as_deref());
+        if view.waiting() {
             self.selected = 0;
         }
     }
 
     fn enter_repository_mode(&mut self) {
         self.scratch = false;
-        if self.needs_me {
-            // Esc from the repository step lands on the full map, not the flat list.
-            self.needs_me = false;
+        if self.view.waiting() {
+            // Esc from the repository step lands on the full map, not a needs-me list.
+            self.view = View::Flat;
             self.rebuild(None);
         }
         if let Ok(activity_dir) = activity_dir() {
@@ -1934,7 +1969,7 @@ impl TreeRow {
     }
 }
 
-/// Enter on an Alt-I row lands on the clanker that needs attention, when it is still on screen.
+/// Enter on a needs-me row (Alt-I, Alt-E) lands on the clanker that needs attention, when it is still on screen.
 fn needs_me_target(session: &SessionRow) -> Target {
     session
         .needs_me
@@ -2633,20 +2668,20 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_flat_picker(frame, app, &areas);
         return;
     }
-    if app.needs_me {
+    if app.view.waiting() {
         draw_needs_me(frame, app, &areas);
         return;
     }
     frame.render_widget(
         Line::from(vec![
             Span::styled(
-                "Clankerhouse · Jump",
+                "Clankerhouse · Flat",
                 Style::default()
                     .fg(Color::LightCyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Alt-K branches · Alt-I needs me · Alt-R/A/L/D actions · ←/→ expand · Alt-. done · Enter open · Esc close",
+                "  Alt-I needs me · Alt-E eldest · Alt-K branches · Alt-R/A/L/D/S actions · ←/→ expand · Alt-. done · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2739,7 +2774,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 ""
             };
-            let right = [summary.as_str(), titled_branch, meta.as_str()]
+            // Snoozed, or waiting on another Workshop: said here too, where Alt-S works as in the needs-me views.
+            let deferred = row.session.needs_me.as_ref().filter(|_| row.detail.is_none()).map(deferred_status).unwrap_or_default();
+            let right = [summary.as_str(), deferred.as_str(), titled_branch, meta.as_str()]
                 .into_iter()
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
@@ -2820,12 +2857,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(footer).style(Style::default().fg(footer_color)),
         areas[2],
     );
+    let (needing, open) = needs_me_counts(&app.sessions);
     frame.render_widget(
         Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::LightCyan)),
             Span::raw(&app.query),
             Span::raw("_"),
-            Span::raw(format!("  {} targets", app.rows.iter().filter(|row| row.done_group.is_none()).count())),
+            Span::raw(format!("  {} targets · {needing} need you · {open} open", app.rows.iter().filter(|row| row.done_group.is_none()).count())),
         ]),
         areas[3],
     );
@@ -2841,17 +2879,19 @@ fn needs_me_glyph(reason: &str) -> (&'static str, Color) {
     }
 }
 
-/// `N need you · M open`: open means a live session, and a Workshop counts once (needsMeCounts in src/needs-me.ts).
+/// `N need you · M open`: open means a live session, a Workshop counts once, and a snoozed or waiting-on one does
+/// not count as needing you (needsMeCounts in src/needs-me.ts).
 fn needs_me_counts(sessions: &[SessionRow]) -> (usize, usize) {
     let open = sessions
         .iter()
         .filter(|session| matches!(session.target, Target::Session { .. }))
         .map(|session| session.workshop_id.clone().unwrap_or_else(|| session.path.clone()))
         .collect::<HashSet<_>>();
-    (needs_me_sessions(sessions, "").len(), open.len())
+    let needing = needs_me_sessions(sessions, "", false).into_iter().filter(|session| session.needs_me.as_ref().is_some_and(|reason| !reason.deferred())).count();
+    (needing, open.len())
 }
 
-/// One Alt-I row: the Alt-K row's name, project and label tags, why it is listed on the right, and the clanker's
+/// One needs-me row (Alt-I, Alt-E): the flat row's name, project and label tags, why it is listed on the right, and the clanker's
 /// own words on a second line when there are any.
 fn needs_me_item(row: &TreeRow, width: usize, now_ms: f64, current: bool) -> ListItem<'static> {
     let session = &row.session;
@@ -2895,8 +2935,18 @@ fn needs_me_height(row: &TreeRow) -> usize {
 fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(
         Line::from(vec![
-            Span::styled("Clankerhouse · Needs me", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
-            Span::styled("  Enter jump · Alt-S snooze · Alt-D done · Alt-K everything · Esc close", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if app.view == View::Eldest { "Clankerhouse · Waiting longest" } else { "Clankerhouse · Needs me" },
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if app.view == View::Eldest {
+                    "  eldest first · Alt-I freshest · Alt-F flat · Alt-S snooze · Alt-D done · Enter jump · Esc close"
+                } else {
+                    "  freshest first · Alt-E eldest · Alt-F flat · Alt-S snooze · Alt-D done · Enter jump · Esc close"
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         areas[0],
     );
@@ -2908,7 +2958,7 @@ fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         let message = if app.query.is_empty() { "Caught up: nothing needs you." } else { "No matches" };
         frame.render_widget(Paragraph::new(format!(" {message}")).style(Style::default().fg(Color::Gray)).block(block), list_area);
     } else {
-        // Rows grow upward from the prompt, as in Alt-K; keep the selected one in view whatever the rows' heights.
+        // Rows grow upward from the prompt, as in the flat list; keep the selected one in view whatever the rows' heights.
         let available = list_area.height.saturating_sub(2) as usize;
         let selected = app.selected.min(app.rows.len() - 1);
         let mut start = 0;
@@ -3072,14 +3122,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         return None;
     }
 
-    // Alt-I from any mode: the Workshops that need the operator. Alt-K there returns to the full map.
-    if key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::ALT) {
-        app.set_needs_me(true);
-        return None;
-    }
-    if app.needs_me && app.mode == Mode::Jump && key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::ALT) {
-        app.set_needs_me(false);
-        return None;
+    // The list's views, from any mode: Alt-I the Workshops that need the operator, freshest first; Alt-E the same
+    // rows, eldest first; Alt-F everything. Alt-K in a needs-me view is Alt-F, as it was before the views merged.
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        let view = match key.code {
+            KeyCode::Char('i') => Some(View::NeedsMe),
+            KeyCode::Char('e') => Some(View::Eldest),
+            KeyCode::Char('f') => Some(View::Flat),
+            KeyCode::Char('k') if app.view.waiting() && app.mode == Mode::Jump => Some(View::Flat),
+            _ => None,
+        };
+        if let Some(view) = view {
+            app.set_view(view);
+            return None;
+        }
     }
     // Alt-B as outside the picker: the branch flow's repository step. Alt-K does the same.
     if matches!(key.code, KeyCode::Char('k') | KeyCode::Char('b')) && key.modifiers.contains(KeyModifiers::ALT) {
@@ -3198,8 +3254,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     }
 
     if key.modifiers.contains(KeyModifiers::ALT) {
-        // The flat list has no done fold to toggle.
-        if key.code == KeyCode::Char('.') && app.needs_me {
+        // A needs-me list has no done fold to toggle.
+        if key.code == KeyCode::Char('.') && app.view.waiting() {
             return None;
         }
         if key.code == KeyCode::Char('.') {
@@ -3212,13 +3268,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         if app.selected().is_some_and(|row| row.done_group.is_some()) {
             return None;
         }
-        // Alt-S in Needs Me: down the list for a day, or until something new; again to take it back.
-        if key.code == KeyCode::Char('s') && app.needs_me {
+        // Alt-S, in every view: down the needs-me lists for a day, or until something new; again to take it back.
+        if key.code == KeyCode::Char('s') {
             let row = app.selected()?;
-            let reason = row.session.needs_me.as_ref()?;
-            if row.session.path.is_empty() {
+            let Some(reason) = row.session.needs_me.as_ref().filter(|_| row.detail.is_none() && !row.session.path.is_empty()) else {
+                app.error = "Nothing to snooze: this row does not need you".into();
                 return None;
-            }
+            };
             let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0.0, |elapsed| elapsed.as_millis() as f64);
             return Some(AppCommand::Submit(MutationIntent::Label {
                 path: row.session.path.clone(),
@@ -3303,9 +3359,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         }
     }
 
-    if app.needs_me {
+    if app.view.waiting() {
         match key.code {
-            // No lineage or details to unfold in the flat list.
+            // No lineage or details to unfold in a needs-me list.
             KeyCode::Left | KeyCode::Right => return None,
             KeyCode::Enter => {
                 let row = app.selected()?;
@@ -3853,7 +3909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("scratch") {
         app.enter_scratch_mode();
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("needs-me") {
-        app.set_needs_me(true);
+        app.set_view(View::NeedsMe);
     }
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let subscription_path = socket_path.clone();
@@ -4589,15 +4645,18 @@ mod tests {
     ]"#;
 
     #[test]
-    fn needs_me_lists_waiting_clankers_first_then_unseen_then_failures_then_the_rest_oldest_first() {
+    fn needs_me_lists_the_freshest_first_and_the_eldest_view_reverses_it() {
         let sessions: Vec<SessionRow> = serde_json::from_str(NEEDS_ME_SESSIONS).unwrap();
-        let names = |query: &str| needs_me_sessions(&sessions, query).iter().map(|session| session.name.clone()).collect::<Vec<_>>();
-        // One row per Workshop (its most pressing reason); working and sessionless rows are not listed; a label
-        // comes after what clankers wait on now, and a reason this picker does not know sorts last.
-        assert_eq!(names(""), ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"]);
+        let names = |query: &str, eldest: bool| needs_me_sessions(&sessions, query, eldest).iter().map(|session| session.name.clone()).collect::<Vec<_>>();
+        // One row per Workshop (its most pressing reason: crashed, not its twin's ready); working and sessionless
+        // rows are not listed. Age alone orders them, whatever the reason; of the two as old as each other, the
+        // label comes before the reason this picker does not know.
+        let freshest = ["asked late", "finished", "blocked early", "stale", "crashed", "labelled", "newer reason"];
+        assert_eq!(names("", false), freshest);
+        assert_eq!(names("", true), ["labelled", "newer reason", "crashed", "stale", "blocked early", "finished", "asked late"]);
         // Typing filters without reordering.
-        assert_eq!(names("e"), ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"].into_iter().filter(|name| name.contains('e')).collect::<Vec<_>>());
-        assert_eq!(names("late"), ["asked late"]);
+        assert_eq!(names("e", false), freshest.into_iter().filter(|name| name.contains('e')).collect::<Vec<_>>());
+        assert_eq!(names("late", true), ["asked late"]);
         assert_eq!(needs_me_counts(&sessions), (7, 8));
     }
 
@@ -4616,16 +4675,44 @@ mod tests {
     }
 
     #[test]
-    fn alt_i_shows_what_needs_me_and_alt_k_returns_to_everything() {
+    fn alt_i_alt_e_and_alt_f_switch_the_view_of_the_one_list() {
         let mut app = app_with_sessions(NEEDS_ME_SESSIONS);
         let everything = app.rows.len();
+        let names = |app: &App| app.rows.iter().map(|row| row.session.name.clone()).collect::<Vec<_>>();
         assert_eq!(handle_key(&mut app, alt('i')), None);
-        assert!(app.needs_me);
-        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(),
-            ["blocked early", "asked late", "finished", "crashed", "labelled", "newer reason", "stale"]);
+        assert_eq!(app.view, View::NeedsMe);
+        assert_eq!(names(&app), ["asked late", "finished", "blocked early", "stale", "crashed", "labelled", "newer reason"]);
         assert!(app.rows.iter().all(|row| row.depth == 0 && row.detail.is_none()));
 
+        // Alt-E: the same rows, the longest waiting first, starting at the first row; the query carries over.
+        app.selected = 3;
+        assert_eq!(handle_key(&mut app, alt('e')), None);
+        assert_eq!((app.view, app.selected), (View::Eldest, 0));
+        assert_eq!(names(&app), ["labelled", "newer reason", "crashed", "stale", "blocked early", "finished", "asked late"]);
+        for character in "late".chars() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(names(&app), ["asked late"]);
+        assert_eq!(handle_key(&mut app, alt('i')), None);
+        assert_eq!((app.query.as_str(), names(&app)), ("late", vec!["asked late".to_string()]));
+        // Alt-F: everything again, on the Workshop that was selected, the query still filtering.
+        assert_eq!(handle_key(&mut app, alt('f')), None);
+        assert_eq!((app.mode, app.view, app.query.as_str()), (Mode::Jump, View::Flat, "late"));
+        assert_eq!(app.selected().map(|row| row.session.name.as_str()), Some("asked late"));
+        app.update_query(String::new());
+        assert_eq!(app.rows.len(), everything);
+        // Plain letters are always the query, never a view switch.
+        for character in ['i', 'e', 'f'] {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!((app.view, app.query.as_str()), (View::Flat, "ief"));
+        app.update_query(String::new());
+        assert_eq!(handle_key(&mut app, alt('e')), None);
+        assert_eq!(app.selected().map(|row| row.session.name.as_str()), Some("labelled"));
+        assert_eq!(handle_key(&mut app, alt('i')), None);
+
         // Enter lands on the clanker that needs attention.
+        app.selected = app.rows.iter().position(|row| row.session.name == "blocked early").unwrap();
         assert_eq!(
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(AppCommand::Submit(MutationIntent::Open {
@@ -4638,18 +4725,25 @@ mod tests {
 
         // A snapshot refresh keeps the view, and an empty list says caught up rather than vanishing.
         app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str("[]").unwrap() }, false).unwrap();
-        assert!(app.needs_me && app.rows.is_empty());
+        assert!(app.view == View::NeedsMe && app.rows.is_empty());
 
         app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str(NEEDS_ME_SESSIONS).unwrap() }, false).unwrap();
+        // Alt-K in a needs-me view is Alt-F; in the flat list it is the branch flow.
         assert_eq!(handle_key(&mut app, alt('k')), None);
-        assert_eq!((app.mode, app.needs_me, app.rows.len()), (Mode::Jump, false, everything));
+        assert_eq!((app.mode, app.view, app.rows.len()), (Mode::Jump, View::Flat, everything));
+        assert_eq!(handle_key(&mut app, alt('k')), None);
+        assert_eq!((app.mode, app.view), (Mode::Repository, View::Flat));
 
-        // Alt-I from the repository step too; Alt-B from the view leaves it.
-        app.enter_repository_mode();
-        assert_eq!(handle_key(&mut app, alt('i')), None);
-        assert_eq!((app.mode, app.needs_me), (Mode::Jump, true));
+        // The views from the repository step too; Alt-B from a view leaves it.
+        for (key, view) in [('i', View::NeedsMe), ('e', View::Eldest), ('f', View::Flat)] {
+            app.enter_repository_mode();
+            app.query = "typed".into();
+            assert_eq!(handle_key(&mut app, alt(key)), None);
+            assert_eq!((app.mode, app.view, app.query.as_str()), (Mode::Jump, view, ""));
+        }
+        assert_eq!(handle_key(&mut app, alt('e')), None);
         assert_eq!(handle_key(&mut app, alt('b')), None);
-        assert_eq!((app.mode, app.needs_me), (Mode::Repository, false));
+        assert_eq!((app.mode, app.view), (Mode::Repository, View::Flat));
     }
 
     #[test]
@@ -4660,9 +4754,13 @@ mod tests {
             {"name":"stale","path":"/stale","workshopId":"w3","target":{"type":"session","session":"stale"},"needsMe":{"reason":"stale","since":3000}},
             {"name":"asked","path":"/asked","workshopId":"w4","target":{"type":"session","session":"asked"},"needsMe":{"reason":"asked","since":4000}}
         ]"#);
+        // Snoozed and waiting rows do not count as needing you, and come last in both sorted views.
+        assert_eq!(needs_me_counts(&app.sessions), (2, 4));
+        assert_eq!(handle_key(&mut app, alt('e')), None);
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(), ["stale", "asked", "snoozed", "waiting"]);
         assert_eq!(handle_key(&mut app, alt('i')), None);
         let names = app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>();
-        assert_eq!(names, ["asked", "stale", "snoozed", "waiting"]);
+        assert_eq!(names, ["asked", "stale", "waiting", "snoozed"]);
         let status = |name: &str| needs_me_status(app.rows.iter().find(|row| row.session.name == name).unwrap().session.needs_me.as_ref().unwrap(), 4000.0);
         assert_eq!(status("waiting"), "waiting on pr one · asked 2s ago");
         assert_eq!(status("snoozed"), "snoozed · asked 3s ago");
@@ -4679,6 +4777,48 @@ mod tests {
             handle_key(&mut app, alt('s')),
             Some(AppCommand::Submit(MutationIntent::Label { path: "/snoozed".into(), key: "_snooze".into(), value: None }))
         );
+
+        // The flat list snoozes too and says what keeps a row down; a row that does not need you has no snooze.
+        assert_eq!(handle_key(&mut app, alt('f')), None);
+        assert_eq!(app.selected().map(|row| row.session.name.as_str()), Some("snoozed"));
+        assert_eq!(
+            handle_key(&mut app, alt('s')),
+            Some(AppCommand::Submit(MutationIntent::Label { path: "/snoozed".into(), key: "_snooze".into(), value: None }))
+        );
+        let reason = |name: &str| app.sessions.iter().find(|session| session.name == name).unwrap().needs_me.clone().unwrap();
+        assert_eq!((deferred_status(&reason("snoozed")), deferred_status(&reason("waiting")), deferred_status(&reason("asked"))), ("snoozed".into(), "waiting on pr one".into(), String::new()));
+        let mut app = app_with_sessions(r#"[{"name":"working","path":"/working","workshopId":"w0","target":{"type":"session","session":"working"}}]"#);
+        assert_eq!(handle_key(&mut app, alt('s')), None);
+        assert_eq!(app.error, "Nothing to snooze: this row does not need you");
+    }
+
+    #[test]
+    fn every_view_draws_its_name_the_other_views_keys_and_the_need_you_count() {
+        let mut app = app_with_sessions(r#"[
+            {"name":"snoozed","path":"/snoozed","workshopId":"w1","target":{"type":"session","session":"snoozed"},"needsMe":{"reason":"asked","since":1000,"snoozedUntil":9000}},
+            {"name":"waiting","path":"/waiting","workshopId":"w2","target":{"type":"session","session":"waiting"},"needsMe":{"reason":"asked","since":2000,"waitingOn":"pr one"}},
+            {"name":"asked","path":"/asked","workshopId":"w4","target":{"type":"session","session":"asked"},"needsMe":{"reason":"asked","since":4000}}
+        ]"#);
+        let text = |app: &mut App| {
+            let buffer = rendered_view(app);
+            buffer.content().chunks(100).map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        let flat = text(&mut app);
+        for expected in ["Clankerhouse · Flat", "Alt-I needs me · Alt-E eldest", "3 targets · 1 need you · 3 open", "waiting on pr one"] {
+            assert!(flat.contains(expected), "{expected}\n{flat}");
+        }
+        // The snoozed row says so beside its name.
+        assert!(flat.lines().any(|line| line.matches("snoozed").count() == 2), "{flat}");
+        handle_key(&mut app, alt('i'));
+        let needs_me = text(&mut app);
+        for expected in ["Clankerhouse · Needs me", "freshest first · Alt-E eldest · Alt-F flat · Alt-S snooze", "1 need you · 3 open", "waiting on pr one · asked"] {
+            assert!(needs_me.contains(expected), "{expected}\n{needs_me}");
+        }
+        handle_key(&mut app, alt('e'));
+        let eldest = text(&mut app);
+        for expected in ["Clankerhouse · Waiting longest", "eldest first · Alt-I freshest · Alt-F flat", "1 need you · 3 open"] {
+            assert!(eldest.contains(expected), "{expected}\n{eldest}");
+        }
     }
 
     #[test]

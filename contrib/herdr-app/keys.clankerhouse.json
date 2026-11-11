@@ -39,6 +39,8 @@
     "alt-shift-l": "terminal",
     "alt-[": "terminal",
     "alt-]": "terminal",
-    "alt-s": "terminal"
+    "alt-s": "terminal",
+    "alt-e": "terminal",
+    "alt-f": "terminal"
   }
 }

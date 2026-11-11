@@ -97,7 +97,7 @@ flock -u 9
 exec 9>&-
 
 [[ ${1:-} == "--ensure-server" ]] && exit 0
-# Alt-I opens at the Workshops that need the operator.
+# Alt-I opens the list in its needs-me view; inside the picker Alt-I, Alt-E and Alt-F switch views.
 if [[ ${1:-} == "--needs-me" ]]; then
     export CLANKERHOUSE_MODE=needs-me
     shift

@@ -1,5 +1,5 @@
 /**
- * Needs Me: why a Workshop waits on the operator, decided once in the daemon's snapshot so the picker's Alt-I view,
+ * Needs Me: why a Workshop waits on the operator, decided once in the daemon's snapshot so the picker's needs-me views (Alt-I, Alt-E),
  * the Herdr app's count and any later reader agree. Pure: the daemon gathers the facts (Reports, the ledger, label
  * times, the clanker's last words) and this decides.
  *
@@ -9,7 +9,7 @@ import type { DetailRow, SessionRow } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
 import { DONE_LABEL } from "./labels"
 
-/** Most pressing first, which decides a Workshop's one reason. The picker groups them (native-client needs_me_rank). */
+/** Most pressing first, which decides a Workshop's one reason. The picker sorts by age and breaks ties by this (native-client needs_me_rank). */
 export const NEEDS_ME_REASONS = ["asked", "blocked", "finished", "failed", "crashed", "your-move", "ready", "stale"] as const
 export type NeedsMeReason = typeof NEEDS_ME_REASONS[number]
 

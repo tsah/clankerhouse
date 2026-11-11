@@ -7,7 +7,7 @@
 #   clankerhouse-hc --repo          open at repository selection (Herdr's Alt-B)
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
 #   clankerhouse-hc --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
-#   clankerhouse-hc --needs-me      open at the Workshops that need the operator (Herdr's Alt-I)
+#   clankerhouse-hc --needs-me      open the list in its needs-me view (Herdr's Alt-I); inside, Alt-I/E/F switch views
 #   clankerhouse-hc --popup [--focus T] [--repo|--delete|--scratch|--needs-me]  the picker in a Herdr app popup over terminal T: exits on a choice, leaving it for the mod
 #   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
 #   clankerhouse-hc --session-row DIR  print the picker's row (title, project, branch, labels) for the session holding DIR,

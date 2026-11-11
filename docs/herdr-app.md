@@ -73,11 +73,12 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 
 | Key | TUI | App |
 |---|---|---|
-| Alt-K | Clankerhouse jump | Same, as a popup |
+| Alt-K | Clankerhouse: the one Workshop list, flat | Same, as a popup |
 | Alt-B | Open or create branch | Same, as a popup |
 | Alt-D | Delete current session | Same, as a popup; in the picker, Done or delete the selected row |
 | Alt-N | Scratch workshop | Same, as a popup |
-| Alt-I | Needs me: the Workshops waiting on you | Same, as a popup |
+| Alt-I | The same list in its needs-me view: the Workshops waiting on you, freshest first | Same, as a popup |
+| Alt-E, Alt-F | In the open list only: eldest first, and flat | Pass-through to the popup |
 | Alt-O | Go to | App's picker (`mod.open:picker`) |
 | Alt-G | Open current PR | `gh` on puffin, opened in the laptop's browser |
 | Alt-Enter | Split, new pane below | `pane.split:down` |
@@ -116,7 +117,8 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 | Alt-Up / Alt-Down | `agent.prev` / `agent.next` | `space.prev` / `space.next` |
 | Alt-K, Alt-J | `pane.go` | Popup; pass-through |
 | Alt-H, Alt-L, Alt-Shift-H/J/K/L, Alt-[, Alt-] | Pane and tab moves | Pass-through, as in the TUI |
-| Alt-S | Snooze the selected row in Alt-I | Pass-through to the popup |
+| Alt-S | Snooze the selected row in the list | Pass-through to the popup |
+| Alt-E, Alt-F | The list's eldest-first and flat views | Pass-through to the popup |
 
 The app's Ctrl-Shift defaults stay, so `ctrl-shift-p` still opens the palette. Mod commands such as `clankerhouse.jump` are not
 listed in the palette: `commands()` is documented as leaving them out, and that was not checked in the palette itself.
@@ -139,7 +141,7 @@ listed in the palette: `commands()` is documented as leaving them out, and that 
 - **Adoption turns on hc keep.** If a holder is lost, a clanker's terminal becomes a shell at the same address. The harness is not
   re-run, and its claims stay on the terminal.
 - **Status.** With no sidebar, you learn of agents through toasts and sounds, and in the switcher. The top bar's right end shows
-  `N need you · M open`, the count of Alt-I's list, refreshed with the focused session's row (on focus and every 15 seconds).
+  `N need you · M open`, the count of the list's needs-me views (Alt-I, Alt-E), refreshed with the focused session's row (on focus and every 15 seconds).
 - **A popup left open when the app dies** stays on puffin as a terminal labelled `ch_popup`. The next popup removes it, and
   Clankerhouse never shows it.
 - **Esc in the switcher goes back a level first.** Press it again to close, as in the TUI.

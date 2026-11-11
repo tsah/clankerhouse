@@ -73,7 +73,9 @@ matches by concatenating unrelated fields.
 - `Right`/`Enter` on a `✓ N done` row: show that group in place; `Left` folds it again
 - `Alt-.`: show or fold every done Workshop
 - `Enter`: open the exact workshop, clanker, window, worktree, or directory
-- `Alt-K`: open the repository/branch flow when already inside Clankerhouse
+- `Alt-K`: open the repository/branch flow when already inside Clankerhouse (from a needs-me view, back to the flat list first)
+- `Alt-I` / `Alt-E` / `Alt-F`: the list's views: Workshops that need you freshest first, the same eldest first, and everything flat
+- `Alt-S`: snooze the selected Workshop's need
 - `Alt-B`: open directly at repository selection
 - `Alt-R`: rename a multiplexer session without changing workshop identity
 - `Alt-A`: attach a workshop to another valid parent

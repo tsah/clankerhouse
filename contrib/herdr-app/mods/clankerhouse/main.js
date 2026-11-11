@@ -14,7 +14,8 @@ import { closeOverlay, exec, focused, hc, notify, openOverlay, panes, props, nex
 
 const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"], needs_me: ["--needs-me"] };
 // The layout's Alt keys win over the popup's terminal, so pressed again while a popup is open they are passed into it:
-// the picker has its own Alt-D (done or delete the selected row) and Alt-K.
+// the picker has its own Alt-D (done or delete the selected row), Alt-K and Alt-I (its needs-me view). Its other view
+// keys, Alt-E and Alt-F, are no layout keys: keys.clankerhouse.json hands them to the terminal, as it does Alt-S.
 const POPUP_KEYS = { jump: "alt+k", repo: "alt+b", delete: "alt+d", scratch: "alt+n", needs_me: "alt+i" };
 const HEARTBEAT_MS = 60000; // HC_FOCUS_STALE_MS in src/multiplexer/hc.ts allows three of these.
 const TICK_MS = 150;
@@ -24,7 +25,7 @@ const POPUP_START_MS = 20000; // A popup with no terminal after this never start
 const PANE_WAIT_TICKS = 40; // A new session's pane appears once the app has seen and adopted its terminal.
 
 // The picker's tag colours (native-client/src/main.rs: PROJECT_COLORS, LABEL_COLORS, name_hash), so a project or
-// label looks the same in the top bar as in Alt-K.
+// label looks the same in the top bar as in the picker.
 const PROJECT_COLORS = ["#5eb4aa", "#a78bfa", "#e882b4", "#d6bc68", "#67c8e6", "#a0be6e", "#be96c8", "#c8a082"];
 const LABEL_COLORS = ["#3894a0", "#806cc8", "#ba608c", "#aa8c3c", "#6e9646", "#a8704e"];
 const DONE_GRAY = "#6c7280";
@@ -232,7 +233,7 @@ export default class Clankerhouse extends View {
     return this.branches.get(pane.cwd);
   }
 
-  // The Alt-K row (title, project, labels) of the focused pane's session, refreshed every ROW_REFRESH_MS.
+  // The picker's row (title, project, labels) of the focused pane's session, refreshed every ROW_REFRESH_MS.
   sessionRow(pane, cx) {
     const { machine, launcher } = props() ?? {};
     if (!pane?.cwd || !local(machine, pane.terminal)) return null;
@@ -306,7 +307,7 @@ export default class Clankerhouse extends View {
         .when(Boolean(row?.project && row.project !== name), (el) => el.child(tag(row.project, projectColor(row.project))))
         .children((row?.labels ?? []).map((text) => tag(text, labelColor(text)))))
       .when(Boolean(branch), (el) => el.child(label("git-branch", branch)))
-      // The Alt-I view's count: Workshops waiting on the operator, of all open ones.
+      // The picker's count: Workshops waiting on the operator (its Alt-I and Alt-E views), of all open ones.
       .when(Boolean(this.counts), (el) => el.child(div().flex_none()
         .text_color(this.counts.needsMe > 0 ? t.foreground : t.muted)
         .child(`${this.counts.needsMe} need you · ${this.counts.open} open`)));

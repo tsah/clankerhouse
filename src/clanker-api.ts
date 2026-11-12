@@ -160,6 +160,9 @@ const readReportSync = (pane: string): ClankerReport | undefined => {
   catch { return undefined }
 }
 
+/** The lifecycle report the pane's harness hook last wrote, as raw fields; undefined when there is none. */
+export const paneReport = (pane: string): Record<string, unknown> | undefined => readReportSync(pane) as Record<string, unknown> | undefined
+
 const socketIsOnline = (path: string) => {
   if (!path) return false
   try {

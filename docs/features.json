@@ -408,7 +408,7 @@
     },
     {
       "id": "needs-me",
-      "title": "The one Workshop list's needs-me views (Alt-I freshest first, Alt-E eldest first, Alt-F flat) and the Herdr app's need-you count, decided once in the daemon's snapshot, and `clankers needs-me [--json]` printing the same list without a terminal",
+      "title": "The one Workshop list's needs-me views (Alt-I freshest first, Alt-E eldest first, Alt-F flat) and the Herdr app's need-you count, decided once in the daemon's snapshot, and `clankers needs-me [--json]` printing the same list without a terminal; `clankers settled [--json]` lists every session with nothing in progress with the full last replies from the harness log",
       "core": true,
       "unit": [
         "src/needs-me.test.ts",
@@ -416,7 +416,9 @@
         "src/server/observations.test.ts",
         "src/herdr-delete-launcher.test.ts",
         "src/herdr-app-config.test.ts",
-        "native-client/src/main.rs"
+        "native-client/src/main.rs",
+        "src/settled.test.ts",
+        "src/last-messages.test.ts"
       ],
       "standalone": [
         "scripts/qa-daemon",
@@ -434,7 +436,8 @@
         "In the Herdr app, confirm the top bar's `N need you · M open` matches the view's own count",
         "Press Alt-S on a row; confirm it moves last as `snoozed ·` in both needs-me views, leaves the count, and comes back up on a new question or after a day; Alt-S again takes it back; in the flat list confirm Alt-S does the same and the row says `snoozed`",
         "Label a Workshop `waits-on=<branch of another>`; confirm `waiting on <title> ·` at the bottom until the other is marked done",
-        "Without a terminal (from a clanker's shell) run `clankers needs-me --json`, then with `--eldest`; confirm the rows and order match Alt-I and Alt-E, deferred rows last, and that `clankerhouse-hc --help` and `clankerhouse-hc --needs-me --json` work there too"
+        "Without a terminal (from a clanker's shell) run `clankers needs-me --json`, then with `--eldest`; confirm the rows and order match Alt-I and Alt-E, deferred rows last, and that `clankerhouse-hc --help` and `clankerhouse-hc --needs-me --json` work there too",
+        "Without a terminal run `clankers settled --json`; confirm no row has a working clanker, rows run earliest created first, and that a session compacted while idle (pane showing only chrome) still carries its real last reply in `lastMessages`; page with `--limit 1` and `--after` the printed `next`"
       ]
     },
     {

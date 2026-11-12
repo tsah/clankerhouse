@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, fstatSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { ClankerApiError, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
+import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
 import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
@@ -24,6 +24,8 @@ import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
 import { needsMeCounts, needsMeEntry, needsMeList, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
+import { SETTLED_ORDERS, orderSettled, settledEntry, settledKey, settledSessions, type SettledOrder } from "./settled"
+import { lastMessages } from "./last-messages"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
 import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
@@ -425,6 +427,7 @@ export const usage = `Usage:
   clankers workshop reparent [ID|BRANCH|PATH] --parent ID|BRANCH|PATH [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
+  clankers settled [--json] [--order created|freshest|eldest|flat] [--messages N] [--limit N] [--after KEY | --key KEY]   every open session with nothing in progress, earliest created first, with the full final replies of its last turns (default 2) from the harness's own log; one by one with --limit 1 and --after NEXT
   clankers needs-me [--json] [--eldest | --flat]   the picker's needs-me list (Alt-I freshest first; Alt-E with --eldest; the flat list with --flat), no terminal needed
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
@@ -618,6 +621,68 @@ const runNeedsMeCommand = async (parsed: ParsedArgs) => {
   }
 }
 
+const settledUsage = "Usage: clankers settled [--json] [--order created|freshest|eldest|flat] [--messages N] [--limit N] [--after KEY | --key KEY]"
+
+const positiveInteger = (value: string | undefined, flag: string, fallback: number) => {
+  if (value === undefined) return fallback
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < 0) throw new Error(`${flag} takes a whole number\n${settledUsage}`)
+  return number
+}
+
+/**
+ * Every open session with nothing in progress, each with the final replies of its main clanker's last turns read from
+ * the harness's own log (src/last-messages.ts), for a reader that decides what needs the operator. Read-only, needs no
+ * terminal, never starts the daemon. One by one: --limit 1, then --after the `next` key it printed.
+ */
+const runSettledCommand = async (parsed: ParsedArgs) => {
+  const json = parsed.has("--json")
+  if (parsed.has("--help") || parsed.has("-h")) return console.log(settledUsage)
+  const orderFlag = parsed.take("--order") ?? "created"
+  if (!SETTLED_ORDERS.includes(orderFlag as SettledOrder)) throw new Error(`--order takes ${SETTLED_ORDERS.join(", ")}\n${settledUsage}`)
+  const order = orderFlag as SettledOrder
+  const count = positiveInteger(parsed.take("--messages"), "--messages", 2)
+  const limit = parsed.take("--limit")
+  const after = parsed.take("--after")
+  const key = parsed.take("--key")
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${settledUsage}`)
+  if (after && key) throw new Error(`--after and --key are mutually exclusive\n${settledUsage}`)
+  if (!existsSync(daemonSocketPath)) throw new Error(`Clankerhouse daemon is not running (no ${daemonSocketPath}); start it with clankerhouse-hc --ensure-server`)
+  const snapshot = await getSnapshot<SessionRow>(daemonSocketPath, { timeoutMs: 5000 })
+  let labels = new Map<string, Readonly<Record<string, string>>>()
+  let created = new Map<string, number>()
+  try { labels = allWorkshopLabels() } catch {}
+  try { created = allWorkshopCreatedAt() } catch {}
+  const createdAt = (workshopId: string) => created.get(workshopId)
+  const ordered = orderSettled(settledSessions(snapshot.sessions), order, createdAt)
+  const keys = ordered.map(settledKey)
+  let start = 0
+  if (after || key) {
+    const index = keys.indexOf((after ?? key)!)
+    if (index < 0) throw new Error(`${after ? "--after" : "--key"} ${after ?? key}: no such session with nothing in progress (it may be working again or closed)`)
+    start = after ? index + 1 : index
+  }
+  const end = key ? start + 1 : Math.min(ordered.length, start + positiveInteger(limit, "--limit", ordered.length))
+  const dependencies = {
+    report: paneReport,
+    lastMessages: (harness: string | undefined, report: Record<string, unknown> | undefined) => lastMessages(harness, report, count),
+    labels: (workshopId: string) => ({ ...visibleLabels(labels.get(workshopId)) }),
+    createdAt,
+  }
+  const rows = ordered.slice(start, end).map((row, index) => settledEntry(row, start + index + 1, dependencies, count > 0))
+  // The cursor for the following page: pass it to --after. Null on the last page.
+  const next = end < ordered.length && !key && end > start ? keys[end - 1]! : null
+  const counts = { ...needsMeCounts(snapshot.sessions), settled: ordered.length }
+  if (json) return console.log(JSON.stringify({ version: 1, order, generatedAt: snapshot.generatedAt, counts, total: ordered.length, next, rows }, null, 2))
+  console.log(`${counts.settled} with nothing in progress · ${counts.needsMe} need you · ${counts.open} open`)
+  for (const row of rows) {
+    const why = row.needsMe ? ` · ${row.needsMe.reason}${row.needsMe.deferred ? " (deferred)" : ""}` : ""
+    console.log(`${String(row.position).padStart(3)}. ${row.title ?? row.name}  ${row.state ?? "no clanker"}${why}  ${row.pane ?? row.session}  [${row.key}]`)
+    for (const message of row.lastMessages) console.log(message.text.split("\n").filter(Boolean).slice(0, 3).map((line) => `     ${line}`).join("\n"))
+  }
+  if (next) console.log(`next: --after ${next}`)
+}
+
 export async function runClankersCli(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
   const command = parsed.shift()
@@ -642,6 +707,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "needs-me") return runNeedsMeCommand(parsed)
+  if (command === "settled") return runSettledCommand(parsed)
 
   if (command === "diagnose") {
     const json = parsed.has("--json")

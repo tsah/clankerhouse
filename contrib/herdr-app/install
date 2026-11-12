@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Install the Clankerhouse layout, mod and Alt keys into the Herdr app on this computer (the laptop, not the Clankerhouse
+"""Install the Clankerhouse layout, mods and Alt keys into the Herdr app on this computer (the laptop, not a Clankerhouse
 machine). Idempotent. keys.json is the person's own file: only the layout:clankerhouse section is replaced, and the previous
 file is kept as keys.json.pre-clankerhouse.
 
   contrib/herdr-app/install [--machine puffin] [--launcher clankerhouse-hc]
+
+The mod follows the focused terminal's machine, and Alt-M picks one from `hc machine ls`, so a second box needs only
+`hc machine add`, not a reinstall. --machine is the fallback for when no terminal on any machine has been focused yet.
 """
 import argparse, json, os, platform, shutil
 from pathlib import Path
@@ -28,7 +31,7 @@ def find(node, id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--machine", default="puffin")
+    parser.add_argument("--machine", default="puffin", help="the fallback machine, until a terminal on one is focused")
     parser.add_argument("--launcher", default="clankerhouse-hc")
     options = parser.parse_args()
     home = Path(os.environ.get("HERDR_APP_HOME") or Path.home() / ".config/herdr-app")
@@ -44,10 +47,11 @@ def main():
     (home / "layouts").mkdir(exist_ok=True)
     write_json(home / "layouts/clankerhouse.json", layout)
 
-    mod = home / "mods/clankerhouse"
-    mod.mkdir(parents=True, exist_ok=True)
-    for name in ("main.js", "mod.json"):
-        shutil.copyfile(HERE / "mods/clankerhouse" / name, mod / name)
+    for mod_name in ("clankerhouse", "clankerhouse-machines"):
+        mod = home / "mods" / mod_name
+        mod.mkdir(parents=True, exist_ok=True)
+        for name in ("main.js", "mod.json"):
+            shutil.copyfile(HERE / "mods" / mod_name / name, mod / name)
 
     keys = json.loads(keys_path.read_text())
     wanted = json.loads((HERE / "keys.clankerhouse.json").read_text())

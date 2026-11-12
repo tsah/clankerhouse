@@ -6,6 +6,7 @@
     "alt-n": "clankerhouse.scratch",
     "alt-i": "clankerhouse.needs_me",
     "alt-g": "clankerhouse.open_pr",
+    "alt-m": "clankerhouse.machines",
     "alt-o": "mod.open:picker",
     "alt-enter": "pane.split:down",
     "alt-shift-enter": "pane.split:right",

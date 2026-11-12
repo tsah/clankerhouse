@@ -37,6 +37,25 @@ describe("Herdr app config", () => {
     expect(JSON.parse(once)).toMatchObject({ ...mine, "layout:clankerhouse": keys })
     expect(JSON.parse(readFileSync(join(home, "keys.json.pre-clankerhouse"), "utf8"))).toEqual(mine)
     expect(JSON.parse(readFileSync(join(home, "layouts/clankerhouse.json"), "utf8")).children[0].children[1].content.props).toEqual({ machine: "box", launcher: "/opt/clankerhouse-hc" })
+    for (const mod of ["clankerhouse", "clankerhouse-machines"]) {
+      expect(readFileSync(join(home, "mods", mod, "main.js"), "utf8")).toBe(readFileSync(`contrib/herdr-app/mods/${mod}/main.js`, "utf8"))
+    }
+  })
+
+  test("a first-time install still sets puffin, now as the fallback machine", () => {
+    const home = mkdtempSync(join(tmpdir(), "ch-herdr-app-"))
+    writeFileSync(join(home, "keys.json"), "{}")
+    expect(Bun.spawnSync(["python3", "-I", "contrib/herdr-app/install"], { env: { ...Bun.env, HERDR_APP_HOME: home } }).exitCode).toBe(0)
+    expect(JSON.parse(readFileSync(join(home, "layouts/clankerhouse.json"), "utf8")).children[0].children[1].content.props).toEqual({ machine: "puffin", launcher: "clankerhouse-hc" })
+  })
+
+  test("Alt-M, the machine list, takes a key no other layer binds", () => {
+    expect(keys["alt-m"]).toBe("clankerhouse.machines")
+    // The TUI's Clankerhouse keys, the TUI config's Alt keys, the picker's own Alt keys, and the pass-throughs.
+    expect(installerKeys).not.toContain('"alt+m"')
+    const picker = readFileSync("native-client/src/main.rs", "utf8")
+    expect(picker).not.toContain("Char('m')")
+    expect(Object.entries(keys).filter(([key]) => key === "alt-m")).toHaveLength(1)
   })
 
   test("the installer refuses a home the app has not started in", () => {

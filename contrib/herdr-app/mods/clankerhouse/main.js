@@ -1,8 +1,14 @@
 // Clankerhouse on the Herdr app: the switcher as a popup, the Alt keys the app has no command for, the app's focus
 // reported to the Clankerhouse machine, and the current workshop and branch. It lives at the right of the clankerhouse
-// layout's tab bar; it must stay shown, because `<mod>.<command>` keys reach shown copies only. Props: { machine, launcher }: the `hc machine` running Clankerhouse, and clankerhouse-hc there.
+// layout's tab bar; it must stay shown, because `<mod>.<command>` keys reach shown copies only. Props: { machine, launcher }:
+// the fallback `hc machine` running Clankerhouse, and clankerhouse-hc on every machine.
 //
-// Any program on that machine can ask for a popup too (Schlop under herdr-core does): a terminal labelled popup=1 is
+// Each machine runs its own Clankerhouse. The mod follows the focused terminal: `box/t7` makes `box` the current machine,
+// and every key, report and count goes to it. With nothing focused, or a pane local to the app, it stays on the last
+// machine focused, else props.machine. Alt-M picks a machine from a list (the clankerhouse-machines mod); the pick holds
+// until focus moves to another terminal. The current machine lives in shared state, which every mod copy sees.
+//
+// Any program on a machine can ask for a popup too (Schlop under herdr-core does): a terminal labelled popup=1 is
 // opened over the whole window and labelled popup_shown=1, so the asker knows someone sees it.
 //
 // A popup is a terminal on that machine running `clankerhouse-hc --popup`, labelled ch_popup so Clankerhouse does not take
@@ -11,6 +17,10 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { closeOverlay, exec, focused, hc, notify, openOverlay, panes, props, nextCommand, run, spaces, terminals, theme, window } from "herdr";
+// shared() and setShared() came after the first app releases; an older app falls back to this copy's own memory.
+import * as herdr from "herdr";
+
+export const CURRENT_MACHINE = "clankerhouse.machine"; // shared: { machine, over }, the machine and the focus it was chosen at.
 
 const POPUPS = { jump: [], repo: ["--repo"], delete: ["--delete"], scratch: ["--scratch"], needs_me: ["--needs-me"] };
 // The layout's Alt keys win over the popup's terminal, so pressed again while a popup is open they are passed into it:
@@ -43,17 +53,23 @@ const labelColor = (label) => (label === "done" ? DONE_GRAY : LABEL_COLORS[nameH
 const projectColor = (project) => PROJECT_COLORS[nameHash(project) % PROJECT_COLORS.length];
 const dimmed = (hex, percent) => `#${[1, 3, 5].map((at) => Math.floor((parseInt(hex.slice(at, at + 2), 16) * percent) / 100).toString(16).padStart(2, "0")).join("")}`;
 
-const local = (machine, address) => (address?.startsWith(`${machine}/`) ? address.slice(machine.length + 1) : null);
+const local = (machine, address) => (machine && address?.startsWith(`${machine}/`) ? address.slice(machine.length + 1) : null);
+// The machine part of a terminal address (`puffin/t7` -> `puffin`); null for a terminal local to the app.
+export const machineOf = (address) => {
+  const at = typeof address === "string" ? address.indexOf("/") : -1;
+  return at > 0 ? address.slice(0, at) : null;
+};
 
 export default class Clankerhouse extends View {
   init(_props, cx) {
+    this.current = null; // Without shared state: { machine, over }.
     this.popup = null;
     this.resumePopup(cx);
     this.reported = null;
     this.reporting = false;
-    this.branches = new Map(); // cwd on the machine -> its branch, for panes the app reports none for.
-    this.rows = new Map(); // cwd on the machine -> { row, at }: the picker's row for the session holding it.
-    this.counts = null; // { needsMe, open }, which come with every row fetched.
+    this.branches = new Map(); // machine:cwd -> its branch, for panes the app reports none for.
+    this.rows = new Map(); // machine:cwd -> { row, at }: the picker's row for the session holding it.
+    this.counts = new Map(); // machine -> { needsMe, open }, which come with every row fetched from it.
     this.requests = new Set(); // popup=1 terminals already opened here.
     // terminals() changing does not re-render this block, so requests are polled.
     cx.timer.every(REQUEST_POLL_MS, (cx) => this.openRequests(cx));
@@ -67,8 +83,46 @@ export default class Clankerhouse extends View {
         else if (command === "tab_left") this.moveTab(-1);
         else if (command === "tab_right") this.moveTab(1);
         else if (command === "open_pr") this.openPr(cx);
+        else if (command === "machines") this.openMachines();
       }
     });
+  }
+
+  currentMachine() {
+    if (typeof herdr.shared !== "function") return this.current;
+    const value = herdr.shared(CURRENT_MACHINE);
+    return value && typeof value.machine === "string" ? value : null;
+  }
+
+  setCurrentMachine(value) {
+    this.current = value;
+    if (typeof herdr.setShared === "function") herdr.setShared(CURRENT_MACHINE, value);
+  }
+
+  // The machine every action goes to: one picked with Alt-M while focus has not moved since, else the focused
+  // terminal's, else the last one, else props.machine.
+  machine() {
+    const over = focused()?.terminal ?? null;
+    const current = this.currentMachine();
+    if (current && current.over === over) return current.machine;
+    const focusedOn = machineOf(over);
+    // A popup stands over the terminal it opened from: closing it must not undo an Alt-M pick.
+    if (current && terminals().some((t) => t.address === over && (t.labels?.ch_popup || t.labels?.popup))) return current.machine;
+    if (focusedOn) {
+      this.setCurrentMachine({ machine: focusedOn, over });
+      return focusedOn;
+    }
+    return current?.machine ?? props()?.machine ?? null;
+  }
+
+  openMachines() {
+    // A popup is a terminal on a machine; a list over it would leave both waiting on one another.
+    if (this.popup && !this.popupGone()) return;
+    try {
+      openOverlay({ kind: "dialog", modal: true, width: 460, height: 0.5, mod: "clankerhouse-machines", props: { current: this.machine(), over: focused()?.terminal ?? null, fallback: props()?.machine ?? null } });
+    } catch (error) {
+      this.fail("The machine list did not open", error);
+    }
   }
 
   fail(title, error) {
@@ -76,16 +130,17 @@ export default class Clankerhouse extends View {
   }
 
   reportFocus(cx) {
-    const { machine, launcher } = props() ?? {};
+    const { launcher } = props() ?? {};
+    const machine = this.machine();
     const terminal = local(machine, focused()?.terminal);
-    if (!terminal || terminal === this.reported || this.reporting) return;
+    if (!terminal || focused().terminal === this.reported || this.reporting) return;
     // A popup stands over the session it opened from; reporting it would lose that session.
     if (terminals().some((t) => t.address === focused().terminal && t.labels?.ch_popup)) return;
     this.reporting = true;
     cx.spawn(async (cx) => {
       try {
         await exec(launcher, ["--report-focus", terminal], { on: machine });
-        this.reported = terminal;
+        this.reported = `${machine}/${terminal}`;
       } catch {
         // The machine is away; the next focus change or heartbeat tries again.
       }
@@ -131,7 +186,9 @@ export default class Clankerhouse extends View {
       if (address) cx.spawn(async () => { await hc(["keys", address, POPUP_KEYS[mode]]).catch(() => {}); });
       return;
     }
-    const { machine, launcher } = props() ?? {};
+    const { launcher } = props() ?? {};
+    const machine = this.machine();
+    if (!machine) return this.fail("Clankerhouse popup did not open", "No machine: focus a terminal on one, or install with --machine");
     const over = local(machine, focused()?.terminal);
     this.popup = mode;
     this.popupStarted = Date.now();
@@ -181,7 +238,7 @@ export default class Clankerhouse extends View {
       } catch {
         // Cleanup only: the next popup removes a leftover ch_popup terminal.
       }
-      if (target) this.showTerminal(`${props().machine}/${target}`, PANE_WAIT_TICKS, cx);
+      if (target) this.showTerminal(`${machineOf(address)}/${target}`, PANE_WAIT_TICKS, cx);
     });
   }
 
@@ -200,7 +257,7 @@ export default class Clankerhouse extends View {
   }
 
   openPr(cx) {
-    const { machine } = props() ?? {};
+    const machine = this.machine();
     const place = focused();
     if (!place?.cwd) return;
     cx.spawn(async () => {
@@ -217,56 +274,61 @@ export default class Clankerhouse extends View {
   // The app knows the branch of local panes only; ask the machine for the others, once per folder and heartbeat.
   branch(pane, cx) {
     if (pane?.branch) return pane.branch;
-    const { machine } = props() ?? {};
-    if (!pane?.cwd || !local(machine, pane.terminal)) return null;
-    if (!this.branches.has(pane.cwd)) {
-      this.branches.set(pane.cwd, null);
+    const machine = machineOf(pane?.terminal);
+    if (!pane?.cwd || !machine) return null;
+    const key = `${machine}:${pane.cwd}`;
+    if (!this.branches.has(key)) {
+      this.branches.set(key, null);
       cx.spawn(async (cx) => {
         try {
           const git = await exec("git", ["branch", "--show-current"], { cwd: pane.cwd, on: machine });
-          if (git.code === 0 && git.stdout.trim()) { this.branches.set(pane.cwd, git.stdout.trim()); cx.notify(); }
+          if (git.code === 0 && git.stdout.trim()) { this.branches.set(key, git.stdout.trim()); cx.notify(); }
         } catch {
           // The machine is away; the heartbeat clears the cache and tries again.
         }
       });
     }
-    return this.branches.get(pane.cwd);
+    return this.branches.get(key);
   }
 
-  // The picker's row (title, project, labels) of the focused pane's session, refreshed every ROW_REFRESH_MS.
-  sessionRow(pane, cx) {
-    const { machine, launcher } = props() ?? {};
-    if (!pane?.cwd || !local(machine, pane.terminal)) return null;
-    const cached = this.rows.get(pane.cwd);
+  // The picker's row (title, project, labels) of the focused pane's session, refreshed every ROW_REFRESH_MS, with the
+  // machine's counts. A pane that is not on the machine (none focused, or local to the app) still fetches the counts,
+  // for a folder no session holds.
+  sessionRow(pane, machine, cx) {
+    const { launcher } = props() ?? {};
+    if (!machine) return null;
+    const cwd = pane?.cwd && local(machine, pane.terminal) ? pane.cwd : "/";
+    const key = `${machine}:${cwd}`;
+    const cached = this.rows.get(key);
     if (!cached || (!cached.loading && Date.now() - cached.at > ROW_REFRESH_MS)) {
-      this.rows.set(pane.cwd, { row: cached?.row ?? null, at: Date.now(), loading: true });
+      this.rows.set(key, { row: cached?.row ?? null, at: Date.now(), loading: true });
       cx.spawn(async (cx) => {
         let row = cached?.row ?? null;
         try {
-          const got = await exec(launcher, ["--session-row", pane.cwd], { on: machine });
+          const got = await exec(launcher, ["--session-row", cwd], { on: machine });
           if (got.code === 0) {
             const parsed = JSON.parse(got.stdout);
-            if (typeof parsed?.needsMe === "number") this.counts = { needsMe: parsed.needsMe, open: parsed.open };
+            if (typeof parsed?.needsMe === "number") this.counts.set(machine, { needsMe: parsed.needsMe, open: parsed.open });
             row = parsed?.name ? parsed : null;
           }
         } catch {
           // The machine is away; the next refresh tries again.
         }
-        this.rows.set(pane.cwd, { row, at: Date.now(), loading: false });
+        this.rows.set(key, { row, at: Date.now(), loading: false });
         cx.notify();
       });
     }
-    return this.rows.get(pane.cwd)?.row ?? null;
+    return cwd === "/" ? null : this.rows.get(key)?.row ?? null;
   }
 
   // A Clankerhouse session is a space here, but the app names a space after its folder; a Workshop's title
   // (set at creation or renamed in the picker) lives on its terminals as ch_session_name. Mirror it.
+  // Every machine's spaces are named, not only the current one's: they all sit in the app's space list.
   syncSpaceNames() {
-    const { machine } = props() ?? {};
     const wanted = new Map();
     for (const t of terminals()) {
-      const space = t.labels?.["herdr.space"], name = t.labels?.ch_session_name;
-      if (space && name && local(machine, t.address)) wanted.set(`${machine}/${space}`, name);
+      const space = t.labels?.["herdr.space"], name = t.labels?.ch_session_name, machine = machineOf(t.address);
+      if (space && name && machine) wanted.set(`${machine}/${space}`, name);
     }
     for (const space of spaces()) {
       const name = wanted.get(space.id);
@@ -274,9 +336,9 @@ export default class Clankerhouse extends View {
     }
   }
 
+  // Requests from any machine: a popup asked for on a box you are not looking at still needs you.
   openRequests(cx) {
-    const { machine } = props() ?? {};
-    const live = terminals().filter((t) => t.labels?.popup && t.state === "live" && local(machine, t.address));
+    const live = terminals().filter((t) => t.labels?.popup && t.state === "live" && machineOf(t.address));
     this.requests = new Set([...this.requests].filter((address) => live.some((t) => t.address === address)));
     const fresh = live.filter((t) => !t.labels.popup_shown && !this.requests.has(t.address));
     if (!fresh.length) return;
@@ -294,7 +356,10 @@ export default class Clankerhouse extends View {
     const t = theme();
     const space = spaces().find((s) => s.active);
     const pane = panes().find((p) => p.focused);
-    const row = this.sessionRow(pane, cx);
+    const machine = this.machine();
+    const row = this.sessionRow(pane, machine, cx);
+    // Only the current machine's counts: another box's would read as this one's.
+    const counts = machine ? this.counts.get(machine) : null;
     const branch = row?.branch || this.branch(pane, cx) || space?.branch;
     const done = Boolean(row?.labels?.includes("done"));
     // As in the picker: an untitled session drops its "project@" prefix, because the project tag names it.
@@ -307,9 +372,11 @@ export default class Clankerhouse extends View {
         .when(Boolean(row?.project && row.project !== name), (el) => el.child(tag(row.project, projectColor(row.project))))
         .children((row?.labels ?? []).map((text) => tag(text, labelColor(text)))))
       .when(Boolean(branch), (el) => el.child(label("git-branch", branch)))
-      // The picker's count: Workshops waiting on the operator (its Alt-I and Alt-E views), of all open ones.
-      .when(Boolean(this.counts), (el) => el.child(div().flex_none()
-        .text_color(this.counts.needsMe > 0 ? t.foreground : t.muted)
-        .child(`${this.counts.needsMe} need you · ${this.counts.open} open`)));
+      // The current machine, and the picker's count there: Workshops waiting on the operator (its Alt-I and Alt-E
+      // views), of all open ones.
+      .when(Boolean(machine), (el) => el.child(div().flex_none().text_color(t.foreground).child(machine)))
+      .when(Boolean(counts), (el) => el.child(div().flex_none()
+        .text_color(counts.needsMe > 0 ? t.foreground : t.muted)
+        .child(`${counts.needsMe} need you · ${counts.open} open`)));
   }
 }

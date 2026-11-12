@@ -1,8 +1,12 @@
 # Clankerhouse on the Herdr desktop app
 
 The Herdr TUI experience on the desktop app: a clean full-window terminal, no sidebar, the Clankerhouse switcher as a popup, and
-the same Alt keys. The app runs on your laptop (Omarchy now, macOS later), and Clankerhouse and every clanker stay on puffin, in
-the hc lane. Herdr TUI remains the default multiplexer; nothing here moves live sessions.
+the same Alt keys. The app runs on your laptop (Omarchy now, macOS later), and Clankerhouse and every clanker stay on the boxes
+(puffin, and any other you add), in the hc lane. Herdr TUI remains the default multiplexer; nothing here moves live sessions.
+
+**Each box is its own herd.** Every box runs its own Clankerhouse: daemon, registry, Workshops, hooks. The app follows the box
+you are looking at and gives you that box's Clankerhouse. Nothing is shared across boxes: Alt-K, Alt-I and the `N need you · M
+open` count show one box at a time, and there is no needs-me list across all of them.
 
 Test status is in [herdr-core-eval.md](herdr-core-eval.md) under "Desktop app path". Real ssh, Hyprland and macOS are not yet
 verified.
@@ -10,15 +14,17 @@ verified.
 ## How it fits together
 
 - `contrib/herdr-app/layouts/clankerhouse.json`: the bare layout.
-- `contrib/herdr-app/mods/clankerhouse/`: runs the popups, sends the keys the app has no command for, and reports focus to puffin.
+- `contrib/herdr-app/mods/clankerhouse/`: runs the popups, sends the keys the app has no command for, and reports focus to the
+  current machine.
+- `contrib/herdr-app/mods/clankerhouse-machines/`: the Alt-M machine list.
 - `contrib/herdr-app/keys.clankerhouse.json`: the Alt keys, only while this layout is shown.
-- `clankerhouse-hc --popup` on puffin: the picker, exiting after a choice. The mod then moves focus.
+- `clankerhouse-hc --popup` on the current machine: the picker, exiting after a choice. The mod then moves focus.
 - Clanker terminals carry `herdr.space` and `herdr.tab` labels, so each gets a space and a tab in the app by itself. A session is a
   space, and a window is a tab.
 
 ## Setup
 
-### 1. On puffin
+### 1. On each box
 
 Start the lane (it runs beside the Herdr TUI lane; the daemon is the `clankerhouse-daemon-hc` user unit):
 
@@ -59,7 +65,11 @@ From a checkout on the laptop:
 contrib/herdr-app/install --machine puffin --launcher clankerhouse-hc
 herdr-app do layout.switch --name clankerhouse
 herdr-app check ~/.config/herdr-app/mods/clankerhouse
+herdr-app check ~/.config/herdr-app/mods/clankerhouse-machines
 ```
+
+`--machine` is only the fallback, used until a terminal on some machine has been focused. Re-run the installer after pulling, so
+the app gets the new mods; adding a box does not need it.
 
 The installer needs `python3`. It replaces only the `layout:clankerhouse` section of `keys.json` and keeps the old file as
 `keys.json.pre-clankerhouse`. On macOS it also sets `option_as_alt` to `on`, drops the layout's custom title bar, and removes
@@ -67,7 +77,35 @@ The installer needs `python3`. It replaces only the `layout:clankerhouse` sectio
 
 Check `herdr-app status` for errors. To back out, `ctrl-shift-l` switches layouts, and `ctrl-alt-shift-escape` always resets.
 
-## Keys
+## More than one box
+
+### Add a box
+
+1. On the new box: a normal Clankerhouse install (see the README) and the hc lane, as in step 1: `clankerhouse-hc
+   --ensure-server`, which starts the `clankerhouse-daemon-hc` unit. `hc` must be on its non-interactive `PATH`.
+2. On the laptop, add it with the lane's session, as in step 3:
+
+   ```bash
+   hc machine add user@host --name NAME --session clankerhouse
+   ```
+
+The same `--session clankerhouse` rule applies. No reinstall of the app config is needed.
+
+### Which box is current
+
+- **The focused terminal decides.** A terminal's address names its machine (`heron/t3` is on `heron`). Alt-K, Alt-B, Alt-D,
+  Alt-N, Alt-I, Alt-G, focus reporting and the count all go to that machine. Leftover `ch_popup` terminals are cleaned up on that
+  machine only.
+- **Alt-M picks one from a list**: every machine `hc machine ls` shows, the current one marked. Up/Down or type to filter, Enter
+  or click to switch, Esc to close. A machine that is not connected is listed with its state (`unreachable`, `needs login`) and
+  cannot be chosen. Choosing one shows its first space if it has one; with none, it still becomes current, so Alt-K opens its
+  list. The choice holds until you focus another terminal, which then decides again.
+- **With nothing focused**, or a pane local to the app, the last machine stays current, else the installer's `--machine`.
+- **The top bar** shows the current machine, then its `N need you · M open`. A box's count is shown only once that box has
+  answered; another box's count is never shown in its place.
+- Space names from Workshop titles are kept up to date on every machine, and a popup asked for by any machine opens.
+- **Focus reported to the box you left** goes stale there after 3 minutes, as when the window closes.
+
 
 The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Option for Alt.
 
@@ -80,7 +118,8 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 | Alt-I | The same list in its needs-me view: the Workshops waiting on you, freshest first | Same, as a popup |
 | Alt-E, Alt-F | In the open list only: eldest first, and flat | Pass-through to the popup |
 | Alt-O | Go to | App's picker (`mod.open:picker`) |
-| Alt-G | Open current PR | `gh` on puffin, opened in the laptop's browser |
+| Alt-G | Open current PR | `gh` on the current machine, opened in the laptop's browser |
+| Alt-M | (none: the TUI runs on one box) | The machine list: switch the current machine |
 | Alt-Enter | Split, new pane below | `pane.split:down` |
 | Alt-Shift-Enter | Split, new pane right | `pane.split:right` |
 | Alt-W | Close pane | `pane.close` |
@@ -120,6 +159,11 @@ The same Alt chords as `~/.config/herdr/config.toml`, 1:1. On macOS, press Optio
 | Alt-S | Snooze the selected row in the list | Pass-through to the popup |
 | Alt-E, Alt-F | The list's eldest-first and flat views | Pass-through to the popup |
 
+**Alt-M was checked free** on 2026-11-12 in every layer: the app's defaults (Alt binds 1-9, H/J/K/L, Shift-H/J/K/L, `[`, `]`,
+arrows), the Herdr TUI config and the Clankerhouse managed block (K, B, D, N, I, G, O, T, W, J, Enter, arrows, 1-9), this
+layout's keys and pass-throughs (H, J, L, Shift-H/J/K/L, `[`, `]`, S, E, F), and the picker's own Alt keys (I, E, F, K, B, N, S,
+R, A, L, D, `.`). Omarchy's binds were not re-checked for it.
+
 The app's Ctrl-Shift defaults stay, so `ctrl-shift-p` still opens the palette. Mod commands such as `clankerhouse.jump` are not
 listed in the palette: `commands()` is documented as leaving them out, and that was not checked in the palette itself.
 
@@ -135,13 +179,15 @@ listed in the palette: `commands()` is documented as leaving them out, and that 
 
 ## Things to know
 
-- **Do not take core updates for puffin.** The app offers them ("herdr-core 0.1.15 is ready"). `hc machine update` restarts hc on
-  puffin. Updates to the laptop's own core are fine, as long as puffin still connects.
-- **Closing the window leaves everything running.** After 3 minutes puffin treats the reported focus as stale.
+- **Do not take core updates for a remote machine.** The app offers them ("herdr-core 0.1.15 is ready"). `hc machine update`
+  restarts hc on that box, under every clanker there. Updates to the laptop's own core are fine, as long as every box still
+  connects.
+- **Closing the window leaves everything running.** After 3 minutes each box treats the reported focus as stale.
 - **Adoption turns on hc keep.** If a holder is lost, a clanker's terminal becomes a shell at the same address. The harness is not
   re-run, and its claims stay on the terminal.
 - **Status.** With no sidebar, you learn of agents through toasts and sounds, and in the switcher. The top bar's right end shows
-  `N need you · M open`, the count of the list's needs-me views (Alt-I, Alt-E), refreshed with the focused session's row (on focus and every 15 seconds).
-- **A popup left open when the app dies** stays on puffin as a terminal labelled `ch_popup`. The next popup removes it, and
-  Clankerhouse never shows it.
+  the current machine and its `N need you · M open`, the count of the list's needs-me views (Alt-I, Alt-E), refreshed with the
+  focused session's row (on focus and every 15 seconds).
+- **A popup left open when the app dies** stays on its box as a terminal labelled `ch_popup`. The next popup on that box removes
+  it, and Clankerhouse never shows it.
 - **Esc in the switcher goes back a level first.** Press it again to close, as in the TUI.

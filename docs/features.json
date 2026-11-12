@@ -493,7 +493,8 @@
       "unit": [
         "src/multiplexer/hc.test.ts",
         "src/multiplexer/hc-core.test.ts",
-        "src/herdr-app-config.test.ts"
+        "src/herdr-app-config.test.ts",
+        "src/herdr-app-mod.test.ts"
       ],
       "standalone": [
         "scripts/qa-hc"
@@ -501,7 +502,9 @@
       "manual": [
         "Run bin/clankerhouse-hc in a plain terminal, open a Workshop from the picker, detach with Ctrl+\\ and confirm the picker returns",
         "With a real claude in vim editor mode, confirm clankers mux interrupt stops a streaming turn",
-        "SIGKILL the core and confirm the daemon restarts it while clankers keep running"
+        "SIGKILL the core and confirm the daemon restarts it while clankers keep running",
+        "In the Herdr app with two machines added, focus a terminal on each and confirm the top bar's machine name and counts change with it, and that Alt-K opens that machine's list",
+        "Press Alt-M, choose the other machine while focus stays put, and confirm Alt-K and the counts go to it; confirm an unreachable machine is listed as such and cannot be chosen"
       ]
     }
   ]

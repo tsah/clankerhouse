@@ -439,6 +439,15 @@ export const allWorkshopLabels = (dbPath = workshopStatePath): Map<string, Works
   } finally { db.close() }
 }
 
+/** Every Workshop's creation time, epoch ms, in one read. */
+export const allWorkshopCreatedAt = (dbPath = workshopStatePath): Map<string, number> => {
+  if (!existsSync(dbPath)) return new Map()
+  const db = openStore(dbPath)
+  try {
+    return new Map((db.query("SELECT id, created_at FROM workshops").all() as Array<{ id: string; created_at: number }>).map((row) => [row.id, Number(row.created_at)]))
+  } finally { db.close() }
+}
+
 /** Sets one label key, or removes it when value is null. Reports whether anything actually changed. */
 export const changeWorkshopLabel = (workshopId: string, key: string, value: string | null, dbPath = workshopStatePath): LabelChange => {
   const db = openStore(dbPath)

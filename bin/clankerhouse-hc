@@ -8,6 +8,7 @@
 #   clankerhouse-hc --delete        delete the current session (Herdr's Alt-D)
 #   clankerhouse-hc --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
 #   clankerhouse-hc --needs-me      open the list in its needs-me view (Herdr's Alt-I); inside, Alt-I/E/F switch views
+#   clankerhouse-hc --needs-me --json [--eldest|--flat]  print that list instead, no terminal needed (clankers needs-me)
 #   clankerhouse-hc --popup [--focus T] [--repo|--delete|--scratch|--needs-me]  the picker in a Herdr app popup over terminal T: exits on a choice, leaving it for the mod
 #   clankerhouse-hc --report-focus T  record the terminal the Herdr app has focused
 #   clankerhouse-hc --session-row DIR  print the picker's row (title, project, branch, labels) for the session holding DIR,
@@ -15,6 +16,7 @@
 #   clankerhouse-hc --ensure-server start the core and daemon, then exit
 #   clankerhouse-hc --stop-server   stop the daemon; the core and its terminals keep running
 #   clankerhouse-hc --health        print core and daemon health; exit 1 when either is down
+#   clankerhouse-hc --help          print this
 #
 # The daemon runs as a systemd user service, not in an hc terminal: the exit sweep kills anything a terminal started, and
 # a daemon inside hc would die with the holder it needs to report on. Where no user manager is reachable it runs in its
@@ -30,6 +32,17 @@ export CLANKERHOUSE_INSTANCE=${CLANKERHOUSE_INSTANCE:-hc}
 export HC_SESSION=${HC_SESSION:-clankerhouse}
 # shellcheck source=/dev/null
 . "$CLANKERHOUSE_LIBEXEC/clankerhouse-mux"
+
+# Nothing here draws or starts anything: no terminal is needed, and a down daemon stays down.
+case "${1:-}" in
+    -h|--help) sed -n '2,/^set -euo pipefail$/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;;
+    --needs-me)
+        for argument in "${@:2}"; do
+            [[ $argument == --json ]] && exec "$CLANKERHOUSE_BIN_DIR/clankers" needs-me "${@:2}"
+        done
+        [[ -t 1 ]] || { echo "The needs-me view needs a terminal; without one use: clankerhouse-hc --needs-me --json (or clankers needs-me)" >&2; exit 2; }
+        ;;
+esac
 
 command -v bun >/dev/null 2>&1 || { echo "Clankerhouse requires bun" >&2; exit 1; }
 command -v "${HC_BIN:-hc}" >/dev/null 2>&1 || { echo "Clankerhouse's hc lane requires hc (herdr-core)" >&2; exit 1; }

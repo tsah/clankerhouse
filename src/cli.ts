@@ -17,12 +17,13 @@ import { MultiplexerResourceExhaustedError, paneLocation, UnsupportedMultiplexer
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
-import { bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
+import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
-import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue } from "./labels"
+import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
+import { needsMeCounts, needsMeEntry, needsMeList, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
 import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
@@ -424,6 +425,7 @@ export const usage = `Usage:
   clankers workshop reparent [ID|BRANCH|PATH] --parent ID|BRANCH|PATH [--cwd PATH]
   clankers target open --json TARGET
   clankers diagnose [--json] [--strict]
+  clankers needs-me [--json] [--eldest | --flat]   the picker's needs-me list (Alt-I freshest first; Alt-E with --eldest; the flat list with --flat), no terminal needed
   clankers spawn --workshop WORKSHOP --name NAME --harness HARNESS [--profile NAME] [--model MODEL] [--resource-class interactive|validation-heavy|untrusted] [--prompt TEXT]
   clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
   clankers status|capabilities CLANKER_ID
@@ -576,6 +578,46 @@ export const cliErrorCode = (error: unknown): { code: string; exitCode: number }
   return { code: "INVALID_REQUEST", exitCode: 2 }
 }
 
+const shortAge = (milliseconds: number) => {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86_400 ? `${Math.floor(seconds / 3600)}h` : `${Math.floor(seconds / 86_400)}d`
+}
+
+/**
+ * The picker's needs-me list without the picker: the daemon's snapshot (what the picker draws), ordered as Alt-I
+ * (freshest first), Alt-E (--eldest) or the flat list (--flat). Read-only, needs no terminal, and never starts the daemon.
+ */
+const runNeedsMeCommand = async (parsed: ParsedArgs) => {
+  const usageLine = "Usage: clankers needs-me [--json] [--eldest | --flat]"
+  const json = parsed.has("--json")
+  const eldest = parsed.has("--eldest")
+  const flat = parsed.has("--flat")
+  if (parsed.has("--help") || parsed.has("-h")) return console.log(usageLine)
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usageLine}`)
+  if (eldest && flat) throw new Error(`--eldest and --flat are mutually exclusive\n${usageLine}`)
+  const order: NeedsMeOrder = flat ? "flat" : eldest ? "eldest" : "freshest"
+  if (!existsSync(daemonSocketPath)) throw new Error(`Clankerhouse daemon is not running (no ${daemonSocketPath}); start it with clankerhouse-hc --ensure-server`)
+  const snapshot = await getSnapshot<SessionRow>(daemonSocketPath, { timeoutMs: 5000 })
+  // The snapshot carries label values only, and no creation time; the registry has both. A failed read only leaves them out.
+  let labels = new Map<string, Readonly<Record<string, string>>>()
+  let createdAt = new Map<string, number>()
+  try { labels = allWorkshopLabels() } catch {}
+  try { createdAt = allWorkshopCreatedAt() } catch {}
+  const rows: NeedsMeEntry[] = needsMeList(snapshot.sessions, order).map((row, index) => needsMeEntry(row, index + 1, {
+    labels: row.workshopId ? visibleLabels(labels.get(row.workshopId)) : {},
+    createdAt: row.workshopId ? createdAt.get(row.workshopId) : undefined,
+  }))
+  const counts = needsMeCounts(snapshot.sessions)
+  if (json) return console.log(JSON.stringify({ version: 1, order, generatedAt: snapshot.generatedAt, counts, rows }, null, 2))
+  const now = Date.now()
+  console.log(`${counts.needsMe} need you · ${counts.open} open`)
+  for (const row of rows) {
+    const why = row.reason ? `${row.deferred ? (row.waitingOn ? `waiting on ${row.waitingOn} · ` : "snoozed · ") : ""}${row.reason}${row.detail ? ` (${row.detail})` : ""} ${shortAge(now - (row.since ?? now))}` : row.state ?? ""
+    console.log(`${String(row.position).padStart(3)}. ${row.title ?? row.name}  ${why}  ${row.pane ?? row.session}`)
+    if (row.excerpt) console.log(`     ${row.excerpt}`)
+  }
+}
+
 export async function runClankersCli(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
   const command = parsed.shift()
@@ -598,6 +640,8 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     if (Bun.env.CLANKERHOUSE_PROGRESS !== "1") console.log(JSON.stringify(routed.result ?? { deleted: true }))
     return
   }
+
+  if (command === "needs-me") return runNeedsMeCommand(parsed)
 
   if (command === "diagnose") {
     const json = parsed.has("--json")

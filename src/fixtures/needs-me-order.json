@@ -1,0 +1,22 @@
+{
+  "comment": "One snapshot, and the order each needs-me view lists it in. Both the picker (native-client needs_me_sessions) and clankers needs-me (src/needs-me.ts needsMeList) are tested against it, so the dump cannot drift from Alt-I and Alt-E.",
+  "sessions": [
+    {"name":"working","path":"/working","workshopId":"w0","target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@0","pane":"%0"}}]},
+    {"name":"stale","path":"/stale","workshopId":"w1","target":{"type":"session","session":"stale"},"needsMe":{"reason":"stale","since":1000}},
+    {"name":"finished","path":"/finished","workshopId":"w2","target":{"type":"session","session":"finished"},"needsMe":{"reason":"finished","since":5000,"excerpt":"Done: tests pass."}},
+    {"name":"asked late","path":"/late","workshopId":"w3","target":{"type":"session","session":"late"},"needsMe":{"reason":"asked","since":9000,"excerpt":"Roll back?"}},
+    {"name":"blocked early","path":"/early","workshopId":"w4","target":{"type":"session","session":"early"},"availableActions":["open","delete"],"needsMe":{"reason":"blocked","since":2000,"detail":"permission prompt","clankerId":"c4"},
+     "details":[{"kind":"clanker","state":"blocked","clankerId":"c4","target":{"type":"window","session":"early","windowId":"@4","pane":"%4"}}]},
+    {"name":"crashed","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed"},"needsMe":{"reason":"crashed","since":100,"detail":"interrupted"}},
+    {"name":"crashed twin","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed-2"},"needsMe":{"reason":"ready","since":50}},
+    {"name":"sessionless","path":"/gone","workshopId":"w6","target":{"type":"directory","path":"/gone"},"needsMe":{"reason":"stale","since":1}},
+    {"name":"newer reason","path":"/new","workshopId":"w7","target":{"type":"session","session":"new"},"needsMe":{"reason":"thinking-hard","since":1}},
+    {"name":"labelled","path":"/labelled","workshopId":"w8","target":{"type":"session","session":"labelled"},"needsMe":{"reason":"your-move","since":1,"detail":"needs-input"}},
+    {"name":"snoozed","path":"/snoozed","workshopId":"w9","target":{"type":"session","session":"snoozed"},"needsMe":{"reason":"asked","since":20000,"snoozedUntil":99000}},
+    {"name":"waiting","path":"/waiting","workshopId":"w10","target":{"type":"session","session":"waiting"},"needsMe":{"reason":"finished","since":10,"waitingOn":"asked late"}}
+  ],
+  "freshest": ["asked late", "finished", "blocked early", "stale", "crashed", "labelled", "newer reason", "snoozed", "waiting"],
+  "eldest": ["labelled", "newer reason", "crashed", "stale", "blocked early", "finished", "asked late", "waiting", "snoozed"],
+  "flat": ["working", "stale", "finished", "asked late", "blocked early", "crashed", "newer reason", "labelled", "snoozed", "waiting"],
+  "counts": {"needsMe": 7, "open": 10}
+}

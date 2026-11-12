@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, IsTerminal, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
@@ -3821,10 +3821,24 @@ fn run(
     }
 }
 
+const USAGE: &str = "Usage: clankerhouse-native [--dump-tree | --check | --delete-current | --server-health OWNER]
+
+The Clankerhouse picker. Without an option it draws on the terminal and needs one; launch it through
+clankerhouse-hc or clankerhouse-herdr. The options print and exit without a terminal:
+  --dump-tree             the flat list's rows as JSON
+  --check                 count the daemon snapshot's sessions
+  --delete-current        confirm deleting CLANKERHOUSE_CURRENT_SESSION (draws; needs a terminal)
+  --server-health OWNER   exit 0 when the daemon is healthy and owned by OWNER
+For the needs-me list without a terminal: clankers needs-me [--json] [--eldest | --flat]";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = env::args().collect::<Vec<_>>();
+    if arguments.iter().skip(1).any(|argument| argument == "--help" || argument == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
     let runtime = runtime_root().map_err(io::Error::other)?;
     let socket_path = runtime.join("daemon.sock");
-    let arguments = env::args().collect::<Vec<_>>();
     if let Some(index) = arguments.iter().position(|argument| argument == "--server-health") {
         let expected_owner = arguments
             .get(index + 1)
@@ -3910,6 +3924,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.enter_scratch_mode();
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("needs-me") {
         app.set_view(View::NeedsMe);
+    }
+    // Without a terminal ratatui::init panics; say what to use instead.
+    if !io::stdout().is_terminal() {
+        return Err(io::Error::other("The picker needs a terminal. For the needs-me list without one: clankers needs-me [--json] [--eldest | --flat]").into());
     }
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let subscription_path = socket_path.clone();
@@ -4630,34 +4648,33 @@ mod tests {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
     }
 
-    const NEEDS_ME_SESSIONS: &str = r#"[
-        {"name":"working","path":"/working","workshopId":"w0","target":{"type":"session","session":"working"},"details":[{"kind":"clanker","state":"working","target":{"type":"window","session":"working","windowId":"@0","pane":"%0"}}]},
-        {"name":"stale","path":"/stale","workshopId":"w1","target":{"type":"session","session":"stale"},"needsMe":{"reason":"stale","since":1000}},
-        {"name":"finished","path":"/finished","workshopId":"w2","target":{"type":"session","session":"finished"},"needsMe":{"reason":"finished","since":5000,"excerpt":"Done: tests pass."}},
-        {"name":"asked late","path":"/late","workshopId":"w3","target":{"type":"session","session":"late"},"needsMe":{"reason":"asked","since":9000,"excerpt":"Roll back?"}},
-        {"name":"blocked early","path":"/early","workshopId":"w4","target":{"type":"session","session":"early"},"availableActions":["open","delete"],"needsMe":{"reason":"blocked","since":2000,"detail":"permission prompt","clankerId":"c4"},
-         "details":[{"kind":"clanker","state":"blocked","clankerId":"c4","target":{"type":"window","session":"early","windowId":"@4","pane":"%4"}}]},
-        {"name":"crashed","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed"},"needsMe":{"reason":"crashed","since":100,"detail":"interrupted"}},
-        {"name":"crashed twin","path":"/crashed","workshopId":"w5","target":{"type":"session","session":"crashed-2"},"needsMe":{"reason":"ready","since":50}},
-        {"name":"sessionless","path":"/gone","workshopId":"w6","target":{"type":"directory","path":"/gone"},"needsMe":{"reason":"stale","since":1}},
-        {"name":"newer reason","path":"/new","workshopId":"w7","target":{"type":"session","session":"new"},"needsMe":{"reason":"thinking-hard","since":1}},
-        {"name":"labelled","path":"/labelled","workshopId":"w8","target":{"type":"session","session":"labelled"},"needsMe":{"reason":"your-move","since":1,"detail":"needs-input"}}
-    ]"#;
+    /// Shared with src/needs-me.test.ts, so `clankers needs-me` lists in this picker's order.
+    const NEEDS_ME_ORDER: &str = include_str!("../../src/fixtures/needs-me-order.json");
+    fn needs_me_fixture() -> serde_json::Value {
+        serde_json::from_str(NEEDS_ME_ORDER).unwrap()
+    }
+    fn needs_me_fixture_sessions() -> Vec<SessionRow> {
+        serde_json::from_value(needs_me_fixture()["sessions"].clone()).unwrap()
+    }
+    fn needs_me_fixture_names(view: &str) -> Vec<String> {
+        serde_json::from_value(needs_me_fixture()[view].clone()).unwrap()
+    }
 
     #[test]
     fn needs_me_lists_the_freshest_first_and_the_eldest_view_reverses_it() {
-        let sessions: Vec<SessionRow> = serde_json::from_str(NEEDS_ME_SESSIONS).unwrap();
+        let sessions = needs_me_fixture_sessions();
         let names = |query: &str, eldest: bool| needs_me_sessions(&sessions, query, eldest).iter().map(|session| session.name.clone()).collect::<Vec<_>>();
         // One row per Workshop (its most pressing reason: crashed, not its twin's ready); working and sessionless
         // rows are not listed. Age alone orders them, whatever the reason; of the two as old as each other, the
-        // label comes before the reason this picker does not know.
-        let freshest = ["asked late", "finished", "blocked early", "stale", "crashed", "labelled", "newer reason"];
+        // label comes before the reason this picker does not know. Snoozed and waiting-on rows come last.
+        let freshest = needs_me_fixture_names("freshest");
         assert_eq!(names("", false), freshest);
-        assert_eq!(names("", true), ["labelled", "newer reason", "crashed", "stale", "blocked early", "finished", "asked late"]);
+        assert_eq!(names("", true), needs_me_fixture_names("eldest"));
         // Typing filters without reordering.
-        assert_eq!(names("e", false), freshest.into_iter().filter(|name| name.contains('e')).collect::<Vec<_>>());
+        assert_eq!(names("e", false), freshest.iter().filter(|name| name.contains('e')).cloned().collect::<Vec<_>>());
         assert_eq!(names("late", true), ["asked late"]);
-        assert_eq!(needs_me_counts(&sessions), (7, 8));
+        let counts = &needs_me_fixture()["counts"];
+        assert_eq!(needs_me_counts(&sessions), (counts["needsMe"].as_u64().unwrap() as usize, counts["open"].as_u64().unwrap() as usize));
     }
 
     #[test]
@@ -4676,19 +4693,19 @@ mod tests {
 
     #[test]
     fn alt_i_alt_e_and_alt_f_switch_the_view_of_the_one_list() {
-        let mut app = app_with_sessions(NEEDS_ME_SESSIONS);
+        let mut app = app_with_sessions(&needs_me_fixture()["sessions"].to_string());
         let everything = app.rows.len();
         let names = |app: &App| app.rows.iter().map(|row| row.session.name.clone()).collect::<Vec<_>>();
         assert_eq!(handle_key(&mut app, alt('i')), None);
         assert_eq!(app.view, View::NeedsMe);
-        assert_eq!(names(&app), ["asked late", "finished", "blocked early", "stale", "crashed", "labelled", "newer reason"]);
+        assert_eq!(names(&app), needs_me_fixture_names("freshest"));
         assert!(app.rows.iter().all(|row| row.depth == 0 && row.detail.is_none()));
 
         // Alt-E: the same rows, the longest waiting first, starting at the first row; the query carries over.
         app.selected = 3;
         assert_eq!(handle_key(&mut app, alt('e')), None);
         assert_eq!((app.view, app.selected), (View::Eldest, 0));
-        assert_eq!(names(&app), ["labelled", "newer reason", "crashed", "stale", "blocked early", "finished", "asked late"]);
+        assert_eq!(names(&app), needs_me_fixture_names("eldest"));
         for character in "late".chars() {
             handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -4727,7 +4744,7 @@ mod tests {
         app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str("[]").unwrap() }, false).unwrap();
         assert!(app.view == View::NeedsMe && app.rows.is_empty());
 
-        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: serde_json::from_str(NEEDS_ME_SESSIONS).unwrap() }, false).unwrap();
+        app.apply_snapshot(Snapshot { version: CACHE_VERSION, sessions: needs_me_fixture_sessions() }, false).unwrap();
         // Alt-K in a needs-me view is Alt-F; in the flat list it is the branch flow.
         assert_eq!(handle_key(&mut app, alt('k')), None);
         assert_eq!((app.mode, app.view, app.rows.len()), (Mode::Jump, View::Flat, everything));

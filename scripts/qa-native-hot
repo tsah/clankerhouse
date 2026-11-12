@@ -74,6 +74,14 @@ expected = ["idle", "ready", "failed", "old-working", "new-neutral"]
 if roots != expected:
     raise SystemExit(f"native neutral-last, last-seen order was {roots}, expected {expected}")
 
+# Without a terminal (stdout a pipe) help prints and the picker refuses cleanly instead of panicking in terminal init.
+help_run = subprocess.run([os.environ["BINARY"], "--help"], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+if help_run.returncode != 0 or "clankers needs-me" not in help_run.stdout:
+    raise SystemExit(f"headless --help failed: {help_run.returncode} {help_run.stdout!r} {help_run.stderr!r}")
+picker = subprocess.run([os.environ["BINARY"]], env={**env, "CLANKERHOUSE_MODE": "needs-me"}, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
+if picker.returncode == 0 or "panicked" in picker.stderr or "needs a terminal" not in picker.stderr:
+    raise SystemExit(f"headless picker did not refuse cleanly: {picker.returncode} {picker.stderr!r}")
+
 # Warm executable pages and allocator before measuring the hot Alt-K path.
 subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL)
 samples = []
@@ -87,5 +95,5 @@ samples.sort()
 p95 = samples[-2]
 if p95 >= 100:
     raise SystemExit(f"hot native first-frame p95 was {p95:.1f} ms (samples={samples})")
-print(f"Clankerhouse native hot-start QA passed: neutral-last, last-seen ordering and first-frame p95 {p95:.1f} ms (n={len(samples)}).")
+print(f"Clankerhouse native hot-start QA passed: headless help and refusal, neutral-last, last-seen ordering and first-frame p95 {p95:.1f} ms (n={len(samples)}).")
 PY

@@ -408,7 +408,7 @@
     },
     {
       "id": "needs-me",
-      "title": "The one Workshop list's needs-me views (Alt-I freshest first, Alt-E eldest first, Alt-F flat) and the Herdr app's need-you count, decided once in the daemon's snapshot",
+      "title": "The one Workshop list's needs-me views (Alt-I freshest first, Alt-E eldest first, Alt-F flat) and the Herdr app's need-you count, decided once in the daemon's snapshot, and `clankers needs-me [--json]` printing the same list without a terminal",
       "core": true,
       "unit": [
         "src/needs-me.test.ts",
@@ -420,7 +420,8 @@
       ],
       "standalone": [
         "scripts/qa-daemon",
-        "scripts/qa"
+        "scripts/qa",
+        "scripts/qa-native-hot"
       ],
       "manual": [
         "Press Alt-I in Herdr and inside the picker; confirm a list of only the Workshops that need you, one row each, the freshest reason nearest the prompt, with the flat row's title, project and label tags in the same colours",
@@ -432,7 +433,8 @@
         "Press Enter on a row and confirm you land on the clanker that needs attention; press Alt-D and confirm Done or deletion exactly as on a flat row; type to filter; Alt-F or Alt-K back to the flat list",
         "In the Herdr app, confirm the top bar's `N need you · M open` matches the view's own count",
         "Press Alt-S on a row; confirm it moves last as `snoozed ·` in both needs-me views, leaves the count, and comes back up on a new question or after a day; Alt-S again takes it back; in the flat list confirm Alt-S does the same and the row says `snoozed`",
-        "Label a Workshop `waits-on=<branch of another>`; confirm `waiting on <title> ·` at the bottom until the other is marked done"
+        "Label a Workshop `waits-on=<branch of another>`; confirm `waiting on <title> ·` at the bottom until the other is marked done",
+        "Without a terminal (from a clanker's shell) run `clankers needs-me --json`, then with `--eldest`; confirm the rows and order match Alt-I and Alt-E, deferred rows last, and that `clankerhouse-hc --help` and `clankerhouse-hc --needs-me --json` work there too"
       ]
     },
     {

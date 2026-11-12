@@ -1,7 +1,15 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import type { ClankerState, DetailRow, SessionRow } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
-import { firstLine, needsMe, needsMeCounts, parseSnooze, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
+import { firstLine, needsMe, needsMeCounts, needsMeEntry, needsMeList, parseSnooze, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
+
+const repo = resolve(import.meta.dir, "..")
+/** The picker's own order for one snapshot; native-client tests needs_me_sessions against the same file. */
+const fixture = JSON.parse(readFileSync(join(repo, "src/fixtures/needs-me-order.json"), "utf8")) as { sessions: SessionRow[]; freshest: string[]; eldest: string[]; flat: string[]; counts: { needsMe: number; open: number } }
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -157,5 +165,139 @@ describe("needs me", () => {
     expect(yourMoveLabels({})).toEqual([{ key: "stage", value: "needs-input" }, { key: "stage", value: "waiting-for-approval" }])
     expect(yourMoveLabels({ CLANKERHOUSE_YOUR_MOVE_LABELS: "review=me, bad" })).toEqual([{ key: "review", value: "me" }])
     expect(yourMoveLabels({ CLANKERHOUSE_YOUR_MOVE_LABELS: "none" })).toEqual([])
+  })
+})
+
+describe("the needs-me list without the picker", () => {
+  const names = (rows: readonly SessionRow[]) => rows.map((row) => row.name)
+
+  test("lists in the picker's order: Alt-I freshest first, Alt-E eldest first, deferred last, flat in snapshot order", () => {
+    expect(names(needsMeList(fixture.sessions, "freshest"))).toEqual(fixture.freshest)
+    expect(names(needsMeList(fixture.sessions, "eldest"))).toEqual(fixture.eldest)
+    expect(names(needsMeList(fixture.sessions, "flat"))).toEqual(fixture.flat)
+    expect(needsMeCounts(fixture.sessions)).toEqual(fixture.counts)
+    // Deferred rows are listed but not counted: the count is exactly the rows before them.
+    const listed = needsMeList(fixture.sessions, "freshest")
+    expect(listed.filter((row) => !row.needsMe!.snoozedUntil && !row.needsMe!.waitingOn)).toHaveLength(fixture.counts.needsMe)
+    expect(names(listed.slice(fixture.counts.needsMe))).toEqual(["snoozed", "waiting"])
+  })
+
+  test("lists the reasons the daemon decided, and leaves a working clanker with nothing asked off", () => {
+    const working = row([clanker("working", now - HOUR, { clankerId: "w" })], { name: "working", workshopId: "w0" })
+    const asked = row([clanker("idle", now - 2 * HOUR, { clankerId: "a" })], { name: "asked", workshopId: "w1" })
+    const finished = row([clanker("done", now - 3 * HOUR, { clankerId: "f" })], { name: "finished", workshopId: "w2" })
+    const decided = facts({ latestReport: (id) => id === "a" ? { ...report("question", now - 2 * HOUR, "Ship it?"), clankerId: "a" } : undefined })
+    const rows = [working, asked, finished].map((candidate) => ({ ...candidate, needsMe: needsMe(candidate, decided) }))
+    const listed = needsMeList(rows, "freshest")
+    expect(listed.map((candidate) => [candidate.name, candidate.needsMe?.reason])).toEqual([["asked", "asked"], ["finished", "finished"]])
+    expect(needsMeList(rows, "eldest").map((candidate) => candidate.name)).toEqual(["finished", "asked"])
+  })
+
+  test("a row names the pane, the session, why, since when, what was said, its labels and when it was made", () => {
+    const blocked = fixture.sessions.find((candidate) => candidate.name === "blocked early")!
+    expect(needsMeEntry(blocked, 3, { labels: { stage: "needs-input" }, createdAt: 42 })).toMatchObject({
+      position: 3, workshopId: "w4", name: "blocked early", session: "early", pane: "%4", clankerId: "c4", state: "blocked",
+      target: { type: "window", session: "early", windowId: "@4", pane: "%4" },
+      reason: "blocked", since: 2000, detail: "permission prompt", excerpt: null, deferred: false,
+      labels: { stage: "needs-input" }, createdAt: 42,
+    })
+    const snoozed = fixture.sessions.find((candidate) => candidate.name === "snoozed")!
+    expect(needsMeEntry(snoozed, 8, {})).toMatchObject({ pane: null, target: { type: "session", session: "snoozed" }, deferred: true, snoozedUntil: 99000, labels: {}, createdAt: null })
+    // An hc pane is addressed by its terminal id.
+    const hc = row([clanker("done", now, { clankerId: "c1", target: { type: "window", session: "s", windowId: "t1q9", pane: "t1q9", location: { kind: "hc", instanceId: "hc:x", nativeSessionId: "n", nativeWindowId: "t1q9", nativePaneId: "t1q9" } } })], { needsMe: { reason: "finished", since: now, clankerId: "c1" } })
+    expect(needsMeEntry(hc, 1, {}).pane).toBe("t1q9")
+  })
+})
+
+describe("clankers needs-me", () => {
+  const roots: string[] = []
+  afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+
+  /** A daemon socket that answers snapshot.get with the fixture, and a registry with labels and creation times. */
+  const daemon = async () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-needs-me-"))
+    roots.push(root)
+    const instance = "needs-me-test"
+    const runtime = join(root, "run", `clankerhouse-${process.getuid!()}-${instance}`)
+    mkdirSync(runtime, { recursive: true })
+    const state = join(root, "state", `clankerhouse-${instance}`)
+    mkdirSync(state, { recursive: true })
+    const db = new Database(join(state, "workshops.sqlite3"))
+    db.exec(`CREATE TABLE repositories (id TEXT PRIMARY KEY, common_dir TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE workshops (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, canonical_path TEXT NOT NULL UNIQUE, branch TEXT NOT NULL, parent_id TEXT, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE workshop_labels (workshop_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (workshop_id, key));
+      PRAGMA user_version = 1;
+      INSERT INTO repositories VALUES ('r', '/r/.git', 1, 1);
+      INSERT INTO workshops VALUES ('w3', 'r', '/late', 'late', NULL, 1, 1234, 1);
+      INSERT INTO workshop_labels VALUES ('w3', 'stage', 'needs-input', 1), ('w3', 'title', 'Late question', 1), ('w3', '_snooze', 'x:1:2', 1);`)
+    db.close()
+    const server = Bun.listen({
+      unix: join(runtime, "daemon.sock"),
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim())
+          const result = request.method === "snapshot.get" ? { version: 11, revision: { source: "test", sequence: 1 }, generatedAt: 5, sessions: fixture.sessions } : undefined
+          socket.write(`${JSON.stringify(result ? { version: 1, id: request.id, ok: true, result } : { version: 1, id: request.id, ok: false, error: { code: "UNSUPPORTED", message: request.method } })}\n`)
+        },
+      },
+    })
+    // Only what a headless caller has: no terminal, nothing of the invoking clanker or Herdr.
+    const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec") }
+    return { env, stop: () => server.stop(true) }
+  }
+
+  const run = async (command: string[], env: Record<string, string>) => {
+    const child = Bun.spawn(command, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { stdout, stderr, code }
+  }
+
+  test("prints the picker's list as JSON with no terminal, in each order", async () => {
+    const { env, stop } = await daemon()
+    try {
+      const freshest = await run([join(repo, "bin/clankers"), "needs-me", "--json"], env)
+      expect(freshest.stderr).toBe("")
+      const dump = JSON.parse(freshest.stdout)
+      expect(dump).toMatchObject({ version: 1, order: "freshest", generatedAt: 5, counts: fixture.counts })
+      expect(dump.rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.freshest)
+      expect(dump.rows[0]).toMatchObject({ position: 1, workshopId: "w3", session: "late", reason: "asked", since: 9000, excerpt: "Roll back?", labels: { stage: "needs-input" }, createdAt: 1234, deferred: false })
+      for (const key of ["pane", "session", "reason", "since", "excerpt", "labels", "createdAt", "workshopId", "title", "project", "deferred", "target"]) expect(dump.rows[0]).toHaveProperty(key)
+      expect(dump.rows.slice(-2).map((entry: { deferred: boolean }) => entry.deferred)).toEqual([true, true])
+      expect(dump.rows.some((entry: { name: string }) => entry.name === "working")).toBe(false)
+
+      const eldest = JSON.parse((await run([join(repo, "bin/clankers"), "needs-me", "--json", "--eldest"], env)).stdout)
+      expect(eldest.rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.eldest)
+      const flat = JSON.parse((await run([join(repo, "bin/clankers"), "needs-me", "--json", "--flat"], env)).stdout)
+      expect(flat.rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.flat)
+      expect(flat.rows[0]).toMatchObject({ name: "working", reason: null, state: "working" })
+
+      // The hc launcher's spelling is the same list and starts nothing.
+      const launcher = await run([join(repo, "bin/clankerhouse-hc"), "--needs-me", "--json", "--eldest"], env)
+      expect(JSON.parse(launcher.stdout).rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.eldest)
+
+      const text = await run([join(repo, "bin/clankers"), "needs-me"], env)
+      expect(text.stdout.split("\n")[0]).toBe(`${fixture.counts.needsMe} need you · ${fixture.counts.open} open`)
+      expect(text.stdout).toContain("1. asked late  asked")
+    } finally { stop() }
+  })
+
+  test("says so when the daemon is down instead of starting one", async () => {
+    const { env, stop } = await daemon()
+    stop()
+    rmSync(join(env.XDG_RUNTIME_DIR, `clankerhouse-${process.getuid!()}-${env.CLANKERHOUSE_INSTANCE}`, "daemon.sock"), { force: true })
+    const result = await run([join(repo, "bin/clankers"), "needs-me", "--json"], env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("daemon is not running")
+  })
+
+  test("the hc launcher's help and its needs-me view need no terminal and start nothing", async () => {
+    const { env, stop } = await daemon()
+    stop()
+    const help = await run([join(repo, "bin/clankerhouse-hc"), "--help"], env)
+    expect(help.code).toBe(0)
+    expect(help.stdout).toContain("clankerhouse-hc --needs-me --json")
+    const view = await run([join(repo, "bin/clankerhouse-hc"), "--needs-me"], env)
+    expect(view.code).toBe(2)
+    expect(view.stderr).toContain("clankerhouse-hc --needs-me --json")
   })
 })

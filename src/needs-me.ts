@@ -5,7 +5,7 @@
  *
  * A Workshop where a clanker is working and nothing is asked of the operator is not listed.
  */
-import type { DetailRow, SessionRow } from "./model"
+import type { DetailRow, SessionRow, Target } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
 import { DONE_LABEL } from "./labels"
 
@@ -78,7 +78,7 @@ const rank = (reason: NeedsMeReason) => NEEDS_ME_REASONS.indexOf(reason)
 const morePressing = (left: NeedsMe, right: NeedsMe) => rank(left.reason) - rank(right.reason) || left.since - right.since
 
 /** A Workshop's clanker rows: owned clankers, and harnesses the Multiplexer observes without a claim. */
-const clankerDetails = (row: SessionRow) => row.details.filter((detail) => detail.kind === "clanker" || (detail.kind === "observation" && detail.harness && detail.observation?.confidence !== "rejected"))
+const clankerDetails = (row: SessionRow) => (row.details ?? []).filter((detail) => detail.kind === "clanker" || (detail.kind === "observation" && detail.harness && detail.observation?.confidence !== "rejected"))
 
 /** A Report filed before the clanker's current turn began was answered by whatever started that turn. */
 const currentReport = (clankerId: string | undefined, facts: NeedsMeFacts) => {
@@ -178,3 +178,111 @@ export const yourMoveLabels = (env: Record<string, string | undefined> = Bun.env
 }
 
 export const READY_AFTER_MS = 86_400_000
+
+/**
+ * The picker's own list order (native-client needs_me_rank): age orders the list and this only breaks its ties, so it
+ * groups coarser than NEEDS_ME_REASONS. An unknown reason from a newer daemon ranks last.
+ */
+export const needsMeListRank = (reason: string) =>
+  reason === "asked" || reason === "blocked" ? 0 : reason === "finished" ? 1 : reason === "failed" || reason === "crashed" ? 2 : reason === "your-move" ? 3 : 4
+
+/** Freshest first (Alt-I), eldest first (Alt-E), or every open Workshop in the snapshot's order (the flat list, Alt-F/Alt-K). */
+export type NeedsMeOrder = "freshest" | "eldest" | "flat"
+
+type ListedRow = Pick<SessionRow, "target" | "workshopId" | "needsMe">
+
+/**
+ * The rows the picker's needs-me views list, in their order (native-client needs_me_sessions, pinned to it by
+ * src/fixtures/needs-me-order.json): open Workshops with a reason, one row each (its most pressing: deferred last,
+ * then rank, then the eldest), deferred after everything else, then age, then rank. `flat` keeps every open Workshop,
+ * one row each, in the snapshot's order, with or without a reason.
+ */
+export const needsMeList = <Row extends ListedRow>(rows: readonly Row[], order: NeedsMeOrder): Row[] => {
+  const chosen: Row[] = []
+  const key = (row: Row) => [Number(deferred(row.needsMe)), needsMeListRank(row.needsMe!.reason), row.needsMe!.since] as const
+  const before = (left: readonly number[], right: readonly number[]) => {
+    for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return left[index]! < right[index]!
+    return false
+  }
+  for (const row of rows) {
+    if (row.target.type !== "session" || (order !== "flat" && !row.needsMe)) continue
+    const same = row.workshopId ? chosen.findIndex((known) => known.workshopId === row.workshopId) : -1
+    if (same < 0) chosen.push(row)
+    else if (order !== "flat" && before(key(row), key(chosen[same]!))) chosen[same] = row
+  }
+  if (order === "flat") return chosen
+  return chosen.toSorted((left, right) => {
+    const [l, r] = [left.needsMe!, right.needsMe!]
+    const age = order === "eldest" ? l.since - r.since : r.since - l.since
+    return Number(deferred(l)) - Number(deferred(r)) || age || needsMeListRank(l.reason) - needsMeListRank(r.reason)
+  })
+}
+
+/** A row of `clankers needs-me --json`: the Workshop, where Enter lands, and why it is listed. */
+export interface NeedsMeEntry {
+  position: number
+  workshopId: string | null
+  name: string
+  session: string
+  title: string | null
+  project: string | null
+  branch: string
+  path: string
+  /** The multiplexer address of the clanker's pane (hc terminal id, Herdr pane id), or null when the row has none. */
+  pane: string | null
+  clankerId: string | null
+  /** That clanker's state, as the flat list shows it. */
+  state: string | null
+  /** The target Enter in the picker opens: the clanker's window, else the session. */
+  target: Target
+  reason: NeedsMeReason | string | null
+  since: number | null
+  detail: string | null
+  excerpt: string | null
+  deferred: boolean
+  snoozedUntil: number | null
+  waitingOn: string | null
+  /** Visible labels, KEY=VALUE (title and hidden `_` keys left out). */
+  labels: Record<string, string>
+  /** When the Workshop was created, epoch ms; null when the registry does not know it. */
+  createdAt: number | null
+}
+
+const windowOf = (detail: DetailRow | undefined) => detail && (detail.target.type === "window" || detail.target.type === "opencode") ? detail.target : undefined
+const paneOf = (target: Target | undefined) => {
+  if (!target || target.type === "directory" || target.type === "session") return null
+  return target.location?.nativePaneId ?? target.pane ?? null
+}
+
+/** One listed row as the dump prints it. Labels and createdAt come from the Workshop registry, which the snapshot does not carry. */
+export const needsMeEntry = (row: SessionRow, position: number, registry: { labels?: Record<string, string>; createdAt?: number }): NeedsMeEntry => {
+  const reason = row.needsMe
+  const clankers = clankerDetails(row)
+  const needing = reason?.clankerId ? clankers.find((detail) => detail.clankerId === reason.clankerId) : undefined
+  // Enter lands on the clanker that needs attention when it is still on screen (native-client needs_me_target).
+  const target = windowOf(needing) ?? row.target
+  const shown = needing ?? clankers.find((detail) => windowOf(detail))
+  return {
+    position,
+    workshopId: row.workshopId ?? null,
+    name: row.name,
+    session: row.target.type === "directory" ? "" : row.target.session,
+    title: row.title ?? null,
+    project: row.project ?? null,
+    branch: row.branch ?? "",
+    path: row.path,
+    pane: paneOf(windowOf(shown)),
+    clankerId: reason?.clankerId ?? shown?.clankerId ?? null,
+    state: shown?.state ?? null,
+    target,
+    reason: reason?.reason ?? null,
+    since: reason?.since ?? null,
+    detail: reason?.detail ?? null,
+    excerpt: reason?.excerpt ?? null,
+    deferred: deferred(reason),
+    snoozedUntil: reason?.snoozedUntil ?? null,
+    waitingOn: reason?.waitingOn ?? null,
+    labels: { ...registry.labels },
+    createdAt: registry.createdAt ?? null,
+  }
+}

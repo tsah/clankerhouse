@@ -45,6 +45,10 @@ export interface LedgerClanker extends LedgerInput {
 
 const SCHEMA_VERSION = 1
 
+/** The task recorded for a live session the ledger adopted without knowing what it was asked. */
+export const ADOPTION_PLACEHOLDER = "Adopted a live session; continue the most recent unfinished user request."
+const isAdoptionPlaceholder = (task: string) => task === ADOPTION_PLACEHOLDER
+
 export const ledgerStatePath = (stateHome = stateHomeDefault(), env: Record<string, string | undefined> = Bun.env) =>
   join(stateDirFor(stateHome, env), "clankers.sqlite3")
 
@@ -258,6 +262,49 @@ export class ClankerLedger {
     }).immediate()
   }
 
+  /**
+   * Take over a clanker recorded by another lane's ledger, keeping its task, launch spec, owner
+   * unit and harness session. The other lane's row is the live one, so it wins over a row this
+   * ledger copied or adopted earlier, except that an adoption placeholder never replaces a real task.
+   * The row is open and stamped with no server, like a clanker interrupted elsewhere.
+   */
+  importFrom(source: LedgerClanker) {
+    const clanker = validateInput(source)
+    const now = this.clock()
+    return this.db.transaction(() => {
+      const current = this.get(clanker.clankerId)
+      const originalTask = current && isAdoptionPlaceholder(clanker.originalTask) && !isAdoptionPlaceholder(current.originalTask) ? current.originalTask : clanker.originalTask
+      if (current && current.harness !== clanker.harness) throw new Error(`Clanker ${clanker.clankerId} is a ${current.harness} here, not ${clanker.harness}`)
+      if (!current) {
+        this.db.query(`INSERT INTO clankers (${columns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open', NULL, ?11, NULL, ?12, ?13)`)
+          .run(clanker.clankerId, clanker.harness, clanker.workshopId, clanker.workshopPath, clanker.sessionLabel, clanker.windowLabel, clanker.cwd, clanker.harnessSessionId, JSON.stringify(clanker.launchSpec), originalTask, source.ownerUnit, source.createdAt || now, now)
+      } else {
+        this.db.query("UPDATE clankers SET workshop_id = ?2, workshop_path = ?3, session_label = ?4, window_label = ?5, cwd = ?6, harness_session_id = ?7, launch_spec = ?8, original_task = ?9, owner_unit = COALESCE(?10, owner_unit), state = 'open', closed_reason = NULL, server_epoch = NULL, updated_at = ?11 WHERE clanker_id = ?1")
+          .run(clanker.clankerId, clanker.workshopId, clanker.workshopPath, clanker.sessionLabel, clanker.windowLabel, clanker.cwd, clanker.harnessSessionId, JSON.stringify(clanker.launchSpec), originalTask, source.ownerUnit, now)
+      }
+      return this.get(clanker.clankerId)!
+    }).immediate()
+  }
+
+  /**
+   * Fill in what an adoption could not know from another lane's row for the same clanker and harness
+   * session: the task, when this row has only the placeholder, and the launch spec, when it has only
+   * the default. Nothing else changes; the clanker may be running here.
+   */
+  restoreFrom(source: LedgerClanker) {
+    const current = this.get(source.clankerId)
+    if (!current) throw new Error(`Unknown clanker ${source.clankerId}`)
+    if (current.harness !== source.harness || current.harnessSessionId !== source.harnessSessionId) throw new Error(`Clanker ${source.clankerId} runs another session here (${current.harnessSessionId}) than the other lane recorded (${source.harnessSessionId})`)
+    const task = isAdoptionPlaceholder(current.originalTask) && !isAdoptionPlaceholder(source.originalTask) ? source.originalTask : current.originalTask
+    const defaultSpec = current.launchSpec.version === 1 && current.launchSpec.profile === null
+    const launchSpec = defaultSpec ? validateLaunchSpec(source.launchSpec) : current.launchSpec
+    const restored = { originalTask: task !== current.originalTask, launchSpec: JSON.stringify(launchSpec) !== JSON.stringify(current.launchSpec) }
+    if (restored.originalTask || restored.launchSpec) {
+      this.db.query("UPDATE clankers SET original_task = ?2, launch_spec = ?3, updated_at = ?4 WHERE clanker_id = ?1").run(source.clankerId, task, JSON.stringify(launchSpec), this.clock())
+    }
+    return { clanker: this.get(source.clankerId)!, restored }
+  }
+
   get(clankerId: string) {
     const row = this.db.query(`SELECT ${columns} FROM clankers WHERE clanker_id = ?1`).get(clankerId) as Row | null
     return row ? fromRow(row) : undefined
@@ -321,7 +368,7 @@ export class ClankerLedger {
               cwd: clanker.cwd,
               harnessSessionId: clanker.harnessSessionId,
               launchSpec: { version: 1, profile: null },
-              originalTask: "Adopted a live session; continue the most recent unfinished user request.",
+              originalTask: ADOPTION_PLACEHOLDER,
             })
           } else if (clanker.harnessSessionId && clanker.harnessSessionId !== row.harnessSessionId) {
             this.bindSession(clanker.clankerId, clanker.harnessSessionId)

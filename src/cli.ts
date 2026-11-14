@@ -18,7 +18,8 @@ import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
-import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
+import { ensureDirectorySession, ensureSession, identity, moveClankerFromLane, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
+import { foreignClankers, laneLedgerPath, moveCommand, readLaneLedger } from "./other-lanes"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
@@ -330,6 +331,12 @@ const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; i
     .filter((row) => !options.interrupted || row.interrupted !== false)
 }
 
+/** Clankers running on another lane's server that this lane does not see, with the command that moves each. */
+const otherLaneClankers = async () => {
+  const aliveHere = await listClankers().then((clankers) => new Set(clankers.map((clanker) => clanker.id)), () => new Set<string>())
+  return foreignClankers({ aliveHere }).map((row) => ({ ...row, moveCommand: moveCommand(row) }))
+}
+
 const printHooksStatus = (status: ReturnType<typeof hooksStatus>) => {
   const { config, totals, recent } = status
   console.log(`Config: ${config.path} (${config.state})${config.error ? `: ${config.error}` : ""}`)
@@ -449,8 +456,11 @@ export const usage = `Usage:
   clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers ledger [--state open|closed | --interrupted] [--workshop ID]
+  clankers ledger other-lanes
+  clankers ledger restore CLANKER_ID --from-lane LANE
   clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
   clankers resume CLANKER_ID [--prompt TEXT]
+  clankers resume CLANKER_ID --from-lane LANE [--prompt TEXT] [--dry-run]
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
@@ -714,11 +724,16 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const strict = parsed.has("--strict")
     const snapshot = await getSnapshot<SessionRow>(daemonSocketPath)
     const report = diagnoseProjection(snapshot.sessions)
-    if (json) console.log(JSON.stringify(report, null, 2))
+    const otherLanes = await otherLaneClankers()
+    if (json) console.log(JSON.stringify({ ...report, otherLanes }, null, 2))
     else {
       console.log(`Clankerhouse projection: ${report.counts.sessions} sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
       if (!report.issues.length) console.log("No projection anomalies detected.")
       for (const entry of report.issues) console.log(`${entry.severity.toUpperCase()} ${entry.code}: ${entry.summary}`)
+      if (otherLanes.length) {
+        console.log(`${otherLanes.length} clanker(s) still run on another lane's server, invisible to this lane until moved:`)
+        for (const row of otherLanes) console.log(`  ${row.clankerId} ${row.harness} lane ${row.lane} ${row.workshopPath}\n    ${row.moveCommand}`)
+      }
     }
     if (strict && !report.healthy) throw new Error("Projection diagnostics found invariant violations")
     return
@@ -749,6 +764,20 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "ledger") {
+    if (parsed.args[0] === "other-lanes") {
+      parsed.shift()
+      return console.log(JSON.stringify(await otherLaneClankers()))
+    }
+    if (parsed.args[0] === "restore") {
+      parsed.shift()
+      const lane = parsed.take("--from-lane")
+      if (!lane) throw new Error("Usage: clankers ledger restore CLANKER_ID --from-lane LANE")
+      const id = requiredClankerId(parsed)
+      const source = readLaneLedger(laneLedgerPath(lane), { clankerId: id })[0]
+      if (!source) throw new Error(`Lane ${lane} has no clanker ${id}`)
+      const ledger = openClankerLedger()
+      try { return console.log(JSON.stringify(ledger.restoreFrom(source))) } finally { ledger.close() }
+    }
     if (parsed.args[0] === "close") {
       // Closing stops the harness too, so it is not reopened by the next observation.
       parsed.shift()
@@ -773,8 +802,13 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "resume") {
+    const lane = parsed.take("--from-lane")
+    const dryRun = parsed.has("--dry-run")
+    const prompt = parsed.take("--prompt")
     const id = requiredClankerId(parsed)
-    return console.log(JSON.stringify(await resumeClanker(id, { prompt: parsed.take("--prompt") })))
+    if (dryRun && !lane) throw new Error("--dry-run needs --from-lane")
+    if (lane) return console.log(JSON.stringify(await moveClankerFromLane(id, { lane, dryRun, prompt })))
+    return console.log(JSON.stringify(await resumeClanker(id, { prompt })))
   }
 
   if (command === "workshop") {

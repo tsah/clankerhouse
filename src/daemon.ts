@@ -29,6 +29,7 @@ import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { LifecycleMirror } from "./lifecycle-mirror"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
+import { foreignClankers, type ForeignClanker } from "./other-lanes"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
@@ -409,13 +410,33 @@ const applyProjectEffect = (effect: ProjectEffect) => {
   markDirectoryActivity(effect.path, effect.source, effect.updatedAt, effect.minIntervalMs)
 }
 
+/** Clankers left running on another lane's server; read every 30 s, since it only changes when one is moved or ends. */
+const OTHER_LANES_REFRESH_MS = 30_000
+let otherLanesCache: { refreshedAt: number; rows: ForeignClanker[] } | undefined
+let otherLanesFailure = ""
+const collectOtherLaneClankers = Effect.sync(() => {
+  if (otherLanesCache && Date.now() - otherLanesCache.refreshedAt < OTHER_LANES_REFRESH_MS) return otherLanesCache.rows
+  let rows: ForeignClanker[] = otherLanesCache?.rows ?? []
+  try {
+    rows = foreignClankers()
+    otherLanesFailure = ""
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message !== otherLanesFailure) console.error(`Other-lane clanker scan failed: ${message}`)
+    otherLanesFailure = message
+  }
+  otherLanesCache = { refreshedAt: Date.now(), rows }
+  return rows
+})
+
 const collectSessions = Effect.all([
   collectMultiplexerResources,
   collectDirectories,
   collectClankerReports,
   collectProjectionEnrichment,
+  collectOtherLaneClankers,
 ], { concurrency: "unbounded" }).pipe(
-  Effect.flatMap(([multiplexer, directories, clankerReports, enrichment]) => {
+  Effect.flatMap(([multiplexer, directories, clankerReports, enrichment, otherLaneClankers]) => {
     const { lineage, managedResources } = enrichment
     return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
       const projection = projectResources({
@@ -429,6 +450,7 @@ const collectSessions = Effect.all([
         observedAt: Date.now(),
         instanceId: multiplexer.instanceId,
         multiplexerKind: multiplexer.kind,
+        otherLaneClankers,
         home: Bun.env.HOME,
       })
       for (const effect of projection.effects) applyProjectEffect(effect)
@@ -867,6 +889,9 @@ const dumpState = collectSessions.pipe(
       clankers: session.details
         .filter((detail) => detail.kind === "clanker")
         .map((detail) => ({ harness: detail.harness, state: detail.state, status: detail.status, detail: detail.detail, title: detail.title, terminalId: detail.terminalId, clankerId: detail.clankerId, location: detail.target.type !== "directory" ? detail.target.location : undefined })),
+      elsewhere: session.details
+        .filter((detail) => detail.kind === "elsewhere")
+        .map((detail) => ({ harness: detail.harness, status: detail.status, detail: detail.detail, title: detail.title })),
       observations: session.details
         .filter((detail) => detail.kind === "observation")
         .map((detail) => ({ harness: detail.harness, status: detail.status, detail: detail.detail, title: detail.title, terminalId: detail.terminalId, observation: detail.observation, location: detail.target.type !== "directory" ? detail.target.location : undefined })),

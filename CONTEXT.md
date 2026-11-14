@@ -56,7 +56,11 @@ A Clanker's own wake-up schedule: a five-field cron expression read in a stored 
 
 ## Interrupted Clanker
 
-An open Clanker Ledger row that is not alive and was last seen in an earlier Herdr server: it was running when the host or Herdr went down. An Interrupted Clanker returns only when someone runs `clankers resume`, which continues its exact harness session in its Workshop under the same Clanker identity without replaying a prompt; `clankers ledger close` drops one that should not return. After a restart the operator typically asks a Clanker to read `clankers ledger --interrupted` and resume what still matters.
+An open Clanker Ledger row that is not alive and was last seen in an earlier Herdr server: it was running when the host or Herdr went down. An Interrupted Clanker returns only when someone runs `clankers resume`, which continues its exact harness session in its Workshop under the same Clanker identity without replaying a prompt; `clankers ledger close` drops one that should not return. After a restart the operator typically asks a Clanker to read `clankers ledger --interrupted` and resume what still matters. `clankers resume` refuses a Clanker whose harness still runs in its owner scope, which a Clanker on another Lane's server does.
+
+## Lane
+
+One Clankerhouse instance (`CLANKERHOUSE_INSTANCE`) with its own Multiplexer, daemon, registry and Clanker Ledger: the Herdr TUI lane (`herdr`) and the herdr-core lane (`hc`) run side by side. A Lane sees only its own Multiplexer, so a Clanker left running on another Lane's server after a switch is invisible to it: not listed, not addressable, and its Workshop looks dead. Each Lane reads its siblings' ledgers (read-only) for open rows whose harness still runs in its owner scope, shows them on their Workshops as "on the herdr server" and in `clankers diagnose` and `clankers ledger other-lanes`, and moves one with `clankers resume ID --from-lane LANE`: its row is copied with task, launch spec and harness session, its old scope is stopped (with anything hung in it), the old row is closed as `moved-to-<lane>`, and it resumes here with its Workshop environment taken from this Lane's registry. A Clanker this Lane adopted from a pane started by hand gets its task and launch spec back with `clankers ledger restore ID --from-lane LANE`.
 
 ## Herd Reconciliation
 

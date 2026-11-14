@@ -2294,8 +2294,33 @@ fn neutral_detail(detail: &DetailRow) -> bool {
             }))
 }
 
+/// A clanker still running on another lane's server (src/other-lanes.ts): alive, but not this lane's to drive.
+const ELSEWHERE_GLYPH: (&str, Color) = ("◇", Color::Rgb(251, 191, 36));
+
+fn runs_elsewhere(row: &TreeRow) -> bool {
+    match &row.detail {
+        Some(detail) => detail.kind == "elsewhere",
+        None => {
+            !row.contains_clanker
+                && row.state == ClankerState::Unknown
+                && row.session.details.iter().any(|detail| detail.kind == "elsewhere")
+        }
+    }
+}
+
+/// What a Workshop row says about a clanker on another lane, such as "on the herdr server".
+fn elsewhere_status(session: &SessionRow) -> Option<&str> {
+    session
+        .details
+        .iter()
+        .find(|detail| detail.kind == "elsewhere")
+        .map(|detail| detail.status.as_str())
+}
+
 fn row_glyph(row: &TreeRow, _current_session: &str, frame: usize) -> (&'static str, Color) {
-    if uses_neutral_glyph(row) {
+    if runs_elsewhere(row) {
+        ELSEWHERE_GLYPH
+    } else if uses_neutral_glyph(row) {
         ("○", Color::Rgb(148, 163, 184))
     } else {
         state_glyph(row.state, frame)
@@ -2392,11 +2417,15 @@ fn session_meta(session: &SessionRow, current: bool) -> String {
         .collect::<Vec<_>>()
         .join(" ")
     };
-    [current.then_some("current"), (!meta.is_empty()).then_some(meta.as_str())]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+    [
+        current.then_some("current"),
+        elsewhere_status(session),
+        (!meta.is_empty()).then_some(meta.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
@@ -4399,6 +4428,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["idle", "ready", "failed", "working", "neutral"]
         );
+    }
+
+    #[test]
+    fn a_workshop_whose_clanker_runs_on_another_lane_says_so_instead_of_an_empty_orb() {
+        let app = app_with_sessions(
+            r#"[
+                {"name":"/work/old","path":"/work/old","recency":5,"workshopId":"old","target":{"type":"directory","path":"/work/old"},"details":[
+                    {"kind":"directory","state":"unknown","target":{"type":"directory","path":"/work/old"}},
+                    {"kind":"elsewhere","harness":"claude","status":"on the herdr server","title":"claude c1","state":"unknown","target":{"type":"directory","path":"/work/old"}}
+                ]},
+                {"name":"shell","path":"/shell","recency":1,"target":{"type":"session","session":"shell"}}
+            ]"#,
+        );
+        let old = app.rows.iter().find(|row| row.session.name == "/work/old").unwrap();
+        assert_eq!(row_glyph(old, "", 0), ELSEWHERE_GLYPH);
+        assert_eq!(session_meta(&old.session, false), "on the herdr server");
+        let shell = app.rows.iter().find(|row| row.session.name == "shell").unwrap();
+        assert_eq!(row_glyph(shell, "", 0), ("○", Color::Rgb(148, 163, 184)));
+        assert_eq!(session_meta(&shell.session, false), "");
     }
 
     #[test]

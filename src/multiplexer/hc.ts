@@ -5,14 +5,14 @@
  * so a session ends with its last terminal, as a herdr workspace does. Core lifecycle lives in `hc-core.ts`.
  */
 import { randomUUID } from "node:crypto"
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
 import {
   claimScopeOf, locationScope,
   MultiplexerUnavailableError, UnsupportedMultiplexerOperation,
   type AgentInterruptOutcome, type ClaimKey, type ClaimMap, type CurrentLocation, type Multiplexer, type MultiplexerCapabilities, type MultiplexerChange,
-  type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
+  type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type RuntimeAgentStatus, type SpawnRequest, type SpawnResult,
 } from "./interface"
 import { runtimeDirFor } from "../paths"
 
@@ -105,6 +105,49 @@ export const hcRequest = (socketPath: string, timeoutMs = 10_000): HcRequest => 
 interface HcForeground { pid: number; name?: string; argv?: string[]; cwd?: string }
 interface HcTerminal { address: string; name?: string | null; argv: string[]; cwd: string; pid: number | null; state: "live" | "finished"; reason?: string | null; exit_code?: number | null; title?: string; created_ms: number; reported?: boolean; status_ms?: number | null; status?: { state: string; app?: string; kind?: string; msg?: string } | null; labels: Record<string, string>; foreground?: HcForeground | null }
 
+/** Reads a /proc file; injectable so the walk below can be tested without live processes. */
+export type ProcRead = (path: string) => string | undefined
+const readProc: ProcRead = (path) => {
+  try { return path.endsWith("/cwd") ? readlinkSync(path) : readFileSync(path, "utf8") } catch { return undefined }
+}
+
+/** The process group of a /proc/<pid>/stat line: the third field after the command's closing parenthesis. */
+const processGroupOf = (stat: string | undefined) => {
+  if (!stat) return undefined
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+  const group = Number(fields[2])
+  return Number.isInteger(group) ? group : undefined
+}
+
+/**
+ * Every process in the foreground group hc names. hc reports one foreground process, the group's
+ * leader; for a clanker that is the lifecycle wrapper, and the harness is its child in the same
+ * group. Without the rest of the group the harness looks gone. Descendants are read from /proc on
+ * this host; when it cannot be read the leader alone is returned.
+ */
+export const foregroundGroup = (leader: HcForeground, read: ProcRead = readProc, limit = 64): HcForeground[] => {
+  const members: HcForeground[] = [leader]
+  const seen = new Set([leader.pid])
+  const queue = [leader.pid]
+  while (queue.length && members.length < limit) {
+    const pid = queue.shift()!
+    const tasks = read(`/proc/${pid}/task/${pid}/children`)
+    for (const value of (tasks ?? "").split(/\s+/).filter(Boolean)) {
+      const child = Number(value)
+      if (!Number.isInteger(child) || seen.has(child)) continue
+      seen.add(child)
+      if (processGroupOf(read(`/proc/${child}/stat`)) !== leader.pid) continue
+      const name = read(`/proc/${child}/comm`)?.trim()
+      if (!name) continue
+      const argv = (read(`/proc/${child}/cmdline`) ?? "").split("\0").filter(Boolean)
+      members.push({ pid: child, name, argv, cwd: read(`/proc/${child}/cwd`) })
+      queue.push(child)
+      if (members.length >= limit) break
+    }
+  }
+  return members
+}
+
 /** Identity a terminal must never take from the core's environment. `spawn` unsets whichever the caller did not set. */
 /** `hc run` copies the caller's TERM, and a daemon has none or `dumb`, which breaks prompts like starship. */
 export const HC_TERMINAL_TYPE = { TERM: "xterm-256color", COLORTERM: "truecolor" }
@@ -180,13 +223,17 @@ export class HcAdapter implements Multiplexer {
   private readonly request: HcRequest
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
+  private readonly readProc: ProcRead
 
-  constructor(options: { socketPath?: string; request?: HcRequest; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
+  constructor(options: { socketPath?: string; request?: HcRequest; now?: () => number; sleep?: (ms: number) => Promise<void>; readProc?: ProcRead } = {}) {
     this.socketPath = options.socketPath ?? hcSocketPath()
     this.request = options.request ?? hcRequest(this.socketPath)
     this.now = options.now ?? Date.now
     this.sleep = options.sleep ?? Bun.sleep
+    this.readProc = options.readProc ?? readProc
   }
+
+  private foregroundGroup(leader: HcForeground) { return foregroundGroup(leader, this.readProc) }
 
   capabilities(): MultiplexerCapabilities {
     return { processInfo: true, agentStatus: true, agentPrompt: true, sessionRefs: false, persistentLabels: true, durableIds: true, popup: false, worktrees: false, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }
@@ -215,7 +262,8 @@ export class HcAdapter implements Multiplexer {
   private async sessionTerminals(sessionId: string) { return (await this.terminals()).filter((terminal) => sessionOf(terminal) === sessionId) }
 
   /** No per-pane requests: `terminal.list` has everything, so the `processInfo` options change nothing here. */
-  async observe(): Promise<MultiplexerSnapshot> {
+  async observe(options: ObserveOptions = {}): Promise<MultiplexerSnapshot> {
+    const groups = options.processInfo !== false
     const [instanceId, terminals] = await Promise.all([this.instanceId(), this.terminals()])
     const now = this.now()
     const grouped = new Map<string, HcTerminal[]>()
@@ -247,7 +295,7 @@ export class HcAdapter implements Multiplexer {
           clankerId: paneClaims.clankerId,
           harness: paneClaims.harness,
           harnessSessionId: paneClaims.harnessSessionId,
-          processInfo: { shellPid: terminal.pid ?? undefined, foregroundProcessGroupId: foreground?.pid, foregroundProcesses: foreground ? [foreground] : [] },
+          processInfo: { shellPid: terminal.pid ?? undefined, foregroundProcessGroupId: foreground?.pid, foregroundProcesses: foreground ? groups ? this.foregroundGroup(foreground) : [foreground] : [] },
           agentStatus: agentStatusFor(terminal, paneClaims.harness, now),
           ...(harnessGone(terminal, paneClaims.harness) ? { harnessGone: true } : {}),
         }

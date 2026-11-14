@@ -1,0 +1,157 @@
+#!/bin/bash
+# Moving a clanker left on another lane's server into the hc lane, end to end, on a private herdr-core session: a fake
+# "old lane" ledger row whose fake Claude (and a hung job beside it) runs in its own systemd scope, a real Workshop with a
+# parent, and `clankers resume --from-lane`. Proves the old scope is stopped, the row keeps its task, launch spec and
+# harness session, the Workshop environment comes from this lane's registry, and `clankers list` sees the harness alive
+# under the lifecycle wrapper. Needs hc and a systemd user manager; skips without a user manager, and without hc unless
+# HC_REQUIRED is set.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+# shellcheck source=lib/qa-hc-server
+. "$repo/scripts/lib/qa-hc-server"
+
+for name in $(compgen -e); do case $name in HERDR_*|HC_TERMINAL_*|HC_SCOPE|CLANKER_*|CLANKERHOUSE_WORKSHOP_ID|CLANKERHOUSE_PARENT_WORKSHOP_ID|CLANKERHOUSE_RUNTIME_DIR|CLANKERHOUSE_HARNESS_INCARNATION|CLAUDE*) unset "$name";; esac; done
+
+runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+# The move stops a systemd scope, so there is nothing to prove without a user manager (CI has none).
+if [[ ! -S "$runtime/systemd/private" ]]; then echo "no systemd user manager; skipping lane move scenario"; exit 0; fi
+
+root=$(mktemp -d /tmp/qa-lane-move.XXXXXX)
+launcher="$repo/bin/clankerhouse-hc"
+clankers="$repo/bin/clankers"
+old_lane="qaold-$$"
+old_unit="clankerhouse-qa-lane-move-$$.scope"
+failures=0
+cleanup() {
+    systemctl --user stop "$old_unit" >/dev/null 2>&1 || true
+    [[ -n "${clanker:-}" ]] && "$clankers" ledger close "$clanker" --if-present >/dev/null 2>&1 || true
+    "$launcher" --stop-server >/dev/null 2>&1 || true
+    qa_hc_stop
+    rm -rf -- "$root"
+}
+trap cleanup EXIT INT TERM
+
+ok() { printf '  ok: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() { local what=$1; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
+contains() { [[ "$1" == *"$2"* ]]; }
+wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
+json() { python3 -c 'import json,sys
+value = json.load(sys.stdin)
+for key in sys.argv[1:]:
+    value = value[int(key) if key.lstrip("-").isdigit() else key] if value is not None else None
+print("" if value is None else (json.dumps(value) if isinstance(value, (dict, list)) else value))' "$@"; }
+
+set +e
+qa_hc_start "$root" --systemd; started=$?
+set -e
+if [[ $started == 77 ]]; then exit 0; fi
+[[ $started == 0 ]] || exit "$started"
+export CLANKERHOUSE_MULTIPLEXER=hc CLANKERHOUSE_INSTANCE="qa-move-$$" CLANKERHOUSE_AUTO_RECOVER=0
+export CLANKERHOUSE_QA_LOG_DIR="$root/logs" CLANKERHOUSE_CLANKERS="$clankers"
+export CLANKERHOUSE_HC_CORE_ENV=CLANKERHOUSE_QA_LOG_DIR,CLANKERHOUSE_CLANKERS,CLANKERHOUSE_AUTO_RECOVER
+mkdir -p "$root/logs" "$root/bin"
+
+# A fake Claude: logs its argv and Workshop environment, and keeps a "hung test job" running beside it.
+cat >"$root/bin/claude" <<'SH'
+#!/bin/bash
+tag=${1#--}
+{ printf 'argv=%s\n' "$*"; env | grep -E '^(CLANKER_ID|CLANKER_SESSION_ID|CLANKERHOUSE_WORKSHOP_ID|CLANKERHOUSE_PARENT_WORKSHOP_ID|HC_TERMINAL_ID)=' | sort; } >"$CLANKERHOUSE_QA_LOG_DIR/claude-$tag.log"
+sleep 600 &
+while :; do sleep 1; done
+SH
+chmod +x "$root/bin/claude"
+export PATH="$root/bin:$PATH"
+
+"$launcher" --ensure-server
+
+echo "== fixture: a parent and a child Workshop, registered in this lane"
+fixture="$root/repo"
+git init -q -b main "$fixture"
+git -C "$fixture" config user.name "lane QA"; git -C "$fixture" config user.email qa@example.invalid; git -C "$fixture" config commit.gpgsign false
+echo fixture >"$fixture/tracked.txt"; git -C "$fixture" add tracked.txt; git -C "$fixture" commit -qm fixture
+git -C "$fixture" worktree add -q -b parent "$root/parent"
+git -C "$fixture" worktree add -q -b child "$root/child"
+parent=$(realpath "$root/parent"); child=$(realpath "$root/child")
+"$clankers" workshop ensure --cwd "$parent" >/dev/null
+"$clankers" workshop ensure --cwd "$child" >/dev/null
+(cd "$child" && "$clankers" workshop reparent "$child" --parent "$parent" >/dev/null)
+parent_id=$("$clankers" workshop show --path "$parent" | json workshopId)
+child_id=$("$clankers" workshop show --path "$child" | json workshopId)
+check "child Workshop has its parent here" test "$("$clankers" workshop show --path "$child" | json parentWorkshopId)" = "$parent_id"
+
+echo "== a clanker on the old lane, alive in its own scope with a stale parent in its environment"
+clanker="clanker-qa-move-$$"
+session=$(cat /proc/sys/kernel/random/uuid)
+old_ledger="$XDG_STATE_HOME/clankerhouse-$old_lane/clankers.sqlite3"
+(cd "$repo" && bun -e '
+import { ClankerLedger } from "./src/clanker-ledger"
+const [path, id, workshopId, workshopPath, session, unit] = process.argv.slice(1)
+const ledger = ClankerLedger.open({ dbPath: path })
+ledger.record({ clankerId: id, harness: "claude", workshopId, workshopPath, sessionLabel: "old", windowLabel: "claude", cwd: workshopPath, harnessSessionId: session, launchSpec: { version: 2, profile: null, resourceClass: "interactive" }, originalTask: "QA: the original task, kept across the move" })
+ledger.setOwnerUnit(id, unit)
+ledger.close()
+' "$old_ledger" "$clanker" "$child_id" "$child" "$session" "$old_unit")
+(cd "$child" && CLANKER_ID=$clanker CLANKERHOUSE_WORKSHOP_ID=$child_id CLANKERHOUSE_PARENT_WORKSHOP_ID=stale-parent \
+    systemd-run --user --scope --quiet --unit="$old_unit" --property=CollectMode=inactive-or-failed -- "$root/bin/claude" --old >/dev/null 2>&1 & disown) 2>/dev/null
+check "old harness runs in its scope" wait_for 50 test -s "$root/logs/claude-old.log"
+check "old harness has the stale parent" contains "$(<"$root/logs/claude-old.log")" "CLANKERHOUSE_PARENT_WORKSHOP_ID=stale-parent"
+check "this lane does not list it" bash -c "! '$clankers' list | grep -q $clanker"
+
+echo "== it is shown as running on another lane"
+others=$("$clankers" ledger other-lanes)
+check "ledger other-lanes lists it" contains "$others" "\"clankerId\":\"$clanker\""
+check "with the command that moves it" contains "$others" "clankers resume $clanker --from-lane $old_lane"
+check "diagnose lists it" contains "$("$clankers" diagnose)" "clankers resume $clanker --from-lane $old_lane"
+# To a file: a pipe loses the tail of a large dump when bun exits.
+(cd "$repo" && timeout 60 bun src/daemon.ts --dump-state >"$root/dump.json" 2>"$root/dump.err") || fail "dump-state: $(tail -3 "$root/dump.err")"
+projected=$(python3 -c 'import json,sys; print(json.dumps([s for s in json.load(open(sys.argv[1])) if s.get("elsewhere")]))' "$root/dump.json" 2>&1)
+check "the projection shows it on its Workshop" contains "$projected" "\"status\": \"on the $old_lane server\""
+check "on the right Workshop" contains "$projected" "\"workshopId\": \"$child_id\""
+
+echo "== a dry run changes nothing"
+dry=$("$clankers" resume "$clanker" --from-lane "$old_lane" --dry-run)
+check "dry run plans to stop the old scope" test "$(json stops <<<"$dry")" = "$old_unit"
+check "old scope still runs" systemctl --user is-active --quiet "$old_unit"
+check "this lane's ledger has no row yet" test "$("$clankers" ledger | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" = 0
+
+echo "== a plain resume of a copied row refuses while the old harness runs"
+# The 3 Nov cut-over copied open rows into the hc ledger; resuming one started a second Claude on the same session.
+(cd "$repo" && bun -e '
+import { ClankerLedger } from "./src/clanker-ledger"
+import { readLaneLedger } from "./src/other-lanes"
+const [from, to, id] = process.argv.slice(1)
+const ledger = ClankerLedger.open({ dbPath: to })
+ledger.importFrom({ ...readLaneLedger(from, { clankerId: id })[0]!, originalTask: "Adopted a live session; continue the most recent unfinished user request." })
+ledger.close()
+' "$old_ledger" "$XDG_STATE_HOME/clankerhouse-$CLANKERHOUSE_INSTANCE/clankers.sqlite3" "$clanker")
+refused=$("$clankers" resume "$clanker" 2>&1 || true)
+check "resume refuses" contains "$refused" "still runs in $old_unit on lane $old_lane"
+check "and names the move" contains "$refused" "clankers resume $clanker --from-lane $old_lane"
+check "old harness untouched" systemctl --user is-active --quiet "$old_unit"
+
+echo "== the move"
+moved=$("$clankers" resume "$clanker" --from-lane "$old_lane") || { fail "move failed: $moved"; exit 1; }
+check "old scope is gone, hung job and all" bash -c "! systemctl --user is-active --quiet '$old_unit'"
+# The bracket keeps this check's own command line from matching.
+check "no old fake harness survives" bash -c "! pgrep -f -- '$root/bin/[c]laude --old' >/dev/null"
+old_row=$(cd "$repo" && bun -e 'import { readLaneLedger } from "./src/other-lanes"; console.log(JSON.stringify(readLaneLedger(process.argv[1], { clankerId: process.argv[2] })[0]))' "$old_ledger" "$clanker")
+check "old row is closed as moved" test "$(json state <<<"$old_row")/$(json closedReason <<<"$old_row")" = "closed/moved-to-qa-move-$$"
+row=$("$clankers" ledger | python3 -c 'import json,sys; print(json.dumps(next(r for r in json.load(sys.stdin) if r["clankerId"] == sys.argv[1])))' "$clanker")
+check "task kept" test "$(json originalTask <<<"$row")" = "QA: the original task, kept across the move"
+check "launch spec kept" test "$(json launchSpec resourceClass <<<"$row")" = interactive
+check "harness session kept" test "$(json harnessSessionId <<<"$row")" = "$session"
+check "owned by a new scope" bash -c "[[ '$(json ownerUnit <<<"$row")' == clankerhouse-$clanker-*.scope ]]"
+check "resumed harness started" wait_for 100 test -s "$root/logs/claude-resume.log"
+resumed=$(<"$root/logs/claude-resume.log")
+check "resumes the same session" contains "$resumed" "argv=--resume $session"
+check "under the same clanker id" contains "$resumed" "CLANKER_ID=$clanker"
+check "parent comes from this lane's registry, not the old environment" contains "$resumed" "CLANKERHOUSE_PARENT_WORKSHOP_ID=$parent_id"
+check "clankers list sees it alive under the lifecycle wrapper" wait_for 100 bash -c "'$clankers' list | python3 -c 'import json,sys; rows=[r for r in json.load(sys.stdin) if r[\"id\"]==sys.argv[1]]; sys.exit(0 if rows and rows[0][\"alive\"] is True else 1)' $clanker"
+check "it is no longer listed on another lane" bash -c "! '$clankers' ledger other-lanes | grep -q $clanker"
+check "a second resume refuses a running clanker" bash -c "! '$clankers' resume $clanker 2>/dev/null"
+
+[[ $failures == 0 ]] || { printf '%d lane move checks failed\n' "$failures" >&2; exit 1; }
+echo "lane move scenario passed"

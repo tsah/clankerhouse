@@ -6,6 +6,7 @@ import type { ResourceRecord } from "../resource-registry"
 import { attachmentCandidatesFromWorkshops, type LineageSnapshot } from "../workshop"
 import type { ClankerReport, DirectoryRow, MuxSession, MuxWindow } from "./resources"
 import { reconcileClankerObservations, type LifecycleObservation, type OwnedClankerIdentity } from "./observations"
+import { moveCommand, type ForeignClanker } from "../other-lanes"
 
 export interface GitMeta {
   branch: string
@@ -26,6 +27,8 @@ export interface ProjectInputs {
   instanceId: string
   /** Multiplexer kind that produced `sessions`/`windows`; defaults to herdr. */
   multiplexerKind?: string
+  /** Clankers still running on another lane's server, shown on their Workshops until moved. */
+  otherLaneClankers?: readonly ForeignClanker[]
   home?: string
 }
 
@@ -197,6 +200,26 @@ export const projectResources = (inputs: ProjectInputs): ProjectResult => {
     const row: SessionRow = { name: path, path, branch: directory.branch, flags: "", markers: [], age, recency: Math.floor((directory.activityAt ?? 0) / 1000), target: { type: "directory", path }, details, searchText: "", availableActions, directorySource: directory.source, activitySource: directory.activitySource, frecency: directory.frecency, workshopId: workshop?.workshopId, parentWorkshopId, childWorkshopCount, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText, labels: labelTags(workshop?.labels), title: workshop?.labels?.title, project: projectName(workshop?.commonDir) }
     row.searchText = [row.name, row.path, row.branch, `${directory.source} directory`, row.activitySource, ...(row.labels ?? []), row.title, row.lineageLabel, row.lineageSearchText].join(" ").toLowerCase()
     rows.push(row)
+  }
+
+  // A clanker this lane cannot see but whose harness still runs elsewhere: its Workshop is not idle or dead.
+  const seenHere = new Set(windows.flatMap((window) => window.clankerId ? [window.clankerId] : []))
+  for (const clanker of inputs.otherLaneClankers ?? []) {
+    if (seenHere.has(clanker.clankerId)) continue
+    const workshop = lineage.byId.get(clanker.workshopId) ?? lineage.byPath.get(clanker.workshopPath)
+    const path = workshop?.canonicalPath ?? clanker.workshopPath
+    let row = rows.find((candidate) => (workshop && candidate.workshopId === workshop.workshopId) || expandHome(candidate.path, home) === path)
+    if (!row) {
+      const parentWorkshopId = preferredWorkshopId(workshop?.parentWorkshopId)
+      const lineageFields = buildLineageFields(workshop?.workshopId, parentWorkshopId, workshop ? projectedChildCount(workshop) : 0)
+      row = { name: path, path, branch: "", flags: "", markers: [], age: "", recency: Math.floor(clanker.updatedAt / 1000), target: { type: "directory", path }, details: [], searchText: "", availableActions: ["open", "create"], directorySource: "worktree", workshopId: workshop?.workshopId, parentWorkshopId, childWorkshopCount: workshop ? projectedChildCount(workshop) : 0, lineageLabel: lineageFields.lineageLabel, lineageSearchText: lineageFields.lineageSearchText, labels: labelTags(workshop?.labels), title: workshop?.labels?.title, project: projectName(workshop?.commonDir) }
+      rows.push(row)
+    }
+    row.details = [
+      ...row.details,
+      { kind: "elsewhere", harness: clanker.harness, status: `on the ${clanker.lane} server`, detail: moveCommand(clanker), title: `${clanker.harness} ${clanker.clankerId}`, age: ageFromTimestamp(clanker.updatedAt, observedAt), state: "unknown", target: row.target, updatedAt: clanker.updatedAt },
+    ]
+    row.searchText = [row.searchText || [row.name, row.path, row.branch, ...(row.labels ?? []), row.title].join(" ").toLowerCase(), "elsewhere", clanker.lane, clanker.clankerId].join(" ").toLowerCase()
   }
 
   const preferredWorkshops = [...lineage.byId.values()]

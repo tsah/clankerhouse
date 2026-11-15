@@ -8,7 +8,7 @@ import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
-import { openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
+import { isAdoptionPlaceholder, openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
 import { harnessModelArgs, stopOwnedHarness } from "./harness-launch"
 import { createMultiplexer, openManagedMultiplexer } from "./multiplexer"
 import { HcAdapter, HcAttachError } from "./multiplexer/hc"
@@ -19,7 +19,8 @@ import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, moveClankerFromLane, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
-import { foreignClankers, laneLedgerPath, moveCommand, readLaneLedger } from "./other-lanes"
+import { closeCommand, currentLane, foreignClankers, laneLedgerPath, moveCommand, readLaneLedger } from "./other-lanes"
+import { describeHarness, duplicateHarnesses, orphanedHarnesses, scanLiveHarnesses } from "./live-harnesses"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
@@ -327,14 +328,31 @@ const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; i
   try { rows = ledger.list({ state: options.interrupted ? "open" : options.state, workshopId: options.workshopId }) } finally { ledger.close() }
   const live = await listClankers().then((clankers) => new Set(clankers.map((clanker) => clanker.id)), () => undefined)
   return rows
-    .map((row) => ({ ...row, alive: live ? live.has(row.clankerId) : null, interrupted: live ? row.state === "open" && !live.has(row.clankerId) : null }))
+    // adopted: started by hand in a terminal and taken in by observation, so it has no launch task and no scope of its own.
+    .map((row) => ({ ...row, adopted: isAdoptionPlaceholder(row.originalTask), alive: live ? live.has(row.clankerId) : null, interrupted: live ? row.state === "open" && !live.has(row.clankerId) : null }))
     .filter((row) => !options.interrupted || row.interrupted !== false)
+}
+
+/** Worktrees with more than one live harness, from the process table, across every lane and hand-started ones. */
+const harnessDuplicates = async (workshopPaths: readonly string[]) => {
+  const panes = await listClankers().then((clankers) => new Map(clankers.map((clanker) => [clanker.pane, clanker.id])), () => new Map<string, string>())
+  const here = currentLane()
+  const harnesses = scanLiveHarnesses({ workshopPaths, clankerAt: (lane, terminal) => lane === here ? panes.get(terminal) : undefined })
+  return { duplicates: duplicateHarnesses(harnesses), orphaned: orphanedHarnesses(harnesses) }
 }
 
 /** Clankers running on another lane's server that this lane does not see, with the command that moves each. */
 const otherLaneClankers = async () => {
   const aliveHere = await listClankers().then((clankers) => new Set(clankers.map((clanker) => clanker.id)), () => new Set<string>())
-  return foreignClankers({ aliveHere }).map((row) => ({ ...row, moveCommand: moveCommand(row) }))
+  const ledger = openClankerLedger()
+  let mine
+  try { mine = ledger.list({ state: "open" }).filter((row) => aliveHere.has(row.clankerId)) } finally { ledger.close() }
+  return foreignClankers({ aliveHere }).map((row) => {
+    // The cases `clankers resume --from-lane` refuses: there, the clanker is dropped where it runs instead of moved.
+    const twin = mine.find((here) => here.clankerId !== row.clankerId && here.harness === row.harness && here.harnessSessionId && here.harnessSessionId === row.harnessSessionId)
+    const blocked = !existsSync(row.workshopPath) ? "its Workshop no longer exists" : twin ? `its session already runs here as ${twin.clankerId}` : null
+    return { ...row, moveCommand: moveCommand(row), blocked, ...(blocked ? { closeCommand: closeCommand(row.lane, row.clankerId) } : {}) }
+  })
 }
 
 const printHooksStatus = (status: ReturnType<typeof hooksStatus>) => {
@@ -725,14 +743,29 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const snapshot = await getSnapshot<SessionRow>(daemonSocketPath)
     const report = diagnoseProjection(snapshot.sessions)
     const otherLanes = await otherLaneClankers()
-    if (json) console.log(JSON.stringify({ ...report, otherLanes }, null, 2))
+    const { duplicates, orphaned } = await harnessDuplicates([...snapshot.sessions.map((row) => row.path), ...otherLanes.map((row) => row.workshopPath)].filter(Boolean))
+    if (json) console.log(JSON.stringify({ ...report, otherLanes, duplicateHarnesses: duplicates, orphanedHarnesses: orphaned }, null, 2))
     else {
       console.log(`Clankerhouse projection: ${report.counts.sessions} sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
       if (!report.issues.length) console.log("No projection anomalies detected.")
       for (const entry of report.issues) console.log(`${entry.severity.toUpperCase()} ${entry.code}: ${entry.summary}`)
       if (otherLanes.length) {
         console.log(`${otherLanes.length} clanker(s) still run on another lane's server, invisible to this lane until moved:`)
-        for (const row of otherLanes) console.log(`  ${row.clankerId} ${row.harness} lane ${row.lane} ${row.workshopPath}\n    ${row.moveCommand}`)
+        for (const row of otherLanes) console.log(`  ${row.clankerId} ${row.harness} lane ${row.lane} ${row.workshopPath}\n    ${row.blocked ? `not movable, ${row.blocked}: ${row.closeCommand}` : row.moveCommand}`)
+      }
+      const suspect = duplicates.filter((group) => group.reason !== "several")
+      if (suspect.length) {
+        console.log(`${suspect.length} worktree(s) have more than one live harness, across lanes or started by hand; they share the worktree, so keep one:`)
+        for (const group of suspect) {
+          console.log(`  ${group.workshopPath} (${group.reason === "lanes" ? `lanes ${group.lanes.join(", ")}` : "started by hand"})`)
+          for (const harness of group.harnesses) console.log(`    ${describeHarness(harness)}`)
+        }
+      }
+      const several = duplicates.length - suspect.length
+      if (several) console.log(`${several} other worktree(s) run several clankers their lane launched (--json lists them).`)
+      if (orphaned.length) {
+        console.log(`${orphaned.length} harness(es) run in a deleted worktree:`)
+        for (const harness of orphaned) console.log(`  ${describeHarness(harness)}`)
       }
     }
     if (strict && !report.healthy) throw new Error("Projection diagnostics found invariant violations")

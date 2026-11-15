@@ -47,7 +47,7 @@ const SCHEMA_VERSION = 1
 
 /** The task recorded for a live session the ledger adopted without knowing what it was asked. */
 export const ADOPTION_PLACEHOLDER = "Adopted a live session; continue the most recent unfinished user request."
-const isAdoptionPlaceholder = (task: string) => task === ADOPTION_PLACEHOLDER
+export const isAdoptionPlaceholder = (task: string) => task === ADOPTION_PLACEHOLDER
 
 export const ledgerStatePath = (stateHome = stateHomeDefault(), env: Record<string, string | undefined> = Bun.env) =>
   join(stateDirFor(stateHome, env), "clankers.sqlite3")

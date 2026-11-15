@@ -305,7 +305,8 @@
       "title": "Clankers left on another lane's server: shown, diagnosed, and moved with their task, launch spec and session",
       "core": true,
       "unit": [
-        "src/other-lanes.test.ts"
+        "src/other-lanes.test.ts",
+        "src/live-harnesses.test.ts"
       ],
       "standalone": [
         "scripts/qa-lane-move"
@@ -313,7 +314,8 @@
       "manual": [
         "With a clanker still running on the Herdr TUI lane, open the hc popup; confirm its Workshop shows ◇ and 'on the herdr server' instead of an empty circle",
         "Run `clankers diagnose` on the hc lane; confirm it lists each such clanker with its `clankers resume ID --from-lane herdr` command",
-        "Run that command with --dry-run, then without; confirm the old Claude and anything in its scope stop, one Claude resumes the same conversation in the Workshop on hc, and `clankers ledger` keeps its original task"
+        "Run that command with --dry-run, then without; confirm the old Claude and anything in its scope stop, one Claude resumes the same conversation in the Workshop on hc, and `clankers ledger` keeps its original task",
+        "With two Claudes in one worktree on different lanes, or one started by typing `claude --resume` in an hc terminal, run `clankers diagnose`; confirm the worktree is listed under 'more than one live harness' with each pid, lane, clanker and unit, and that an old-lane clanker whose session already runs on hc shows a ledger close command instead of a move"
       ]
     },
     {

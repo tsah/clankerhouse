@@ -32,11 +32,11 @@ const input = (id: string, overrides: Partial<LedgerInput> = {}): LedgerInput =>
 })
 
 /** A lane ledger with the given clankers, each owned by `unit-<id>`. */
-const seedLane = (home: string, lane: string, ids: string[], now = () => 1000) => {
+const seedLane = (home: string, lane: string, ids: string[], now = () => 1000, overrides: Partial<LedgerInput> = {}) => {
   const ledger = ClankerLedger.open({ dbPath: laneLedgerPath(lane, home), now })
   try {
     for (const id of ids) {
-      ledger.record(input(id))
+      ledger.record(input(id, overrides))
       ledger.setOwnerUnit(id, `clankerhouse-${id}.scope`)
     }
   } finally { ledger.close() }
@@ -214,9 +214,11 @@ describe("projection", () => {
 })
 
 describe("moving a clanker from another lane", () => {
-  const setup = (options: { unit?: UnitState; aliveHere?: string[]; resumeFails?: boolean } = {}) => {
+  const setup = (options: { unit?: UnitState; aliveHere?: string[]; resumeFails?: boolean; workshopMissing?: boolean } = {}) => {
     const home = stateHome()
-    seedLane(home, "herdr", ["a"])
+    const workshop = join(home, "work-a")
+    if (!options.workshopMissing) mkdirSync(workshop)
+    seedLane(home, "herdr", ["a"], () => 1000, { workshopPath: workshop, cwd: workshop })
     const ledgerPath = laneLedgerPath("hc", home)
     const steps: string[] = []
     const hereRow = () => {
@@ -240,14 +242,14 @@ describe("moving a clanker from another lane", () => {
       },
       ...extra,
     })
-    return { home, steps, hereRow, theirRow, move }
+    return { home, workshop, ledgerPath, steps, hereRow, theirRow, move }
   }
 
   test("records it here, stops its old harness, closes the old row, then resumes it", async () => {
-    const { steps, hereRow, move } = setup()
+    const { steps, hereRow, move, workshop } = setup()
     const result = await move()
     expect(steps).toEqual([
-      "register herdr /work/a",
+      `register herdr ${workshop}`,
       "stop clankerhouse-a.scope here=open theirs=open",
       "resume a theirs=closed:moved-to-hc",
     ])
@@ -277,6 +279,27 @@ describe("moving a clanker from another lane", () => {
     await expect(move()).rejects.toThrow("already runs in lane hc")
     await expect(move({ lane: "hc" })).rejects.toThrow("is this lane")
     await expect(setup().move({ lane: "nowhere" })).rejects.toThrow("has no clanker a")
+  })
+
+  test("refuses a Workshop that no longer exists, and says how to drop the clanker there", async () => {
+    const { move, steps, theirRow } = setup({ workshopMissing: true })
+    await expect(move()).rejects.toThrow("no longer exists, so it cannot resume here; drop it there with: CLANKERHOUSE_INSTANCE=herdr clankers ledger close a")
+    await expect(move({ dryRun: true })).rejects.toThrow("no longer exists")
+    expect(steps).toEqual([])
+    expect(theirRow().state).toBe("open")
+  })
+
+  // smf-status-glyph-flaky on puffin: the old lane's clanker sat blocked while the same Claude session was resumed by
+  // hand in an hc terminal and adopted there. Moving the old one would run that session twice.
+  test("refuses when its harness session already runs here under another clanker", async () => {
+    const { move, steps, theirRow, ledgerPath, workshop } = setup({ aliveHere: ["twin"] })
+    const ledger = ClankerLedger.open({ dbPath: ledgerPath })
+    try { ledger.record(input("twin", { harnessSessionId: "session-a", workshopPath: workshop, cwd: workshop, originalTask: ADOPTION_PLACEHOLDER })) } finally { ledger.close() }
+    await expect(move()).rejects.toThrow("claude session session-a already runs in lane hc as twin; keep that one and drop this one there with: CLANKERHOUSE_INSTANCE=herdr clankers ledger close a")
+    expect(steps).toEqual([])
+    expect(theirRow().state).toBe("open")
+    // Once the twin has stopped, the move goes ahead.
+    expect(await setup().move()).toMatchObject({ clankerId: "a", pane: "t9" })
   })
 
   test("a failed resume after the move says how to finish it", async () => {

@@ -191,6 +191,9 @@ export const foreignClankers = (options: ForeignClankerOptions = {}): ForeignCla
 }
 
 /** The command that moves a foreign clanker into the current lane. */
+/** The command that closes a clanker in its own lane's ledger, stopping its scope there. */
+export const closeCommand = (lane: string, clankerId: string) => `CLANKERHOUSE_INSTANCE=${lane} clankers ledger close ${clankerId}`
+
 export const moveCommand = (clanker: Pick<ForeignClanker, "clankerId" | "lane">) => `clankers resume ${clanker.clankerId} --from-lane ${clanker.lane}`
 
 

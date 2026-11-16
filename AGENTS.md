@@ -16,14 +16,16 @@ CLANKERHOUSE_HOME="$PWD" CLANKERHOUSE_BIN_DIR= CLANKERHOUSE_LIBEXEC= ./test
 
 ## Deploying to the live install
 
-The live Rex lane runs from the main checkout: Rex's config loads `~/clankerhouse/contrib/rex/clankerhouse.lua`,
-`~/.config/rex/clankerhouse-rex` links to `~/clankerhouse/bin/clankerhouse-rex`, and the runner runs from there.
-Deploy only what is on `origin/main`:
+Deploy only what is on `origin/main`, from the main checkout. The installer stages, tests and activates a version under
+`~/.local/lib/clankerhouse`, which `~/.local/bin/clankers`, the Rex config (`~/.local/lib/clankerhouse/contrib/rex/clankerhouse.lua`),
+`~/.config/rex/clankerhouse-rex` (a link to `~/.local/bin/clankerhouse-rex`), the Claude hooks and the integrations resolve
+on each use. The runner keeps the version it started with, so restart it:
 
 ```bash
 git -C ~/clankerhouse merge --ff-only origin/main
-cd ~/clankerhouse && bun install --frozen-lockfile && scripts/build-native
-bin/clankerhouse-rex --stop-runner && bin/clankerhouse-rex --ensure-runner && bin/clankerhouse-rex --health
+cd ~/clankerhouse && env -u CLANKERHOUSE_HOME -u CLANKERHOUSE_BIN_DIR -u CLANKERHOUSE_LIBEXEC \
+  scripts/install --prefix "$HOME/.local" --integrations --no-daemon-handoff
+clankerhouse-rex --stop-runner && clankerhouse-rex --ensure-runner && clankerhouse-rex --health
 ```
 
 Running clankers and the picker need nothing else; `rex config reload` only when `contrib/rex/clankerhouse.lua` changed.

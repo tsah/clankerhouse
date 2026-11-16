@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { randomUUID } from "node:crypto"
 import { existsSync, fstatSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { format } from "node:util"
 import { join, resolve } from "node:path"
 import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
@@ -919,6 +920,9 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
 }
 
 if (import.meta.main) {
+  // With the effect library loaded (snapshots, mutations), Bun exits before console.log output to a pipe drains, cutting
+  // it at 64 KiB; process.stdout.write is flushed. Every result goes through it.
+  console.log = (...values: unknown[]) => { process.stdout.write(`${format(...values)}\n`) }
   runClankersCli().catch((error) => {
     const { code, exitCode } = cliErrorCode(error)
     console.error(JSON.stringify({ apiVersion: 1, error: { code, message: error instanceof Error ? error.message : String(error) } }))

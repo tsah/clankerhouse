@@ -24,6 +24,14 @@
 # environment.
 set -euo pipefail
 
+# Another host's picker runs this over a non-interactive ssh, whose PATH (on macOS, /usr/bin:/bin:/usr/sbin:/sbin) has
+# neither bun nor rex. Append their usual homes; whatever the caller's PATH already finds still wins.
+for dir in "$HOME/.bun/bin" /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/.cargo/bin" \
+    "$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"; do
+    [[ -d "$dir" && ":$PATH:" != *":$dir:"* ]] && PATH="$PATH:$dir"
+done
+export PATH
+
 # Resolve links first: each machine links this launcher at ~/.config/rex/clankerhouse-rex for the Rex config to find.
 script=$0
 while [[ -L "$script" ]]; do

@@ -3644,6 +3644,7 @@ fn remote_hosts() -> Vec<HostTab> {
     };
     let Ok(listed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return Vec::new() };
     let local = local_host_label();
+    let mut seen = HashSet::new();
     listed
         .get("hosts")
         .and_then(|hosts| hosts.as_array())
@@ -3656,7 +3657,9 @@ fn remote_hosts() -> Vec<HostTab> {
                 return None;
             }
             let endpoint = host.get("endpoints")?.as_array()?.iter().filter_map(|value| value.as_str()).find(|value| value.starts_with("ssh://"))?;
-            Some(HostTab { label, ssh: ssh_arguments(endpoint)?, ..HostTab::default() })
+            let ssh = ssh_arguments(endpoint)?;
+            // One machine known under two labels (one added in the app, one with `rex hosts add`) is one tab.
+            seen.insert(ssh.clone()).then(|| HostTab { label, ssh, ..HostTab::default() })
         })
         .collect()
 }

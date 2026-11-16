@@ -203,9 +203,9 @@ describe("the needs-me list without the picker", () => {
     })
     const snoozed = fixture.sessions.find((candidate) => candidate.name === "snoozed")!
     expect(needsMeEntry(snoozed, 8, {})).toMatchObject({ pane: null, target: { type: "session", session: "snoozed" }, deferred: true, snoozedUntil: 99000, labels: {}, createdAt: null })
-    // An hc pane is addressed by its terminal id.
-    const hc = row([clanker("done", now, { clankerId: "c1", target: { type: "window", session: "s", windowId: "t1q9", pane: "t1q9", location: { kind: "hc", instanceId: "hc:x", nativeSessionId: "n", nativeWindowId: "t1q9", nativePaneId: "t1q9" } } })], { needsMe: { reason: "finished", since: now, clankerId: "c1" } })
-    expect(needsMeEntry(hc, 1, {}).pane).toBe("t1q9")
+    // A Rex pane is addressed by its block id.
+    const rex = row([clanker("done", now, { clankerId: "c1", target: { type: "window", session: "s", windowId: "window:w9", pane: "%9", location: { kind: "rex", instanceId: "rex:x", nativeSessionId: "session:n", nativeWindowId: "window:w9", nativePaneId: "block:b9" } } })], { needsMe: { reason: "finished", since: now, clankerId: "c1" } })
+    expect(needsMeEntry(rex, 1, {}).pane).toBe("block:b9")
   })
 })
 
@@ -241,7 +241,7 @@ describe("clankers needs-me", () => {
         },
       },
     })
-    // Only what a headless caller has: no terminal, nothing of the invoking clanker or Herdr.
+    // Only what a headless caller has: no terminal, nothing of the invoking clanker or Rex.
     const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec") }
     return { env, stop: () => server.stop(true) }
   }
@@ -271,8 +271,8 @@ describe("clankers needs-me", () => {
       expect(flat.rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.flat)
       expect(flat.rows[0]).toMatchObject({ name: "working", reason: null, state: "working" })
 
-      // The hc launcher's spelling is the same list and starts nothing.
-      const launcher = await run([join(repo, "bin/clankerhouse-hc"), "--needs-me", "--json", "--eldest"], env)
+      // The Rex launcher's spelling is the same list and starts nothing.
+      const launcher = await run([join(repo, "bin/clankerhouse-rex"), "--needs-me", "--json", "--eldest"], env)
       expect(JSON.parse(launcher.stdout).rows.map((entry: { name: string }) => entry.name)).toEqual(fixture.eldest)
 
       const text = await run([join(repo, "bin/clankers"), "needs-me"], env)
@@ -290,14 +290,14 @@ describe("clankers needs-me", () => {
     expect(result.stderr).toContain("daemon is not running")
   })
 
-  test("the hc launcher's help and its needs-me view need no terminal and start nothing", async () => {
+  test("the Rex launcher's help and its needs-me view need no terminal and start nothing", async () => {
     const { env, stop } = await daemon()
     stop()
-    const help = await run([join(repo, "bin/clankerhouse-hc"), "--help"], env)
+    const help = await run([join(repo, "bin/clankerhouse-rex"), "--help"], env)
     expect(help.code).toBe(0)
-    expect(help.stdout).toContain("clankerhouse-hc --needs-me --json")
-    const view = await run([join(repo, "bin/clankerhouse-hc"), "--needs-me"], env)
+    expect(help.stdout).toContain("clankerhouse-rex --needs-me --json")
+    const view = await run([join(repo, "bin/clankerhouse-rex"), "--needs-me"], env)
     expect(view.code).toBe(2)
-    expect(view.stderr).toContain("clankerhouse-hc --needs-me --json")
+    expect(view.stderr).toContain("clankerhouse-rex --needs-me --json")
   })
 })

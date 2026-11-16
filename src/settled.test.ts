@@ -10,7 +10,7 @@ const repo = resolve(import.meta.dir, "..")
 
 const clanker = (state: DetailRow["state"], pane: string, updatedAt: number, clankerId = `c-${pane}`): DetailRow => ({
   kind: "clanker", harness: "claude", status: "", detail: "", title: "main", age: "", state, updatedAt, clankerId,
-  target: { type: "window", session: pane, windowId: pane, pane, location: { kind: "hc", instanceId: "hc:x", nativeSessionId: pane, nativeWindowId: pane, nativePaneId: pane } },
+  target: { type: "window", session: pane, windowId: pane, pane, location: { kind: "rex", instanceId: "rex:x", nativeSessionId: pane, nativeWindowId: pane, nativePaneId: pane } },
 })
 const session = (name: string, details: DetailRow[], extra: Partial<SessionRow> = {}): SessionRow => ({
   name, path: `/w/${name}`, branch: name, flags: "", markers: [], age: "", recency: 0, searchText: "", details,
@@ -171,8 +171,8 @@ describe("clankers settled", () => {
       expect(text.stdout).toContain("5 with nothing in progress")
       expect(text.stdout).toContain("next: --after mux-asked")
       expect((await run(["--order", "nope"], env)).code).not.toBe(0)
-      // The hc launcher's spelling is the same command and starts nothing.
-      const launcher = Bun.spawn([join(repo, "bin/clankerhouse-hc"), "--settled", "--json", "--limit", "1"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      // The Rex launcher's spelling is the same command and starts nothing.
+      const launcher = Bun.spawn([join(repo, "bin/clankerhouse-rex"), "--settled", "--json", "--limit", "1"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
       expect(JSON.parse(await new Response(launcher.stdout).text()).rows[0].name).toBe("first-created")
     } finally { stop() }
   })

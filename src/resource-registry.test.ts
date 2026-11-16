@@ -16,13 +16,13 @@ const fixture = () => {
 }
 
 const sessionLocation = (nativeSessionId = "$1"): NativeLocationInput => ({
-  kind: "herdr", instanceId: "server-a", nativeSessionId,
+  kind: "rex", instanceId: "server-a", nativeSessionId,
 })
 
 describe("resource registry", () => {
   test("uses a separate versioned state database", () => {
     const { root, dbPath } = fixture()
-    expect(resourceRegistryStatePath(root, {})).toBe(join(root, "clankerhouse-herdr", "resources.sqlite3"))
+    expect(resourceRegistryStatePath(root, {})).toBe(join(root, "clankerhouse-rex", "resources.sqlite3"))
     expect(resourceRegistryStatePath(root, {})).not.toContain("workshops.sqlite3")
     const registry = openResourceRegistry({ dbPath })
     registry.close()

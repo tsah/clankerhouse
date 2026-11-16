@@ -44,14 +44,14 @@ interface Pane {
 }
 
 const CLANKER = "clanker-msg"
-const PANE = "w1:p7"
+const PANE = "block:p7"
 
-const fakeHerdr = (pane: Pane) => new ManagedMultiplexer(Object.assign({
-  kind: "herdr",
+const fakeRex = (pane: Pane) => new ManagedMultiplexer(Object.assign({
+  kind: "rex",
   capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
   observe: async () => ({
-    kind: "herdr",
-    instanceId: "herdr:/tmp/test.sock",
+    kind: "rex",
+    instanceId: "rex:test-host",
     sessions: [{
       id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
         id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
@@ -74,9 +74,9 @@ const fakeHerdr = (pane: Pane) => new ManagedMultiplexer(Object.assign({
 const setup = (options: { interruptOutcome?: AgentInterruptOutcome; focused?: boolean } = {}) => {
   const reports = isolate()
   const pane: Pane = { prompts: [], interrupts: 0, interruptOutcome: options.interruptOutcome, focused: options.focused ?? false, failWith: [] }
-  const multiplexer = fakeHerdr(pane)
+  const multiplexer = fakeRex(pane)
   const report = (state: string, generation: number, settledGeneration: number, extra: Record<string, unknown> = {}) =>
-    writeFileSync(join(reports, "w1_p7.json"), JSON.stringify({ harness: "claude", clankerId: CLANKER, pane: PANE, state, generation, settledGeneration, updatedAt: Date.now(), ...extra }))
+    writeFileSync(join(reports, "block_p7.json"), JSON.stringify({ harness: "claude", clankerId: CLANKER, pane: PANE, state, generation, settledGeneration, updatedAt: Date.now(), ...extra }))
   /** The hook's record of a submitted prompt, as the native hook writes it. */
   const submitted = (prompt: string, generation: number) => {
     const ids = [...prompt.matchAll(/\[clankerhouse (msg-[A-Za-z0-9-]+)/g)].map((match) => match[1])
@@ -153,7 +153,7 @@ describe("idempotent request ids", () => {
 describe("ambiguous hand-offs", () => {
   test("a timed-out hand-off is kept, acknowledged later by id, and never retyped", async () => {
     const { pane, multiplexer, report, submitted } = setup()
-    pane.failWith.push("herdr agent.prompt failed: timeout")
+    pane.failWith.push("rex api call block.send_input failed: timeout")
     const receipt = await sendClanker(CLANKER, "maybe landed", {}, multiplexer)
     expect(receipt).toMatchObject({ delivery: "immediate", confirmed: false })
     ageDelivered(receipt.messageId, 60_000)
@@ -367,12 +367,12 @@ describe("native hook", () => {
     const hook = join(import.meta.dir, "../native-client/target/release/clankerhouse-hook")
     const run = (state: string, payload: object) => {
       const result = Bun.spawnSync([hook, "claude", state], {
-        env: { ...process.env, CLANKERHOUSE_MULTIPLEXER: "", HERDR_PANE_ID: PANE, CLANKER_ID: CLANKER, HERDR_SOCKET_PATH: "/nonexistent", CLAUDE_CODE_MESSAGING_SOCKET: "", CLANKERHOUSE_HARNESS_INCARNATION: "", ...env },
+        env: { ...process.env, CLANKERHOUSE_MULTIPLEXER: "", REX_BLOCK: PANE, CLANKER_ID: CLANKER, CLAUDE_CODE_MESSAGING_SOCKET: "", CLANKERHOUSE_HARNESS_INCARNATION: "", ...env },
         stdin: new TextEncoder().encode(JSON.stringify(payload)),
       })
       return { exitCode: result.exitCode, stdout: result.stdout.toString() }
     }
-    const record = () => JSON.parse(readFileSync(join(reports, "w1_p7.json"), "utf8"))
+    const record = () => JSON.parse(readFileSync(join(reports, "block_p7.json"), "utf8"))
     return { run, record }
   }
 

@@ -21,8 +21,7 @@
       ],
       "standalone": [
         "scripts/qa",
-        "scripts/qa-native-hot",
-        "scripts/qa-herdr"
+        "scripts/qa-native-hot"
       ],
       "manual": [
         "Inspect the full unfiltered tree",
@@ -63,7 +62,6 @@
         "native-client/src/main.rs"
       ],
       "standalone": [
-        "scripts/qa-herdr",
         "scripts/qa"
       ],
       "manual": [
@@ -81,15 +79,13 @@
         "src/client-environment.test.ts",
         "src/worktree-delete.test.ts",
         "src/worktree-pool.test.ts",
-        "src/herdr-delete-launcher.test.ts",
         "src/transport/protocol.test.ts",
         "src/cli.test.ts",
         "native-client/src/main.rs"
       ],
       "standalone": [
         "scripts/qa",
-        "scripts/qa-lineage-actions",
-        "scripts/qa-herdr"
+        "scripts/qa-lineage-actions"
       ],
       "automatedScope": "Attach candidate projection and native submission, delete (including outside-TUI confirmation, navigation/jump during daemon-owned deletion, default-branch preservation, and middle-lineage child splicing), protocol validation, and durable action stages are automated; CLI detach and reparent are automated end to end, including cycle and unknown-parent rejection; rename, TUI detach, and create require the manual standalone walkthrough until dedicated interaction scenarios are added.",
       "manual": [
@@ -114,7 +110,6 @@
       "standalone": [
         "scripts/qa",
         "scripts/qa-lineage-actions",
-        "scripts/qa-herdr",
         "scripts/qa-spawn-model"
       ],
       "automatedScope": "Automatic lineage capture resolves the invoking Multiplexer pane rather than global runtime focus and refuses missing pane identity before writing Workshop claims. A spawn from a Workshop worktree is parented to that Workshop, a spawn from a repository's main checkout is top-level, and an explicit parent is honoured from either. A Workshop created without an explicit base starts from the freshly fetched origin default branch, and a failed fetch fails the create. Agent launches create a single-tab session when needed and preserve existing tabs.",
@@ -136,7 +131,7 @@
         "src/resource-registry.test.ts"
       ],
       "standalone": [
-        "scripts/qa-herdr"
+        "scripts/qa-rex"
       ],
       "manual": [
         "Enter an unmanaged session through Clankerhouse",
@@ -174,8 +169,6 @@
         "src/clanker-list.test.ts",
         "src/claude-background-tasks.test.ts",
         "src/hook-events.test.ts",
-        "src/lifecycle-mirror.test.ts",
-        "src/multiplexer/herdr.test.ts",
         "integrations/opencode/clankerhouse-lifecycle.test.ts"
       ],
       "standalone": [
@@ -271,8 +264,7 @@
       ],
       "standalone": [
         "scripts/qa-daemon",
-        "scripts/qa-install",
-        "scripts/qa-herdr"
+        "scripts/qa-install"
       ],
       "manual": [
         "Validate integrity and foreign keys",
@@ -302,24 +294,6 @@
       ]
     },
     {
-      "id": "lane-move",
-      "title": "Clankers left on another lane's server: shown, diagnosed, and moved with their task, launch spec and session",
-      "core": true,
-      "unit": [
-        "src/other-lanes.test.ts",
-        "src/live-harnesses.test.ts"
-      ],
-      "standalone": [
-        "scripts/qa-lane-move"
-      ],
-      "manual": [
-        "With a clanker still running on the Herdr TUI lane, open the hc popup; confirm its Workshop shows ◇ and 'on the herdr server' instead of an empty circle",
-        "Run `clankers diagnose` on the hc lane; confirm it lists each such clanker with its `clankers resume ID --from-lane herdr` command",
-        "Run that command with --dry-run, then without; confirm the old Claude and anything in its scope stop, one Claude resumes the same conversation in the Workshop on hc, and `clankers ledger` keeps its original task",
-        "With two Claudes in one worktree on different lanes, or one started by typing `claude --resume` in an hc terminal, run `clankers diagnose`; confirm the worktree is listed under 'more than one live harness' with each pid, lane, clanker and unit, and that an old-lane clanker whose session already runs on hc shows a ledger close command instead of a move"
-      ]
-    },
-    {
       "id": "process-ownership",
       "title": "Process ownership",
       "core": true,
@@ -345,8 +319,7 @@
       "standalone": [
         "scripts/qa",
         "scripts/qa-native-hot",
-        "scripts/qa-lineage-actions",
-        "scripts/qa-herdr"
+        "scripts/qa-lineage-actions"
       ],
       "automatedScope": "Native startup, fresh repository-cache regeneration for the branch popup, repository ordering by durable last use (newest opened or focused activity in any checkout, never-used repositories after in name order, match quality first under a query), cache-independent attach selection, typed intent construction, child routing, additive observation compatibility, and the TUI contract are automated; full native action parity and reconnect remain mandatory manual standalone judgements.",
       "manual": [
@@ -413,11 +386,10 @@
         "src/multiplexer.test.ts",
         "src/multiplexer/interface.test.ts",
         "src/multiplexer/shell-environment.test.ts",
-        "src/multiplexer/herdr.test.ts",
         "src/paths.test.ts"
       ],
       "standalone": [
-        "scripts/qa-herdr"
+        "scripts/qa-rex"
       ],
       "manual": [
         "From a Herdr pane, confirm every generic CLI, picker, child process, and instance path resolves the Herdr instance",
@@ -433,8 +405,6 @@
         "src/needs-me.test.ts",
         "src/server/project.test.ts",
         "src/server/observations.test.ts",
-        "src/herdr-delete-launcher.test.ts",
-        "src/herdr-app-config.test.ts",
         "native-client/src/main.rs",
         "src/settled.test.ts",
         "src/last-messages.test.ts"
@@ -511,32 +481,13 @@
       ]
     },
     {
-      "id": "hc-lane",
-      "title": "herdr-core lane behind CLANKERHOUSE_MULTIPLEXER=hc: core lifecycle, per-terminal identity, status, interrupt, attach",
-      "core": false,
-      "unit": [
-        "src/multiplexer/hc.test.ts",
-        "src/multiplexer/hc-core.test.ts",
-        "src/herdr-app-config.test.ts",
-        "src/herdr-app-mod.test.ts"
-      ],
-      "standalone": [
-        "scripts/qa-hc"
-      ],
-      "manual": [
-        "Run bin/clankerhouse-hc in a plain terminal, open a Workshop from the picker, detach with Ctrl+\\ and confirm the picker returns",
-        "With a real claude in vim editor mode, confirm clankers mux interrupt stops a streaming turn",
-        "SIGKILL the core and confirm the daemon restarts it while clankers keep running",
-        "In the Herdr app with two machines added, focus a terminal on each and confirm the top bar's machine name and counts change with it, and that Alt-K opens that machine's list",
-        "Press Alt-M, choose the other machine while focus stays put, and confirm Alt-K and the counts go to it; confirm an unreachable machine is listed as such and cannot be chosen"
-      ]
-    },
-    {
       "id": "rex-lane",
       "title": "Rex lane behind CLANKERHOUSE_MULTIPLEXER=rex: Rex sessions, tabs and panes as Workshops, a file Claim store shared with the Rust hook, OSC 7501 status, a native event stream, and the picker in a Rex popup",
       "core": false,
       "unit": [
-        "src/multiplexer/rex.test.ts"
+        "src/multiplexer/rex.test.ts",
+        "src/harness-units.test.ts",
+        "src/multiplexer/process-group.test.ts"
       ],
       "standalone": [
         "scripts/qa-rex"

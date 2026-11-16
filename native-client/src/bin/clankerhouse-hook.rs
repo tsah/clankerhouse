@@ -6,13 +6,12 @@
 //! Multiplexer claims are written only when they change (once per session in practice),
 //! and the state change is left in a spool file for the daemon to mirror.
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,8 +21,6 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_secs(2);
 const PROMPT_HISTORY: usize = 8;
 /// Settled turns kept in the pane record so `clankers result` can find a generation's reply.
 const TURN_HISTORY: usize = 8;
-/// A claim is a rare, best-effort write; a stalled Herdr must not stall the harness.
-const HERDR_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -36,11 +33,9 @@ fn main() {
 }
 
 struct Context {
+    /// The Rex block this hook runs in. Claims live in the lane's own store, one file per pane and key under
+    /// `state_dir/rex-claims`.
     pane: String,
-    /// The hc lane: claims travel over hc's socket instead of Herdr's.
-    hc: bool,
-    /// The Rex lane: claims live in the lane's own store, one file per pane and key under `state_dir/rex-claims`.
-    rex: bool,
     runtime_dir: PathBuf,
     state_dir: PathBuf,
 }
@@ -50,16 +45,13 @@ fn var(name: &str) -> String {
 }
 
 fn context() -> Result<Option<Context>, String> {
-    let lane = var("CLANKERHOUSE_MULTIPLEXER");
-    let hc = lane == "hc";
-    let rex = lane == "rex";
-    let pane = var(if hc { "HC_TERMINAL_ID" } else if rex { "REX_BLOCK" } else { "HERDR_PANE_ID" });
+    let pane = var("REX_BLOCK");
     if pane.is_empty() {
         return Ok(None);
     }
     let instance = var("CLANKERHOUSE_INSTANCE");
     let slug = if instance.is_empty() {
-        "-herdr".to_string()
+        "-rex".to_string()
     } else if instance == "."
         || instance == ".."
         || !instance.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
@@ -82,8 +74,6 @@ fn context() -> Result<Option<Context>, String> {
         .unwrap_or_else(|| format!("{}/.local/state", env::var("HOME").unwrap_or_default()));
     Ok(Some(Context {
         pane,
-        hc,
-        rex,
         runtime_dir: PathBuf::from(format!("{runtime_root}/clankerhouse-{uid}{slug}")),
         state_dir: PathBuf::from(format!("{state_home}/clankerhouse{slug}")),
     }))
@@ -335,56 +325,6 @@ fn generated_clanker_id() -> String {
     format!("clanker-{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
-fn herdr_token(key: &str) -> &'static str {
-    match key {
-        "clankerId" => "ch_clanker_id",
-        "harness" => "ch_harness",
-        "harnessSessionId" => "ch_harness_session",
-        other => unreachable!("unknown claim {other}"),
-    }
-}
-
-fn herdr_socket() -> PathBuf {
-    if let Ok(path) = env::var("HERDR_SOCKET_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    let config = env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("{}/.config", env::var("HOME").unwrap_or_default()));
-    match env::var("HERDR_SESSION").ok().filter(|v| !v.is_empty()) {
-        Some(session) => PathBuf::from(format!("{config}/herdr/sessions/{session}/herdr.sock")),
-        None => PathBuf::from(format!("{config}/herdr/herdr.sock")),
-    }
-}
-
-fn herdr_request(method: &str, params: Value) -> Option<Value> {
-    let mut stream = UnixStream::connect(herdr_socket()).ok()?;
-    stream.set_read_timeout(Some(HERDR_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(HERDR_TIMEOUT)).ok()?;
-    let request = json!({ "id": "1", "method": method, "params": params });
-    stream.write_all(format!("{request}\n").as_bytes()).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    let response: Value = serde_json::from_str(&line).ok()?;
-    if response.get("error").is_some() { None } else { response.get("result").cloned() }
-}
-
-/// hc's JSON-RPC socket, named by the terminal this hook runs in. Same deadline as Herdr's: the hook never waits.
-fn hc_request(method: &str, params: Value) -> Option<Value> {
-    let mut stream = UnixStream::connect(var("HC_TERMINAL_SOCKET")).ok()?;
-    stream.set_read_timeout(Some(HERDR_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(HERDR_TIMEOUT)).ok()?;
-    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    stream.write_all(format!("{request}\n").as_bytes()).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    let response: Value = serde_json::from_str(&line).ok()?;
-    response.get("result").cloned()
-}
-
 /// The Rex lane's claim file for this pane, as `src/multiplexer/rex.ts` (`RexClaimStore`) lays it out.
 fn rex_claim_path(ctx: &Context, key: &str) -> Option<PathBuf> {
     let valid = ctx.pane.split_once(':').is_some_and(|(kind, id)| {
@@ -394,69 +334,31 @@ fn rex_claim_path(ctx: &Context, key: &str) -> Option<PathBuf> {
 }
 
 fn read_claim(ctx: &Context, key: &str) -> Option<String> {
-    if ctx.rex {
-        let value = fs::read_to_string(rex_claim_path(ctx, key)?).ok()?;
-        return if value.is_empty() { None } else { Some(value) };
-    }
-    if ctx.hc {
-        let result = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
-        let value = result.get("labels")?.get(herdr_token(key))?.as_str()?.to_string();
-        return if value.is_empty() { None } else { Some(value) };
-    }
-    let value = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?
-        .get("pane")?
-        .get("tokens")?
-        .get(herdr_token(key))?
-        .as_str()?
-        .to_string();
+    let value = fs::read_to_string(rex_claim_path(ctx, key)?).ok()?;
     if value.is_empty() { None } else { Some(value) }
 }
 
-fn pane_path(ctx: &Context) -> Option<PathBuf> {
-    // Asking Rex costs a process; the caller falls back to the hook's own directory.
-    if ctx.rex {
-        return None;
-    }
-    if ctx.hc {
-        let terminal = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
-        let path = terminal.get("foreground").and_then(|f| f.get("cwd")).or(terminal.get("cwd"))?.as_str()?;
-        return if path.is_empty() { None } else { Some(PathBuf::from(path)) };
-    }
-    let result = herdr_request("pane.get", json!({ "pane_id": ctx.pane }))?;
-    let pane = result.get("pane")?;
-    let path = ["foreground_cwd", "cwd"].iter().find_map(|key| pane.get(*key)?.as_str().filter(|v| !v.is_empty()).map(str::to_string))?;
-    if path.is_empty() { None } else { Some(PathBuf::from(path)) }
+/// Asking Rex where the pane is costs a process; the caller falls back to the payload's cwd or the hook's own directory.
+fn pane_path(_ctx: &Context) -> Option<PathBuf> {
+    None
 }
 
 fn write_claims(ctx: &Context, claims: &BTreeMap<&str, Option<String>>) {
-    if ctx.rex {
-        for (key, value) in claims {
-            let Some(path) = rex_claim_path(ctx, key) else { return };
-            match value.as_deref().filter(|value| !value.is_empty()) {
-                Some(value) => {
-                    if let Some(dir) = path.parent() {
-                        if private_dir(dir).is_ok() {
-                            let _ = write_atomic(&path, value.as_bytes());
-                        }
+    for (key, value) in claims {
+        let Some(path) = rex_claim_path(ctx, key) else { return };
+        match value.as_deref().filter(|value| !value.is_empty()) {
+            Some(value) => {
+                if let Some(dir) = path.parent() {
+                    if private_dir(dir).is_ok() {
+                        let _ = write_atomic(&path, value.as_bytes());
                     }
                 }
-                None => {
-                    let _ = fs::remove_file(&path);
-                }
+            }
+            None => {
+                let _ = fs::remove_file(&path);
             }
         }
-        return;
     }
-    if ctx.hc {
-        // An empty value removes a label.
-        let labels: Map<String, Value> =
-            claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value.clone().unwrap_or_default()))).collect();
-        hc_request("terminal.label", json!({ "terminal": ctx.pane, "labels": labels }));
-        return;
-    }
-    let tokens: Map<String, Value> =
-        claims.iter().map(|(key, value)| (herdr_token(key).to_string(), json!(value))).collect();
-    herdr_request("pane.report_metadata", json!({ "pane_id": ctx.pane, "source": "clankerhouse", "tokens": tokens }));
 }
 
 fn mark_activity(ctx: &Context, payload: &Value) {

@@ -37,12 +37,12 @@ describe("renderer contraction", () => {
   })
 
   test("routes public interactive launchers to the native client", () => {
-    expect(read("bin/clankerhouse")).toContain("clankerhouse-herdr")
-    expect(read("bin/clankerhouse-native")).toContain("clankerhouse-herdr")
+    expect(read("bin/clankerhouse")).toContain("clankerhouse-rex")
+    expect(read("bin/clankerhouse-native")).toContain("clankerhouse-rex")
 
-    const herdr = read("bin/clankerhouse-herdr")
-    expect(herdr).toContain("src/daemon.ts --server")
-    expect(herdr).toContain("clankerhouse-native")
-    expect(herdr).not.toContain("bun src/main.tsx")
+    const rex = read("bin/clankerhouse-rex")
+    expect(rex).toContain("src/daemon.ts --server")
+    expect(rex).toContain("clankerhouse-native")
+    expect(rex).not.toContain("bun src/main.tsx")
   })
 })

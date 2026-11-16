@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 
-const pane = (process.env.CLANKERHOUSE_MULTIPLEXER === "hc" ? process.env.HC_TERMINAL_ID : process.env.CLANKERHOUSE_MULTIPLEXER === "rex" ? process.env.REX_BLOCK : process.env.HERDR_PANE_ID)?.trim() || ""
+const pane = process.env.REX_BLOCK?.trim() || ""
 const clankersEnv = process.env
 const clankersCli = process.env.CLANKERHOUSE_CLANKERS || "clankers"
 const clankerId = process.env.CLANKER_ID?.trim() || ""
@@ -24,7 +24,7 @@ const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || ""
 if (requestedInstance && (requestedInstance === "." || requestedInstance === ".." || !/^[A-Za-z0-9._-]+$/.test(requestedInstance))) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${requestedInstance}`)
 const instanceSlug = requestedInstance
   ? (requestedInstance === "default" ? "" : `-${requestedInstance}`)
-  : "-herdr"
+  : "-rex"
 const runtime = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}${instanceSlug}`
 const reportPath = `${runtime}/clanker-state/${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`
 const daemonSocketPath = `${runtime}/daemon.sock`

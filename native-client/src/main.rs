@@ -3711,7 +3711,7 @@ fn instance_suffix(environment: &HashMap<String, String>) -> Result<String, Stri
     Ok(match instance {
         Some("default") => String::new(),
         Some(other) => format!("-{other}"),
-        None => "-herdr".to_string(),
+        None => "-rex".to_string(),
     })
 }
 
@@ -3853,7 +3853,7 @@ fn run(
 const USAGE: &str = "Usage: clankerhouse-native [--dump-tree | --check | --delete-current | --server-health OWNER]
 
 The Clankerhouse picker. Without an option it draws on the terminal and needs one; launch it through
-clankerhouse-hc or clankerhouse-herdr. The options print and exit without a terminal:
+clankerhouse-rex. The options print and exit without a terminal:
   --dump-tree             the flat list's rows as JSON
   --check                 count the daemon snapshot's sessions
   --delete-current        confirm deleting CLANKERHOUSE_CURRENT_SESSION (draws; needs a terminal)
@@ -4307,7 +4307,7 @@ mod tests {
         };
         assert_eq!(
             activity_dir_from(&environment(&[("HOME", "/home/u")])),
-            Ok(PathBuf::from("/home/u/.local/state/clankerhouse-herdr/activity"))
+            Ok(PathBuf::from("/home/u/.local/state/clankerhouse-rex/activity"))
         );
         assert_eq!(
             activity_dir_from(&environment(&[
@@ -5876,13 +5876,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_root_defaults_to_the_herdr_instance() {
+    fn runtime_root_defaults_to_the_rex_instance() {
         let environment = HashMap::from([
             ("XDG_RUNTIME_DIR".to_string(), "/run/test".to_string()),
         ]);
         assert_eq!(
             runtime_root_from(&environment, 42).unwrap(),
-            PathBuf::from("/run/test/clankerhouse-42-herdr")
+            PathBuf::from("/run/test/clankerhouse-42-rex")
         );
 
         let mut default_instance = environment.clone();

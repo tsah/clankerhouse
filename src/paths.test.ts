@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { instanceSlug, runtimeDirFor, stateDirFor } from "./paths"
 
 describe("instance scoping", () => {
-  test("without an explicit instance the Herdr instance paths are used", () => {
+  test("without an explicit instance the Rex instance paths are used", () => {
     const uid = process.getuid?.() ?? "user"
-    expect(instanceSlug({})).toBe("-herdr")
-    expect(runtimeDirFor({ XDG_RUNTIME_DIR: "/run/user/x" })).toBe(`/run/user/x/clankerhouse-${uid}-herdr`)
-    expect(stateDirFor("/s", {})).toBe("/s/clankerhouse-herdr")
+    expect(instanceSlug({})).toBe("-rex")
+    expect(runtimeDirFor({ XDG_RUNTIME_DIR: "/run/user/x" })).toBe(`/run/user/x/clankerhouse-${uid}-rex`)
+    expect(stateDirFor("/s", {})).toBe("/s/clankerhouse-rex")
   })
 
   test("the default instance is unsuffixed", () => {

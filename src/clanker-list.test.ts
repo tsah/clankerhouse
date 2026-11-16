@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { ClankerInfo, ClankerReportFacts } from "./clanker-api"
@@ -10,7 +10,7 @@ import type { WorkshopRecord } from "./workshop"
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const tempRoot = () => {
-  const root = mkdtempSync(join(tmpdir(), "clankerhouse-list-test-"))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-list-test-")))
   roots.push(root)
   return root
 }
@@ -83,7 +83,7 @@ describe("clankers list", () => {
 
   test("treats a pane as alive while its harness is a foreground process", () => {
     const pane = (id: string, processes: Array<{ pid: number; name?: string; argv?: string[] }> | undefined) => ({ id, processInfo: processes && { foregroundProcesses: processes } })
-    const snapshot = { kind: "herdr", instanceId: "i", sessions: [{ windows: [{ panes: [
+    const snapshot = { kind: "rex", instanceId: "i", sessions: [{ windows: [{ panes: [
       pane("pane-a", [{ pid: 1, name: "clankerhouse-ha" }, { pid: 2, name: "claude" }]),
       pane("pane-b", [{ pid: 3, name: "zsh" }]),
       pane("pane-c", [{ pid: 4, name: "node", argv: ["/usr/bin/pi", "--session"] }]),

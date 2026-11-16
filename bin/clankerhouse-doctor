@@ -20,11 +20,7 @@ printf 'Clankerhouse home: %s\n' "$CLANKERHOUSE_HOME"
 [[ -x "$CLANKERHOUSE_BIN_DIR/clankers" ]] && ok 'clankers command' || fail 'clankers command missing'
 [[ -x "$CLANKERHOUSE_LIBEXEC/worktree-delete" ]] && ok 'worktree helper' || fail 'worktree helper missing'
 required bun
-case "${CLANKERHOUSE_MULTIPLEXER:-}" in
-    hc) required "${HC_BIN:-hc}" ;;
-    rex) required "${REX_BIN:-rex}" ;;
-    *) required herdr ;;
-esac
+required "${REX_BIN:-rex}"
 required git
 required python3
 required flock

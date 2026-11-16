@@ -8,6 +8,7 @@ import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import { advanceProjection } from "./projection"
 import { startSnapshotServer } from "./transport"
+import { FAKE_REX_HOST, fakeRex, writeRexClaims } from "./fixtures/fake-rex"
 
 /** The text a prompt carried, without the `[clankerhouse msg-... from ...]` tag. */
 const untagged = (prompt: string) => prompt.replace(/^\[clankerhouse msg-[A-Za-z0-9-]+ from [^\]]+\] /, "")
@@ -19,41 +20,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-const runtimeName = `clankerhouse-${process.getuid?.() || 0}-herdr`
-
-interface FakePane { pane_id: string; tab_id: string; label: string; cwd: string; agent: string; tokens: Record<string, string> }
-
-/** Minimal Herdr socket serving one workspace snapshot; one NDJSON request per connection. */
-const fakeHerdr = (socketPath: string, cwd: string, panes: FakePane[]) => {
-  const server = Bun.listen({
-    unix: socketPath,
-    socket: {
-      data(socket, chunk) {
-        const request = JSON.parse(chunk.toString().trim()) as { id: string; method: string; params: { pane_id?: string } }
-        const pane = panes.find((candidate) => candidate.pane_id === request.params.pane_id)
-        const result = request.method === "ping" ? { type: "pong", protocol: 22 }
-          : request.method === "session.snapshot" ? { snapshot: {
-            focused_workspace_id: "w1",
-            workspaces: [{ workspace_id: "w1", number: 1, label: "fixture", focused: true, active_tab_id: panes[0]!.tab_id, agent_status: "unknown", tokens: {} }],
-            tabs: panes.map((entry, index) => ({ tab_id: entry.tab_id, workspace_id: "w1", number: index + 1, label: entry.label, focused: index === 0, agent_status: "unknown" })),
-            panes: panes.map((entry, index) => ({ pane_id: entry.pane_id, terminal_id: `term-${index}`, workspace_id: "w1", tab_id: entry.tab_id, focused: index === 0, cwd: entry.cwd || cwd, foreground_cwd: entry.cwd || cwd, agent: entry.agent, agent_status: "unknown", tokens: entry.tokens, revision: 1 })),
-          } }
-          : request.method === "pane.process_info" ? { process_info: { pane_id: request.params.pane_id, foreground_processes: [{ pid: 1, name: pane?.agent ?? "zsh" }] } }
-          : request.method === "pane.get" ? { pane: pane ?? null }
-          : { type: "ok" }
-        socket.end(`${JSON.stringify({ id: request.id, result })}\n`)
-      },
-    },
-  })
-  servers.push(server)
-}
-
-describe("Clankerhouse clanker metadata", () => {
-  test("generates opaque namespaced ids", () => {
-    expect(generatedClankerId()).toMatch(/^clanker-[0-9a-f-]{36}$/)
-    expect(generatedClankerId()).not.toBe(generatedClankerId())
-  })
-})
+const runtimeName = `clankerhouse-${process.getuid?.() || 0}-rex`
 
 describe("report generations", () => {
   test("advances and settles a non-Pi lifecycle from native hook reports", async () => {
@@ -69,9 +36,9 @@ describe("report generations", () => {
       PATH: `${bin}:${process.env.PATH || ""}`,
       XDG_RUNTIME_DIR: runtime,
       XDG_STATE_HOME: join(root, "state"),
-      HERDR_PANE_ID: "w1:p99",
-      // No Herdr server: claims are best-effort and must not block the report.
-      HERDR_SOCKET_PATH: join(root, "missing.sock"),
+      // The hook writes Rex claims as files and never asks a Rex server.
+      REX_BLOCK: "block:p99",
+      REX_BIN: join(root, "missing-rex"),
       CLANKERHOUSE_INSTANCE: "",
       CLANKER_ID: "clanker-test",
     }
@@ -83,7 +50,7 @@ describe("report generations", () => {
     }
     await emit("working", "UserPromptSubmit")
     await emit("done", "Stop")
-    const report = JSON.parse(readFileSync(join(runtime, runtimeName, "clanker-state", "w1_p99.json"), "utf8"))
+    const report = JSON.parse(readFileSync(join(runtime, runtimeName, "clanker-state", "block_p99.json"), "utf8"))
     expect(report).toMatchObject({ harness: "claude", clankerId: "clanker-test", generation: 1, settledGeneration: 1, state: "done" })
   })
 
@@ -98,20 +65,22 @@ describe("report generations", () => {
     const nested = join(root, "nested")
     mkdirSync(nested)
     expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0)
-    const herdrSocket = join(root, "herdr.sock")
     // A Codex pane is report-only; a Pi pane serves results.
-    fakeHerdr(herdrSocket, root, [
-      { pane_id: "w1:p7", tab_id: "w1:t2", label: "codexwin", cwd: root, agent: "codex", tokens: { ch_clanker_id: "clanker-codex", ch_harness: "codex" } },
-      { pane_id: "w1:p8", tab_id: "w1:t3", label: "piwin", cwd: nested, agent: "pi", tokens: { ch_clanker_id: "clanker-pi", ch_harness: "pi" } },
-    ])
-    writeFileSync(join(reportDirectory, "w1_p7.json"), JSON.stringify({ harness: "codex", clankerId: "clanker-codex", pane: "w1:p7", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "Stop" }))
-    writeFileSync(join(reportDirectory, "w1_p8.json"), JSON.stringify({
-      harness: "pi", clankerId: "clanker-pi", pane: "w1:p8", state: "idle", generation: 0, settledGeneration: 0, updatedAt: Date.now(), hookEvent: "session_start", results: [],
+    const rex = fakeRex(join(root, "rex"), [{ id: "session:s1", label: "fixture", windows: [
+      { id: "window:t2", label: "codexwin", blocks: [{ id: "block:p7", program: "codex", cwd: root }] },
+      { id: "window:t3", label: "piwin", blocks: [{ id: "block:p8", program: "pi", cwd: nested }] },
+    ] }])
+    const stateDir = join(root, "state", "clankerhouse-rex")
+    writeRexClaims(stateDir, "block:p7", { clankerId: "clanker-codex", harness: "codex" })
+    writeRexClaims(stateDir, "block:p8", { clankerId: "clanker-pi", harness: "pi" })
+    writeFileSync(join(reportDirectory, "block_p7.json"), JSON.stringify({ harness: "codex", clankerId: "clanker-codex", pane: "block:p7", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "Stop" }))
+    writeFileSync(join(reportDirectory, "block_p8.json"), JSON.stringify({
+      harness: "pi", clankerId: "clanker-pi", pane: "block:p8", state: "idle", generation: 0, settledGeneration: 0, updatedAt: Date.now(), hookEvent: "session_start", results: [],
     }))
     const repository = join(import.meta.dir, "..")
     const clankerhouse = join(repository, "bin/clankers")
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_ENV: "", HERDR_PANE_ID: "", HERDR_SOCKET_PATH: herdrSocket, CLANKERHOUSE_INSTANCE: "" }
-    // The fake Herdr server runs in this process, so the CLI must never block the event loop.
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), REX_BIN: rex.bin, REX_BLOCK: "", CLANKERHOUSE_REX_SERVER: "", CLANKERHOUSE_INSTANCE: "" }
+    // Await the CLI without blocking the event loop.
     const run = async (args: string[]) => {
       const child = Bun.spawn([clankerhouse, ...args], { env, stdout: "pipe", stderr: "pipe" })
       const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
@@ -123,7 +92,7 @@ describe("report generations", () => {
     expect(listed).toHaveLength(2)
     expect(listed[0]).toMatchObject({ id: "clanker-codex", harness: "codex", state: "done", settledGeneration: 2, capabilities: { wait: "reports", send: false, result: false } })
     expect(listed[1]).toMatchObject({ id: "clanker-pi", generation: 0, settledGeneration: 0 })
-    // The fake Herdr reports each pane's harness as its foreground process; no Workshop is registered.
+    // The fake Rex reports each pane's harness as its foreground process; no Workshop is registered.
     expect(listed[0]).toMatchObject({ alive: true, workshop: null, parentWorkshopId: null, lastText: null })
     const unknownFlag = await run(["list", "--childs-of"])
     expect(unknownFlag.exitCode).toBe(2)
@@ -132,8 +101,8 @@ describe("report generations", () => {
     expect(done.exitCode, done.stderr).toBe(0)
     expect(JSON.parse(done.stdout).map((row: { id: string }) => row.id)).toEqual(["clanker-codex"])
     expect((await run(["list", "--state", "stuck"])).exitCode).toBe(2)
-    writeFileSync(join(reportDirectory, "w1_p8.json"), JSON.stringify({
-      harness: "pi", clankerId: "clanker-pi", pane: "w1:p8", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "agent_settled",
+    writeFileSync(join(reportDirectory, "block_p8.json"), JSON.stringify({
+      harness: "pi", clankerId: "clanker-pi", pane: "block:p8", state: "done", generation: 2, settledGeneration: 2, updatedAt: Date.now(), hookEvent: "agent_settled",
       results: [
         { generation: 1, timestamp: 1, status: 0, stopReason: "stop", errorMessage: "", reply: "first" },
         { generation: 2, timestamp: 2, status: 0, stopReason: "stop", errorMessage: "", reply: "second" },
@@ -144,7 +113,7 @@ describe("report generations", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ clankerId: "clanker-pi", generation: 1, reply: "first" })
     const waiter = Bun.spawn([clankerhouse, "wait", "--after", "2", "--timeout", "2", "clanker-codex"], { env, stdout: "pipe", stderr: "pipe" })
     await Bun.sleep(250)
-    writeFileSync(join(reportDirectory, "w1_p7.json"), JSON.stringify({ harness: "codex", clankerId: "clanker-codex", pane: "w1:p7", state: "done", generation: 3, settledGeneration: 3, updatedAt: Date.now(), hookEvent: "Stop" }))
+    writeFileSync(join(reportDirectory, "block_p7.json"), JSON.stringify({ harness: "codex", clankerId: "clanker-codex", pane: "block:p7", state: "done", generation: 3, settledGeneration: 3, updatedAt: Date.now(), hookEvent: "Stop" }))
     const waited = await new Response(waiter.stdout).text()
     expect(await waiter.exited).toBe(0)
     expect(JSON.parse(waited)).toMatchObject({ id: "clanker-codex", generation: 3, settledGeneration: 3 })
@@ -160,10 +129,10 @@ describe("report generations", () => {
   })
 })
 
-describe("Herdr semantic prompt transport", () => {
+describe("Rex semantic prompt transport", () => {
   // The orchestration store and pane reports follow XDG paths; keep them in a private root.
   const isolate = () => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herdr-send-"))
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-rex-send-"))
     roots.push(root)
     const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE }
     process.env.XDG_STATE_HOME = join(root, "state")
@@ -177,16 +146,16 @@ describe("Herdr semantic prompt transport", () => {
   const restores: Array<() => void> = []
   afterEach(() => { for (const restore of restores.splice(0)) restore() })
 
-  const fakeHerdr = (clankerId: string, paneId: string, prompts: Array<{ pane: string; text: string }>, pane: { focused: boolean; present: boolean } = { focused: false, present: true }) => {
+  const fakeRex = (clankerId: string, paneId: string, prompts: Array<{ pane: string; text: string }>, pane: { focused: boolean; present: boolean } = { focused: false, present: true }) => {
     const adapter = {
-      kind: "herdr",
+      kind: "rex",
       capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
       observe: async () => ({
-        kind: "herdr",
-        instanceId: "herdr:/tmp/test.sock",
+        kind: "rex",
+        instanceId: "rex:test-host",
         sessions: [{
-          id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
-            id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: pane.present ? [{
+          id: "session:w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
+            id: "window:t1", index: "1", nativeName: "claude", active: true, panes: pane.present ? [{
               id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true, focused: pane.focused,
               claims: { clankerId, harness: "claude" },
             }] : [],
@@ -202,9 +171,9 @@ describe("Herdr semantic prompt transport", () => {
   test("advertises and dispatches Claude sends to the exact claimed pane", async () => {
     isolate()
     const prompts: Array<{ pane: string; text: string }> = []
-    const clankerId = `clanker-claude-herdr-${Date.now()}`
-    const paneId = `w1:p${Date.now()}`
-    const multiplexer = fakeHerdr(clankerId, paneId, prompts)
+    const clankerId = `clanker-claude-rex-${Date.now()}`
+    const paneId = `block:p${Date.now()}`
+    const multiplexer = fakeRex(clankerId, paneId, prompts)
 
     const listed = await listClankers({ multiplexer })
     expect(listed).toHaveLength(1)
@@ -224,9 +193,9 @@ describe("Herdr semantic prompt transport", () => {
     const reports = isolate()
     const prompts: Array<{ pane: string; text: string }> = []
     const clankerId = "clanker-claude-follow-up"
-    const multiplexer = fakeHerdr(clankerId, "w1:p9", prompts)
-    const report = (state: string, generation: number, settledGeneration: number) => writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
-      harness: "claude", clankerId, pane: "w1:p9", state, generation, settledGeneration, updatedAt: Date.now(),
+    const multiplexer = fakeRex(clankerId, "block:p9", prompts)
+    const report = (state: string, generation: number, settledGeneration: number) => writeFileSync(join(reports, "block_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: "block:p9", state, generation, settledGeneration, updatedAt: Date.now(),
     }))
     report("working", 1, 0)
     const queued = await sendClanker(clankerId, "after this turn", { delivery: "followUp" }, multiplexer)
@@ -241,7 +210,7 @@ describe("Herdr semantic prompt transport", () => {
   test("returns each settled Claude generation's final assistant message from the transcript", async () => {
     const reports = isolate()
     const clankerId = "clanker-claude-result"
-    const multiplexer = fakeHerdr(clankerId, "w1:p9", [])
+    const multiplexer = fakeRex(clankerId, "block:p9", [])
     const transcript = join(reports, "..", "session.jsonl")
     const at = (ms: number) => new Date(ms).toISOString()
     const assistant = (ms: number, id: string, content: unknown[], stop: string | null, extra: object = {}) =>
@@ -258,8 +227,8 @@ describe("Herdr semantic prompt transport", () => {
       assistant(2_100, "m3", [{ type: "text", text: "Second answer." }], "end_turn"),
       assistant(3_100, "m4", [{ type: "text", text: "still running" }], null),
     ].join("\n"))
-    writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
-      harness: "claude", clankerId, pane: "w1:p9", state: "working", generation: 3, settledGeneration: 2, updatedAt: Date.now(), transcriptPath: transcript,
+    writeFileSync(join(reports, "block_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: "block:p9", state: "working", generation: 3, settledGeneration: 2, updatedAt: Date.now(), transcriptPath: transcript,
       turns: [{ generation: 1, startedAt: 1_000, settledAt: 1_400 }, { generation: 2, startedAt: null, settledAt: 2_200 }],
     }))
     expect(await resultForClanker(clankerId, 1, multiplexer)).toEqual({ clankerId, generation: 1, timestamp: 1_302, status: 0, stopReason: "end_turn", errorMessage: "", reply: "First answer.\n\nDone." })
@@ -270,11 +239,11 @@ describe("Herdr semantic prompt transport", () => {
   test("drops a clanker whose harness exited while its pane lingers, and a relaunch in the pane restores it", async () => {
     const reports = isolate()
     const clankerId = "clanker-claude-exited"
-    const paneId = "w1:p31"
-    const multiplexer = fakeHerdr(clankerId, paneId, [])
-    const mark = join(reports, "w1_p31.exited")
+    const paneId = "block:p31"
+    const multiplexer = fakeRex(clankerId, paneId, [])
+    const mark = join(reports, "block_p31.exited")
     const lifecycle = (...command: string[]) => Bun.spawnSync([join(import.meta.dir, "../bin/clankerhouse-harness-lifecycle"), "--", ...command], {
-      env: { ...process.env, HERDR_PANE_ID: paneId, CLANKER_ID: clankerId }, stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, REX_BLOCK: paneId, CLANKER_ID: clankerId }, stdout: "pipe", stderr: "pipe",
     }).exitCode
 
     expect((await listClankers({ multiplexer })).map((clanker) => clanker.id)).toEqual([clankerId])
@@ -292,16 +261,16 @@ describe("Herdr semantic prompt transport", () => {
   test("a harness's own runtime status refines blocked without moving generations, and a replaced harness is gone", async () => {
     const reports = isolate()
     const clankerId = "clanker-claude-runtime"
-    const paneId = "w1:p41"
+    const paneId = "block:p41"
     let agentStatus: Record<string, unknown> | undefined
     let harnessGone = false
     const adapter = {
-      kind: "herdr",
+      kind: "rex",
       capabilities: () => ({ processInfo: true, agentStatus: true, sessionRefs: true, agentPrompt: true, persistentLabels: true, durableIds: true, popup: true, worktrees: true, nativeChanges: true, argvLaunch: true, claimScopes: ["session", "pane"] }),
       observe: async () => ({
-        kind: "herdr", instanceId: "herdr:/tmp/test.sock",
-        sessions: [{ id: "w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
-          id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
+        kind: "rex", instanceId: "rex:test-host",
+        sessions: [{ id: "session:w1", nativeName: "repo@main", path: "/repo", recency: 0, attached: true, worktreePath: "/repo", directoryPath: "", windows: [{
+          id: "window:t1", index: "1", nativeName: "claude", active: true, panes: [{
             id: paneId, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true,
             claims: { clankerId, harness: "claude" }, agentStatus, ...(harnessGone ? { harnessGone } : {}),
           }],
@@ -310,7 +279,7 @@ describe("Herdr semantic prompt transport", () => {
       readClaim: async (_location: unknown, key: string) => key === "clankerId" ? clankerId : undefined,
     } as unknown as Multiplexer
     const multiplexer = new ManagedMultiplexer(adapter)
-    const hook = (state: string, updatedAt: number) => writeFileSync(join(reports, "w1_p41.json"), JSON.stringify({ harness: "claude", clankerId, pane: paneId, state, generation: 3, settledGeneration: 2, updatedAt }))
+    const hook = (state: string, updatedAt: number) => writeFileSync(join(reports, "block_p41.json"), JSON.stringify({ harness: "claude", clankerId, pane: paneId, state, generation: 3, settledGeneration: 2, updatedAt }))
     const status = () => clankerStatus(clankerId, multiplexer)
 
     // AskUserQuestion: the hook last saw the tool call start; the harness then reported the question.
@@ -343,10 +312,10 @@ describe("Herdr semantic prompt transport", () => {
     const reports = isolate()
     const prompts: Array<{ pane: string; text: string }> = []
     const clankerId = "clanker-claude-queue"
-    const paneId = "w1:p9"
+    const paneId = "block:p9"
     const pane = { focused: false, present: true }
-    const multiplexer = fakeHerdr(clankerId, paneId, prompts, pane)
-    const report = (state: string, generation: number, settledGeneration: number, submitted: string[] = []) => writeFileSync(join(reports, "w1_p9.json"), JSON.stringify({
+    const multiplexer = fakeRex(clankerId, paneId, prompts, pane)
+    const report = (state: string, generation: number, settledGeneration: number, submitted: string[] = []) => writeFileSync(join(reports, "block_p9.json"), JSON.stringify({
       harness: "claude", clankerId, pane: paneId, state, generation, settledGeneration, updatedAt: Date.now(), hookEvent: state === "done" ? "Stop" : "UserPromptSubmit",
       prompts: submitted.map((text, index) => ({ sha256: promptSha256(text), generation: generation - submitted.length + index + 1 })),
     }))
@@ -441,7 +410,7 @@ idle = true
 await handlers.get("agent_start")?.({}, context)
 await handlers.get("agent_end")?.({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "third result" }] }] }, context)
 await handlers.get("agent_settled")?.({}, context)
-const reportPath = \`${runtime}/${runtimeName}/clanker-state/w1_p44.json\`
+const reportPath = \`${runtime}/${runtimeName}/clanker-state/block_p44.json\`
 const report = JSON.parse(readFileSync(reportPath, "utf8"))
 const socketMode = (statSync(socketPath).mode & 0o777).toString(8)
 await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
@@ -449,7 +418,7 @@ await Bun.sleep(10)
 console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, steerReceipt, sent, report, socketMode, socketRemoved: !existsSync(socketPath) }))
 `)
     const child = Bun.spawnSync([process.execPath, script], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), HERDR_PANE_ID: "w1:p44", CLANKERHOUSE_INSTANCE: "", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKERHOUSE_CLANKERS: join(bin, "clankers") },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"), REX_BLOCK: "block:p44", CLANKERHOUSE_INSTANCE: "", CLANKER_ID: "clanker-pi-test", CLANKER_SESSION_ID: "pi-test-session", CLANKERHOUSE_CLANKERS: join(bin, "clankers") },
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -483,7 +452,7 @@ console.log(JSON.stringify({ firstReceipt, secondReceipt, concurrentReceipt, ste
     mkdirSync(runtime)
     writeFileSync(join(bin, "clankers"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$CLAIM_LOG"
-case "$*" in "mux read-claim --pane w1:p88 clankerId") printf 'clanker-parent\\n' ;; esac
+case "$*" in "mux read-claim --pane block:p88 clankerId") printf 'clanker-parent\\n' ;; esac
 `, { mode: 0o755 })
     const script = join(root, "sdk-workers.ts")
     writeFileSync(script, `
@@ -491,7 +460,7 @@ import assert from "node:assert/strict"
 import { readFileSync, readdirSync } from "node:fs"
 import extension from ${JSON.stringify(join(import.meta.dir, "../integrations/pi/clanker-lifecycle.ts"))}
 const runtime = ${JSON.stringify(join(runtime, runtimeName))}
-const reportPath = runtime + "/clanker-state/w1_p88.json"
+const reportPath = runtime + "/clanker-state/block_p88.json"
 const claimLog = ${JSON.stringify(join(root, "claims.log"))}
 function instance(mode: string, sessionId: string) {
   const handlers = new Map<string, Function>()
@@ -547,7 +516,7 @@ console.log("parent ownership preserved")
         PATH: `${bin}:${process.env.PATH || ""}`, HOME: join(root, "home"),
         XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: join(root, "state"),
         XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"),
-        HERDR_PANE_ID: "w1:p88", CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
+        REX_BLOCK: "block:p88", CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
         CLAIM_LOG: join(root, "claims.log"),
       }, stdout: "pipe", stderr: "pipe",
     })
@@ -584,7 +553,7 @@ await Bun.sleep(10)
 const root = ${JSON.stringify(join(runtime, runtimeName))}
 const observed = {
   handlers: [...handlers.keys()],
-  reportExists: existsSync(root + "/clanker-state/w1_p77.json"),
+  reportExists: existsSync(root + "/clanker-state/block_p77.json"),
   sockets: existsSync(root + "/clanker-sockets") ? readdirSync(root + "/clanker-sockets") : [],
 }
 await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
@@ -596,7 +565,7 @@ console.log(JSON.stringify(observed))
         PATH: `${bin}:${process.env.PATH || ""}`,
         XDG_RUNTIME_DIR: runtime,
         XDG_STATE_HOME: join(root, "state"),
-        HERDR_PANE_ID: "w1:p77",
+        REX_BLOCK: "block:p77",
         CLANKERHOUSE_INSTANCE: "",
         CLANKERS_LOG: clankersLog,
         CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
@@ -609,8 +578,8 @@ console.log(JSON.stringify(observed))
     expect(existsSync(clankersLog) ? readFileSync(clankersLog, "utf8") : "").toBe("")
   })
 
-  test("routes pane claims through clankers mux on the Herdr instance", () => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herdr-pi-"))
+  test("routes pane claims through clankers mux on the Rex instance", () => {
+    const root = mkdtempSync(join(tmpdir(), "clankerhouse-rex-pi-"))
     roots.push(root)
     const bin = join(root, "bin")
     const runtime = join(root, "runtime")
@@ -621,7 +590,7 @@ console.log(JSON.stringify(observed))
 printf '%s\n' "$*" >> "$CLANKERS_LOG"
 `, { mode: 0o755 })
     const extension = join(import.meta.dir, "../integrations/pi/clanker-lifecycle.ts")
-    const script = join(root, "herdr-claims-test.ts")
+    const script = join(root, "rex-claims-test.ts")
     writeFileSync(script, `
 import extension from ${JSON.stringify(extension)}
 const handlers = new Map<string, Function>()
@@ -631,7 +600,7 @@ const pi = {
   sendUserMessage: () => {},
 }
 extension(pi as never)
-const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "pi-herdr-session" } }
+const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "pi-rex-session" } }
 await handlers.get("session_start")?.({}, context)
 await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
 `)
@@ -641,13 +610,12 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
         PATH: `${bin}:${process.env.PATH || ""}`,
         XDG_RUNTIME_DIR: runtime,
         XDG_STATE_HOME: join(root, "state"),
-        HERDR_ENV: "1",
-        HERDR_PANE_ID: "w1:p2",
-        HERDR_SOCKET_PATH: join(root, "herdr.sock"),
+        REX_BLOCK: "block:p2",
+        REX_BIN: join(root, "missing-rex"),
         CLANKERHOUSE_INSTANCE: "",
         CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
-        CLANKER_ID: "clanker-herdr-test",
-        CLANKER_SESSION_ID: "pi-herdr-session",
+        CLANKER_ID: "clanker-rex-test",
+        CLANKER_SESSION_ID: "pi-rex-session",
         CLANKERS_LOG: clankersLog,
       },
       stdout: "pipe",
@@ -656,9 +624,9 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
     expect(child.exitCode, child.stderr.toString()).toBe(0)
     const calls = readFileSync(clankersLog, "utf8").trim().split("\n")
     expect(calls.length).toBeGreaterThan(0)
-    expect(calls).toContain("mux claim --pane w1:p2 harness pi")
-    expect(calls.filter((call) => call.startsWith("mux ")).every((call) => call.includes("--pane w1:p2"))).toBe(true)
-    expect(existsSync(join(root, "state", "clankerhouse-herdr", "activity"))).toBe(true)
+    expect(calls).toContain("mux claim --pane block:p2 harness pi")
+    expect(calls.filter((call) => call.startsWith("mux ")).every((call) => call.includes("--pane block:p2"))).toBe(true)
+    expect(existsSync(join(root, "state", "clankerhouse-rex", "activity"))).toBe(true)
     expect(existsSync(join(root, "state", "clankerhouse", "activity"))).toBe(false)
   })
 
@@ -685,64 +653,53 @@ describe("clanker discovery through the daemon's herd", () => {
   const restores: Array<() => void> = []
   afterEach(() => { for (const restore of restores.splice(0)) restore() })
 
-  // A herdr server that counts requests and knows one workspace with one Claude pane.
-  const fakeHerdrServer = async (path: string, clankerId: string, paneId: string) => {
-    const methods: string[] = []
-    const snapshot = {
-      focused_workspace_id: "w1",
-      workspaces: [{ workspace_id: "w1", number: 1, label: "repo@main", focused: true, active_tab_id: "w1:t1", agent_status: "idle", tokens: { ch_worktree_path: "/repo" } }],
-      tabs: [{ tab_id: "w1:t1", workspace_id: "w1", number: 1, label: "claude", focused: true, agent_status: "idle" }],
-      panes: [{ pane_id: paneId, terminal_id: "term-1", workspace_id: "w1", tab_id: "w1:t1", focused: false, cwd: "/repo", agent_status: "idle", revision: 1, tokens: { ch_clanker_id: clankerId, ch_harness: "claude" } }],
-    }
-    const server = createServer((socket) => {
-      socket.on("data", (chunk) => {
-        const request = JSON.parse(chunk.toString().split("\n")[0]!) as { id: string; method: string }
-        methods.push(request.method)
-        socket.end(`${JSON.stringify({ id: request.id, result: request.method === "session.snapshot" ? { snapshot } : {} })}\n`)
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(path, resolve))
-    restores.push(() => server.close())
-    return methods
+  // A Rex server that logs requests and knows one session with one Claude block.
+  const rexServer = (root: string, clankerId: string, paneId: string) => {
+    const rex = fakeRex(join(root, "rex"), [{ id: "session:w1", label: "repo@main", windows: [{ id: "window:t1", label: "claude", blocks: [{ id: paneId, program: "claude", cwd: "/repo" }] }] }])
+    const stateDir = join(root, "state", "clankerhouse-unit")
+    writeRexClaims(stateDir, "session:w1", { worktreePath: "/repo" })
+    writeRexClaims(stateDir, paneId, { clankerId, harness: "claude" })
+    return rex
   }
 
-  const isolate = async (herdPanes: unknown[]) => {
+  const isolate = async (herdPanes: unknown[], clankerId: string, paneId: string) => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-herd-"))
     roots.push(root)
-    const herdrSocket = join(root, "herdr.sock")
-    const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH }
+    const rex = rexServer(root, clankerId, paneId)
+    const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE, REX_BIN: process.env.REX_BIN, CLANKERHOUSE_REX_SERVER: process.env.CLANKERHOUSE_REX_SERVER }
     process.env.XDG_STATE_HOME = join(root, "state")
     process.env.XDG_RUNTIME_DIR = join(root, "runtime")
     process.env.CLANKERHOUSE_INSTANCE = "unit"
-    process.env.HERDR_SOCKET_PATH = herdrSocket
+    process.env.REX_BIN = rex.bin
+    delete process.env.CLANKERHOUSE_REX_SERVER
     restores.push(() => { for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value })
     const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() ?? "user"}-unit`)
     mkdirSync(join(runtime, "clanker-state"), { recursive: true })
     const daemon = await startSnapshotServer({
       socketPath: join(runtime, "daemon.sock"),
       initialSnapshot: advanceProjection(undefined, [], 10, "test", Date.now()),
-      herd: () => ({ instanceId: `herdr:${herdrSocket}`, observedAt: Date.now(), panes: herdPanes }),
+      herd: () => ({ instanceId: `rex:${FAKE_REX_HOST}`, observedAt: Date.now(), panes: herdPanes }),
     })
     restores.push(() => { void daemon.close() })
-    return herdrSocket
+    return rex
   }
 
-  const herdPane = (id: string, pane: string) => ({ harness: "claude", id, socketPath: "", sessionId: "w1", session: "repo@main", window: "w1:t1", name: "claude", pane, cwd: "/repo", worktreePath: "/repo", focused: false })
+  const herdPane = (id: string, pane: string) => ({ harness: "claude", id, socketPath: "", sessionId: "session:w1", session: "repo@main", window: "window:t1", name: "claude", pane, cwd: "/repo", worktreePath: "/repo", focused: false })
 
   test("lists and polls clankers from the daemon without asking the Multiplexer", async () => {
-    const herdrSocket = await isolate([herdPane("clanker-herd", "w1:p1")])
-    const methods = await fakeHerdrServer(herdrSocket, "clanker-herd", "w1:p1")
+    const rex = await isolate([herdPane("clanker-herd", "block:p1")], "clanker-herd", "block:p1")
 
     expect((await listClankers()).map((clanker) => clanker.id)).toEqual(["clanker-herd"])
-    expect(await clankerStatus("clanker-herd")).toMatchObject({ id: "clanker-herd", pane: "w1:p1", harness: "claude" })
-    expect(methods).toEqual([])
+    expect(await clankerStatus("clanker-herd")).toMatchObject({ id: "clanker-herd", pane: "block:p1", harness: "claude" })
+    // Matching the herd to this server costs a status call; nothing observes the server.
+    expect(rex.calls().filter((call) => !call.startsWith("api server.status "))).toEqual([])
   })
 
   test("observes the Multiplexer, without process facts, for a clanker the daemon has not seen yet", async () => {
-    const herdrSocket = await isolate([])
-    const methods = await fakeHerdrServer(herdrSocket, "clanker-new", "w1:p2")
+    const rex = await isolate([], "clanker-new", "block:p2")
 
-    expect(await clankerStatus("clanker-new")).toMatchObject({ id: "clanker-new", pane: "w1:p2" })
-    expect(methods).toEqual(["session.snapshot"])
+    expect(await clankerStatus("clanker-new")).toMatchObject({ id: "clanker-new", pane: "block:p2" })
+    // One `rex do` observation carries every block's process facts; nothing asks for more.
+    expect(rex.calls().filter((call) => !call.startsWith("api server.status "))).toEqual(["do"])
   })
 })

@@ -30,7 +30,7 @@ const spares = (repo: string) => {
 }
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "clankerhouse-pool-test-"))
+  root = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-pool-test-")))
   // Isolate Worktrunk and git from the developer's own configuration.
   Object.assign(process.env, {
     HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "home", ".config"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",

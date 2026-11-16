@@ -31,7 +31,7 @@ export class HooksConfigError extends Error {
 export const hooksConfigPath = (env: Record<string, string | undefined> = Bun.env) => {
   if (env.CLANKERHOUSE_HOOKS_CONFIG) return env.CLANKERHOUSE_HOOKS_CONFIG
   const slug = instanceSlug(env)
-  return `${env.XDG_CONFIG_HOME || `${env.HOME || ""}/.config`}/clankerhouse/hooks${slug === "-herdr" ? "" : slug}.toml`
+  return `${env.XDG_CONFIG_HOME || `${env.HOME || ""}/.config`}/clankerhouse/hooks${slug === "-rex" ? "" : slug}.toml`
 }
 
 type Table = Record<string, unknown>

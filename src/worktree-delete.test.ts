@@ -25,9 +25,8 @@ function fixture(options: { padding?: number; fault?: string } = {}) {
     GIT_CONFIG_SYSTEM: "/dev/null",
     CLANKERHOUSE_INSTANCE: "",
     CLANKERHOUSE_CLANKERS: join(root, "bin/clankers"),
-    HERDR_SOCKET_PATH: join(root, "no-live-runtime.sock"),
-    HERDR_ENV: "",
-    HERDR_PANE_ID: "",
+    REX_BIN: join(root, "no-live-rex"),
+    REX_BLOCK: "",
     PATH: `${join(root, "bin")}:${process.env.PATH || ""}`,
     QA_ROOT: root,
     QA_FAULT: options.fault || "",
@@ -75,7 +74,7 @@ else: sys.exit(99)
 `)
   chmodSync(env.CLANKERHOUSE_CLANKERS, 0o755)
   // Use Git only inside this fixture as a narrow Worktrunk double. The standalone
-  // scenario exercises the production helper with real Worktrunk and Herdr.
+  // scenario exercises the production helper with real Worktrunk and Rex.
   const wt = join(root, "bin/wt")
   writeFileSync(wt, `#!/bin/bash
 set -euo pipefail
@@ -129,7 +128,7 @@ describe("worktree deletion runtime snapshots", () => {
     const f = fixture({ fault: "kill-error" })
     const result = await f.remove()
     expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain("Worktree was removed, but herdr session worktree-target could not be closed")
+    expect(result.stderr).toContain("Worktree was removed, but Rex session worktree-target could not be closed")
     expect(f.calls().filter((args) => args[1] === "kill")).toHaveLength(3)
   })
 })

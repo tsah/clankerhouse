@@ -9,7 +9,7 @@ const isolatedEnv = (overrides: Record<string, string> = {}) => ({
   ...process.env,
   CLANKER_ID: "",
   CLANKER_SESSION_ID: "",
-  HERDR_PANE_ID: "",
+  REX_BLOCK: "",
   CLANKERHOUSE_INSTANCE: "",
   ...overrides,
 })
@@ -53,12 +53,12 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.deleted", properties: { info } })
       console.log(JSON.stringify({ created, working, blocked, resumed, done, updated, deleted: report() }))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`, "clanker-state", "block_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
       env: isolatedEnv({
         PATH: `${bin}:${process.env.PATH || ""}`,
         XDG_RUNTIME_DIR: runtime,
-        HERDR_PANE_ID: "w1:p44",
+        REX_BLOCK: "block:p44",
         CLANKER_ID: "clanker-opencode",
         CLANKER_SESSION_ID: "session-root",
         CLANKERHOUSE_CLANKERS: join(bin, "clankers"),
@@ -71,7 +71,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
 
     expect(child.exitCode, child.stderr.toString()).toBe(0)
     const output = JSON.parse(child.stdout.toString())
-    expect(output.created).toMatchObject({ harness: "opencode", clankerId: "clanker-opencode", harnessSessionId: "session-root", pane: "w1:p44", state: "idle", generation: 0 })
+    expect(output.created).toMatchObject({ harness: "opencode", clankerId: "clanker-opencode", harnessSessionId: "session-root", pane: "block:p44", state: "idle", generation: 0 })
     expect(output.working).toMatchObject({ state: "working", generation: 1, settledGeneration: 0, hookEvent: "session.status" })
     expect(output.blocked).toMatchObject({ state: "blocked", hookEvent: "question.asked" })
     expect(output.resumed).toMatchObject({ state: "working", hookEvent: "question.replied" })
@@ -79,8 +79,8 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     expect(output.updated).toEqual(output.done)
     expect(output.deleted).toMatchObject({ state: "unknown", hookEvent: "session.deleted" })
     const calls = readFileSync(clankersLog, "utf8")
-    expect(calls).toContain("mux claim --pane w1:p44 harness opencode")
-    expect(calls).toContain("mux claim --pane w1:p44 clankerId --unset")
+    expect(calls).toContain("mux claim --pane block:p44 harness opencode")
+    expect(calls).toContain("mux claim --pane block:p44 clankerId --unset")
   })
 
   test("ignores unrelated sessions", () => {
@@ -93,7 +93,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "child-session", status: { type: "busy" } } })
     `)
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: join(root, "runtime"), HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKER_SESSION_ID: "session-root", CLANKERHOUSE_CLANKERS: "/bin/true" }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: join(root, "runtime"), REX_BLOCK: "block:p44", CLANKER_ID: "clanker-opencode", CLANKER_SESSION_ID: "session-root", CLANKERHOUSE_CLANKERS: "/bin/true" }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -115,9 +115,9 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-root", status: { type: "busy" } } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`, "clanker-state", "block_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -126,7 +126,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     expect(JSON.parse(child.stdout.toString())).toMatchObject({
       harness: "opencode",
       harnessSessionId: "session-root",
-      pane: "w1:p44",
+      pane: "block:p44",
       state: "working",
       hookEvent: "session.status",
     })
@@ -137,7 +137,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-opencode-lifecycle-"))
     roots.push(root)
     const runtime = join(root, "runtime")
-    const runtimeRoot = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`)
+    const runtimeRoot = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`)
     mkdirSync(runtimeRoot, { recursive: true })
     const requests: unknown[] = []
     const server = createServer((socket) => {
@@ -162,7 +162,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await Bun.sleep(50)
     `)
     const child = Bun.spawn([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44" }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44" }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -173,7 +173,7 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     expect(requests).toHaveLength(2)
     expect(requests.map((request: any) => request.params.state)).toEqual(["idle", "working"])
     expect(requests.every((request: any) => request.method === "observation.report")).toBe(true)
-    expect(existsSync(join(runtimeRoot, "clanker-state", "w1_p44.json"))).toBe(false)
+    expect(existsSync(join(runtimeRoot, "clanker-state", "block_p44.json"))).toBe(false)
   })
 
   test("recovers an untracked root from a status event after plugin reload", () => {
@@ -191,9 +191,9 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       )
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`, "clanker-state", "block_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -218,9 +218,9 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-child", status: { type: "busy" } } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`, "clanker-state", "block_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -245,9 +245,9 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
       await handleLifecycleEvent({ type: "session.created", properties: { info: info("session-root") } })
       console.log(readFileSync(process.env.REPORT_PATH!, "utf8"))
     `)
-    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-herdr`, "clanker-state", "w1_p44.json")
+    const reportPath = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`, "clanker-state", "block_p44.json")
     const child = Bun.spawnSync([process.execPath, script], {
-      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
+      env: isolatedEnv({ PATH: `${bin}:${process.env.PATH || ""}`, XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44", CLANKER_ID: "clanker-opencode", CLANKERHOUSE_CLANKERS: "/bin/true", REPORT_PATH: reportPath }),
       stdout: "pipe",
       stderr: "pipe",
     })

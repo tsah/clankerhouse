@@ -226,7 +226,7 @@ describe("session resource projection", () => {
 
   test("projects Herdr agent status as observed working state without creating Clanker identity", () => {
     const result = projectResources(inputs({
-      multiplexerKind: "herdr",
+      multiplexerKind: "rex",
       instanceId: "herdr:/tmp/test.sock",
       sessions: [muxSession()],
       windows: [muxWindow({ agentStatus: { agent: "pi", status: "working" } })],
@@ -239,14 +239,14 @@ describe("session resource projection", () => {
       harness: "pi",
       state: "working",
       observation: { source: "runtime", confidence: "observed", state: "working", observedAt },
-      target: { location: { kind: "herdr" } },
+      target: { location: { kind: "rex" } },
     })
     expect(result.sessions[0]?.details[0]?.clankerId).toBeUndefined()
   })
 
   test("keeps Herdr working state visible alongside a rejected identity claim", () => {
     const result = projectResources(inputs({
-      multiplexerKind: "herdr",
+      multiplexerKind: "rex",
       instanceId: "herdr:/tmp/test.sock",
       sessions: [muxSession()],
       windows: [muxWindow({ agentStatus: { agent: "pi", status: "working" } })],
@@ -457,7 +457,7 @@ describe("session resource projection", () => {
   test("uses a managed Workshop's canonical path and does not duplicate it as a directory", () => {
     const record = workshop({ workshopId: "workshop-1", canonicalPath: "/tmp/canonical", parentWorkshopId: null })
     const lineage: LineageSnapshot = { byPath: new Map([[record.canonicalPath, record]]), byId: new Map([[record.workshopId, record]]) }
-    const managed = { id: "mux-session-1", kind: "session" as const, workshopId: record.workshopId, parentId: null, displayName: "managed", createdAt: 1, updatedAt: 1, location: { kind: "herdr" as const, instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }
+    const managed = { id: "mux-session-1", kind: "session" as const, workshopId: record.workshopId, parentId: null, displayName: "managed", createdAt: 1, updatedAt: 1, location: { kind: "rex" as const, instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }
     const result = projectResources(inputs({
       sessions: [muxSession({ path: "/tmp/stale-legacy-path", workshopId: record.workshopId, resourceId: managed.id })],
       windows: [muxWindow()],
@@ -476,8 +476,8 @@ describe("session resource projection", () => {
       sessions: [muxSession({ resourceId: "mux-session-1", displayName: "Owned workshop" })],
       windows: [muxWindow({ terminalId: "terminal-1", terminalDisplayName: "Owned terminal" })],
       managedResources: new Map([
-        ["mux-session-1", { id: "mux-session-1", kind: "session", workshopId: "workshop-1", parentId: null, displayName: "Owned workshop", createdAt: 1, updatedAt: 1, location: { kind: "herdr", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }],
-        ["terminal-1", { id: "terminal-1", kind: "terminal", workshopId: "workshop-1", parentId: "window-1", displayName: "Owned terminal", createdAt: 1, updatedAt: 1, location: { kind: "herdr", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1", observedAt: 1 } }],
+        ["mux-session-1", { id: "mux-session-1", kind: "session", workshopId: "workshop-1", parentId: null, displayName: "Owned workshop", createdAt: 1, updatedAt: 1, location: { kind: "rex", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: null, nativePaneId: null, observedAt: 1 } }],
+        ["terminal-1", { id: "terminal-1", kind: "terminal", workshopId: "workshop-1", parentId: "window-1", displayName: "Owned terminal", createdAt: 1, updatedAt: 1, location: { kind: "rex", instanceId: instanceId, nativeSessionId: "$1", nativeWindowId: "@1", nativePaneId: "%1", observedAt: 1 } }],
       ]),
     }))
 

@@ -8,40 +8,40 @@ import type { ManagedMultiplexer } from "./multiplexer"
 describe("workshop parent resolution", () => {
   const missingParentId = "00000000-0000-4000-8000-000000000001"
 
-  test("uses the invoking pane instead of Herdr's globally focused workspace", async () => {
+  test("uses the invoking pane instead of the globally focused session", async () => {
     let currentLocationCalls = 0
     const multiplexer = {
-      kind: "herdr",
-      paneAddressEnv: () => "HERDR_PANE_ID",
+      kind: "rex",
+      paneAddressEnv: () => "REX_BLOCK",
       observe: async () => ({
-        kind: "herdr",
-        instanceId: "herdr:test",
+        kind: "rex",
+        instanceId: "rex:test",
         sessions: [
-          { id: "w13", nativeName: "focused", path: "/repo/search", recency: 2, attached: true, worktreePath: "/repo/search", directoryPath: "", windows: [{ id: "w13:t1", index: "1", nativeName: "main", active: true, panes: [{ id: "w13:p1", index: "0", pid: "1", command: "pi", title: "", currentPath: "/repo/search", activity: 2, active: true }] }] },
-          { id: "w16", nativeName: "invoker", path: "/repo/big", recency: 1, attached: false, worktreePath: "/repo/big", directoryPath: "", windows: [{ id: "w16:t2", index: "2", nativeName: "pi", active: true, panes: [{ id: "w16:p2", index: "0", pid: "2", command: "pi", title: "", currentPath: "/repo/big/src", activity: 1, active: true }] }] },
+          { id: "session:w13", nativeName: "focused", path: "/repo/search", recency: 2, attached: true, worktreePath: "/repo/search", directoryPath: "", windows: [{ id: "window:t1", index: "1", nativeName: "main", active: true, panes: [{ id: "block:p1", index: "0", pid: "1", command: "pi", title: "", currentPath: "/repo/search", activity: 2, active: true }] }] },
+          { id: "session:w16", nativeName: "invoker", path: "/repo/big", recency: 1, attached: false, worktreePath: "/repo/big", directoryPath: "", windows: [{ id: "window:t2", index: "2", nativeName: "pi", active: true, panes: [{ id: "block:p2", index: "0", pid: "2", command: "pi", title: "", currentPath: "/repo/big/src", activity: 1, active: true }] }] },
         ],
       }),
       currentLocation: async () => {
         currentLocationCalls += 1
-        return { kind: "herdr", instanceId: "herdr:test", nativeSessionId: "w13", nativeWindowId: "w13:t1", nativePaneId: "w13:p1" }
+        return { kind: "rex", instanceId: "rex:test", nativeSessionId: "session:w13", nativeWindowId: "window:t1", nativePaneId: "block:p1" }
       },
       adapter: { insideRuntime: () => true },
     } as unknown as ManagedMultiplexer
 
-    expect(await invokingSessionTarget(multiplexer, { HERDR_PANE_ID: "w16:p2" })).toEqual({ nativeSessionId: "w16", panePath: "/repo/big/src" })
+    expect(await invokingSessionTarget(multiplexer, { REX_BLOCK: "block:p2" })).toEqual({ nativeSessionId: "session:w16", panePath: "/repo/big/src" })
     expect(currentLocationCalls).toBe(0)
   })
 
   test("fails closed when an invoking pane address is no longer observable", async () => {
     const multiplexer = {
-      kind: "herdr",
-      paneAddressEnv: () => "HERDR_PANE_ID",
-      observe: async () => ({ kind: "herdr", instanceId: "herdr:test", sessions: [] }),
-      currentLocation: async () => ({ kind: "herdr", instanceId: "herdr:test", nativeSessionId: "w13", nativeWindowId: null, nativePaneId: null }),
+      kind: "rex",
+      paneAddressEnv: () => "REX_BLOCK",
+      observe: async () => ({ kind: "rex", instanceId: "rex:test", sessions: [] }),
+      currentLocation: async () => ({ kind: "rex", instanceId: "rex:test", nativeSessionId: "session:w13", nativeWindowId: null, nativePaneId: null }),
       adapter: { insideRuntime: () => true },
     } as unknown as ManagedMultiplexer
 
-    await expect(invokingSessionTarget(multiplexer, { HERDR_PANE_ID: "w16:p2" })).rejects.toThrow(/invoking herdr pane w16:p2/i)
+    await expect(invokingSessionTarget(multiplexer, { REX_BLOCK: "block:p2" })).rejects.toThrow(/invoking rex pane block:p2/i)
   })
 
   test("rejects explicit parents when lineage is off", async () => {
@@ -145,8 +145,8 @@ describe("workshop spawn rollback", () => {
     const commands: string[][] = []
     const killed: string[] = []
     const multiplexer = {
-      kind: "herdr",
-      observe: async () => ({ kind: "herdr", instanceId: "herdr:test", sessions: [{ id: "$7", nativeName: "repo@failed-workshop", path: "/tmp/repo/failed-workshop", recency: 0, attached: false, worktreePath: "", directoryPath: "", windows: [] }] }),
+      kind: "rex",
+      observe: async () => ({ kind: "rex", instanceId: "rex:test", sessions: [{ id: "$7", nativeName: "repo@failed-workshop", path: "/tmp/repo/failed-workshop", recency: 0, attached: false, worktreePath: "", directoryPath: "", windows: [] }] }),
       kill: async (location: { nativeSessionId: string }) => { killed.push(location.nativeSessionId) },
     } as unknown as ManagedMultiplexer
     const rollback = (workshop: Parameters<typeof rollbackCreatedWorkshop>[0]) => rollbackCreatedWorkshop(workshop, {
@@ -212,9 +212,9 @@ describe("clanker launch failure", () => {
       import { MultiplexerResourceExhaustedError } from ${JSON.stringify(join(import.meta.dir, "multiplexer/interface.ts"))}
       import { openClankerLedger } from ${JSON.stringify(join(import.meta.dir, "clanker-ledger.ts"))}
       const multiplexer = {
-        kind: "herdr",
-        observe: async () => ({ kind: "herdr", instanceId: "herdr:test", sessions: [] }),
-        spawn: async () => { throw new MultiplexerResourceExhaustedError("herdr workspace.create: the herdr server ran out of file descriptors") },
+        kind: "rex",
+        observe: async () => ({ kind: "rex", instanceId: "rex:test", sessions: [] }),
+        spawn: async () => { throw new MultiplexerResourceExhaustedError("rex session.create: the rex server ran out of file descriptors") },
       }
       const error = await spawnClanker("claude", ${JSON.stringify(repo)}, "task", { multiplexer: multiplexer as never }).then(() => undefined, (failure) => failure)
       const ledger = openClankerLedger()

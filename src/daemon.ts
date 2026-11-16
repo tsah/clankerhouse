@@ -19,17 +19,14 @@ import { advanceProjection, parseProjectionSnapshot } from "./projection"
 import type { ProjectionSnapshot } from "./projection"
 import { planRepositoryIdentities, readRepositoryIdentityCache, writeRepositoryIdentityCache } from "./repository-cache"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
-import { ensureHcCore, superviseHcCore } from "./multiplexer/hc-core"
 import { instanceSlug, runtimeDirFor, stateHomeDefault } from "./paths"
 import { paneLocation, sessionLocation } from "./multiplexer/interface"
 import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
 import { openDurableRegistry, type DurableRegistry } from "./registry"
 import { legacyRecoveryStatePath, openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
-import { LifecycleMirror } from "./lifecycle-mirror"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
-import { foreignClankers, type ForeignClanker } from "./other-lanes"
 import { createStagedMutationExecutor } from "./daemon-mutations"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
@@ -411,32 +408,13 @@ const applyProjectEffect = (effect: ProjectEffect) => {
 }
 
 /** Clankers left running on another lane's server; read every 30 s, since it only changes when one is moved or ends. */
-const OTHER_LANES_REFRESH_MS = 30_000
-let otherLanesCache: { refreshedAt: number; rows: ForeignClanker[] } | undefined
-let otherLanesFailure = ""
-const collectOtherLaneClankers = Effect.sync(() => {
-  if (otherLanesCache && Date.now() - otherLanesCache.refreshedAt < OTHER_LANES_REFRESH_MS) return otherLanesCache.rows
-  let rows: ForeignClanker[] = otherLanesCache?.rows ?? []
-  try {
-    rows = foreignClankers()
-    otherLanesFailure = ""
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (message !== otherLanesFailure) console.error(`Other-lane clanker scan failed: ${message}`)
-    otherLanesFailure = message
-  }
-  otherLanesCache = { refreshedAt: Date.now(), rows }
-  return rows
-})
-
 const collectSessions = Effect.all([
   collectMultiplexerResources,
   collectDirectories,
   collectClankerReports,
   collectProjectionEnrichment,
-  collectOtherLaneClankers,
 ], { concurrency: "unbounded" }).pipe(
-  Effect.flatMap(([multiplexer, directories, clankerReports, enrichment, otherLaneClankers]) => {
+  Effect.flatMap(([multiplexer, directories, clankerReports, enrichment]) => {
     const { lineage, managedResources } = enrichment
     return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
       const projection = projectResources({
@@ -450,7 +428,6 @@ const collectSessions = Effect.all([
         observedAt: Date.now(),
         instanceId: multiplexer.instanceId,
         multiplexerKind: multiplexer.kind,
-        otherLaneClankers,
         home: Bun.env.HOME,
       })
       for (const effect of projection.effects) applyProjectEffect(effect)
@@ -645,13 +622,9 @@ const startRoutines = () => {
   return () => clearInterval(timer)
 }
 
-// Harness lifecycle reports are mirrored into the Multiplexer's agent status (ADR-0007).
-const lifecycleMirror = new LifecycleMirror(() => daemonMultiplexer().adapter)
-
 const applyHookStateRequest = async (request: HookStateRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
-  if (request.harness) void lifecycleMirror.offer({ ...request, harness: request.harness })
   if (hasPendingMessagesFor(request.clankerId)) runQueuedDelivery()
 }
 
@@ -664,7 +637,6 @@ const ingestLifecycleObservation = (report: import("./transport").ObservationRep
   if (!parsed) return false
   const previous = liveLifecycleReports.get(parsed.pane)
   liveLifecycleReports.set(parsed.pane, parsed)
-  if (parsed.clankerId) void lifecycleMirror.offer(report)
 
   mkdirSync(clankerStateDir, { recursive: true, mode: 0o700 })
   const target = `${clankerStateDir}/${report.pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`
@@ -732,10 +704,6 @@ const serverProgram = Effect.gen(function* () {
   })
   producerLease = yield* Effect.tryPromise({
     try: async () => {
-      if (daemonMultiplexer().kind === "hc") {
-        await ensureHcCore()
-        void superviseHcCore(new AbortController().signal, { log: console.error })
-      }
       return acquireProducerLease(`${runtimeDir}/producer.lease`, await daemonMultiplexer().instanceId())
     },
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
@@ -1100,7 +1068,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       // hc moves nothing itself: its focus only leaves the choice for the picker's launcher, and its current location
       // is the Herdr app's last report, which can be stale. Skipping it would lose the choice, so hc always records it.
       // Rex keeps no focus outside its apps, and the daemon runs in none of its terminals, so it always opens too.
-      const current = multiplexer.kind === "hc" || multiplexer.kind === "rex" ? undefined : await multiplexer.currentLocation()
+      const current = multiplexer.kind === "rex" ? undefined : await multiplexer.currentLocation()
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
         && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)

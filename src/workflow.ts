@@ -8,7 +8,7 @@ import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sen
 import { clankerUnitName, harnessCommand, harnessModelArgs, resumeLaunch, stopOwnedHarness, workshopEnvironment, type WorkshopLaunchIdentity } from "./harness-launch"
 import { ClankerLedger, openClankerLedger, pathWorkshopId, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
 import { isLinkedWorktreeSync, lineageMode, persistWorkshopLineage, registerWorkshop, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
-import { closeCommand, currentLane, harnessRunsIn, laneLedgerPath, laneWorkshopParent, readLaneLedger, siblingLanes, systemdUnitProbe, type UnitProbe } from "./other-lanes"
+import { harnessRunsIn, systemdUnitProbe, type UnitProbe } from "./harness-units"
 import { workshopBase } from "./workshop-base"
 import { TITLE_KEY } from "./labels"
 import { dispatchPostCreateHook, ensureWorkshopForLabels } from "./workshop-hooks"
@@ -246,10 +246,9 @@ export async function resumeClanker(clankerId: string, options: { prompt?: strin
     if (!clanker) throw new Error(`Unknown clanker ${clankerId}`)
     if (!clanker.harnessSessionId) throw new Error(`Clanker ${clankerId} has no harness session to resume`)
     if ((await listClankers()).some((row) => row.id === clankerId)) throw new Error(`Clanker ${clankerId} is already running`)
-    // Not seen here, but its harness still runs: on another lane's server, or a pane this lane lost. A second harness on one session corrupts it.
+    // Not seen in Rex, but its harness still runs in its scope: a pane this lane lost. A second harness on one session corrupts it.
     if (clanker.ownerUnit && harnessRunsIn((options.probe ?? systemdUnitProbe)([clanker.ownerUnit]).get(clanker.ownerUnit), clanker.harness)) {
-      const lane = siblingLanes().find((name) => readLaneLedger(laneLedgerPath(name), { clankerId, state: "open" }).some((row) => row.ownerUnit === clanker.ownerUnit))
-      throw new Error(`Clanker ${clankerId} still runs in ${clanker.ownerUnit}${lane ? ` on lane ${lane}; move it with: clankers resume ${clankerId} --from-lane ${lane}` : "; stop it first with: clankers ledger close " + clankerId}`)
+      throw new Error(`Clanker ${clankerId} still runs in ${clanker.ownerUnit}; stop it first with: clankers ledger close ${clankerId}`)
     }
     const multiplexer = options.multiplexer ?? openManagedMultiplexer()
     const placement = await clankerPlacement(clanker.workshopPath, clanker.windowLabel, multiplexer)
@@ -260,96 +259,6 @@ export async function resumeClanker(clankerId: string, options: { prompt?: strin
     await claimClankerPane(placement, location, clankerId, clanker.harness, multiplexer)
     return { clankerId, harnessSessionId: clanker.harnessSessionId, session: placement.session, window: location.nativeWindowId, pane: location.nativePaneId, name: placement.name }
   } finally { ledger.close() }
-}
-
-export interface MoveFromLaneOptions {
-  /** The lane whose ledger records the clanker, such as `herdr`. */
-  lane: string
-  /** Report what would happen and change nothing. */
-  dryRun?: boolean
-  prompt?: string
-  multiplexer?: ManagedMultiplexer
-  stateHome?: string
-  probe?: UnitProbe
-  stop?: (unit: string) => void
-  resume?: (clankerId: string, options: { prompt?: string; multiplexer?: ManagedMultiplexer }) => Promise<Record<string, unknown>>
-  aliveHere?: () => Promise<ReadonlySet<string>>
-  /** Registers the Workshop in this lane before the clanker is recorded here. */
-  registerWorkshop?: (lane: string, workshopPath: string) => Promise<unknown>
-  ledgerPath?: string
-  env?: Record<string, string | undefined>
-}
-
-/** The parent a moved Workshop gets here: the one this lane has, else the other lane's if it exists here, else the manifest's. */
-export const movedWorkshopParent = (lane: string, workshopPath: string, options: { stateHome?: string; dbPath?: string } = {}): { parentWorkshopId?: string | null; preserveParent: boolean } => {
-  if (workshopForPath(workshopPath, options.dbPath)) return { preserveParent: true }
-  const theirs = laneWorkshopParent(lane, workshopPath, options.stateHome)
-  if (theirs === null) return { parentWorkshopId: null, preserveParent: false }
-  if (theirs && workshopForId(theirs, options.dbPath)) return { parentWorkshopId: theirs, preserveParent: false }
-  return { preserveParent: true }
-}
-
-const registerMovedWorkshop = async (lane: string, workshopPath: string, stateHome?: string) => {
-  const id = await identity(workshopPath)
-  const parent = movedWorkshopParent(lane, id.path, { stateHome })
-  try { return registerWorkshop(id, parent) }
-  // A manifest naming a parent this lane never registered: the Workshop moves as top-level rather than not at all.
-  catch { return registerWorkshop(id, { parentWorkshopId: null, preserveParent: false }) }
-}
-
-/**
- * Moves a clanker recorded by another lane (a sibling instance, such as the Herdr TUI lane after the
- * cut-over to hc) into this one. Its row is copied into this lane's ledger with its task, launch spec
- * and owner unit; the harness still running there is stopped with its scope, so nothing else keeps the
- * session; the other lane's row is closed; then it resumes here under the same clanker id and harness
- * session, with its Workshop environment taken from this lane's registry.
- */
-export async function moveClankerFromLane(clankerId: string, options: MoveFromLaneOptions) {
-  const lane = options.lane
-  const here = currentLane(options.env)
-  if (lane === here) throw new Error(`Lane ${lane} is this lane; use clankers resume ${clankerId}`)
-  const sourcePath = laneLedgerPath(lane, options.stateHome)
-  const source = readLaneLedger(sourcePath, { clankerId })[0]
-  if (!source) throw new Error(`Lane ${lane} has no clanker ${clankerId} (${sourcePath})`)
-  if (!source.harnessSessionId) throw new Error(`Clanker ${clankerId} has no harness session to resume`)
-  if (!existsSync(source.workshopPath)) throw new Error(`Clanker ${clankerId}'s Workshop ${source.workshopPath} no longer exists, so it cannot resume here; drop it there with: ${closeCommand(lane, clankerId)}`)
-  const aliveHere = await (options.aliveHere ?? (async () => new Set((await listClankers()).map((row) => row.id))))()
-  if (aliveHere.has(clankerId)) throw new Error(`Clanker ${clankerId} already runs in lane ${here}`)
-  // Its harness session may already run here under another clanker, resumed by hand in a terminal; moving would start a second copy of it.
-  const mine = options.ledgerPath ? ClankerLedger.open({ dbPath: options.ledgerPath }) : openClankerLedger()
-  let twin: string | undefined
-  try { twin = mine.list({ state: "open" }).find((row) => row.clankerId !== clankerId && row.harness === source.harness && row.harnessSessionId === source.harnessSessionId && aliveHere.has(row.clankerId))?.clankerId } finally { mine.close() }
-  if (twin) throw new Error(`Clanker ${clankerId}'s ${source.harness} session ${source.harnessSessionId} already runs in lane ${here} as ${twin}; keep that one and drop this one there with: ${closeCommand(lane, clankerId)}`)
-  const unit = source.ownerUnit
-  if (!unit && source.state === "open") throw new Error(`Clanker ${clankerId} has no owner unit in lane ${lane}, so whether it still runs there cannot be checked; stop it there, then run clankers ledger close ${clankerId} in that lane and retry`)
-  const unitState = unit ? (options.probe ?? systemdUnitProbe)([unit]).get(unit) : undefined
-  const running = harnessRunsIn(unitState, source.harness)
-  const plan = {
-    clankerId,
-    from: lane,
-    to: here,
-    harness: source.harness,
-    harnessSessionId: source.harnessSessionId,
-    workshopPath: source.workshopPath,
-    sourceState: source.state,
-    ownerUnit: unit,
-    running,
-    stops: unitState?.active ? unit : null,
-  }
-  if (options.dryRun) return { ...plan, dryRun: true }
-  await (options.registerWorkshop ?? ((name, path) => registerMovedWorkshop(name, path, options.stateHome)))(lane, source.workshopPath)
-  const ledger = options.ledgerPath ? ClankerLedger.open({ dbPath: options.ledgerPath }) : openClankerLedger()
-  try { ledger.importFrom(source) } finally { ledger.close() }
-  if (unitState?.active && unit) (options.stop ?? stopOwnedHarness)(unit)
-  if (source.state === "open") {
-    const theirs = ClankerLedger.open({ dbPath: sourcePath })
-    try { theirs.end(clankerId, `moved-to-${here}`) } finally { theirs.close() }
-  }
-  const resumed = await (options.resume ?? resumeClanker)(clankerId, { prompt: options.prompt, multiplexer: options.multiplexer }).catch((error) => {
-    // Its row is here now and nothing runs it: a plain resume finishes the move.
-    throw new Error(`Clanker ${clankerId} moved to lane ${here} but did not start: ${error instanceof Error ? error.message : String(error)}; retry with: clankers resume ${clankerId}`, { cause: error })
-  })
-  return { ...plan, ...resumed }
 }
 
 /**

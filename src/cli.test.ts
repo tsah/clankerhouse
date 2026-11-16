@@ -13,7 +13,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 describe("cli error codes", () => {
   test("names resource exhaustion even when a spawn wraps it", () => {
-    const exhausted = new MultiplexerResourceExhaustedError("herdr workspace.create: the herdr server ran out of file descriptors")
+    const exhausted = new MultiplexerResourceExhaustedError("rex session.create: the rex server ran out of file descriptors")
     expect(cliErrorCode(exhausted)).toEqual({ code: "RESOURCE_EXHAUSTED", exitCode: 5 })
     expect(cliErrorCode(new ClankerRegistrationError(exhausted.message, { cause: exhausted }))).toEqual({ code: "RESOURCE_EXHAUSTED", exitCode: 5 })
     expect(cliErrorCode(new ClankerApiError("NOT_FOUND", "gone", 3))).toEqual({ code: "NOT_FOUND", exitCode: 3 })

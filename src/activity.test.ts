@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gitStatusPaths, markDirectoryActivity, newestActivity, readDirectoryActivities } from "./activity"
@@ -11,7 +11,7 @@ afterEach(() => {
 
 describe("recovery activity", () => {
   test("persists only newer canonical-path activity", () => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-activity-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-activity-")))
     roots.push(root)
     const worktree = join(root, "worktree")
     const ledger = join(root, "state")

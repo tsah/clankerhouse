@@ -3,7 +3,7 @@
  *
  * Instances never share a daemon socket, cache, registry, or clanker ledger. The
  * instance slug comes from CLANKERHOUSE_INSTANCE when set ("default" means no
- * suffix); otherwise it is `-herdr`, the Herdr instance's established paths.
+ * suffix); otherwise it is `-rex`, the Rex instance's paths.
  */
 
 const uid = () => process.getuid?.() ?? Bun.env.USER ?? "user"
@@ -14,7 +14,7 @@ export const instanceSlug = (env: Record<string, string | undefined> = Bun.env) 
     if (explicit === "." || explicit === ".." || !/^[A-Za-z0-9._-]+$/.test(explicit)) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${explicit}`)
     return explicit === "default" ? "" : `-${explicit}`
   }
-  return "-herdr"
+  return "-rex"
 }
 
 export const runtimeDirFor = (env: Record<string, string | undefined> = Bun.env) =>

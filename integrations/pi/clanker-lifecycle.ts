@@ -36,14 +36,14 @@ interface PersistedReport {
 }
 
 // Pane address: the Multiplexer pane that hosts this process.
-const pane = (process.env.CLANKERHOUSE_MULTIPLEXER === "hc" ? process.env.HC_TERMINAL_ID : process.env.CLANKERHOUSE_MULTIPLEXER === "rex" ? process.env.REX_BLOCK : process.env.HERDR_PANE_ID)?.trim() || "";
+const pane = process.env.REX_BLOCK?.trim() || "";
 const clankersCli = process.env.CLANKERHOUSE_CLANKERS?.trim() || "clankers";
 const sessionless = process.argv.includes("--no-session");
 const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || "";
 if (requestedInstance && (requestedInstance === "." || requestedInstance === ".." || !/^[A-Za-z0-9._-]+$/.test(requestedInstance))) throw new Error(`Invalid CLANKERHOUSE_INSTANCE: ${requestedInstance}`);
 const instanceSlug = requestedInstance
 	? (requestedInstance === "default" ? "" : `-${requestedInstance}`)
-	: "-herdr";
+	: "-rex";
 const runtimeRoot = join(process.env.XDG_RUNTIME_DIR || "/tmp", `clankerhouse-${process.getuid?.() || 0}${instanceSlug}`);
 const stateDirectory = join(runtimeRoot, "clanker-state");
 const socketDirectory = join(runtimeRoot, "clanker-sockets");
@@ -132,7 +132,7 @@ export function extractAssistantResult(messages: Array<any>) {
 }
 
 export default function (pi: ExtensionAPI) {
-	// Headless Pi subprocesses such as Agent workers inherit HERDR_PANE_ID but do
+	// Headless Pi subprocesses such as Agent workers inherit REX_BLOCK but do
 	// not own its Terminal. Their --no-session identities are ephemeral and
 	// must never replace the parent Clanker or enter the clanker ledger.
 	if (sessionless) return;

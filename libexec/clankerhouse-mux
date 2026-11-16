@@ -4,7 +4,7 @@
 # speak the Multiplexer's native protocol.
 #
 # Functions:
-#   ch_mux_pane                 -> this process's pane address (HERDR_PANE_ID, HC_TERMINAL_ID on the hc lane, REX_BLOCK on the Rex lane)
+#   ch_mux_pane                 -> this process's pane address (REX_BLOCK)
 #   ch_mux_pane_read KEY        -> pane claim value
 #   ch_mux_pane_claim KEY VALUE -> write pane claim
 #   ch_mux_pane_unset KEY       -> clear pane claim
@@ -25,11 +25,7 @@ _ch_mux_run_clankers() {
 }
 
 ch_mux_pane() {
-    case "${CLANKERHOUSE_MULTIPLEXER:-}" in
-        hc) printf '%s\n' "${HC_TERMINAL_ID:-}" ;;
-        rex) printf '%s\n' "${REX_BLOCK:-}" ;;
-        *) printf '%s\n' "${HERDR_PANE_ID:-}" ;;
-    esac
+    printf '%s\n' "${REX_BLOCK:-}"
 }
 
 ch_mux_pane_read() {
@@ -76,7 +72,7 @@ ch_mux_kill() {
 }
 
 # Instance scoping: CLANKERHOUSE_INSTANCE names a separate instance with its own
-# runtime and state directories; otherwise the Herdr instance paths are used.
+# runtime and state directories; otherwise the Rex instance paths are used.
 ch_instance_slug() {
     if [[ -n "${CLANKERHOUSE_INSTANCE:-}" ]]; then
         local instance
@@ -88,7 +84,7 @@ ch_instance_slug() {
         esac
         return
     fi
-    printf -- '-herdr'
+    printf -- '-rex'
 }
 
 ch_runtime_dir() {

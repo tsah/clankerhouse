@@ -46,7 +46,7 @@ const observed = (overrides: Partial<ObservedClanker> = {}): ObservedClanker => 
 describe("clanker ledger", () => {
   test("lives beside the other instance state with private permissions", () => {
     const { root, dbPath } = fixture()
-    expect(ledgerStatePath(root, {})).toBe(join(root, "clankerhouse-herdr", "clankers.sqlite3"))
+    expect(ledgerStatePath(root, {})).toBe(join(root, "clankerhouse-rex", "clankers.sqlite3"))
     openClankerLedger({ dbPath }).close()
     expect(statSync(dbPath).mode & 0o777).toBe(0o600)
   })
@@ -63,7 +63,7 @@ describe("clanker ledger", () => {
     ledger.close()
   })
 
-  test("closes clankers that end in the same Herdr server and keeps interrupted ones open", () => {
+  test("closes clankers that end in the same Rex server and keeps interrupted ones open", () => {
     const { dbPath } = fixture()
     const ledger = openClankerLedger({ dbPath })
     for (const id of ["ended", "interrupted", "fresh", "missing-briefly"]) ledger.record(clanker({ clankerId: id }))
@@ -78,7 +78,7 @@ describe("clanker ledger", () => {
     // A clanker that has not been seen yet is closed only once it has been missing long enough.
     expect(ledger.get("fresh")?.state).toBe("open")
 
-    // After a Herdr restart nothing is alive; clankers seen in the old server stay open.
+    // After a Rex restart nothing is alive; clankers seen in the old server stay open.
     ledger.sync([], "epoch-2", () => true)
     expect(ledger.get("interrupted")?.state).toBe("open")
     expect(ledger.get("missing-briefly")?.state).toBe("open")

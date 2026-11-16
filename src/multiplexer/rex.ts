@@ -13,7 +13,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { applicationRoot } from "../installation"
-import { foregroundGroup } from "./hc"
+import { foregroundGroup, type GroupMember } from "./process-group"
 import { runtimeDirFor, stateDirFor } from "../paths"
 import {
   claimScopeOf, locationScope,
@@ -174,8 +174,6 @@ const argvOf = (pid: number | undefined) => {
   if (!pid) return undefined
   try { return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean) } catch { return undefined }
 }
-
-interface GroupMember { pid: number; name?: string; argv?: string[]; cwd?: string }
 
 /** Without /proc (macOS), one `ps` per observation names every process group's members. */
 export const psProcessGroups = (output: string) => {

@@ -1,44 +1,22 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const roots: string[] = []
-const servers: Array<{ stop: (force?: boolean) => void }> = []
 afterEach(() => {
-  for (const server of servers.splice(0)) server.stop(true)
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-/** Minimal Herdr socket: one NDJSON request per connection, pane tokens kept in memory. */
-const fakeHerdr = (socketPath: string, reportFile: string, cwd: string) => {
-  const methods: string[] = []
-  const claims: string[] = []
-  const tokens: Record<string, string> = {}
-  const server = Bun.listen({
-    unix: socketPath,
-    socket: {
-      data(socket, chunk) {
-        const request = JSON.parse(chunk.toString().trim()) as { id: string; method: string; params: { pane_id?: string; tokens?: Record<string, string | null> } }
-        methods.push(request.method)
-        let result: unknown = {}
-        if (request.method === "pane.get") result = { pane: { pane_id: request.params.pane_id, cwd, tokens } }
-        if (request.method === "pane.report_metadata") {
-          // Record each written token beside the durable state the hook had already persisted.
-          const state = (() => { try { return `"state":"${JSON.parse(readFileSync(reportFile, "utf8")).state}"` } catch { return "" } })()
-          for (const [token, value] of Object.entries(request.params.tokens ?? {})) {
-            claims.push(`${token} ${state}`)
-            if (value === null) delete tokens[token]
-            else tokens[token] = value
-          }
-        }
-        socket.end(`${JSON.stringify({ id: request.id, result })}\n`)
-      },
-    },
-  })
-  servers.push(server)
-  return { methods, claims }
-}
+const claimKeys = ["clankerId", "harness", "harnessSessionId"]
+
+/** Each Rex claim file the hook holds for the pane, with its value and the inode its last write produced. */
+const claimFiles = (dir: string) => claimKeys.flatMap((key) => {
+  const path = join(dir, key)
+  if (!existsSync(path)) return []
+  const stat = statSync(path, { bigint: true })
+  return [{ key, value: readFileSync(path, "utf8"), inode: stat.ino, mtimeNs: stat.mtimeNs }]
+})
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "clankerhouse-claude-background-"))
@@ -50,10 +28,11 @@ function fixture() {
     chmodSync(join(root, "bin", interpreter), 0o755)
   }
   const spawns = join(root, "spawns")
-  const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() || 0}-herdr`)
-  const report = join(runtime, "clanker-state/w1_p9.json")
-  const attestation = join(runtime, "hook-events/w1_p9.json")
-  const herdr = fakeHerdr(join(root, "herdr.sock"), report, root)
+  const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() || 0}-rex`)
+  const report = join(runtime, "clanker-state/block_p9.json")
+  const attestation = join(runtime, "hook-events/block_p9.json")
+  // Rex claims are plain files the hook writes itself; no Multiplexer is asked.
+  const claimDir = join(root, "state", "clankerhouse-rex", "rex-claims", "block:p9")
   const env = {
     ...process.env,
     PATH: `${join(root, "bin")}:${process.env.PATH || ""}`,
@@ -65,24 +44,21 @@ function fixture() {
     CLANKERHOUSE_INSTANCE: "",
     CLANKER_ID: "clanker-background-test",
     CLANKER_SESSION_ID: "claude-test-session",
-    HERDR_ENV: "1",
-    HERDR_PANE_ID: "w1:p9",
-    HERDR_SESSION: "",
-    HERDR_SOCKET_PATH: join(root, "herdr.sock"),
+    REX_BLOCK: "block:p9",
     SPAWN_LOG: spawns,
   }
   const hook = join(import.meta.dir, "../native-client/target/release/clankerhouse-hook")
   return {
     attestation: () => JSON.parse(readFileSync(attestation, "utf8")),
     spawned: () => existsSync(spawns) ? readFileSync(spawns, "utf8").trim().split("\n").filter(Boolean) : [],
-    herdrRequests: () => [...herdr.methods],
+    report: () => report,
     emitTimed: (state: string, payload: Record<string, unknown>) => {
       const started = Bun.nanoseconds()
       const result = Bun.spawnSync([hook, "claude", state], { env, stdin: Buffer.from(JSON.stringify({ session_id: "claude-test-session", ...payload })) })
       expect(result.exitCode).toBe(0)
       return (Bun.nanoseconds() - started) / 1e6
     },
-    claims: () => [...herdr.claims],
+    claims: () => claimFiles(claimDir),
     emit: async (state: string, payload: Record<string, unknown>, harness = "claude") => {
       const child = Bun.spawn([join(import.meta.dir, "../bin/clankerhouse-clanker-state-report"), harness, state], {
         env, stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -112,26 +88,32 @@ describe("Claude background-task lifecycle", () => {
   test("claims follow the durable state record and are written once per session", async () => {
     const f = fixture()
     await f.emit("idle", { hook_event_name: "SessionStart" })
+    const reportWritten = statSync(f.report(), { bigint: true }).mtimeNs
+    const first = f.claims()
+    expect(first.map(({ key, value }) => [key, value])).toEqual([
+      ["clankerId", "clanker-background-test"],
+      ["harness", "claude"],
+      ["harnessSessionId", "claude-test-session"],
+    ])
+    // The durable state record is on disk before any claim names the clanker.
+    for (const claim of first) expect(claim.mtimeNs).toBeGreaterThanOrEqual(reportWritten)
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })
     await f.emit("done", { hook_event_name: "Stop", background_tasks: [] })
-    expect(f.claims().sort()).toEqual([
-      'ch_clanker_id "state":"idle"',
-      'ch_harness "state":"idle"',
-      'ch_harness_session "state":"idle"',
-    ])
+    // Every write replaces the file, so an unchanged inode means it was not written again.
+    expect(f.claims()).toEqual(first)
   })
 
   test("steady-state reports start no processes and spool Recovery attestation only on change", async () => {
     const f = fixture()
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })
-    const requests = f.herdrRequests()
+    const claims = f.claims()
     const requested = f.attestation()
     for (let call = 0; call < 5; call++) await f.emit("working", { hook_event_name: "PreToolUse" })
-    expect(f.herdrRequests()).toEqual(requests)
-    expect(requests).toEqual(["pane.get", "pane.report_metadata"])
+    expect(claims).toHaveLength(3)
+    expect(f.claims()).toEqual(claims)
     expect(f.spawned()).toEqual([])
     expect(f.attestation()).toEqual(requested)
-    expect(f.attestation()).toMatchObject({ pane: "w1:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working" })
+    expect(f.attestation()).toMatchObject({ pane: "block:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working" })
   })
 
   test("Stop defers completion and Recovery settlement until background work has finished", async () => {

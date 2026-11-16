@@ -43,9 +43,9 @@ const resourcesFixture = (path: string, workshop = "workshop-root") => {
     INSERT INTO resources VALUES ('mux-session-1', 'session', '${workshop}', NULL, 'native-session-name', 30, 30);
     INSERT INTO resources VALUES ('mux-window-1', 'window', '${workshop}', 'mux-session-1', 'editor', 31, 31);
     INSERT INTO resources VALUES ('terminal-1', 'terminal', '${workshop}', 'mux-window-1', 'shell', 32, 32);
-    INSERT INTO multiplexer_locations VALUES ('mux-session-1', 'herdr', 'server-epoch-a', '$1', '', '', 40);
-    INSERT INTO multiplexer_locations VALUES ('mux-window-1', 'herdr', 'server-epoch-a', '$1', '@1', '', 40);
-    INSERT INTO multiplexer_locations VALUES ('terminal-1', 'herdr', 'server-epoch-a', '$1', '@1', '%1', 40);
+    INSERT INTO multiplexer_locations VALUES ('mux-session-1', 'rex', 'server-epoch-a', '$1', '', '', 40);
+    INSERT INTO multiplexer_locations VALUES ('mux-window-1', 'rex', 'server-epoch-a', '$1', '@1', '', 40);
+    INSERT INTO multiplexer_locations VALUES ('terminal-1', 'rex', 'server-epoch-a', '$1', '@1', '%1', 40);
     PRAGMA user_version = 1;
   `)
   db.close()

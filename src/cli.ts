@@ -11,16 +11,12 @@ import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type Wa
 import { isAdoptionPlaceholder, openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
 import { harnessModelArgs, stopOwnedHarness } from "./harness-launch"
 import { createMultiplexer, openManagedMultiplexer } from "./multiplexer"
-import { HcAdapter, HcAttachError } from "./multiplexer/hc"
-import { ensureHcCore, hcCoreEnvironment, hcHealth, restartHcCore } from "./multiplexer/hc-core"
 import { MultiplexerResourceExhaustedError, paneLocation, UnsupportedMultiplexerOperation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
 import { runtimeDirFor } from "./paths"
 import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
-import { ensureDirectorySession, ensureSession, identity, moveClankerFromLane, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
-import { closeCommand, currentLane, foreignClankers, laneLedgerPath, moveCommand, readLaneLedger } from "./other-lanes"
-import { describeHarness, duplicateHarnesses, orphanedHarnesses, scanLiveHarnesses } from "./live-harnesses"
+import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { getSnapshot, submitMutation, waitForOperation } from "./transport"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
@@ -333,28 +329,6 @@ const ledgerRows = async (options: { state?: LedgerState; workshopId?: string; i
     .filter((row) => !options.interrupted || row.interrupted !== false)
 }
 
-/** Worktrees with more than one live harness, from the process table, across every lane and hand-started ones. */
-const harnessDuplicates = async (workshopPaths: readonly string[]) => {
-  const panes = await listClankers().then((clankers) => new Map(clankers.map((clanker) => [clanker.pane, clanker.id])), () => new Map<string, string>())
-  const here = currentLane()
-  const harnesses = scanLiveHarnesses({ workshopPaths, clankerAt: (lane, terminal) => lane === here ? panes.get(terminal) : undefined })
-  return { duplicates: duplicateHarnesses(harnesses), orphaned: orphanedHarnesses(harnesses) }
-}
-
-/** Clankers running on another lane's server that this lane does not see, with the command that moves each. */
-const otherLaneClankers = async () => {
-  const aliveHere = await listClankers().then((clankers) => new Set(clankers.map((clanker) => clanker.id)), () => new Set<string>())
-  const ledger = openClankerLedger()
-  let mine
-  try { mine = ledger.list({ state: "open" }).filter((row) => aliveHere.has(row.clankerId)) } finally { ledger.close() }
-  return foreignClankers({ aliveHere }).map((row) => {
-    // The cases `clankers resume --from-lane` refuses: there, the clanker is dropped where it runs instead of moved.
-    const twin = mine.find((here) => here.clankerId !== row.clankerId && here.harness === row.harness && here.harnessSessionId && here.harnessSessionId === row.harnessSessionId)
-    const blocked = !existsSync(row.workshopPath) ? "its Workshop no longer exists" : twin ? `its session already runs here as ${twin.clankerId}` : null
-    return { ...row, moveCommand: moveCommand(row), blocked, ...(blocked ? { closeCommand: closeCommand(row.lane, row.clankerId) } : {}) }
-  })
-}
-
 const printHooksStatus = (status: ReturnType<typeof hooksStatus>) => {
   const { config, totals, recent } = status
   console.log(`Config: ${config.path} (${config.state})${config.error ? `: ${config.error}` : ""}`)
@@ -474,16 +448,13 @@ export const usage = `Usage:
   clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers ledger [--state open|closed | --interrupted] [--workshop ID]
-  clankers ledger other-lanes
-  clankers ledger restore CLANKER_ID --from-lane LANE
   clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
   clankers resume CLANKER_ID [--prompt TEXT]
-  clankers resume CLANKER_ID --from-lane LANE [--prompt TEXT] [--dry-run]
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
-  clankers mux interrupt|attach --pane PANE
-  clankers mux instance-id|hc-health|hc-ensure|hc-restart|hc-env
+  clankers mux interrupt --pane PANE
+  clankers mux instance-id
   clankers mux clanker-ids|pane-path (--pane PANE|--session SESSION)
   clankers mux spawn (--session SESSION|--new-session NAME) --name NAME --cwd PATH [--env KEY=VALUE]... [-- ARGV...]
 
@@ -517,36 +488,12 @@ const muxLocation = (parsed: ParsedArgs): NativeLocation => {
  * Runtime-neutral multiplexer operations for shell callers (lifecycle reporters, stop
  * scripts). Every operation goes through the selected Adapter.
  */
-const attachHcTerminal = async (location: NativeLocation) => {
-  const adapter = createMultiplexer()
-  if (!(adapter instanceof HcAdapter)) throw new UnsupportedMultiplexerOperation(adapter.kind, "attach")
-  try {
-    const target = await adapter.attachTarget(location.nativePaneId ?? location.nativeWindowId ?? "")
-    process.exitCode = await Bun.spawn([Bun.env.HC_BIN || "hc", "attach", target], { stdio: ["inherit", "inherit", "inherit"] }).exited
-  } catch (error) {
-    if (!(error instanceof HcAttachError)) throw error
-    console.error(error.message)
-    if (error.transcript.trim()) console.error(`Its last output:\n${error.transcript.trimEnd()}`)
-    process.exitCode = 3
-  }
-}
-
 const runMultiplexerCli = async (parsed: ParsedArgs) => {
   const subcommand = parsed.shift()
   const multiplexer = openManagedMultiplexer()
   if (subcommand === "kind") return console.log(multiplexer.kind)
   if (subcommand === "instance-id") return console.log(await multiplexer.instanceId())
-  if (subcommand === "hc-env") return console.log(Object.entries(hcCoreEnvironment()).map(([key, value]) => `${key}=${value}`).join("\n"))
-  if (subcommand === "hc-ensure") return console.log(JSON.stringify(await ensureHcCore()))
-  if (subcommand === "hc-restart") return restartHcCore()
-  if (subcommand === "hc-health") {
-    const health = await hcHealth()
-    console.log(JSON.stringify(health))
-    if (!health.reachable) process.exitCode = 1
-    return
-  }
   if (subcommand === "interrupt") return console.log(await multiplexer.interruptAgent(muxLocation(parsed)))
-  if (subcommand === "attach") return attachHcTerminal(muxLocation(parsed))
   if (subcommand === "capabilities") return console.log(JSON.stringify({ kind: multiplexer.kind, ...multiplexer.capabilities() }))
   if (subcommand === "pane-address-env") return console.log(multiplexer.paneAddressEnv())
   if (subcommand === "observe") return console.log(JSON.stringify(await multiplexer.observe()))
@@ -742,31 +689,11 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const strict = parsed.has("--strict")
     const snapshot = await getSnapshot<SessionRow>(daemonSocketPath)
     const report = diagnoseProjection(snapshot.sessions)
-    const otherLanes = await otherLaneClankers()
-    const { duplicates, orphaned } = await harnessDuplicates([...snapshot.sessions.map((row) => row.path), ...otherLanes.map((row) => row.workshopPath)].filter(Boolean))
-    if (json) console.log(JSON.stringify({ ...report, otherLanes, duplicateHarnesses: duplicates, orphanedHarnesses: orphaned }, null, 2))
+    if (json) console.log(JSON.stringify(report, null, 2))
     else {
       console.log(`Clankerhouse projection: ${report.counts.sessions} sessions, ${report.counts.directories} directories, ${report.counts.renderedSessionRows} rendered session rows`)
       if (!report.issues.length) console.log("No projection anomalies detected.")
       for (const entry of report.issues) console.log(`${entry.severity.toUpperCase()} ${entry.code}: ${entry.summary}`)
-      if (otherLanes.length) {
-        console.log(`${otherLanes.length} clanker(s) still run on another lane's server, invisible to this lane until moved:`)
-        for (const row of otherLanes) console.log(`  ${row.clankerId} ${row.harness} lane ${row.lane} ${row.workshopPath}\n    ${row.blocked ? `not movable, ${row.blocked}: ${row.closeCommand}` : row.moveCommand}`)
-      }
-      const suspect = duplicates.filter((group) => group.reason !== "several")
-      if (suspect.length) {
-        console.log(`${suspect.length} worktree(s) have more than one live harness, across lanes or started by hand; they share the worktree, so keep one:`)
-        for (const group of suspect) {
-          console.log(`  ${group.workshopPath} (${group.reason === "lanes" ? `lanes ${group.lanes.join(", ")}` : "started by hand"})`)
-          for (const harness of group.harnesses) console.log(`    ${describeHarness(harness)}`)
-        }
-      }
-      const several = duplicates.length - suspect.length
-      if (several) console.log(`${several} other worktree(s) run several clankers their lane launched (--json lists them).`)
-      if (orphaned.length) {
-        console.log(`${orphaned.length} harness(es) run in a deleted worktree:`)
-        for (const harness of orphaned) console.log(`  ${describeHarness(harness)}`)
-      }
     }
     if (strict && !report.healthy) throw new Error("Projection diagnostics found invariant violations")
     return
@@ -797,20 +724,6 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "ledger") {
-    if (parsed.args[0] === "other-lanes") {
-      parsed.shift()
-      return console.log(JSON.stringify(await otherLaneClankers()))
-    }
-    if (parsed.args[0] === "restore") {
-      parsed.shift()
-      const lane = parsed.take("--from-lane")
-      if (!lane) throw new Error("Usage: clankers ledger restore CLANKER_ID --from-lane LANE")
-      const id = requiredClankerId(parsed)
-      const source = readLaneLedger(laneLedgerPath(lane), { clankerId: id })[0]
-      if (!source) throw new Error(`Lane ${lane} has no clanker ${id}`)
-      const ledger = openClankerLedger()
-      try { return console.log(JSON.stringify(ledger.restoreFrom(source))) } finally { ledger.close() }
-    }
     if (parsed.args[0] === "close") {
       // Closing stops the harness too, so it is not reopened by the next observation.
       parsed.shift()
@@ -835,12 +748,8 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "resume") {
-    const lane = parsed.take("--from-lane")
-    const dryRun = parsed.has("--dry-run")
     const prompt = parsed.take("--prompt")
     const id = requiredClankerId(parsed)
-    if (dryRun && !lane) throw new Error("--dry-run needs --from-lane")
-    if (lane) return console.log(JSON.stringify(await moveClankerFromLane(id, { lane, dryRun, prompt })))
     return console.log(JSON.stringify(await resumeClanker(id, { prompt })))
   }
 

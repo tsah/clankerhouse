@@ -52,10 +52,6 @@ export const isAdoptionPlaceholder = (task: string) => task === ADOPTION_PLACEHO
 export const ledgerStatePath = (stateHome = stateHomeDefault(), env: Record<string, string | undefined> = Bun.env) =>
   join(stateDirFor(stateHome, env), "clankers.sqlite3")
 
-/** Recovery's store, imported once into a new ledger and otherwise left untouched. */
-export const legacyRecoveryStatePath = (stateHome = stateHomeDefault(), env: Record<string, string | undefined> = Bun.env) =>
-  join(stateDirFor(stateHome, env), "recovery.sqlite3")
-
 const plainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 
@@ -190,29 +186,7 @@ const initialize = (db: Database) => {
   return true
 }
 
-/** Copy Recovery's records: running clankers stay open, everything else is closed. */
-const importLegacy = (db: Database, legacyPath: string) => {
-  if (!existsSync(legacyPath)) return 0
-  const legacy = new Database(legacyPath, { readonly: true })
-  try {
-    const present = new Set((legacy.query("PRAGMA table_info(desired_clankers)").all() as { name: string }[]).map((column) => column.name))
-    if (!present.size) return 0
-    const sessionLabel = present.has("preferred_session_label") ? "preferred_session_label" : "tmux_session_name"
-    const windowLabel = present.has("preferred_window_label") ? "preferred_window_label" : "tmux_window_name"
-    const ownerUnit = present.has("owner_unit") ? "owner_unit" : "NULL"
-    const rows = legacy.query(`SELECT clanker_id, harness, workshop_id, workshop_path, ${sessionLabel} AS session_label, ${windowLabel} AS window_label, cwd, harness_session_id, launch_spec, original_task, desired_state, ${ownerUnit} AS owner_unit, created_at, updated_at FROM desired_clankers`).all() as (Omit<Row, "state" | "closed_reason" | "server_epoch"> & { desired_state: string })[]
-    const insert = db.query(`INSERT OR IGNORE INTO clankers (${columns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15)`)
-    db.transaction(() => {
-      for (const row of rows) {
-        const open = row.desired_state === "running"
-        insert.run(row.clanker_id, row.harness, row.workshop_id, row.workshop_path, row.session_label, row.window_label, row.cwd, row.harness_session_id, row.launch_spec, row.original_task, open ? "open" : "closed", open ? null : `imported-${row.desired_state}`, row.owner_unit, row.created_at, row.updated_at)
-      }
-    }).immediate()
-    return rows.length
-  } finally { legacy.close() }
-}
-
-export interface OpenLedgerOptions { dbPath?: string; legacyPath?: string; now?: () => number }
+export interface OpenLedgerOptions { dbPath?: string; now?: () => number }
 
 export class ClankerLedger {
   readonly dbPath: string
@@ -236,7 +210,7 @@ export class ClankerLedger {
       db.exec("PRAGMA busy_timeout = 5000")
       db.exec("PRAGMA journal_mode = WAL")
       db.exec("PRAGMA synchronous = FULL")
-      if (initialize(db)) importLegacy(db, options.legacyPath ?? (options.dbPath ? join(dirname(options.dbPath), "recovery.sqlite3") : legacyRecoveryStatePath()))
+      initialize(db)
       ensurePermissions(dbPath)
       return new ClankerLedger(dbPath, db, options.now ?? Date.now)
     } catch (error) {
@@ -260,49 +234,6 @@ export class ClankerLedger {
         .run(clanker.clankerId, clanker.harness, clanker.workshopId, clanker.workshopPath, clanker.sessionLabel, clanker.windowLabel, clanker.cwd, clanker.harnessSessionId, JSON.stringify(clanker.launchSpec), clanker.originalTask, now)
       return this.get(clanker.clankerId)!
     }).immediate()
-  }
-
-  /**
-   * Take over a clanker recorded by another lane's ledger, keeping its task, launch spec, owner
-   * unit and harness session. The other lane's row is the live one, so it wins over a row this
-   * ledger copied or adopted earlier, except that an adoption placeholder never replaces a real task.
-   * The row is open and stamped with no server, like a clanker interrupted elsewhere.
-   */
-  importFrom(source: LedgerClanker) {
-    const clanker = validateInput(source)
-    const now = this.clock()
-    return this.db.transaction(() => {
-      const current = this.get(clanker.clankerId)
-      const originalTask = current && isAdoptionPlaceholder(clanker.originalTask) && !isAdoptionPlaceholder(current.originalTask) ? current.originalTask : clanker.originalTask
-      if (current && current.harness !== clanker.harness) throw new Error(`Clanker ${clanker.clankerId} is a ${current.harness} here, not ${clanker.harness}`)
-      if (!current) {
-        this.db.query(`INSERT INTO clankers (${columns}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open', NULL, ?11, NULL, ?12, ?13)`)
-          .run(clanker.clankerId, clanker.harness, clanker.workshopId, clanker.workshopPath, clanker.sessionLabel, clanker.windowLabel, clanker.cwd, clanker.harnessSessionId, JSON.stringify(clanker.launchSpec), originalTask, source.ownerUnit, source.createdAt || now, now)
-      } else {
-        this.db.query("UPDATE clankers SET workshop_id = ?2, workshop_path = ?3, session_label = ?4, window_label = ?5, cwd = ?6, harness_session_id = ?7, launch_spec = ?8, original_task = ?9, owner_unit = COALESCE(?10, owner_unit), state = 'open', closed_reason = NULL, server_epoch = NULL, updated_at = ?11 WHERE clanker_id = ?1")
-          .run(clanker.clankerId, clanker.workshopId, clanker.workshopPath, clanker.sessionLabel, clanker.windowLabel, clanker.cwd, clanker.harnessSessionId, JSON.stringify(clanker.launchSpec), originalTask, source.ownerUnit, now)
-      }
-      return this.get(clanker.clankerId)!
-    }).immediate()
-  }
-
-  /**
-   * Fill in what an adoption could not know from another lane's row for the same clanker and harness
-   * session: the task, when this row has only the placeholder, and the launch spec, when it has only
-   * the default. Nothing else changes; the clanker may be running here.
-   */
-  restoreFrom(source: LedgerClanker) {
-    const current = this.get(source.clankerId)
-    if (!current) throw new Error(`Unknown clanker ${source.clankerId}`)
-    if (current.harness !== source.harness || current.harnessSessionId !== source.harnessSessionId) throw new Error(`Clanker ${source.clankerId} runs another session here (${current.harnessSessionId}) than the other lane recorded (${source.harnessSessionId})`)
-    const task = isAdoptionPlaceholder(current.originalTask) && !isAdoptionPlaceholder(source.originalTask) ? source.originalTask : current.originalTask
-    const defaultSpec = current.launchSpec.version === 1 && current.launchSpec.profile === null
-    const launchSpec = defaultSpec ? validateLaunchSpec(source.launchSpec) : current.launchSpec
-    const restored = { originalTask: task !== current.originalTask, launchSpec: JSON.stringify(launchSpec) !== JSON.stringify(current.launchSpec) }
-    if (restored.originalTask || restored.launchSpec) {
-      this.db.query("UPDATE clankers SET original_task = ?2, launch_spec = ?3, updated_at = ?4 WHERE clanker_id = ?1").run(source.clankerId, task, JSON.stringify(launchSpec), this.clock())
-    }
-    return { clanker: this.get(source.clankerId)!, restored }
   }
 
   get(clankerId: string) {

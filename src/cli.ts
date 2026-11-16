@@ -201,25 +201,6 @@ const runListCommand = async (parsed: ParsedArgs) => {
   return console.log(JSON.stringify(await listClankerRows({ cwd, childrenOf: scope, states })))
 }
 
-/** `clankers view children [WORKSHOP]` narrows the Multiplexer's agent list to that Workshop's children; `clear` restores it. */
-const runViewCommand = async (parsed: ParsedArgs) => {
-  const action = parsed.shift()
-  const usage = "Usage: clankers view children [WORKSHOP] | clear"
-  if (action === "clear") {
-    if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usage}`)
-    await openManagedMultiplexer().showChildAgents(null)
-    return console.log(JSON.stringify({ view: null }))
-  }
-  if (action !== "children") throw new Error(usage)
-  const selector = parsed.shift() ?? "."
-  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usage}`)
-  const workshop = resolveWorkshopSelector(selector)
-  const name = workshopLabels(workshop.workshopId)[TITLE_KEY] || workshop.branch
-  const label = `children of ${name}`.slice(0, 60)
-  await openManagedMultiplexer().showChildAgents({ parentWorkshopId: workshop.workshopId, label })
-  return console.log(JSON.stringify({ view: "children", workshopId: workshop.workshopId, label }))
-}
-
 /**
  * A settled turn's result. Claude writes its reply to the transcript a moment after the Stop
  * hook that settles the turn, so a missing transcript result is looked for again briefly.
@@ -439,7 +420,6 @@ export const usage = `Usage:
   clankers result CLANKER_ID [--generation GENERATION]
   clankers report --state question|blocked|done|failed|working [--message TEXT] [--payload JSON | --payload-file PATH | <JSON on stdin] [--to CLANKER_ID|WORKSHOP_ID | --no-parent]
   clankers watch (--children-of [WORKSHOP] [--descendants] | --clanker ID...) [--cursor-file PATH] [--once] [--timeout SECONDS] [--stale-after SECONDS]
-  clankers view children [WORKSHOP] | clear
   clankers routine add --cron "MIN HOUR DOM MON DOW" --message TEXT [--name NAME] [--tz ZONE] [--clanker ID]
   clankers routine list [--clanker ID | --all] [--include-ended] | show ROUTINE_ID
   clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
@@ -665,7 +645,6 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   if (["list", "status", "capabilities", "wait", "send", "send-status", "inbox", "messages", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
 
   if (command === "mux") return runMultiplexerCli(parsed)
-  if (command === "view") return runViewCommand(parsed)
   if (command === "hooks") return runHooksCommand(parsed)
   if (command === "routine" || command === "routines") return runRoutineCommand(parsed)
 

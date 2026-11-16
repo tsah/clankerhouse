@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createConnection, createServer } from "node:net"
 import { advanceProjection, type ProjectionSnapshot } from "../projection"
-import { openDurableRegistry } from "../registry"
+import { openOperationStore as openDurableRegistry } from "../operation-store"
 import { acquireProducerLease, getHerd, getOperationStatus, getServerStatus, getSnapshot, refreshProjection, replaceProducerLeaseRecord, SNAPSHOT_PROTOCOL_VERSION, startSnapshotServer, submitMutation, subscribeSnapshots, type SnapshotServer } from "./index"
 
 interface Row { name: string }

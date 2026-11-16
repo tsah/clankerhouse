@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStagedMutationExecutor, mutationStages } from "./daemon-mutations"
-import { openDurableRegistry } from "./registry"
+import { openOperationStore as openDurableRegistry } from "./operation-store"
 import { OperationJournal } from "./transport/operations"
 import type { OperationRecord } from "./transport/protocol"
 

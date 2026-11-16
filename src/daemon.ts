@@ -18,12 +18,11 @@ import type { DetailRow, SessionRow } from "./model"
 import { advanceProjection, parseProjectionSnapshot } from "./projection"
 import type { ProjectionSnapshot } from "./projection"
 import { planRepositoryIdentities, readRepositoryIdentityCache, writeRepositoryIdentityCache } from "./repository-cache"
-import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
+import { managedResourcesOf, openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { instanceSlug, runtimeDirFor, stateHomeDefault } from "./paths"
 import { paneLocation, sessionLocation } from "./multiplexer/interface"
-import { openResourceRegistry, resourceRegistryStatePath } from "./resource-registry"
-import { openDurableRegistry, type DurableRegistry } from "./registry"
-import { legacyRecoveryStatePath, openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
+import { openOperationStore, type OperationStore as DurableRegistry } from "./operation-store"
+import { openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
@@ -74,7 +73,7 @@ const turnFacts = new Map<string, { turnStartedAt?: number; transcriptPath?: str
 /** Interrupted Clankers per Workshop, as of the last ledger sync. */
 let interruptedByWorkshop = new Map<string, Array<{ clankerId: string; at: number }>>()
 const lastTextCache = new Map<string, { key: string; text: string | null }>()
-let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot>; managedResources: ReturnType<typeof readManagedResources> } | undefined
+let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot> } | undefined
 const invalidateProjectionEnrichment = () => { projectionEnrichmentCache = undefined }
 const snapshotTransportEnabled = Bun.env.CLANKERHOUSE_SUBSCRIBE !== "0"
 const ensurePrivateRuntimeDirectory = () => {
@@ -111,16 +110,10 @@ const collectMultiplexerResources = Effect.tryPromise({
     const multiplexer = daemonMultiplexer()
     // Read before observing, so a server restart in between is never stamped on the old server's panes.
     const serverEpoch = await multiplexer.serverEpoch().catch(() => undefined)
-    let observedAt = Date.now()
-    let snapshot = await multiplexer.observe()
-    if (await multiplexer.reconcileAbsorbedTopology(snapshot)) {
-      invalidateProjectionEnrichment()
-      observedAt = Date.now()
-      snapshot = await multiplexer.observe()
-    }
-    // Presentation only: the runtime's own UI shows Workshop Labels; failures are logged by the managed layer.
+    const observedAt = Date.now()
+    const snapshot = await multiplexer.observe()
+    // Presentation only: Workshop Labels shown beside the session; failures are logged by the managed layer.
     await multiplexer.mirrorWorkshopLabels(snapshot).catch(() => 0)
-    await multiplexer.claimPaneParents(snapshot).catch(() => 0)
     latestHerd = { instanceId: snapshot.instanceId, observedAt, panes: paneMetadataFromSnapshot(snapshot) }
     const sessions: MuxSession[] = snapshot.sessions.map((session) => ({
       id: session.id,
@@ -158,7 +151,7 @@ const collectMultiplexerResources = Effect.tryPromise({
       agentStatus: pane.agentStatus,
       harnessGone: pane.harnessGone,
     }))))
-    return { kind: snapshot.kind, instanceId: snapshot.instanceId, serverEpoch, sessions, windows }
+    return { kind: snapshot.kind, instanceId: snapshot.instanceId, serverEpoch, sessions, windows, managedResources: managedResourcesOf(snapshot, observedAt) }
   },
   catch: (error) => error instanceof Error ? error : new Error(String(error)),
 })
@@ -219,18 +212,11 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
   }
 }
 
-const readManagedResources = () => {
-  const registry = openResourceRegistry()
-  try { return new Map(registry.list().map((resource) => [resource.id, resource])) }
-  finally { registry.close() }
-}
-
 const collectProjectionEnrichment = Effect.sync(() => {
   if (projectionEnrichmentCache && Date.now() - projectionEnrichmentCache.refreshedAt < coldRefreshMs) return projectionEnrichmentCache
   projectionEnrichmentCache = {
     refreshedAt: Date.now(),
     lineage: readLineageSnapshot(),
-    managedResources: readManagedResources(),
   }
   return projectionEnrichmentCache
 })
@@ -415,7 +401,8 @@ const collectSessions = Effect.all([
   collectProjectionEnrichment,
 ], { concurrency: "unbounded" }).pipe(
   Effect.flatMap(([multiplexer, directories, clankerReports, enrichment]) => {
-    const { lineage, managedResources } = enrichment
+    const { lineage } = enrichment
+    const { managedResources } = multiplexer
     return Effect.forEach(multiplexer.sessions, (session) => gitMeta(session.path).pipe(Effect.map((meta) => [session.path, meta] as const)), { concurrency: 8 }).pipe(Effect.map((gitMetas) => {
       const projection = projectResources({
         sessions: multiplexer.sessions,
@@ -679,27 +666,7 @@ const serverProgram = Effect.gen(function* () {
     process.once("SIGTERM", shutdown)
   })
   durableRegistry = yield* Effect.try({
-    try: () => {
-      const registry = openDurableRegistry()
-      try {
-        const stateHome = stateHomeDefault()
-        registry.importLegacy({
-          workshops: workshopStatePath,
-          altKLineage: `${stateHome}/alt-k-tui${instanceSlug()}/workspaces.sqlite3`,
-          resources: resourceRegistryStatePath(stateHome),
-          recovery: legacyRecoveryStatePath(stateHome),
-        }, { oncePerSource: true })
-        const validation = registry.validate()
-        if (validation.foreignKeyViolations.length || validation.semanticViolations.length) throw new Error(`Unified registry validation failed: ${[...validation.semanticViolations, ...validation.foreignKeyViolations.map(String)].join(", ")}`)
-        // Compatibility gate: legacy stores remain mutable until every ingress is a socket client,
-        // so imported domain rows are not preferred while operations already use this registry.
-        registry.setMetadata("compatibility.authority", { domain: "legacy-mutable", operations: "registry" })
-        return registry
-      } catch (error) {
-        registry.close()
-        throw error
-      }
-    },
+    try: () => openOperationStore(),
     catch: (error) => error instanceof Error ? error : new Error(String(error)),
   })
   producerLease = yield* Effect.tryPromise({
@@ -1044,23 +1011,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "topology.absorbed") {
       const location = checkpoint.location as NonNullable<Exclude<typeof intent.target, { type: "directory" }>["location"]>
-      const registry = openResourceRegistry()
-      try {
-        const existing = registry.findByNativeLocation({ kind: location.kind, instanceId: location.instanceId, nativeSessionId: location.nativeSessionId })
-        const snapshot = await multiplexer.observe()
-        const session = snapshot.sessions.find((candidate) => candidate.id === location.nativeSessionId)
-        const claimsComplete = existing && session?.resourceId === existing.id && session.windows.every((window) => {
-          if (!window.resourceId) return false
-          const windowRecord = registry.get(window.resourceId)
-          if (windowRecord?.kind !== "window" || windowRecord.parentId !== existing.id || windowRecord.location?.nativeWindowId !== window.id) return false
-          return window.panes.every((pane) => {
-            if (!pane.terminalId) return false
-            const terminal = registry.get(pane.terminalId)
-            return terminal?.kind === "terminal" && terminal.parentId === windowRecord.id && terminal.location?.nativePaneId === pane.id
-          })
-        })
-        if (!claimsComplete) await multiplexer.absorb(location)
-      } finally { registry.close() }
+      // A session joins its Workshop by claim; Rex ids are already the identity of its windows and panes.
+      await multiplexer.ensureManagedSession(location.nativeSessionId)
       return { checkpoint: { ...checkpoint, outcome: { absorbed: true } } }
     }
     if (stage === "target.opened") {
@@ -1086,13 +1038,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     if (stage === "identity.validated") {
       let row = await exactSession({ session: intent.session }) ?? await exactSession({ session: intent.displayName })
       if (!row) throw new Error("Selected session no longer exists")
-      if (intent.resourceId) {
-        const registry = openResourceRegistry()
-        try {
-          const resource = registry.get(intent.resourceId)
-          if (!resource || resource.kind !== "session" || resource.location?.nativeSessionId !== row[0]) throw new Error("Managed session identity no longer matches its exact Multiplexer Location")
-        } finally { registry.close() }
-      }
+      // A managed session's resource id is its Rex id, so it must name the session found.
+      if (intent.resourceId && intent.resourceId !== row[0]) throw new Error("Managed session identity no longer matches its exact Multiplexer Location")
       return { checkpoint: { ...checkpoint, nativeSessionId: row[0] } }
     }
     const nativeSessionId = String(checkpoint.nativeSessionId)
@@ -1107,12 +1054,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "display-name.persisted") {
       if (intent.resourceId) {
-        const registry = openResourceRegistry()
-        try {
-          const resource = registry.get(intent.resourceId)
-          if (!resource || resource.location?.nativeSessionId !== nativeSessionId) throw new Error("Managed session identity changed before Display Name persistence")
-          if (resource.displayName !== intent.displayName) registry.updateDisplayName(intent.resourceId, intent.displayName)
-        } finally { registry.close() }
+        if (intent.resourceId !== nativeSessionId) throw new Error("Managed session identity changed before Display Name persistence")
         const current = await exactSession({ nativeSessionId })
         if (!current) throw new Error("Managed session disappeared before Display Name claim persistence")
         if (current[7] !== intent.displayName) await daemonMultiplexer().claim(sessionLocation(nativeSessionId), "sessionDisplayName", intent.displayName)

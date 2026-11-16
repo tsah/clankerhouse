@@ -124,11 +124,10 @@
     },
     {
       "id": "absorption",
-      "title": "Explicit whole-session absorption and validated Multiplexer Locations",
+      "title": "Workshop sessions identified by Rex ids and a Workshop claim; resolving and opening managed targets",
       "core": true,
       "unit": [
-        "src/multiplexer.test.ts",
-        "src/resource-registry.test.ts"
+        "src/multiplexer.test.ts"
       ],
       "standalone": [
         "scripts/qa-rex"
@@ -256,11 +255,11 @@
     },
     {
       "id": "durable-registry",
-      "title": "Durable registry, resource identity, imports, and compatibility authority",
+      "title": "Durable Workshop and clanker identity: Workshop lineage and labels, the clanker ledger, and mutation operations",
       "core": true,
       "unit": [
-        "src/registry.test.ts",
-        "src/resource-registry.test.ts"
+        "src/daemon-mutations.test.ts",
+        "src/clanker-ledger.test.ts"
       ],
       "standalone": [
         "scripts/qa-daemon",

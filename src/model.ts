@@ -1,4 +1,4 @@
-import type { MultiplexerLocation } from "./resource-registry"
+import type { MultiplexerLocation } from "./multiplexer/interface"
 import type { AvailableAction } from "./transport/protocol"
 import type { NeedsMe } from "./needs-me"
 

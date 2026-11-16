@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import type { DurableOperationRecord, DurableRegistry } from "../registry"
+import type { DurableOperationRecord, OperationStore as DurableRegistry } from "../operation-store"
 import type { MutationIntent, MutationSubmitResult, OperationRecord } from "./protocol"
 
 export interface MutationExecution {

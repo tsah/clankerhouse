@@ -1,17 +1,16 @@
 /**
- * Registry-backed operations layered over any Multiplexer Adapter: Absorption, Herd
- * Reconciliation of claims, managed-location resolution, and opening targets.
- * Runtime-neutral by construction: it only speaks the Multiplexer Interface.
+ * Clankerhouse's layer over the Rex Adapter: which sessions belong to Workshops, presenting Workshop Labels, resolving
+ * and opening targets. Rex ids are durable, so a native id is a resource's identity; a session is managed when it
+ * carries a `workshopId` claim. Nothing here keeps its own copy of topology.
  */
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { resolve } from "node:path"
-import { openResourceRegistry, type MultiplexerLocation, type ResourceRecord } from "../resource-registry"
 import { visibleLabels } from "../labels"
-import { allWorkshopLabels, identifyWorkshopSync, listWorkshopRecords, persistWorkshopLineage, workshopForId, workshopForPath } from "../workshop"
+import { allWorkshopLabels, identifyWorkshopSync, listWorkshopRecords, persistWorkshopLineage, workshopForPath } from "../workshop"
 import {
-  paneLocation, sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
-  type ClaimKey, type CurrentLocation, type Multiplexer, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type SpawnRequest,
+  sessionLocation, UnsupportedMultiplexerOperation, windowLocation,
+  type ClaimKey, type CurrentLocation, type ManagedResource, type Multiplexer, type MultiplexerLocation, type MultiplexerPane, type MultiplexerSession, type MultiplexerSnapshot, type NativeLocation, type ObserveOptions, type SpawnRequest,
 } from "./interface"
 
 export interface MultiplexerTarget {
@@ -25,33 +24,39 @@ export type OpenMultiplexerTarget =
   | ({ type: "session"; session: string } & MultiplexerTarget)
   | ({ type: "window"; session: string; windowId: string; pane: string } & MultiplexerTarget)
 
-export interface AbsorbedSession {
-  workshopId: string
-  session: ResourceRecord
-  windows: ResourceRecord[]
-  terminals: ResourceRecord[]
-}
+export interface ManagedSession { workshopId: string; sessionId: string }
 
 const canonicalPath = (path: string) => {
   try { return realpathSync(path) }
   catch { return resolve(path) }
 }
 
-export const newManagedResourceId = (kind: "session" | "window" | "terminal") =>
-  `${kind === "session" ? "mux-session" : kind === "window" ? "mux-window" : "terminal"}-${randomUUID()}`
+/** Every session, window and terminal of a Workshop in one observation, keyed by native id. */
+export const managedResourcesOf = (snapshot: MultiplexerSnapshot, observedAt = Date.now()): Map<string, ManagedResource> => {
+  const resources = new Map<string, ManagedResource>()
+  const at = (nativeSessionId: string, nativeWindowId: string | null, nativePaneId: string | null): MultiplexerLocation => ({ kind: snapshot.kind, instanceId: snapshot.instanceId, nativeSessionId, nativeWindowId, nativePaneId, observedAt })
+  for (const session of snapshot.sessions) {
+    if (!session.workshopId) continue
+    const workshopId = session.workshopId
+    resources.set(session.id, { id: session.id, kind: "session", workshopId, parentId: null, displayName: session.displayName ?? session.nativeName, location: at(session.id, null, null) })
+    for (const window of session.windows) {
+      resources.set(window.id, { id: window.id, kind: "window", workshopId, parentId: session.id, displayName: window.displayName ?? window.nativeName, location: at(session.id, window.id, null) })
+      for (const pane of window.panes) resources.set(pane.id, { id: pane.id, kind: "terminal", workshopId, parentId: window.id, displayName: pane.displayName ?? "", location: at(session.id, window.id, pane.id) })
+    }
+  }
+  return resources
+}
 
 export class ManagedMultiplexer {
   readonly kind: string
   readonly adapter: Multiplexer
-  private readonly registryPath?: string
   private readonly workshopStatePath?: string
   /** Last label-mirroring failure per session, so a repeating one is logged once. */
   private readonly labelFailures = new Map<string, string>()
 
-  constructor(adapter: Multiplexer, options: { registryPath?: string; workshopStatePath?: string } = {}) {
+  constructor(adapter: Multiplexer, options: { workshopStatePath?: string } = {}) {
     this.adapter = adapter
     this.kind = adapter.kind
-    this.registryPath = options.registryPath
     this.workshopStatePath = options.workshopStatePath
   }
 
@@ -82,166 +87,27 @@ export class ManagedMultiplexer {
   paneAddressEnv() { return this.adapter.paneAddressEnv() }
   /** Resolves false when the runtime cannot notify. */
   async notify(notice: { title: string; body?: string }) { return this.adapter.notify ? this.adapter.notify(notice) : false }
-  showChildAgents(view: { parentWorkshopId: string; label: string } | null) {
-    if (!this.adapter.showChildAgents) throw new UnsupportedMultiplexerOperation(this.kind, "agent view")
-    return this.adapter.showChildAgents(view)
-  }
   changes(signal: AbortSignal) { return this.adapter.changes(signal) }
   available() { return this.adapter.available() }
 
-  private supportsClaims(scope: "session" | "window" | "pane") { return this.adapter.capabilities().claimScopes.includes(scope) }
-
-  private workshopFor(session: MultiplexerSession, pane: MultiplexerPane) {
+  /** The Workshop a session belongs to: its claim, else the Workshop at its path, registered if new. */
+  private workshopFor(session: MultiplexerSession, pane: MultiplexerPane | undefined) {
     if (session.workshopId) return session.workshopId
-    const path = canonicalPath(pane.currentPath || session.path)
-    const existing = workshopForPath(path)
+    const path = canonicalPath(pane?.currentPath || session.path)
+    const existing = workshopForPath(path, this.workshopStatePath)
     if (existing) return existing.workshopId
     try {
       const identity = identifyWorkshopSync(path)
-      return persistWorkshopLineage(identity)?.workshopId ?? `path-${createHash("sha256").update(identity.path).digest("hex").slice(0, 24)}`
+      return persistWorkshopLineage(identity, { dbPath: this.workshopStatePath })?.workshopId ?? `path-${createHash("sha256").update(identity.path).digest("hex").slice(0, 24)}`
     } catch {
       return `directory-${createHash("sha256").update(path).digest("hex").slice(0, 24)}`
     }
   }
 
-  async absorb(location: Omit<MultiplexerLocation, "observedAt">, observedSnapshot?: MultiplexerSnapshot): Promise<AbsorbedSession> {
-    if (location.kind !== this.kind) throw new Error(`Unsupported multiplexer kind: ${location.kind}`)
-    const snapshot = observedSnapshot ?? await this.observe({ processInfo: false })
-    if (snapshot.instanceId !== location.instanceId) throw new Error("Multiplexer instance changed before absorption")
-    const session = snapshot.sessions.find((candidate) => candidate.id === location.nativeSessionId)
-    if (!session) throw new Error("Multiplexer session disappeared before absorption")
-    const selectedPane = session.windows.flatMap((window) => window.panes).find((pane) => pane.id === location.nativePaneId)
-      ?? session.windows.find((window) => window.active)?.panes.find((pane) => pane.active)
-      ?? session.windows.flatMap((window) => window.panes)[0]
-    if (!selectedPane) throw new Error("Multiplexer session has no terminal panes")
-    const workshopId = this.workshopFor(session, selectedPane)
-    const now = Date.now()
-    const registry = openResourceRegistry({ dbPath: this.registryPath })
-    try {
-      const claimed = registry.transaction(() => {
-        const registeredId = (id: string | undefined, kind: ResourceRecord["kind"], parentId: string | null) => {
-          if (!id) return undefined
-          const resource = registry.get(id)
-          return resource?.kind === kind && resource.workshopId === workshopId && resource.parentId === parentId ? id : undefined
-        }
-        const durable = this.adapter.capabilities().durableIds
-        const byLocation = (input: { nativeSessionId: string; nativeWindowId?: string | null; nativePaneId?: string | null }, kind: ResourceRecord["kind"], parentId: string | null) => {
-          if (!durable) return undefined
-          const found = registry.findByNativeLocation({ kind: this.kind, instanceId: snapshot.instanceId, ...input })
-          return found?.kind === kind && found.workshopId === workshopId && found.parentId === parentId ? found.id : undefined
-        }
-        const sessionRecord = registry.upsert({
-          id: registeredId(session.resourceId, "session", null) ?? byLocation({ nativeSessionId: session.id }, "session", null),
-          kind: "session",
-          workshopId,
-          displayName: session.displayName || session.nativeName,
-          location: { kind: this.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, observedAt: now },
-        }, { now })
-        const windowRecords: ResourceRecord[] = []
-        const terminalRecords: ResourceRecord[] = []
-        for (const window of session.windows) {
-          const windowRecord = registry.upsert({
-            id: registeredId(window.resourceId, "window", sessionRecord.id) ?? byLocation({ nativeSessionId: session.id, nativeWindowId: window.id }, "window", sessionRecord.id),
-            kind: "window",
-            workshopId,
-            parentId: sessionRecord.id,
-            displayName: window.displayName || window.nativeName || `window ${window.index}`,
-            location: { kind: this.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: window.id, observedAt: now },
-          }, { now })
-          windowRecords.push(windowRecord)
-          for (const pane of window.panes) {
-            const displayName = pane.displayName || (window.panes.length > 1 ? `${windowRecord.displayName}.${pane.index}` : windowRecord.displayName)
-            terminalRecords.push(registry.upsert({
-              id: registeredId(pane.terminalId, "terminal", windowRecord.id) ?? byLocation({ nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: pane.id }, "terminal", windowRecord.id),
-              kind: "terminal",
-              workshopId,
-              parentId: windowRecord.id,
-              displayName,
-              location: { kind: this.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: pane.id, observedAt: now },
-            }, { now }))
-          }
-        }
-        return { workshopId, session: sessionRecord, windows: windowRecords, terminals: terminalRecords }
-      })
-      const at = sessionLocation(session.id)
-      if (this.supportsClaims("session")) {
-        if (session.workshopId !== workshopId) await this.adapter.claim(at, "workshopId", workshopId)
-        if (session.resourceId !== claimed.session.id) await this.adapter.claim(at, "sessionId", claimed.session.id)
-        if (session.displayName !== claimed.session.displayName) await this.adapter.claim(at, "sessionDisplayName", claimed.session.displayName)
-      }
-      for (let index = 0; index < session.windows.length; index += 1) {
-        const window = session.windows[index]!
-        const record = claimed.windows[index]!
-        if (this.supportsClaims("window")) {
-          const where = windowLocation(session.id, window.id)
-          if (window.resourceId !== record.id) await this.adapter.claim(where, "windowId", record.id)
-          if (window.displayName !== record.displayName) await this.adapter.claim(where, "windowDisplayName", record.displayName)
-        }
-        if (!this.supportsClaims("pane")) continue
-        for (const pane of window.panes) {
-          const terminal = claimed.terminals.find((candidate) => candidate.location?.nativePaneId === pane.id)!
-          const where = paneLocation(session.id, window.id, pane.id)
-          if (pane.terminalId !== terminal.id) await this.adapter.claim(where, "terminalId", terminal.id)
-          if (pane.displayName !== terminal.displayName) await this.adapter.claim(where, "terminalDisplayName", terminal.displayName)
-        }
-      }
-      return claimed
-    } finally { registry.close() }
-  }
-
-  /**
-   * A cold runtime restart keeps durable native ids but can drop every claim (herdr does not restore tokens). A session
-   * the registry still locates is given its Workshop claims back, but only while its path is still its Workshop's.
-   */
-  private async restoreSessionClaims(session: MultiplexerSession, instanceId: string): Promise<MultiplexerSession | undefined> {
-    const registry = openResourceRegistry({ dbPath: this.registryPath })
-    let resource: ResourceRecord | undefined
-    try { resource = registry.findByNativeLocation({ kind: this.kind, instanceId, nativeSessionId: session.id }) }
-    finally { registry.close() }
-    if (resource?.kind !== "session") return undefined
-    const workshop = workshopForId(resource.workshopId, this.workshopStatePath)
-    if (!workshop || canonicalPath(session.worktreePath || session.path) !== workshop.canonicalPath) return undefined
-    const at = sessionLocation(session.id)
-    await this.adapter.claim(at, "workshopId", workshop.workshopId)
-    await this.adapter.claim(at, "sessionId", resource.id)
-    await this.adapter.claim(at, "worktreePath", workshop.canonicalPath)
-    await this.adapter.claim(at, "gitCommonDir", workshop.commonDir)
-    if (workshop.parentWorkshopId) await this.adapter.claim(at, "workshopParentId", workshop.parentWorkshopId)
-    const claims = { ...session.claims, workshopId: workshop.workshopId, sessionId: resource.id, worktreePath: workshop.canonicalPath, gitCommonDir: workshop.commonDir, ...(workshop.parentWorkshopId ? { workshopParentId: workshop.parentWorkshopId } : {}) }
-    return { ...session, claims, workshopId: workshop.workshopId, resourceId: resource.id, parentWorkshopId: workshop.parentWorkshopId, worktreePath: workshop.canonicalPath }
-  }
-
-  async reconcileAbsorbedTopology(observed: MultiplexerSnapshot): Promise<boolean> {
-    let changed = false
-    let snapshot = observed
-    const durable = this.adapter.capabilities().durableIds
-    for (let session of observed.sessions) {
-      if (durable && this.supportsClaims("session") && !session.workshopId && !session.resourceId) {
-        const restored = await this.restoreSessionClaims(session, snapshot.instanceId)
-        if (!restored) continue
-        session = restored
-        snapshot = { ...snapshot, sessions: snapshot.sessions.map((candidate) => candidate.id === restored.id ? restored : candidate) }
-        changed = true
-      }
-      if (!session.workshopId || !session.resourceId) continue
-      const incomplete = session.windows.some((window) => (this.supportsClaims("window") && !window.resourceId) || window.panes.some((pane) => !pane.terminalId))
-      if (!incomplete && !durable) continue
-      if (!incomplete) continue
-      const pane = session.windows.find((window) => window.active)?.panes.find((candidate) => candidate.active)
-        ?? session.windows.flatMap((window) => window.panes)[0]
-      if (!pane) continue
-      const window = session.windows.find((candidate) => candidate.panes.some((entry) => entry.id === pane.id))!
-      await this.absorb({ kind: this.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: pane.id }, snapshot)
-      changed = true
-    }
-    return changed
-  }
-
   /**
    * Shows each session's Workshop Labels in the runtime, so its own UI can render them. A session belongs to the
    * Workshop its claim names, else to the Workshop at its path, as the session's row does. Idempotent: only
-   * differences are written, so it runs on every observation and repairs what a cold restart dropped. Presentation
-   * only; a session that fails is left for the next pass.
+   * differences are written. Presentation only; a session that fails is left for the next pass.
    */
   async mirrorWorkshopLabels(snapshot: MultiplexerSnapshot): Promise<number> {
     if (!this.adapter.showLabels || !snapshot.sessions.length) return 0
@@ -266,55 +132,15 @@ export class ManagedMultiplexer {
     return written
   }
 
-  /**
-   * Writes each pane's Workshop parent as a pane claim, so a runtime whose agent views filter on pane metadata can
-   * select a Workshop's children (`showChildAgents`). Sessions resolve to Workshops as for labels; only differences
-   * are written, a pane whose Workshop lost its parent is cleared, and a cold restart is repaired on the next pass.
-   */
-  async claimPaneParents(snapshot: MultiplexerSnapshot): Promise<number> {
-    if (!this.adapter.showChildAgents || !this.supportsClaims("pane") || !snapshot.sessions.length) return 0
-    const records = listWorkshopRecords(this.workshopStatePath)
-    const byId = new Map(records.map((workshop) => [workshop.workshopId, workshop]))
-    const byPath = new Map(records.map((workshop) => [workshop.canonicalPath, workshop]))
-    let written = 0
-    for (const session of snapshot.sessions) {
-      const workshop = session.workshopId ? byId.get(session.workshopId) : session.path ? byPath.get(canonicalPath(session.path)) : undefined
-      const parent = workshop?.parentWorkshopId ?? null
-      for (const window of session.windows) {
-        for (const pane of window.panes) {
-          if ((pane.claims?.paneWorkshopParentId ?? null) === parent) continue
-          try {
-            await this.adapter.claim(paneLocation(session.id, window.id, pane.id), "paneWorkshopParentId", parent)
-            written += 1
-          } catch {
-            // The pane may have closed since the observation; the next pass sees the truth.
-          }
-        }
-      }
-    }
-    return written
-  }
-
+  /** A managed target names a native id that must still exist; an unmanaged one carries its location. */
   async resolve(target: MultiplexerTarget): Promise<MultiplexerLocation | undefined> {
     if (target.management === "managed" && target.resourceId) {
-      const registry = openResourceRegistry({ dbPath: this.registryPath })
-      try {
-        const resource = registry.get(target.resourceId)
-        if (!resource?.location) throw new Error(`Managed resource has no current location: ${target.resourceId}`)
-        const snapshot = await this.observe({ processInfo: false })
-        const session = snapshot.sessions.find((candidate) => candidate.id === resource.location?.nativeSessionId)
-        const window = session?.windows.find((candidate) => candidate.id === resource.location?.nativeWindowId)
-        const pane = window?.panes.find((candidate) => candidate.id === resource.location?.nativePaneId)
-        const live = resource.kind === "session" ? session : resource.kind === "window" ? window : pane
-        const scope = resource.kind === "session" ? "session" : resource.kind === "window" ? "window" : "pane"
-        const claimed = resource.kind === "session" ? session?.resourceId : resource.kind === "window" ? window?.resourceId : pane?.terminalId
-        const claimMatches = this.supportsClaims(scope) ? claimed === resource.id : Boolean(live)
-        if (snapshot.instanceId !== resource.location.instanceId || resource.location.kind !== this.kind || !claimMatches) throw new Error(`Managed resource location is stale: ${target.resourceId}`)
-        return resource.location
-      } finally { registry.close() }
+      const snapshot = await this.observe({ processInfo: false })
+      const resource = managedResourcesOf(snapshot).get(target.resourceId)
+      if (!resource) throw new Error(`Managed resource no longer exists: ${target.resourceId}`)
+      return resource.location
     }
     if (!target.location) return undefined
-    if (target.management === "unmanaged") await this.absorb(target.location)
     return { ...target.location, observedAt: Date.now() }
   }
 
@@ -338,16 +164,16 @@ export class ManagedMultiplexer {
     await this.open(windowLocation(session.id, target.windowId))
   }
 
-  /** Absorb the whole session that `selector` (native id or native name) identifies. */
-  async ensureManagedSession(selector: string) {
+  /** Make the session that `selector` (native id or label) names a Workshop's: claim its Workshop when it has none. */
+  async ensureManagedSession(selector: string): Promise<ManagedSession> {
     const snapshot = await this.observe({ processInfo: false })
     const session = snapshot.sessions.find((candidate) => candidate.id === selector || candidate.nativeName === selector)
     if (!session) throw new Error(`Unknown ${this.kind} session: ${selector}`)
     const pane = session.windows.find((window) => window.active)?.panes.find((candidate) => candidate.active)
       ?? session.windows.flatMap((window) => window.panes)[0]
-    if (!pane) throw new Error(`${this.kind} session has no panes: ${selector}`)
-    const window = session.windows.find((candidate) => candidate.panes.some((entry) => entry.id === pane.id))!
-    return this.absorb({ kind: this.kind, instanceId: snapshot.instanceId, nativeSessionId: session.id, nativeWindowId: window.id, nativePaneId: pane.id })
+    const workshopId = this.workshopFor(session, pane)
+    if (session.workshopId !== workshopId) await this.adapter.claim(sessionLocation(session.id), "workshopId", workshopId)
+    return { workshopId, sessionId: session.id }
   }
 }
 

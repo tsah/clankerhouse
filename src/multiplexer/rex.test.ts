@@ -87,7 +87,7 @@ describe("Rex adapter, scripted", () => {
     const [session] = snapshot.sessions
     expect(session).toMatchObject({ id: "session:s1", nativeName: "repo@main", workshopId: "w-1", worktreePath: "/work", path: "/work", attached: true, shownLabels: { lbl_issue: "#9" } })
     expect(session!.claims).toEqual({ workshopId: "w-1", worktreePath: "/work" })
-    expect(session!.windows[0]).toMatchObject({ id: "window:w1", nativeName: "main", active: true, resourceId: "mux-window-1" })
+    expect(session!.windows[0]).toMatchObject({ id: "window:w1", nativeName: "main", active: true, resourceId: "window:w1" })
     // The popup is Clankerhouse's own, never a pane.
     expect(session!.windows[0]!.panes.map((pane) => pane.id)).toEqual(["block:b1"])
     expect(session!.windows[0]!.panes[0]).toMatchObject({

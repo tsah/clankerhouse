@@ -7,7 +7,25 @@
  * the declaration instead of assuming a runtime. Native vocabulary (herdr workspaces,
  * tabs and tokens) never leaves the Adapter module that owns it.
  */
-import type { MultiplexerLocation } from "../resource-registry"
+/** Where a resource lives in the runtime, scoped by runtime kind and instance. Native ids are the runtime's own. */
+export interface MultiplexerLocation {
+  kind: string
+  instanceId: string
+  nativeSessionId: string
+  nativeWindowId: string | null
+  nativePaneId: string | null
+  observedAt: number
+}
+
+/** A session, window or terminal of a Workshop, identified by its native id; derived from claims on each observation. */
+export interface ManagedResource {
+  id: string
+  kind: "session" | "window" | "terminal"
+  workshopId: string
+  parentId: string | null
+  displayName: string
+  location: MultiplexerLocation
+}
 
 export type MultiplexerKind = string
 

@@ -1,7 +1,7 @@
 import { chmod, lstat, unlink } from "node:fs/promises"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import type { ProjectionSnapshot } from "../projection"
-import type { DurableRegistry } from "../registry"
+import type { OperationStore as DurableRegistry } from "../operation-store"
 import { OperationJournal, type MutationExecutor } from "./operations"
 import { encodeMessage, isErrorResponse, parseRequest, protocolError, SNAPSHOT_PROTOCOL_VERSION, type HerdResult, type ObservationReport } from "./protocol"
 

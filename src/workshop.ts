@@ -5,7 +5,6 @@ import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { applyLabelChange, type LabelChange, type WorkshopLabels } from "./labels"
-import { readRegistryWorkshops, registryStatePath } from "./registry"
 
 export type LineageMode = "off" | "best-effort" | "strict"
 export interface LineageIdentity { path: string; commonDir: string; branch: string }
@@ -49,7 +48,6 @@ const manifestRelativePath = ".clankerhouse/workshop.json"
 const manifestIgnoreRule = "/.clankerhouse/workshop.json"
 const defaultStateHome = `${Bun.env.XDG_STATE_HOME || `${Bun.env.HOME || ""}/.local/state`}`
 export const workshopStatePath = `${defaultStateHome}/clankerhouse${instanceSlug()}/workshops.sqlite3`
-const previousWorkshopStatePath = `${defaultStateHome}/alt-k-tui/workspaces.sqlite3`
 
 interface RepoRow { id: string; common_dir: string; created_at: number; updated_at: number }
 interface WorkshopRow {
@@ -649,22 +647,10 @@ const addSnapshotRows = (snapshot: LineageSnapshot, dbPath: string, table: "work
   }
 }
 
-export const readLineageSnapshot = (dbPath = workshopStatePath, mode: LineageMode = lineageMode(), durableRegistryPath = dbPath === workshopStatePath ? registryStatePath() : undefined): LineageSnapshot => {
+export const readLineageSnapshot = (dbPath = workshopStatePath, mode: LineageMode = lineageMode()): LineageSnapshot => {
   const snapshot = emptySnapshot()
   try {
-    // Keep already-running workshops visible; current Clankerhouse records win.
-    if (dbPath === workshopStatePath) addSnapshotRows(snapshot, previousWorkshopStatePath, "workspaces")
     addSnapshotRows(snapshot, dbPath, "workshops")
-    // Expansion compatibility: the durable registry is preferred, while legacy stores remain readable fallbacks.
-    if (durableRegistryPath) {
-      const records = readRegistryWorkshops(durableRegistryPath)
-      const childCounts = Map.groupBy(records.filter((record) => record.parentWorkshopId), (record) => record.parentWorkshopId!)
-      for (const record of records) {
-        const preferred: LineageSnapshotRecord = { ...record, version: manifestVersion, childWorkshopCount: childCounts.get(record.workshopId)?.length ?? 0, labels: snapshot.byId.get(record.workshopId)?.labels }
-        snapshot.byPath.set(record.canonicalPath, preferred)
-        snapshot.byId.set(record.workshopId, preferred)
-      }
-    }
     return snapshot
   } catch (error) {
     if (mode === "strict") throw error

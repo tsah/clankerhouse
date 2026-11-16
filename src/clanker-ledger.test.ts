@@ -129,31 +129,6 @@ describe("clanker ledger", () => {
     ledger.close()
   })
 
-  test("imports Recovery's records once", () => {
-    const { dir, dbPath, legacyPath } = fixture()
-    mkdirSync(dir, { recursive: true })
-    const legacy = new Database(legacyPath)
-    legacy.exec(`CREATE TABLE desired_clankers (clanker_id TEXT PRIMARY KEY, harness TEXT, workshop_id TEXT, workshop_path TEXT, tmux_session_name TEXT, tmux_window_name TEXT, cwd TEXT,
-      harness_session_id TEXT, launch_spec TEXT, original_task TEXT, desired_state TEXT, owner_unit TEXT, created_at INTEGER, updated_at INTEGER)`)
-    const insert = legacy.query("INSERT INTO desired_clankers VALUES (?1, 'pi', 'w', '/tmp/w', 'repo', 'pi', '/tmp/w', ?2, '{\"version\":1,\"profile\":null}', 'task', ?3, 'clankerhouse-x-1.scope', 1, 2)")
-    insert.run("running", "s-1", "running")
-    insert.run("stopped", "s-2", "stopped")
-    insert.run("tombstoned", null, "tombstoned")
-    legacy.close()
-
-    const ledger = openClankerLedger({ dbPath })
-    expect(ledger.get("running")).toMatchObject({ state: "open", sessionLabel: "repo", windowLabel: "pi", harnessSessionId: "s-1", ownerUnit: "clankerhouse-x-1.scope", serverEpoch: null })
-    expect(ledger.get("stopped")).toMatchObject({ state: "closed", closedReason: "imported-stopped" })
-    expect(ledger.get("tombstoned")).toMatchObject({ state: "closed", closedReason: "imported-tombstoned" })
-    ledger.end("running", "operator")
-    ledger.close()
-
-    // Reopening never imports again.
-    const reopened = openClankerLedger({ dbPath })
-    expect(reopened.get("running")).toMatchObject({ state: "closed", closedReason: "operator" })
-    reopened.close()
-  })
-
   test("validates launch specs", () => {
     expect(validateLaunchSpec({ version: 3, profile: null, resourceClass: "interactive", model: "opus" })).toEqual({ version: 3, profile: null, resourceClass: "interactive", model: "opus" })
     expect(() => validateLaunchSpec({ version: 3, profile: null, resourceClass: "interactive", model: "-x" })).toThrow(/model/)

@@ -6,8 +6,8 @@ import type { ManagedMultiplexer } from "./multiplexer/managed"
 import { openManagedMultiplexer } from "./multiplexer/select"
 
 export type { MultiplexerPane, MultiplexerWindow, MultiplexerSession, MultiplexerSnapshot, Multiplexer, MultiplexerCapabilities, ClaimKey, NativeLocation, SpawnRequest, SpawnResult } from "./multiplexer/interface"
-export type { MultiplexerTarget, OpenMultiplexerTarget, AbsorbedSession } from "./multiplexer/managed"
-export { ManagedMultiplexer, newManagedResourceId } from "./multiplexer/managed"
+export type { MultiplexerTarget, OpenMultiplexerTarget, ManagedSession } from "./multiplexer/managed"
+export { ManagedMultiplexer, managedResourcesOf } from "./multiplexer/managed"
 export { openManagedMultiplexer, createMultiplexer } from "./multiplexer/select"
 
 /** Absorb the session identified by a native id or name. */

@@ -10,7 +10,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { createConnection, createServer, type Server } from "node:net";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -48,48 +48,10 @@ const runtimeRoot = join(process.env.XDG_RUNTIME_DIR || "/tmp", `clankerhouse-${
 const stateDirectory = join(runtimeRoot, "clanker-state");
 const socketDirectory = join(runtimeRoot, "clanker-sockets");
 const stateFile = pane ? join(stateDirectory, `${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`) : "";
-const daemonSocketPath = join(runtimeRoot, "daemon.sock");
-const daemonAvailable = Boolean(pane && existsSync(daemonSocketPath));
 const clankersEnv = process.env;
 
 let reportSeq = Date.now() * 1000;
-let reportInFlight = false;
-let queuedReport: Record<string, unknown> | undefined;
 
-function sendReport(record: Record<string, unknown>): Promise<void> {
-	return new Promise((resolve) => {
-		const request = { version: 1, id: `pi:${process.pid}:${record.seq}`, method: "observation.report", params: record };
-		const socket = createConnection(daemonSocketPath);
-		let settled = false;
-		const finish = () => {
-			if (settled) return;
-			settled = true;
-			socket.destroy();
-			resolve();
-		};
-		socket.setTimeout(500, finish);
-		socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-		socket.once("data", finish);
-		socket.once("error", finish);
-		socket.once("end", finish);
-		socket.once("close", finish);
-	});
-}
-
-async function drainReports() {
-	if (reportInFlight) return;
-	reportInFlight = true;
-	try {
-		while (queuedReport) {
-			const next = queuedReport;
-			queuedReport = undefined;
-			await sendReport(next);
-		}
-	} finally {
-		reportInFlight = false;
-		if (queuedReport) void drainReports();
-	}
-}
 
 function paneClaim(key: string) {
 	if (!pane) return "";
@@ -178,11 +140,6 @@ export default function (pi: ExtensionAPI) {
 			result,
 			results,
 		};
-		if (daemonAvailable) {
-			queuedReport = record;
-			void drainReports();
-			return;
-		}
 		try {
 			mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
 			chmodSync(stateDirectory, 0o700);

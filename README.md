@@ -1,33 +1,19 @@
 # Clankerhouse
 
-Clankerhouse is a workshop and visible-harness application for the [Herdr](https://herdr.dev) terminal multiplexer, with a Rust/ratatui jump client and a Bun/TypeScript control plane. Open it with Herdr's `Alt-K` popup or bare `clankerhouse` inside Herdr; use `clankers` for CLI operations.
+Clankerhouse is a thin plugin on the [Rex](https://www.superlogical.com/rex/docs) terminal multiplexer for working with
+coding agents: Workshops (a worktree, its branch, its lineage and labels) and the visible agent sessions in them, with a
+Rust/ratatui picker and a Bun/TypeScript CLI. Rex is the truth for what runs; Clankerhouse keeps only what Rex cannot
+express. See [docs/rex.md](docs/rex.md) for setup and [ADR-0012](docs/adr/0012-a-thin-plugin-on-rex.md) for the design.
 
 ## Installation
 
-Clankerhouse runs inside Herdr. `clankerhouse-install-herdr` installs Alt-K (jump), Alt-B (repository/branch spawn flow), Alt-D (done/delete), Alt-N (scratch workshop), and Alt-I (needs me) popup bindings. To use other keys, edit the `key` lines in the managed block of Herdr's `config.toml`, or set `CLANKERHOUSE_HERDR_KEY`, `CLANKERHOUSE_HERDR_SPAWN_KEY`, `CLANKERHOUSE_HERDR_DELETE_KEY`, `CLANKERHOUSE_HERDR_SCRATCH_KEY`, or `CLANKERHOUSE_HERDR_NEEDS_ME_KEY` when running the installer; the chosen keys are kept on reruns and upgrades. Alt-D confirms deletion of the invoking session/worktree using the native client; it never guesses the target from whichever workspace becomes focused later. Reload Herdr's configuration (`herdr server reload-config`) after updating these bindings. The installer also turns off Herdr's own agent resume on restore; interrupted clankers are resumed through `clankers resume` instead.
+Install Rex and lift its session cap, build this checkout, link `bin/clankerhouse-rex` as
+`~/.config/rex/clankerhouse-rex` on every host, and load `contrib/rex/clankerhouse.lua` from the Rex config of the
+machine running the Rex app (docs/rex.md has the commands). Cmd+K then opens the picker over the focused pane, on that
+pane's host.
 
-For stable commands, integrations, and optional user services:
-
-```bash
-scripts/install --prefix "$HOME/.local" --integrations --systemd
-clankerhouse-doctor
-```
-
-The first install stages and validates a version under `$prefix/lib/clankerhouse-versions` and atomically creates `$prefix/lib/clankerhouse` as the active symlink. Stable launchers under `$prefix/bin`, Herdr bindings, harness integrations, and user units resolve that active target on each invocation instead of pinning a version.
-
-For an upgrade with a running projection daemon, explicitly select its runtime directory and Herdr socket so the installer cannot signal an unrelated process:
-
-```bash
-scripts/install --prefix "$HOME/.local" --integrations --systemd \
-  --runtime-dir "${XDG_RUNTIME_DIR:?}" \
-  --herdr-socket "${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
-```
-
-The installer quiesces only a daemon whose process identity, application target, runtime directory, and Herdr socket all match that selection. It activates the new version, probes `server.status`, and atomically restores and restarts the prior target if activation fails. Use `--no-daemon-handoff` only after manually proving no daemon is using the installation. The first upgrade from the legacy fixed `$prefix/lib/clankerhouse` directory moves that owned tree into the versions directory after quiescence, preserving it as the rollback target.
-
-Old versions are retained for rollback until uninstall or explicit cleanup. `scripts/uninstall --prefix "$HOME/.local"` removes only manifest-owned package files and versions; runtime state and the clanker ledger are never removed.
-
-Required runtime tools are Bun, Herdr, Git, Python 3, and flock. Worktrunk (`wt`), jq, zoxide, and individual harness CLIs are capability-specific.
+Required runtime tools are Rex, Bun, Git and Python 3. Worktrunk (`wt`), jq, zoxide, and individual harness CLIs are
+capability-specific.
 
 ### Neovim
 

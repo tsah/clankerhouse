@@ -1,110 +1,86 @@
-# The Rex lane
+# Clankerhouse on Rex
 
-Clankerhouse on [Rex](https://www.superlogical.com/rex/docs), selected with `CLANKERHOUSE_MULTIPLEXER=rex` and launched
-with `bin/clankerhouse-rex`. It runs beside the Herdr and hc lanes: its own instance (`CLANKERHOUSE_INSTANCE=rex` by
-default), so its own daemon (`clankerhouse-daemon-rex.service`), runtime directory, state directory, clanker ledger and
-Claim store. Nothing it does reaches another lane's server or daemon.
+Clankerhouse is a thin plugin on [Rex](https://www.superlogical.com/rex/docs): a Rex config module that binds keys to a
+picker, the `clankers` CLI, and one background process. ADR-0012 records the design.
 
-## Shape
+## Who owns what
 
-| Clankerhouse | Rex |
-| --- | --- |
-| session (a Workshop's) | session |
-| window | window (a tab) |
-| pane | terminal block |
-| `instanceId` | `rex:` + the server's `host_id`, which survives restarts |
-| `serverEpoch` | `rex:` + the server's `instance_id`, new for every server process |
-| Display Names | session, window and block labels (128 characters) |
-| Claims | files under `$XDG_STATE_HOME/clankerhouse-rex/rex-claims/<rex id>/<key>` |
-| agent status | the terminal's OSC 7501 program status records |
-| Change Stream | `rex events --all --json` |
-| popup | a floating layer opened by the lane's Rex actions |
+| Fact | Truth | Read by |
+| --- | --- | --- |
+| Sessions, tabs, panes, labels, processes, focus, hosts | Rex | every snapshot (`share/rex/observe.lua`, one `rex do` call) |
+| Agent status (working, blocked, idle, done) | the agent, through OSC 7501 to Rex | snapshots; the lifecycle hook adds turns and generations |
+| Which session is a Workshop's, which pane a clanker's | claims, one file per Rex id and key (`rex-claims/`) | snapshots, the hook |
+| Workshop identity, lineage, labels | `workshops.sqlite3` | snapshots, mutations |
+| Clanker identity and resume data | `clankers.sqlite3` | `clankers resume`, the runner |
+| Messages, reports, Routines, Status Events | `orchestration.sqlite3`, `status-events.sqlite3` | the Clanker API, the runner |
+| Mutation checkpoints | `operations.sqlite3` | `clankers mutate` |
+| Worktrees and branches | git and Worktrunk | mutations, snapshots |
 
-- **Every request goes through the `rex` CLI**, the server's documented interface. One observation is one `rex do`
-  script, `share/rex/observe.lua`, that returns every session, window and block with its processes, title and status in
-  one round trip (about 20 ms).
-- **Rex keeps one label per object and no key/value metadata**, so Claims live in a store of the lane's own, one file
-  per object and key, written by atomic rename. The Rust lifecycle hook writes the same files. Entries for objects the
-  server no longer has are pruned after ten minutes.
-- **Rex restores sessions, windows, blocks and labels after a restart, but not the programs in them**: a restored block
-  runs a shell. The adapter records which server process started each block (`_epoch`), so a harness block from an earlier
-  server is reported `harnessGone`, and the new `serverEpoch` lists its clanker as interrupted for `clankers resume`.
-- **Status is the harness's own.** Claude Code and Pi report OSC 7501; the lifecycle hook stays the authority for turns
-  and generations, as on the hc lane (ADR-0011). A self-reporting harness silent for 30 s after it started is shown
-  blocked on a startup dialog.
-- **Claude's lifecycle hooks come with its launch.** The global hooks `clankerhouse-install-claude-hooks` writes run only
-  in Herdr and hc panes, so every Claude this lane starts gets `--settings` with hooks that run this checkout's
-  `clankerhouse-hook` when `REX_BLOCK` is set. The global settings are not changed.
-- **Pi's extension is the installed one** (`~/.pi/agent/extensions/clanker-lifecycle.ts` links to the active install),
-  so Pi clankers report on this lane only once an install includes the lane.
+No store claims liveness: a clanker is alive when Rex shows its harness in its pane. State lives under
+`$XDG_STATE_HOME/clankerhouse-<instance>` and `$XDG_RUNTIME_DIR/clankerhouse-<uid>-<instance>`; the instance is `rex`
+unless `CLANKERHOUSE_INSTANCE` names another.
 
-## Focus
+## The pieces
 
-Inside a session, focus is the server's: `focus` moves the session's active window and focused block. Which session an
-app shows is the app's own choice, so `focus` also asks the app that opened the popup (else every connected app) to run
-its `session.select` action. An app with **Remote Control** off in its settings refuses; the session is still focused,
-and the operator switches to it.
+- **`contrib/rex/clankerhouse.lua`** binds Cmd+K (jump), Cmd+B (new Workshop from a repository), Cmd+I (needs me),
+  Cmd+E (scratch) and Shift+Cmd+K (delete this session). Each opens the picker in a floating layer over the focused
+  pane, on that pane's host. A `clankerhouse_keys` table set before the `dofile` changes the keys.
+- **The picker** (`native-client`) paints from the runner's last snapshot, then follows `clankers snapshot --watch`,
+  which recomputes on Rex events and store changes. Choices run `clankers mutate`; opening a target focuses it in Rex
+  and asks the app to show its session (needs Remote Control in the app's settings).
+- **`clankers`**: `snapshot [--watch]` prints the picker's rows (read-only); `mutate --json INTENT` runs one staged,
+  journaled mutation; everything else (`spawn`, `send --wait`, `resume`, `workshop ...`, `needs-me`, `settled`) works
+  without a server.
+- **`clankers runner`** does timed work only: queued message delivery, Routines, Status Event sinks, the done-Workshop
+  reaper, directory rediscovery, the clanker ledger, and the snapshot cache. The launcher starts it as the systemd user
+  service `clankerhouse-runner-<instance>`, or detached where there is no user manager.
+- **The lifecycle hook** (`clankerhouse-hook`) runs on each Claude hook event in a Rex pane and records the clanker's
+  turns, generations and prompts. Claude started by Clankerhouse gets it through `--settings`.
 
-`currentLocation` is the terminal the process runs in (`REX_SESSION`, `REX_BLOCK`), or, inside a popup, the block the
-popup opened over (`CLANKERHOUSE_REX_FOCUS`, set by the launcher). The daemon runs in no terminal and has none, so like
-the hc lane it always performs an open.
+## Setup on a machine
 
-## Setup on the server's machine
-
-1. Install Rex and run a personal server ([Installing on Linux](https://www.superlogical.com/rex/docs/linux/installation)):
+1. Install Rex and a personal server ([Installing on Linux](https://www.superlogical.com/rex/docs/linux/installation)):
 
    ```sh
    curl -fsSL https://pkgs.superlogical.com/rex/install.sh | sh -s -- --channel preview
    rex server install
    ```
 
-2. Load the lane's keys from the server's `~/.config/rex/init.lua`, then reload:
+   Clankerhouse runs one Rex session per Workshop, so lift Rex's session and block caps in its unit
+   (`systemctl --user edit rex.service`):
 
-   ```lua
-   dofile(os.getenv("HOME") .. "/path/to/clankerhouse/contrib/rex/clankerhouse.lua")
+   ```ini
+   [Service]
+   ExecStart=
+   ExecStart=/usr/bin/rex server run --log-format text --max-sessions 0 --max-blocks 0
    ```
 
+2. Build and link this checkout, then load the module from the machine's Rex config:
+
    ```sh
+   bun install && scripts/build-native
+   ln -sfn "$PWD/bin/clankerhouse-rex" ~/.config/rex/clankerhouse-rex
+   echo 'dofile(os.getenv("HOME") .. "/path/to/clankerhouse/contrib/rex/clankerhouse.lua")' >> ~/.config/rex/init.lua
    rex config check && rex config reload
+   bin/clankerhouse-rex --ensure-runner && bin/clankerhouse-rex --health
    ```
 
-   This defines `clankerhouse_jump`, `_repo`, `_delete`, `_scratch` and `_needs_me`, bound to Cmd+K (replacing the
-   app's Change Session), Cmd+B, Shift+Cmd+K, Cmd+E and Cmd+I; a `clankerhouse_keys` table set before the `dofile`
-   changes them. Load it on every machine whose Rex server should have a picker, the Mac included: each server runs its
-   own launcher, so a local session opens the local picker and a remote host's session opens that host's. Each opens `bin/clankerhouse-rex --popup` in a floating layer over the focused pane; the layer closes
-   when the picker exits. `CLANKERHOUSE_REX_LAUNCHER` names another launcher.
+The Rex app resolves keys with the config of the machine it runs on, even in a remote host's session, and the popup
+then runs on that session's host; the link at `~/.config/rex/clankerhouse-rex` is how it finds that host's launcher.
+Load the module on the app's machine and link the launcher on every host.
 
-   On macOS, without systemd or /proc, harnesses run as the pane's child (`CLANKERHOUSE_PROCESS_OWNER=disabled`), the
-   daemon is a detached process, and process facts come from `ps` and `lsof`. Rex runs each program there under
-   login(1), which the adapter looks past.
+On macOS, without systemd or /proc, harnesses run as the pane's child (`CLANKERHOUSE_PROCESS_OWNER=disabled`), the
+runner is a detached process, and process facts come from `ps` and `lsof`. Rex runs each program there under login(1),
+which the adapter looks past.
 
-   The Rex app resolves keys with the config of the machine it runs on, even in a remote host's session, and the popup
-   then runs on that session's host. So the popup finds its launcher where it runs: link each machine's own at
-   `~/.config/rex/clankerhouse-rex`:
+## Restarts
 
-   ```sh
-   ln -sfn /path/to/clankerhouse/bin/clankerhouse-rex ~/.config/rex/clankerhouse-rex
-   ```
-
-3. Start the daemon once (the popup also starts it on demand):
-
-   ```sh
-   bin/clankerhouse-rex --ensure-server
-   bin/clankerhouse-rex --health
-   ```
-
-From a Mac, add the machine as a host (`rex hosts add NAME ssh://USER@HOST`, or **Add Remote Host…** in the app),
-switch the app to it, and press Alt-K in any of its terminals. Turn on Remote Control in the app's settings for a choice
-in the picker to switch the app's session.
-
-## Commands
-
-`bin/clankerhouse-rex --help` lists the launcher's modes. `clankers` works on the lane with
-`CLANKERHOUSE_MULTIPLEXER=rex CLANKERHOUSE_INSTANCE=rex` in its environment, which every terminal the lane starts has.
-`CLANKERHOUSE_REX_SERVER` points the lane at another Rex server address.
+Rex restores sessions, tabs and panes after a server restart, but not the programs in them. Each harness pane then holds
+a shell, its clanker is listed as interrupted, and `clankers resume ID` (or `clankers ledger --interrupted`) brings it
+back into its conversation. The runner may be restarted at any time; nothing is lost.
 
 ## Tests
 
-`src/multiplexer/rex.test.ts` runs against a scripted `rex`, and against a scratch Rex server when `rex` is installed.
-`scripts/qa-rex` runs the launcher, daemon, hook and popup on a scratch server under scratch XDG directories. Both skip
+`src/multiplexer/rex.test.ts` runs against a scripted `rex` and against a scratch Rex server; `scripts/qa-rex` runs the
+launcher, runner, snapshots, mutations, hook and popup on a scratch server under scratch XDG directories. Both skip
 without `rex` unless `REX_REQUIRED` is set.

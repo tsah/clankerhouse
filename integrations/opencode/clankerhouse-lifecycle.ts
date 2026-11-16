@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { createConnection } from "node:net"
+
 
 const pane = process.env.REX_BLOCK?.trim() || ""
 const clankersEnv = process.env
@@ -15,8 +15,6 @@ let settledGeneration = 0
 let currentState: ClankerState = "idle"
 let reportSeq = Date.now() * 1000
 let lastReportFingerprint = ""
-let reportInFlight = false
-let queuedReport: Record<string, unknown> | undefined
 
 type ClankerState = "blocked" | "working" | "done" | "idle" | "unknown"
 
@@ -27,8 +25,6 @@ const instanceSlug = requestedInstance
   : "-rex"
 const runtime = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/clankerhouse-${process.getuid?.() || 0}${instanceSlug}`
 const reportPath = `${runtime}/clanker-state/${pane.replace(/[^A-Za-z0-9_.%-]/g, "_")}.json`
-const daemonSocketPath = `${runtime}/daemon.sock`
-const daemonAvailable = Boolean(pane && existsSync(daemonSocketPath))
 
 /** Pane claims written through `clankers mux`. */
 const claims = {
@@ -56,7 +52,8 @@ const currentSession = (sessionId: string) => tracked
   ? trackedSession(sessionId)
   : Boolean(pane && sessionId && sessionId === observedSessionId)
 
-const writeLegacyReport = (record: Record<string, unknown>) => {
+/** The pane's state file, which the snapshot and the Clanker API read. */
+const writeReport = (record: Record<string, unknown>) => {
   try {
     const directory = `${runtime}/clanker-state`
     const temporary = `${reportPath}.tmp-${process.pid}`
@@ -70,44 +67,6 @@ const writeLegacyReport = (record: Record<string, unknown>) => {
     writeFileSync(temporary, JSON.stringify(record), { mode: 0o600 })
     renameSync(temporary, reportPath)
   } catch {}
-}
-
-const sendReport = (record: Record<string, unknown>) => new Promise<void>((resolve) => {
-  const request = {
-    version: 1,
-    id: `opencode:${process.pid}:${record.seq}`,
-    method: "observation.report",
-    params: record,
-  }
-  const socket = createConnection(daemonSocketPath)
-  let settled = false
-  const finish = () => {
-    if (settled) return
-    settled = true
-    socket.destroy()
-    resolve()
-  }
-  socket.setTimeout(500, finish)
-  socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`))
-  socket.once("data", finish)
-  socket.once("error", finish)
-  socket.once("end", finish)
-  socket.once("close", finish)
-})
-
-const drainReports = async () => {
-  if (reportInFlight) return
-  reportInFlight = true
-  try {
-    while (queuedReport) {
-      const next = queuedReport
-      queuedReport = undefined
-      await sendReport(next)
-    }
-  } finally {
-    reportInFlight = false
-    if (queuedReport) void drainReports()
-  }
 }
 
 const report = (state: ClankerState, hookEvent: string) => {
@@ -131,9 +90,7 @@ const report = (state: ClankerState, hookEvent: string) => {
     updatedAt: Date.now(),
     hookEvent,
   }
-  if (!daemonAvailable) return writeLegacyReport(record)
-  queuedReport = record
-  void drainReports()
+  writeReport(record)
 }
 
 const withdraw = () => {

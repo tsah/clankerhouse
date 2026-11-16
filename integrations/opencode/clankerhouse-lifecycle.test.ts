@@ -133,48 +133,44 @@ if [ "$2" = read-claim ]; then printf '%s\\n' "$CLANKER_ID"; fi
     expect(JSON.parse(child.stdout.toString())).not.toHaveProperty("clankerId")
   })
 
-  test("uses direct daemon IPC and deduplicates repeated semantic state", async () => {
+  test("writes its pane's state file and deduplicates repeated semantic state", async () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-opencode-lifecycle-"))
     roots.push(root)
     const runtime = join(root, "runtime")
     const runtimeRoot = join(runtime, `clankerhouse-${process.getuid?.() || 0}-rex`)
     mkdirSync(runtimeRoot, { recursive: true })
-    const requests: unknown[] = []
-    const server = createServer((socket) => {
-      socket.setEncoding("utf8")
-      socket.once("data", (input) => {
-        requests.push(JSON.parse(String(input).trim()))
-        socket.end(JSON.stringify({ version: 1, id: (requests.at(-1) as any).id, ok: true, result: { accepted: true } }) + "\n")
-      })
-    })
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(join(runtimeRoot, "daemon.sock"), resolve)
-    })
+    const stateFile = join(runtimeRoot, "clanker-state", "block_p44.json")
     const script = join(root, "exercise.ts")
     const pluginPath = new URL("./clankerhouse-lifecycle.ts", import.meta.url).pathname
     writeFileSync(script, `
+      import { readFileSync } from "node:fs"
       import { handleLifecycleEvent } from ${JSON.stringify(pluginPath)}
+      const seen = () => JSON.parse(readFileSync(${JSON.stringify(stateFile)}, "utf8"))
       const info = { id: "session-root", projectID: "project", directory: "/tmp/work", title: "task", version: "1", time: { created: 1, updated: 1 } }
+      const records = []
       await handleLifecycleEvent({ type: "session.created", properties: { info } })
+      records.push(seen())
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-root", status: { type: "busy" } } })
+      records.push(seen())
       await handleLifecycleEvent({ type: "session.status", data: { sessionID: "session-root", status: { type: "busy" } } })
-      await Bun.sleep(50)
+      records.push(seen())
+      console.log(JSON.stringify(records))
     `)
     const child = Bun.spawn([process.execPath, script], {
       env: isolatedEnv({ XDG_RUNTIME_DIR: runtime, REX_BLOCK: "block:p44" }),
       stdout: "pipe",
       stderr: "pipe",
     })
-    const stderr = await new Response(child.stderr).text()
+    const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
     expect(await child.exited, stderr).toBe(0)
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-
-    expect(requests).toHaveLength(2)
-    expect(requests.map((request: any) => request.params.state)).toEqual(["idle", "working"])
-    expect(requests.every((request: any) => request.method === "observation.report")).toBe(true)
-    expect(existsSync(join(runtimeRoot, "clanker-state", "block_p44.json"))).toBe(false)
+    const records = JSON.parse(stdout) as Array<{ state: string; seq: number; pane: string }>
+    expect(records.map((record) => record.state)).toEqual(["idle", "working", "working"])
+    expect(records[0]!.pane).toBe("block:p44")
+    // The repeated busy status writes nothing new.
+    expect(records[2]!.seq).toBe(records[1]!.seq)
+    expect(records[1]!.seq).toBe(records[0]!.seq + 1)
   })
+
 
   test("recovers an untracked root from a status event after plugin reload", () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-opencode-lifecycle-"))

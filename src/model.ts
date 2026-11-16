@@ -1,5 +1,5 @@
 import type { MultiplexerLocation } from "./multiplexer/interface"
-import type { AvailableAction } from "./transport/protocol"
+import type { AvailableAction } from "./mutation-intent"
 import type { NeedsMe } from "./needs-me"
 
 export interface TargetIdentity {
@@ -123,9 +123,9 @@ export const withReportedStatus = (hook: { state: ClankerState; updatedAt: numbe
 }
 
 /**
- * A settled turn stays `done` until the operator has seen it, then shows `idle`. The Multiplexer tracks seen: Herdr
- * reports a settled pane `done` until its tab is viewed, or `idle` when the tab was in view as the turn settled.
- * A pane whose runtime status holds no settled turn (Herdr still catching up, or not observing the harness)
+ * A settled turn stays `done` until the operator has seen it, then shows `idle`. The agent reports
+ * which through Rex.
+ * A pane whose runtime status holds no settled turn (an agent that reports none)
  * counts as seen only while it is focused.
  */
 export const stateWithSeen = (state: ClankerState, runtimeStatus: string | undefined, focused = false): ClankerState => {

@@ -33,7 +33,7 @@ export interface SettledEntry {
   branch: string
   /** The session's folder, the Workshop's checkout. */
   cwd: string
-  /** The multiplexer address of the main clanker's pane (hc terminal id, Herdr pane id). */
+  /** The multiplexer address of the main clanker's pane (the Rex block id). */
   pane: string | null
   harness: string | null
   /** The main clanker's state: blocked, failed, done, idle or unknown; null for a session with no clanker. */

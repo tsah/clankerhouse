@@ -15,23 +15,22 @@ with_systemd=false
 with_integrations=false
 dry_run=false
 force=false
-no_daemon_handoff=false
-runtime_dir=
-herdr_socket=
+with_rex=false
 preflight_hook=
 activation_hook=
 
 usage() {
-    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--rex] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "  --rex  link ~/.config/rex/clankerhouse-rex, load the installed Rex module from ~/.config/rex/init.lua, restart the runner"
 }
 while (($#)); do
     case "$1" in
         --prefix) prefix=${2:?}; shift 2 ;;
         --systemd) with_systemd=true; shift ;;
         --integrations) with_integrations=true; shift ;;
-        --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
-        --herdr-socket) herdr_socket=${2:?}; shift 2 ;;
-        --no-daemon-handoff) no_daemon_handoff=true; shift ;;
+        --rex) with_rex=true; shift ;;
+        # Accepted for old scripts: there is no daemon to hand off any more.
+        --no-daemon-handoff) shift ;;
         --preflight-hook) preflight_hook=${2:?}; shift 2 ;;
         --activation-hook) activation_hook=${2:?}; shift 2 ;;
         --dry-run) dry_run=true; shift ;;
@@ -42,12 +41,6 @@ while (($#)); do
 done
 [[ "$prefix" != *$'\n'* ]] || { echo "Install prefix may not contain a newline" >&2; exit 2; }
 prefix=$(absolute_path "$prefix")
-if [[ -n "$runtime_dir" || -n "$herdr_socket" ]]; then
-    [[ -n "$runtime_dir" && -n "$herdr_socket" ]] || { echo "--runtime-dir and --herdr-socket must be supplied together" >&2; exit 2; }
-    [[ "$no_daemon_handoff" == false ]] || { echo "Cannot combine an isolated daemon selection with --no-daemon-handoff" >&2; exit 2; }
-    runtime_dir=$(absolute_path "$runtime_dir")
-    herdr_socket=$(absolute_path "$herdr_socket")
-fi
 for hook in "$preflight_hook" "$activation_hook"; do
     [[ -z "$hook" || -x "$hook" ]] || { echo "Install fault hook is not executable: $hook" >&2; exit 2; }
 done
@@ -58,7 +51,6 @@ versions="$lib_dir/clankerhouse-versions"
 bin_dir="$prefix/bin"
 state_root=${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/installations
 manifest="$state_root/$(printf '%s' "$prefix" | sha256_text).files"
-daemon_hook="$source_root/scripts/install-daemon-hook"
 stage=
 active_tmp=
 manifest_next="$manifest.next"
@@ -92,10 +84,6 @@ install_symlink() {
 }
 
 refuse_unmanaged "$active" "installation"
-if [[ (-e "$active" || -L "$active") && -z "$runtime_dir" && "$no_daemon_handoff" == false && "$dry_run" == false ]]; then
-    echo "Upgrades require --runtime-dir and --herdr-socket for isolated daemon handoff, or explicit --no-daemon-handoff after quiescing it yourself" >&2
-    exit 2
-fi
 if [[ "$dry_run" == true ]]; then
     echo "Would stage, validate, and atomically activate Clankerhouse under $versions"
     exit 0
@@ -113,6 +101,8 @@ tar -C "$source_root" --exclude='./.git' --exclude='./node_modules' --exclude='.
 if [[ -n "$preflight_hook" ]]; then "$preflight_hook" "$stage"; fi
 (
     cd "$stage"
+    # The staged checkout tests itself; the caller's lane settings must not leak into its unit tests.
+    for name in $(compgen -e | grep -E '^(CLANKERHOUSE_|REX_)' || true); do unset "$name"; done
     bun install --frozen-lockfile
     scripts/build-native
     bun run check
@@ -251,11 +241,6 @@ elif [[ -e "$active" ]]; then
     exit 1
 fi
 
-if [[ -n "$runtime_dir" && -n "$previous_target" ]]; then
-    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$previous_target"
-elif [[ -n "$runtime_dir" && -n "$legacy_target" ]]; then
-    "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$active"
-fi
 
 if [[ -n "$legacy_target" ]]; then
     mv "$active" "$legacy_target"
@@ -279,23 +264,11 @@ PY
 switch_active "$final"
 
 activation_ok=true
-if [[ -n "$runtime_dir" ]]; then
-    if ! "$daemon_hook" activate --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$final"; then activation_ok=false; fi
-fi
 if [[ "$activation_ok" == true && -n "$activation_hook" ]] && ! "$activation_hook" "$final"; then activation_ok=false; fi
 if [[ "$activation_ok" != true ]]; then
     echo "New version activation failed; restoring the previous target" >&2
-    if [[ -n "$runtime_dir" ]]; then
-        "$daemon_hook" quiesce --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$final" || true
-    fi
     if [[ -n "$previous_target" ]]; then
         switch_active "$previous_target"
-        if [[ -n "$runtime_dir" ]]; then
-            "$daemon_hook" restart --runtime-dir "$runtime_dir" --herdr-socket "$herdr_socket" --application "$previous_target" || {
-                echo "Rollback restored $previous_target but its daemon health probe failed" >&2
-                exit 1
-            }
-        fi
     else
         rm -f -- "$active"
     fi
@@ -305,6 +278,32 @@ fi
 
 if [[ "$with_integrations" == true ]]; then
     CLANKERHOUSE_BIN_DIR="$bin_dir" "$active/bin/clankerhouse-install-claude-hooks"
+fi
+
+if [[ "$with_rex" == true ]]; then
+    # The Rex app finds each host's launcher through this link, and loads the module from the app machine's init.lua.
+    rex_config=${XDG_CONFIG_HOME:-$HOME/.config}/rex
+    install_symlink "$bin_dir/clankerhouse-rex" "$rex_config/clankerhouse-rex"
+    module_line="dofile(\"$active/contrib/rex/clankerhouse.lua\")"
+    python3 - "$rex_config/init.lua" "$module_line" <<'PY'
+import re, sys
+from pathlib import Path
+path, line = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text() if path.exists() else ""
+pattern = re.compile(r'^dofile\(.*contrib/rex/clankerhouse\.lua"\)\s*$', re.M)
+updated = pattern.sub(lambda _: line, text, count=1) if pattern.search(text) else text + ("" if text.endswith("\n") or not text else "\n") + line + "\n"
+if updated != text:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated)
+PY
+    if command -v rex >/dev/null 2>&1; then
+        rex_server=()
+        [[ -z "${CLANKERHOUSE_REX_SERVER:-}" ]] || rex_server=(-S "$CLANKERHOUSE_REX_SERVER")
+        rex ${rex_server[@]+"${rex_server[@]}"} config check >/dev/null && rex ${rex_server[@]+"${rex_server[@]}"} config reload >/dev/null 2>&1 || echo "Warning: Rex did not reload its config; run rex config check" >&2
+    fi
+    # The runner keeps the version it started with.
+    "$bin_dir/clankerhouse-rex" --stop-runner >/dev/null 2>&1 || true
+    "$bin_dir/clankerhouse-rex" --ensure-runner >/dev/null || echo "Warning: the runner did not start; run clankerhouse-rex --health" >&2
 fi
 # Units from retired features: stop and delete any copy a previous install recorded.
 retired_units=(clankerhouse-spot-watch.service clankerhouse-resource-guard.service clankerhouse-recovery.service)

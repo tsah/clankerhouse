@@ -462,7 +462,7 @@ const revalidateClaim = async (multiplexer: ManagedMultiplexer, clanker: Clanker
   if (claimedId !== clanker.id) throw new Error(`pane claim changed to ${claimedId || "none"}`)
 }
 
-/** A hand-off error after which the text may still have been submitted (herdr: `timeout`, `agent_prompt_stalled`). */
+/** A hand-off error after which the text may still have been submitted. */
 const ambiguousHandOff = (error: unknown) => /timeout|timed out|stalled/i.test(error instanceof Error ? error.message : String(error))
 
 /**

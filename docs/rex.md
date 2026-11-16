@@ -8,7 +8,7 @@ picker, the `clankers` CLI, and one background process. ADR-0012 records the des
 | Fact | Truth | Read by |
 | --- | --- | --- |
 | Sessions, tabs, panes, labels, processes, focus, hosts | Rex | every snapshot (`share/rex/observe.lua`, one `rex do` call) |
-| Agent status (working, blocked, idle, done) | the agent, through OSC 7501 to Rex | snapshots; the lifecycle hook adds turns and generations |
+| Agent status (working, blocked, idle, done) | the agent, through OSC 7501 to Rex | snapshots; the hook's own state stands in only for an agent that reports none |
 | Which session is a Workshop's, which pane a clanker's | claims, one file per Rex id and key (`rex-claims/`) | snapshots, the hook |
 | Workshop identity, lineage, labels | `workshops.sqlite3` | snapshots, mutations |
 | Clanker identity and resume data | `clankers.sqlite3` | `clankers resume`, the runner |
@@ -55,15 +55,16 @@ unless `CLANKERHOUSE_INSTANCE` names another.
    ExecStart=/usr/bin/rex server run --log-format text --max-sessions 0 --max-blocks 0
    ```
 
-2. Build and link this checkout, then load the module from the machine's Rex config:
+2. Install Clankerhouse and wire it into Rex, from a checkout:
 
    ```sh
-   bun install && scripts/build-native
-   ln -sfn "$PWD/bin/clankerhouse-rex" ~/.config/rex/clankerhouse-rex
-   echo 'dofile(os.getenv("HOME") .. "/path/to/clankerhouse/contrib/rex/clankerhouse.lua")' >> ~/.config/rex/init.lua
-   rex config check && rex config reload
-   bin/clankerhouse-rex --ensure-runner && bin/clankerhouse-rex --health
+   scripts/install --prefix "$HOME/.local" --integrations --rex
+   clankerhouse-rex --health
    ```
+
+   `--integrations` installs the Claude hooks, the Pi and OpenCode extensions and the coordination skill; `--rex` links
+   `~/.config/rex/clankerhouse-rex`, adds the module's `dofile` line to `~/.config/rex/init.lua`, reloads Rex's config
+   and restarts the runner.
 
 The Rex app resolves keys with the config of the machine it runs on, even in a remote host's session, and the popup
 then runs on that session's host; the link at `~/.config/rex/clankerhouse-rex` is how it finds that host's launcher.

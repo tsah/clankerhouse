@@ -4,8 +4,8 @@
  * A Multiplexer Adapter hosts terminal topology for Clankerhouse. The Interface is
  * expressed in Clankerhouse domain operations: every Adapter implements the required
  * core, and declares which optional Runtime Capabilities it provides. Callers gate on
- * the declaration instead of assuming a runtime. Native vocabulary (herdr workspaces,
- * tabs and tokens) never leaves the Adapter module that owns it.
+ * the declaration instead of assuming a runtime. Native vocabulary (Rex blocks, layers
+ * and claims) never leaves the Adapter module that owns it.
  */
 /** Where a resource lives in the runtime, scoped by runtime kind and instance. Native ids are the runtime's own. */
 export interface MultiplexerLocation {
@@ -152,8 +152,6 @@ export interface MultiplexerSession {
   parentWorkshopId?: string | null
   resourceId?: string
   displayName?: string
-  /** What the runtime currently shows of the Workshop's Labels, in the Adapter's own form; handed back to `showLabels`, never interpreted. */
-  shownLabels?: Readonly<Record<string, string>>
   windows: MultiplexerWindow[]
 }
 
@@ -219,13 +217,6 @@ export interface Multiplexer {
   /** Write (or clear with null) an identity claim on the native object at `location`. */
   claim(location: NativeLocation, key: ClaimKey, value: string | null): Promise<void>
   readClaim(location: NativeLocation, key: ClaimKey): Promise<string | undefined>
-  /**
-   * Show a Workshop's visible Labels on its session, replacing what `shown` (the session's `shownLabels`) says is
-   * there. Presentation only; resolves false when nothing needed writing.
-   */
-  showLabels?(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined): Promise<boolean>
-  /** Ask the runtime to show the operator a notification. Best effort and quick; resolves whether it was shown. */
-  notify?(notice: { title: string; body?: string }): Promise<boolean>
   /**
    * Narrow the runtime's own agent list to the harnesses of one Workshop's child Workshops (panes carrying that
    * `paneWorkshopParentId` claim), or restore it with null. Transient: the runtime may drop it on restart.

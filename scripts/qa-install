@@ -2,7 +2,7 @@
 # The atomic installer end to end, into a scratch --prefix with a scratch HOME and XDG directories: same-filesystem
 # staging, atomic active resolution, preflight and activation rollback, the runner following the active version,
 # optional integrations and user units, settings migration, the installed Claude hooks inside a private Rex terminal,
-# ownership and state preservation. systemctl and herdr are stubs, so no real unit, daemon or Herdr config is touched.
+# ownership and state preservation. systemctl is a stub, so no real unit is touched; --rex runs against the scratch Rex server.
 # Needs GNU coreutils (the installer does) and skips without them; needs rex for the in-terminal hook check and skips
 # without it unless REX_REQUIRED is set.
 set -euo pipefail
@@ -52,14 +52,8 @@ cat > "$fake_bin/systemctl" <<'SH'
 printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
 exit 0
 SH
-# The installer still offers Herdr's OpenCode integration when herdr is on PATH; never reach the real one.
-cat > "$fake_bin/herdr" <<'SH'
-#!/bin/sh
-printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_HERDR_LOG"
-exit 0
-SH
 printf '#!/bin/sh\nexit 0\n' > "$fake_bin/opencode"
-chmod 755 "$fake_bin/systemctl" "$fake_bin/herdr" "$fake_bin/opencode"
+chmod 755 "$fake_bin/systemctl" "$fake_bin/opencode"
 cat > "$root/fail-preflight" <<'SH'
 #!/bin/sh
 printf 'injected preflight failure for %s\n' "$1" >&2
@@ -73,7 +67,7 @@ SH
 chmod 755 "$root/fail-preflight" "$root/fail-activation"
 
 export RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" BUN_INSTALL_CACHE_DIR="$bun_cache"
-export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log" CLANKERHOUSE_QA_HERDR_LOG="$root/herdr.log"
+export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log"
 export PATH="$fake_bin:$PATH"
 export CLAUDE_CONFIG_DIR="$home/.claude"
 
@@ -106,13 +100,13 @@ active="$prefix/lib/clankerhouse"
 versions="$prefix/lib/clankerhouse-versions"
 runner_pid() { cat "$qa_runtime/runner.pid" 2>/dev/null; }
 runner_runs() { local pid; pid=$(runner_pid) && kill -0 "$pid" 2>/dev/null && [[ "$(readlink -e "/proc/$pid/cwd")" == "$1" ]]; }
-# --no-daemon-handoff means the caller quiesces; the runner is the only background process to stop.
+# means the caller quiesces; the runner is the only background process to stop.
 quiesce() { "$prefix/bin/clankerhouse-rex" --stop-runner; }
 # The installer stages and tests a full checkout; the lane's own settings must not leak into those unit tests.
 run_install() {
     local name
     local -a strip=()
-    for name in $(compgen -e | grep -E '^(CLANKERHOUSE_|REX_)' | grep -vx CLANKERHOUSE_QA_SYSTEMCTL_LOG | grep -vx CLANKERHOUSE_QA_HERDR_LOG); do strip+=(-u "$name"); done
+    for name in $(compgen -e | grep -E '^(CLANKERHOUSE_|REX_)' | grep -vx CLANKERHOUSE_QA_SYSTEMCTL_LOG); do strip+=(-u "$name"); done
     env "${strip[@]}" "$repo/scripts/install" "$@" >>"$root/install.log" 2>&1
 }
 installed() { run_install "$@" || { printf 'install %s failed; its log ends:\n' "$*" >&2; tail -n 30 "$root/install.log" >&2; return 1; }; }
@@ -121,7 +115,7 @@ version_count() { find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.sta
 echo "== an unmanaged fixed install stays protected before staging"
 mkdir -p "$root/unmanaged-prefix/lib/clankerhouse"
 printf 'unmanaged\n' > "$root/unmanaged-prefix/lib/clankerhouse/keep"
-check "the installer refuses an unmanaged installation" bash -c "! '$repo/scripts/install' --prefix '$root/unmanaged-prefix' --no-daemon-handoff >/dev/null 2>&1"
+check "the installer refuses an unmanaged installation" bash -c "! '$repo/scripts/install' --prefix '$root/unmanaged-prefix' >/dev/null 2>&1"
 check "and leaves it alone" test -f "$root/unmanaged-prefix/lib/clankerhouse/keep"
 
 echo "== a fresh install activates one validated version"
@@ -140,14 +134,14 @@ check "the installed launcher runs the runner from the active version" runner_ru
 
 echo "== a failed preflight changes nothing"
 old_pid=$(runner_pid)
-check "an injected preflight failure fails the install" bash -c "! '$repo/scripts/install' --prefix '$prefix' --no-daemon-handoff --preflight-hook '$root/fail-preflight' >>'$root/install.log' 2>&1"
+check "an injected preflight failure fails the install" bash -c "! '$repo/scripts/install' --prefix '$prefix' --preflight-hook '$root/fail-preflight' >>'$root/install.log' 2>&1"
 check "the active version is unchanged" test "$(readlink -f "$active")" = "$old_target"
 check "the runner was not touched" bash -c "[[ \$(cat '$qa_runtime/runner.pid') == '$old_pid' ]] && kill -0 '$old_pid'"
 
 echo "== a failed activation restores the previous version atomically"
 quiesce
 before_versions=$(version_count)
-if run_install --prefix "$prefix" --no-daemon-handoff --activation-hook "$root/fail-activation"; then fail "an injected activation failure fails the install"
+if run_install --prefix "$prefix" --activation-hook "$root/fail-activation"; then fail "an injected activation failure fails the install"
 elif grep -q 'injected activation failure' "$root/install.log"; then ok "an injected activation failure fails the install"
 else fail "the activation-failure install failed before activation"; tail -n 30 "$root/install.log" >&2; fi
 check "the previous version is active again" test "$(readlink -f "$active")" = "$old_target"
@@ -163,7 +157,7 @@ ln -s "$active/integrations/pi/$legacy_pi_extension" "$home/.pi/agent/extensions
 
 echo "== an upgrade keeps the old version and moves links through the stable path"
 quiesce
-installed --prefix "$prefix" --no-daemon-handoff --integrations --systemd
+installed --prefix "$prefix" --integrations --systemd
 new_target=$(readlink -f "$active")
 check "a new version is active and the old one kept" bash -c "[[ '$new_target' != '$old_target' && -d '$old_target' ]]"
 "$prefix/bin/clankerhouse-rex" --ensure-runner
@@ -189,7 +183,7 @@ printf '%s\n' "$retired_unit" >> "$manifest"
 
 echo "== a reinstall leaves correct integration links alone and retires old units"
 quiesce
-installed --prefix "$prefix" --no-daemon-handoff --integrations
+installed --prefix "$prefix" --integrations
 newest_target=$(readlink -f "$active")
 "$prefix/bin/clankerhouse-rex" --ensure-runner
 check "the runner starts on the reinstalled version" runner_runs "$newest_target"
@@ -200,6 +194,19 @@ check "the OpenCode plugin link was not replaced" test "$(stat -c %i:%Y "$openco
 check "the OpenCode skill link was not replaced" test "$(stat -c %i:%Y "$opencode_skill")" = "$skill_stamp"
 check "user units were reloaded" grep -qFx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
 check "but never enabled" bash -c "! grep -F -- '--user enable' '$CLANKERHOUSE_QA_SYSTEMCTL_LOG' >/dev/null"
+
+echo "== --rex links the launcher, loads the installed module and restarts the runner"
+mkdir -p "$config/rex"
+printf 'qa_setting = 1\ndofile(os.getenv("HOME") .. "/old/contrib/rex/clankerhouse.lua")\n' > "$config/rex/init.lua"
+if "$repo/scripts/install" --prefix "$prefix" --rex >>"$root/install.log" 2>&1; then ok "the --rex install succeeds"; else fail "the --rex install succeeds"; tail -n 30 "$root/install.log" >&2; fi
+rex_target=$(readlink -f "$active")
+check "the Rex launcher link goes through the stable command" test "$(readlink "$config/rex/clankerhouse-rex")" = "$prefix/bin/clankerhouse-rex"
+check "init.lua loads the installed module, once" test "$(grep -c 'contrib/rex/clankerhouse.lua' "$config/rex/init.lua")" = 1
+check "in place of the old module line" grep -qFx "dofile(\"$active/contrib/rex/clankerhouse.lua\")" "$config/rex/init.lua"
+check "and the rest of init.lua is kept" grep -qFx 'qa_setting = 1' "$config/rex/init.lua"
+check "the runner was restarted on the new version" wait_for 50 runner_runs "$rex_target"
+"$repo/scripts/install" --prefix "$prefix" --rex >>"$root/install.log" 2>&1
+check "a second --rex install leaves one module line" test "$(grep -c 'contrib/rex/clankerhouse.lua' "$config/rex/init.lua")" = 1
 
 echo "== Claude settings are migrated and the installed hooks behave"
 hook="$active/native-client/target/release/clankerhouse-hook"

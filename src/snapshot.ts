@@ -32,10 +32,10 @@ import { openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clank
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
-import { createStagedMutationExecutor } from "./daemon-mutations"
+import { createStagedMutationExecutor } from "./mutation-stages"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
-import type { MutationExecution, MutationExecutor } from "./transport/operations"
+import type { MutationExecution, MutationExecutor } from "./operation-journal"
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
 import { projectResources } from "./server/project"
@@ -43,7 +43,7 @@ import { READY_AFTER_MS, SNOOZE_KEY, WAITS_ON_KEY, needsMe, parseSnooze, yourMov
 import { lastClaudeTranscriptText } from "./clanker-list"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
-import type { HerdResult, MutationIntent } from "./transport"
+import type { HerdResult, MutationIntent } from "./mutation-intent"
 
 const repoRoot = applicationRoot
 const runtimeDir = runtimeDirFor()
@@ -119,7 +119,6 @@ const collectMultiplexerResources = Effect.tryPromise({
     const observedAt = Date.now()
     const snapshot = await multiplexer.observe()
     // Presentation only: Workshop Labels shown beside the session; failures are logged by the managed layer.
-    if (!readOnly) await multiplexer.mirrorWorkshopLabels(snapshot).catch(() => 0)
     latestHerd = { instanceId: snapshot.instanceId, observedAt, panes: paneMetadataFromSnapshot(snapshot) }
     const sessions: MuxSession[] = snapshot.sessions.map((session) => ({
       id: session.id,

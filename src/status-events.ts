@@ -5,7 +5,7 @@
  * to publish and the next cursor. The caller commits both in one transaction (`status-outbox.ts`),
  * so a restart neither repeats nor loses a transition. Nothing here touches the clock or the disk.
  *
- * Herdr's `done` and `idle` differ only in whether the operator has seen the turn, so they are one
+ * An agent's `done` and `idle` differ only in whether the operator has seen the turn, so they are one
  * phase: `done -> idle` is the operator looking at a tab, not news.
  */
 import type { ClankerState } from "./model"

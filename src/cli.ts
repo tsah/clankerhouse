@@ -20,8 +20,8 @@ import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifes
 import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
 import { runMutation } from "./mutations"
 import { refreshProjectionSnapshot, setSnapshotReadOnly } from "./snapshot"
-import type { MutationIntent } from "./transport"
-import { mutationStages } from "./daemon-mutations"
+import { parseMutationIntent, type MutationIntent } from "./mutation-intent"
+import { mutationStages } from "./mutation-stages"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
 import { needsMeCounts, needsMeEntry, needsMeList, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
 import { SETTLED_ORDERS, orderSettled, settledEntry, settledKey, settledSessions, type SettledOrder } from "./settled"
@@ -708,7 +708,9 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const json = parsed.take("--json")
     const idempotencyKey = parsed.take("--idempotency-key")
     if (!json) throw new Error("Usage: clankers mutate --json INTENT [--idempotency-key KEY]")
-    const outcome = await runMutation(JSON.parse(json) as MutationIntent, { idempotencyKey })
+    const intent = parseMutationIntent(JSON.parse(json))
+    if (!intent) throw new Error(`Not a valid mutation intent: ${json}`)
+    const outcome = await runMutation(intent, { idempotencyKey })
     if (outcome.state !== "succeeded") throw new Error(outcome.error ?? `Mutation ${outcome.operationId} ${outcome.state}`)
     return console.log(JSON.stringify(outcome.result ?? null))
   }

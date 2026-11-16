@@ -1,7 +1,7 @@
 /**
  * The clanker ledger: the durable record of every clanker Clankerhouse launched or adopted.
- * It is what survives a host or Herdr restart. Rows the daemon last saw alive in an earlier
- * Herdr server are left `open`, so after a restart the open rows that are not alive are the
+ * It is what survives a host or Rex restart. Rows last seen alive in an earlier
+ * Rex server are left `open`, so after a restart the open rows that are not alive are the
  * interrupted clankers, and each names the exact harness session to resume.
  */
 import { Database } from "bun:sqlite"
@@ -37,7 +37,7 @@ export interface LedgerClanker extends LedgerInput {
   closedReason: string | null
   /** The systemd scope the harness runs in, when it has one. */
   ownerUnit: string | null
-  /** The Herdr server the clanker was last seen alive in. */
+  /** The Rex server (its instance) the clanker was last seen alive in. */
   serverEpoch: string | null
   createdAt: number
   updatedAt: number
@@ -89,7 +89,7 @@ export const launchModel = (spec: LaunchSpec) => spec.version === 3 ? spec.model
 
 /**
  * A Multiplexer name as a ledger label: one trimmed line of at most 256 characters, or `fallback`
- * when nothing is left (hc terminals and Herdr windows may have no name at all).
+ * when nothing is left (a Rex block may have no label at all).
  */
 const displayLabel = (value: string | undefined, fallback: string) =>
   (value ?? "").replace(/[\0-\x1f\x7f]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, 256).trimEnd() || fallback
@@ -272,7 +272,7 @@ export class ClankerLedger {
   }
 
   /**
-   * Apply one observation of the clankers alive in Herdr server `serverEpoch`. Alive clankers
+   * Apply one observation of the clankers alive in Rex server `serverEpoch`. Alive clankers
    * are open, follow their harness session and are stamped with the epoch; a tracked harness the
    * ledger has not seen is adopted. An open clanker that `missing` says has been gone long enough,
    * and was last seen in this same server or never seen at all, ended and is closed. One last

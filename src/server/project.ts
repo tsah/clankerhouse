@@ -24,7 +24,7 @@ export interface ProjectInputs {
   managedResources: ReadonlyMap<string, ResourceRecord>
   observedAt: number
   instanceId: string
-  /** Multiplexer kind that produced `sessions`/`windows`; defaults to herdr. */
+  /** Multiplexer kind that produced `sessions`/`windows`; defaults to rex. */
   multiplexerKind?: string
   /** Clankers still running on another lane's server, shown on their Workshops until moved. */
   home?: string

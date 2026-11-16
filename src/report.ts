@@ -8,7 +8,6 @@ import { paneLocation } from "./multiplexer/interface"
 import { ReportInputError, reportAddressee, withOrchestrationStore, type ClankerReportRecord, type ReportState } from "./orchestration"
 import { currentWorkshop } from "./watch"
 import { workshopForId, workshopLabels } from "./workshop"
-import { notifyReport, reportNotifyStates } from "./attention"
 import { TITLE_KEY } from "./labels"
 
 export interface ReportRequest {
@@ -43,11 +42,5 @@ export async function submitReport(request: ReportRequest, options: { cwd?: stri
   // The registry is authoritative for lineage; a missing parent still records the Report, unaddressed.
   const to = reportAddressee({ workshopId: workshop?.workshopId ?? null, parentWorkshopId: workshop?.parentWorkshopId ?? null, to: request.to === undefined ? undefined : validAddressee(request.to), noParent: request.noParent })
   const report = withOrchestrationStore((store) => store.appendReport({ clankerId, workshopId: workshop?.workshopId ?? null, to, state: request.state, message: request.message, payload: request.payload }))
-  // Recorded first: the notification is a courtesy that can neither fail nor noticeably delay the Report.
-  if (reportNotifyStates(env).has(report.state)) {
-    let name = workshop?.branch
-    try { if (workshop) name = workshopLabels(workshop.workshopId)[TITLE_KEY] || name } catch {}
-    await notifyReport(report, name, (notice) => (options.multiplexer ?? openManagedMultiplexer()).notify(notice), env)
-  }
   return report
 }

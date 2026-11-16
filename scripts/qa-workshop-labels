@@ -1,6 +1,6 @@
 #!/bin/bash
 # Workshop Labels end to end on a private Rex server under scratch XDG directories: durable label changes, the
-# repository's labels-changed and done hooks, labels shown on the Rex session, the done-Workshop reaper (in the runner),
+# repository's labels-changed and done hooks, the done-Workshop reaper (in the runner),
 # titles, labelling by branch or ID, and stopping a Workshop. Needs rex; skips without it unless REX_REQUIRED is set.
 
 set -euo pipefail
@@ -95,18 +95,8 @@ set_result=$(clankers workshop label set stage=implementing --cwd "$feature_path
 wait_for_hook_lines 1
 [[ "$(projected_labels)" == '["implementing"]' ]] || fail "Expected the projection to carry the label tag, got $(projected_labels)"
 
-# Labels are shown on the Rex session (beside its Claims, as `lbl_<key>`), where a client can render them.
-shown_label() { clankers mux observe | jq -r --arg name "$1" --arg key "$2" '[.sessions[] | select(.nativeName == $name) | .shownLabels[$key] // ""][0] // ""'; }
-wait_for_shown() {
-    for _ in {1..300}; do
-        [[ "$(shown_label "$1" "$2")" == "$3" ]] && return 0
-        sleep 0.05
-    done
-    fail "Expected Rex session '$1' to show $2='$3', got '$(shown_label "$1" "$2")'"
-}
-wait_for_shown qa-feature lbl_stage implementing
 
-# A Rex restart keeps the session and what it shows.
+# A Rex restart keeps the session, and its labels stay on its row.
 qa_rex_stop
 qa_rex_start "$root"
 for _ in {1..200}; do
@@ -114,7 +104,7 @@ for _ in {1..200}; do
     sleep 0.05
 done
 clankers mux observe | jq -e '.sessions | any(.nativeName == "qa-feature")' >/dev/null || fail "Expected Rex to restore the session after a restart"
-wait_for_shown qa-feature lbl_stage implementing
+[[ "$(projected_labels)" == '["implementing"]' ]] || fail "Expected the labels to survive a Rex restart, got $(projected_labels)"
 
 # Re-setting the same value is not a change, so the hook must stay quiet.
 repeat_result=$(clankers workshop label set stage=implementing --cwd "$feature_path")
@@ -167,7 +157,6 @@ clankers mux observe | jq -e '.sessions | any(.nativeName == "Rework the parser"
 unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(jq -c '[.changed, .labels]' <<<"$unset_result")" == '[true,{"title":"Rework the parser"}]' ]] || fail "Unexpected label unset result: $unset_result"
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
-wait_for_shown "Rework the parser" lbl_stage ""
 if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
 
 # A merged Workshop's worktree may already be deleted; it is still labelled by branch or ID.
@@ -218,4 +207,4 @@ again=$(clankers workshop stop --cwd "$stopped_path")
 [[ "$(jq -c '[.stopped, (.sessionIds | length)]' <<<"$again")" == '[true,0]' ]] || fail "Expected stopping a stopped Workshop to be a no-op: $again"
 has_session "Rework the parser" || fail "Stopping one Workshop must leave other sessions alone"
 
-printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, labels are shown on Rex sessions and kept across a Rex restart, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, the reaper removes only idle, clean done worktrees, and stopping a Workshop closes its session and retires its clankers while keeping its worktree, branch, and labels.\n'
+printf 'Clankerhouse workshop labels QA passed: label changes are durable, projected, and announced once to the repository hook, labels are kept across a Rex restart, the done key belongs to the repository script when one exists and otherwise marks the Workshop done, the reaper removes only idle, clean done worktrees, and stopping a Workshop closes its session and retires its clankers while keeping its worktree, branch, and labels.\n'

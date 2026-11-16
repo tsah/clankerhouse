@@ -2,10 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStagedMutationExecutor, mutationStages } from "./daemon-mutations"
+import { createStagedMutationExecutor, mutationStages } from "./mutation-stages"
 import { openOperationStore as openDurableRegistry } from "./operation-store"
-import { OperationJournal } from "./transport/operations"
-import type { OperationRecord } from "./transport/protocol"
+import { OperationJournal } from "./operation-journal"
+import type { OperationRecord } from "./mutation-intent"
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })

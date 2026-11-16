@@ -72,35 +72,6 @@ describe("managed multiplexer", () => {
     expect(resources.get("s1")).toMatchObject({ kind: "session", displayName: "native-session", parentId: null })
   })
 
-  test("shows each session's visible Workshop Labels and leaves sessions outside Workshops alone", async () => {
-    const registryPath = fixture()
-    const workshopStatePath = join(registryPath, "..", "workshops.sqlite3")
-    const path = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-labels-"))); roots.push(path)
-    Bun.spawnSync(["git", "-C", path, "init", "-q", "-b", "main"])
-    const workshop = registerWorkshop({ path, commonDir: join(path, ".git"), branch: "main" }, { dbPath: workshopStatePath })
-    changeWorkshopLabel(workshop.workshopId, "stage", "retro", workshopStatePath)
-    changeWorkshopLabel(workshop.workshopId, "title", "A title", workshopStatePath)
-    changeWorkshopLabel(workshop.workshopId, "_bookkeeping", "x", workshopStatePath)
-    const shown: Array<[string, Record<string, string>, Record<string, string> | undefined]> = []
-    class LabelAdapter extends FakeAdapter {
-      async showLabels(location: NativeLocation, labels: Readonly<Record<string, string>>, current: Readonly<Record<string, string>> | undefined) {
-        shown.push([location.nativeSessionId, { ...labels }, current ? { ...current } : undefined])
-        return true
-      }
-    }
-    const sessions = [
-      ...topology({ sessionResourceId: "mux-session-1" }).map((session) => ({ ...session, workshopId: workshop.workshopId, shownLabels: { lbl_old: "x" } })),
-      ...topology({ sessionId: "s2" }).map((session) => ({ ...session, workshopId: undefined })),
-      // A session without claims belongs to the Workshop at its path, as its row does.
-      ...topology({ sessionId: "s3" }).map((session) => ({ ...session, path, workshopId: undefined })),
-    ]
-    const managed = new ManagedMultiplexer(new LabelAdapter(sessions), { workshopStatePath })
-    expect(await managed.mirrorWorkshopLabels(await managed.observe())).toBe(2)
-    expect(shown).toEqual([["s1", { stage: "retro" }, { lbl_old: "x" }], ["s3", { stage: "retro" }, undefined]])
-    // An Adapter that cannot show labels is skipped.
-    expect(await new ManagedMultiplexer(new FakeAdapter(sessions), { workshopStatePath }).mirrorWorkshopLabels(await managed.observe())).toBe(0)
-  })
-
   test("resolves a managed resource by its native id, wherever its target hint points", async () => {
     const managed = new ManagedMultiplexer(new FakeAdapter(topology({ sessionId: "s9" })))
     const resolved = await managed.resolve({

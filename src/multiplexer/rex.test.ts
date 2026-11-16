@@ -73,7 +73,6 @@ describe("Rex adapter, scripted", () => {
     const claims = new RexClaimStore(scratch())
     claims.write("session:s1", "workshopId", "w-1")
     claims.write("session:s1", "worktreePath", "/work")
-    claims.write("session:s1", "lbl_issue", "#9")
     claims.write("window:w1", "windowId", "mux-window-1")
     claims.write("block:b1", "clankerId", "c-1")
     claims.write("block:b1", "harness", "claude")
@@ -84,7 +83,7 @@ describe("Rex adapter, scripted", () => {
     const snapshot = await adapter.observe()
     expect(snapshot).toMatchObject({ kind: "rex", instanceId: "rex:host-1" })
     const [session] = snapshot.sessions
-    expect(session).toMatchObject({ id: "session:s1", nativeName: "repo@main", workshopId: "w-1", worktreePath: "/work", path: "/work", attached: true, shownLabels: { lbl_issue: "#9" } })
+    expect(session).toMatchObject({ id: "session:s1", nativeName: "repo@main", workshopId: "w-1", worktreePath: "/work", path: "/work", attached: true })
     expect(session!.claims).toEqual({ workshopId: "w-1", worktreePath: "/work" })
     expect(session!.windows[0]).toMatchObject({ id: "window:w1", nativeName: "main", active: true, resourceId: "window:w1" })
     // The popup is Clankerhouse's own, never a pane.

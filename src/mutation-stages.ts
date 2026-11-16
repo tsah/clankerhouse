@@ -1,5 +1,5 @@
-import type { MutationExecution, MutationExecutor } from "./transport/operations"
-import type { MutationIntent } from "./transport/protocol"
+import type { MutationExecution, MutationExecutor } from "./operation-journal"
+import type { MutationIntent } from "./mutation-intent"
 
 export const mutationStages = (intent: MutationIntent): readonly string[] => {
   switch (intent.type) {

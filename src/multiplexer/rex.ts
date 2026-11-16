@@ -1,5 +1,5 @@
 /**
- * Rex Multiplexer Adapter, selected by CLANKERHOUSE_MULTIPLEXER=rex; Herdr stays the default. All Rex vocabulary (blocks,
+ * Rex Multiplexer Adapter, the only runtime (ADR-0012). All Rex vocabulary (blocks,
  * layers, the `rex` CLI, its Lua scripts and events) lives here. Mapping: Rex session → session, window → window, block →
  * pane. Rex ids, labels and layouts survive a server restart; the programs in them do not (a restored block runs a shell).
  *
@@ -39,8 +39,6 @@ export const REX_STARTUP_SILENCE_MS = 30_000
 export const REX_INTERRUPT_STEP_MS = 400
 /** Claude reads a paste before it takes the Enter that submits it. */
 export const REX_PROMPT_SUBMIT_DELAY_MS = 150
-/** A notification is a courtesy: the caller never waits on the operator's command longer than this. */
-export const REX_NOTIFY_TIMEOUT_MS = 1_000
 /** How long an app gets to switch to a session before focus gives up on it. */
 export const REX_CLIENT_TIMEOUT_MS = 3_000
 const SELF_REPORTING_HARNESSES = new Set(["claude", "pi"])
@@ -50,8 +48,6 @@ const harnessOfApp: Record<string, string> = { "claude-code": "claude" }
 const EPOCH_KEY = "_epoch"
 const SPAWNED_KEY = "_spawned"
 const REPORTED_KEY = "_reported"
-/** Workshop Labels shown on a session; Rex has no sidebar for them, so these serve `shownLabels`. */
-const SHOWN_LABEL_PREFIX = "lbl_"
 
 /** Identity a terminal must never take from the spawner's environment. `spawn` unsets whichever the caller did not set. */
 export const REX_UNSET_ON_SPAWN = [
@@ -224,7 +220,7 @@ const foregroundMembers = (leader: GroupMember, groups: Map<number, GroupMember[
 }
 
 const pickClaims = (values: Record<string, string>, scope: ClaimScope) =>
-  Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith("_") && !key.startsWith(SHOWN_LABEL_PREFIX) && claimScopeOf(key as ClaimKey) === scope)) as ClaimMap
+  Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith("_") && claimScopeOf(key as ClaimKey) === scope)) as ClaimMap
 
 export interface RexAdapterOptions {
   bin?: string
@@ -359,7 +355,6 @@ export class RexAdapter implements Multiplexer {
         parentWorkshopId: claims.workshopParentId || undefined,
         resourceId: session.session_id,
         displayName: claims.sessionDisplayName || undefined,
-        shownLabels: Object.fromEntries(Object.entries(sessionValues).filter(([key]) => key.startsWith(SHOWN_LABEL_PREFIX))),
         windows,
       })
     }
@@ -649,27 +644,6 @@ export class RexAdapter implements Multiplexer {
     return object ? this.claims.read(object, key) : undefined
   }
 
-  /** Kept beside the session's Claims for `shownLabels`; Rex has no sidebar to show them in. */
-  async showLabels(location: NativeLocation, labels: Readonly<Record<string, string>>, shown: Readonly<Record<string, string>> | undefined) {
-    const wanted = Object.fromEntries(Object.entries(labels).filter(([, value]) => value).map(([key, value]) => [`${SHOWN_LABEL_PREFIX}${key.replace(/[^A-Za-z0-9_.-]/g, "_")}`, value]))
-    const removed = Object.keys(shown ?? {}).filter((label) => !(label in wanted))
-    const changed = Object.entries(wanted).filter(([label, value]) => shown?.[label] !== value)
-    if (!removed.length && !changed.length) return false
-    for (const label of removed) this.claims.write(location.nativeSessionId, label, null)
-    for (const [label, value] of changed) this.claims.write(location.nativeSessionId, label, value)
-    return true
-  }
-
-  /** Delivery is the operator's: CLANKERHOUSE_NOTIFY_COMMAND runs with title and body. */
-  async notify(notice: { title: string; body?: string }) {
-    const command = this.env.CLANKERHOUSE_NOTIFY_COMMAND?.trim()
-    if (!command) return false
-    const child = Bun.spawn(["sh", "-c", `${command} "$@"`, "notify", notice.title, notice.body ?? ""], { stdout: "ignore", stderr: "ignore", stdin: "ignore" })
-    const timeout = setTimeout(() => child.kill(), REX_NOTIFY_TIMEOUT_MS)
-    const exitCode = await child.exited
-    clearTimeout(timeout)
-    return exitCode === 0
-  }
 }
 
 const topologyEvents = new Set(["session_created", "session_destroyed", "window_created", "window_closed", "block_created", "block_closed", "session_view_changed"])

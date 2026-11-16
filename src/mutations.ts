@@ -1,6 +1,6 @@
 /**
  * Clankerhouse mutations: open, create, rename, attach/detach, delete, label, done, stop and repository refresh, run as
- * staged, checkpointed operations (src/daemon-mutations.ts) journaled in operations.sqlite3. `clankers mutate` and the
+ * staged, checkpointed operations (src/mutation-stages.ts) journaled in operations.sqlite3. `clankers mutate` and the
  * other CLI commands run them in-process; an operation interrupted mid-way resumes on the next run.
  */
 import { Effect, Exit } from "effect"
@@ -31,10 +31,10 @@ import { openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clank
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
-import { createStagedMutationExecutor } from "./daemon-mutations"
+import { createStagedMutationExecutor } from "./mutation-stages"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
 import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
-import type { MutationExecution, MutationExecutor } from "./transport/operations"
+import type { MutationExecution, MutationExecutor } from "./operation-journal"
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
 import { projectResources } from "./server/project"
@@ -42,9 +42,9 @@ import { READY_AFTER_MS, SNOOZE_KEY, WAITS_ON_KEY, needsMe, parseSnooze, yourMov
 import { lastClaudeTranscriptText } from "./clanker-list"
 import type { ProjectEffect } from "./server/project"
 import type { DirectoryRow, MuxSession, MuxWindow } from "./server/resources"
-import type { HerdResult, MutationIntent } from "./transport"
+import type { HerdResult, MutationIntent } from "./mutation-intent"
 
-import { OperationJournal } from "./transport/operations"
+import { OperationJournal } from "./operation-journal"
 import { cachedRepositoryRows, daemonMultiplexer, ensurePrivateRuntimeDirectory, expandHome, forgetMissingDirectories, invalidateProjectionEnrichment, latestSnapshotRows, readCache, refreshProjectionAfterMutation, refreshProjectionSnapshot, refreshRepositoryRows, rememberDirectory, repositoryCachePath, runCommand, runtimeDir } from "./snapshot"
 import { rmSync } from "node:fs"
 const repoRoot = applicationRoot
@@ -218,9 +218,7 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
     }
     if (stage === "target.opened") {
       const location = checkpoint.location as { nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
-      // hc moves nothing itself: its focus only leaves the choice for the picker's launcher, and its current location
-      // is the Herdr app's last report, which can be stale. Skipping it would lose the choice, so hc always records it.
-      // Rex keeps no focus outside its apps, and the daemon runs in none of its terminals, so it always opens too.
+      // Rex keeps no focus outside its apps, and a mutation runs in none of its terminals, so it always opens.
       const current = multiplexer.kind === "rex" ? undefined : await multiplexer.currentLocation()
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)

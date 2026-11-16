@@ -1,6 +1,6 @@
 /**
  * Needs Me: why a Workshop waits on the operator, decided once in the daemon's snapshot so the picker's needs-me views (Alt-I, Alt-E),
- * the Herdr app's count and any later reader agree. Pure: the daemon gathers the facts (Reports, the ledger, label
+ * the picker's count and any later reader agree. Pure: the snapshot gathers the facts (Reports, the ledger, label
  * times, the clanker's last words) and this decides.
  *
  * A Workshop where a clanker is working and nothing is asked of the operator is not listed.
@@ -228,7 +228,7 @@ export interface NeedsMeEntry {
   project: string | null
   branch: string
   path: string
-  /** The multiplexer address of the clanker's pane (hc terminal id, Herdr pane id), or null when the row has none. */
+  /** The multiplexer address of the clanker's pane (the Rex block id), or null when the row has none. */
   pane: string | null
   clankerId: string | null
   /** That clanker's state, as the flat list shows it. */

@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
+import { DAEMON_INTERNAL_ENV_KEYS } from "../client-environment"
 import {
   claimScopeOf, locationScope,
   MultiplexerUnavailableError, UnsupportedMultiplexerOperation,
@@ -151,7 +152,7 @@ export const foregroundGroup = (leader: HcForeground, read: ProcRead = readProc,
 /** Identity a terminal must never take from the core's environment. `spawn` unsets whichever the caller did not set. */
 /** `hc run` copies the caller's TERM, and a daemon has none or `dumb`, which breaks prompts like starship. */
 export const HC_TERMINAL_TYPE = { TERM: "xterm-256color", COLORTERM: "truecolor" }
-export const HC_UNSET_ON_SPAWN = ["CLANKER_ID", "CLANKER_SESSION_ID", "CLANKERHOUSE_WORKSHOP_ID", "CLANKERHOUSE_PARENT_WORKSHOP_ID", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+export const HC_UNSET_ON_SPAWN = ["CLANKER_ID", "CLANKER_SESSION_ID", "CLANKERHOUSE_WORKSHOP_ID", "CLANKERHOUSE_PARENT_WORKSHOP_ID", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION", ...DAEMON_INTERNAL_ENV_KEYS]
 
 /** `env -u` is the only way to remove a variable from a terminal: hc's `env` parameter can only set them. */
 const scrubbedArgv = (argv: string[] | undefined, env: Record<string, string>) => {
@@ -161,9 +162,10 @@ const scrubbedArgv = (argv: string[] | undefined, env: Record<string, string>) =
 
 /**
  * A clean core has no Clankerhouse settings and a PATH from whenever it started; Herdr panes got both by inheritance. The
- * spawner's are handed on explicitly, without the variables that say which clanker the spawner is.
+ * spawner's are handed on explicitly, without the variables that say which clanker the spawner is or that it is the
+ * daemon's own child.
  */
-const laneEnvironment = (env: Record<string, string | undefined> = Bun.env) =>
+export const laneEnvironment = (env: Record<string, string | undefined> = Bun.env) =>
   Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => (entry[0] === "PATH" || /^CLANKERHOUSE_/.test(entry[0])) && !HC_UNSET_ON_SPAWN.includes(entry[0]) && Boolean(entry[1])))
 
 export class HcAttachError extends Error {

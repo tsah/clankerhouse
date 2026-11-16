@@ -1,5 +1,6 @@
 import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync } from "node:fs"
 import { dirname } from "node:path"
+import { clientEnvironment } from "./client-environment"
 import { binPath } from "./installation"
 import { ownedScopeCommand } from "./harness-launch"
 import { DONE_LABEL, doneHookHandled, hookEnvironment, isDone, projectName, type HookContext, type WorkshopHookEvent, type WorkshopLabels } from "./labels"
@@ -33,9 +34,8 @@ const executableHook = (workshopPath: string, commonDir: string, event: Workshop
 }
 
 const processEnvironment = (context: HookContext) => {
-  const inherited: Record<string, string | undefined> = { ...Bun.env }
   // The hook's own `clankers` calls must reach the daemon like any other client.
-  for (const key of ["CLANKERHOUSE_DAEMON_INTERNAL", "CLANKERHOUSE_PROGRESS", "CLANKERHOUSE_LEGACY_MUTATIONS"]) delete inherited[key]
+  const inherited: Record<string, string | undefined> = clientEnvironment(Bun.env)
   return { ...inherited, ...hookEnvironment(context), PATH: `${dirname(binPath("clankers"))}:${inherited.PATH ?? ""}` }
 }
 

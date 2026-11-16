@@ -78,6 +78,7 @@
       "core": true,
       "unit": [
         "src/daemon-mutations.test.ts",
+        "src/client-environment.test.ts",
         "src/worktree-delete.test.ts",
         "src/worktree-pool.test.ts",
         "src/herdr-delete-launcher.test.ts",

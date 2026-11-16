@@ -2,6 +2,7 @@
  * Harness launch commands. Each tracked harness runs under the lifecycle wrapper with its
  * clanker identity in the environment, inside its own systemd scope under the clanker budget.
  */
+import { unsetDaemonInternalArgs } from "./client-environment"
 import { binPath, libexecPath } from "./installation"
 import { launchModel, launchResourceClass, validateModelName, type LaunchSpec, type LedgerClanker, type LedgerHarness, type ResourceClass } from "./clanker-ledger"
 
@@ -30,7 +31,9 @@ export const workshopEnvironment = (workshop: WorkshopLaunchIdentity): Record<st
   CLANKERHOUSE_PARENT_WORKSHOP_ID: workshop.parentWorkshopId ?? "",
 })
 
+/** A harness is a client of the daemon, whoever launched it, so it never inherits the daemon-internal markers. */
 const trackedEnvironment = (clankerId: string, sessionId: string | null, workshop: WorkshopLaunchIdentity) => [
+  ...unsetDaemonInternalArgs(),
   ...plannotatorEnv(),
   `CLANKER_ID=${clankerId}`,
   ...Object.entries(workshopEnvironment(workshop)).map(([key, value]) => `${key}=${value}`),

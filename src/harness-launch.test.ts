@@ -124,6 +124,30 @@ describe("Workshop launch environment", () => {
       expect(workshopEnv(command(resumeLaunch(record, root)))).toEqual(["CLANKERHOUSE_WORKSHOP_ID=workshop-test", "CLANKERHOUSE_PARENT_WORKSHOP_ID="])
     }
   })
+
+  test("a harness launched by the daemon's own child never inherits the daemon-internal markers", () => {
+    const owner = Bun.env.CLANKERHOUSE_PROCESS_OWNER
+    Bun.env.CLANKERHOUSE_PROCESS_OWNER = "disabled"
+    try {
+      const daemonChild = { ...Bun.env, CLANKERHOUSE_DAEMON_INTERNAL: "1", CLANKERHOUSE_PROGRESS: "1", CLANKERHOUSE_LEGACY_MUTATIONS: "1", CLANKERHOUSE_KEEP_ME: "kept" }
+      const probe = ["sh", "-c", 'for k in CLANKERHOUSE_DAEMON_INTERNAL CLANKERHOUSE_PROGRESS CLANKERHOUSE_LEGACY_MUTATIONS CLANKERHOUSE_KEEP_ME; do printf "%s=%s\\n" "$k" "$(printenv "$k" || echo unset)"; done']
+      for (const harness of ["pi", "claude", "opencode"] as const) {
+        for (const launch of [initial(clanker(harness)), resumeLaunch(clanker(harness), root)]) {
+          const argv = command(launch)
+          // Keep the launch's own environment prefix and swap the harness for a probe of what it would inherit.
+          const prefix = argv.slice(0, argv.findIndex((part) => part.endsWith("/clankerhouse-harness-lifecycle")))
+          expect(prefix[0]).toBe("env")
+          const ran = Bun.spawnSync([...prefix, ...probe], { env: daemonChild, stdout: "pipe" })
+          expect(ran.stdout.toString().trim().split("\n")).toEqual([
+            "CLANKERHOUSE_DAEMON_INTERNAL=unset", "CLANKERHOUSE_PROGRESS=unset", "CLANKERHOUSE_LEGACY_MUTATIONS=unset", "CLANKERHOUSE_KEEP_ME=kept",
+          ])
+        }
+      }
+    } finally {
+      if (owner === undefined) delete Bun.env.CLANKERHOUSE_PROCESS_OWNER
+      else Bun.env.CLANKERHOUSE_PROCESS_OWNER = owner
+    }
+  })
 })
 
 describe("clanker process ownership", () => {

@@ -6,7 +6,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { HC_FOCUS_STALE_MS, HC_INTERRUPT_STEP_MS, HC_STARTUP_SILENCE_MS, HC_UNSET_ON_SPAWN, HcAdapter, HcAttachError, foregroundGroup, hcRequest, hcSocketPath, type HcRequest } from "./hc"
+import { HC_FOCUS_STALE_MS, HC_INTERRUPT_STEP_MS, HC_STARTUP_SILENCE_MS, HC_UNSET_ON_SPAWN, HcAdapter, HcAttachError, foregroundGroup, hcRequest, hcSocketPath, laneEnvironment, type HcRequest } from "./hc"
 import { harnessAliveIn } from "../clanker-list"
 import { hcCoreEnvironment } from "./hc-core"
 import { paneLocation, sessionLocation } from "./interface"
@@ -306,6 +306,12 @@ describe("hc spawn identity", () => {
     expect(params.argv.at(-1)).toBe("claude")
     expect(params.argv).not.toContain("CLANKER_ID")
     for (const name of HC_UNSET_ON_SPAWN.filter((candidate) => candidate !== "CLANKER_ID")) expect(params.argv).toContain(name)
+  })
+
+  test("a terminal spawned by the daemon's own child is a daemon client, not daemon-internal", () => {
+    const spawner = { PATH: "/bin", CLANKERHOUSE_HOME: "/opt/ch", CLANKERHOUSE_DAEMON_INTERNAL: "1", CLANKERHOUSE_PROGRESS: "1", CLANKERHOUSE_LEGACY_MUTATIONS: "1" }
+    expect(laneEnvironment(spawner)).toEqual({ PATH: "/bin", CLANKERHOUSE_HOME: "/opt/ch" })
+    for (const name of ["CLANKERHOUSE_DAEMON_INTERNAL", "CLANKERHOUSE_PROGRESS", "CLANKERHOUSE_LEGACY_MUTATIONS"]) expect(HC_UNSET_ON_SPAWN).toContain(name)
   })
 })
 

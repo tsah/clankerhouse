@@ -78,6 +78,14 @@ the hc lane it always performs an open.
    daemon is a detached process, and process facts come from `ps` and `lsof`. Rex runs each program there under
    login(1), which the adapter looks past.
 
+   The Rex app resolves keys with the config of the machine it runs on, even in a remote host's session, and the popup
+   then runs on that session's host. So the popup finds its launcher where it runs: link each machine's own at
+   `~/.config/rex/clankerhouse-rex`:
+
+   ```sh
+   ln -sfn /path/to/clankerhouse/bin/clankerhouse-rex ~/.config/rex/clankerhouse-rex
+   ```
+
 3. Start the daemon once (the popup also starts it on demand):
 
    ```sh

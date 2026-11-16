@@ -4,8 +4,13 @@
 --
 --   dofile("/path/to/clankerhouse/contrib/rex/clankerhouse.lua")
 --
--- then run `rex config reload`. CLANKERHOUSE_REX_LAUNCHER, in the server's environment, overrides the launcher this file
--- finds beside itself. CLANKERHOUSE_REX_KEYS=off defines the actions without binding any keys.
+-- then run `rex config reload`. Load it on every machine whose Rex server should have a picker: each server runs its own
+-- launcher, so a session on this Mac opens this Mac's picker and a session on a remote host opens that host's.
+--
+-- Keys default to Cmd+K (jump; replaces the app's Change Session), Cmd+B (repository), Cmd+I (needs me), Cmd+E (scratch)
+-- and Shift+Cmd+K (delete this session). Set a global table before the dofile to change them, `false` to leave one
+-- unbound, e.g. `clankerhouse_keys = { jump = "ctrl+alt+k", delete = false }`. CLANKERHOUSE_REX_LAUNCHER, in the
+-- server's environment, overrides the launcher this file finds beside itself.
 
 local source = debug.getinfo(1, "S").source
 local root = source:match("^@?(.*)/contrib/rex/[^/]+$")
@@ -34,12 +39,13 @@ local function open_popup(ctx, mode)
 end
 
 local actions = {
-  { name = "clankerhouse_jump", title = "Clankerhouse: Jump", key = "alt+k" },
-  { name = "clankerhouse_repo", title = "Clankerhouse: New Workshop from Repository", key = "alt+b", mode = "--repo" },
-  { name = "clankerhouse_delete", title = "Clankerhouse: Delete This Session", key = "alt+d", mode = "--delete" },
-  { name = "clankerhouse_scratch", title = "Clankerhouse: Scratch Workshop", key = "alt+n", mode = "--scratch" },
-  { name = "clankerhouse_needs_me", title = "Clankerhouse: Needs Me", key = "alt+i", mode = "--needs-me" },
+  { id = "jump", name = "clankerhouse_jump", title = "Clankerhouse: Jump", key = "cmd+k" },
+  { id = "repo", name = "clankerhouse_repo", title = "Clankerhouse: New Workshop from Repository", key = "cmd+b", mode = "--repo" },
+  { id = "delete", name = "clankerhouse_delete", title = "Clankerhouse: Delete This Session", key = "shift+cmd+k", mode = "--delete" },
+  { id = "scratch", name = "clankerhouse_scratch", title = "Clankerhouse: Scratch Workshop", key = "cmd+e", mode = "--scratch" },
+  { id = "needs_me", name = "clankerhouse_needs_me", title = "Clankerhouse: Needs Me", key = "cmd+i", mode = "--needs-me" },
 }
+local keys = type(clankerhouse_keys) == "table" and clankerhouse_keys or {}
 
 for _, action in ipairs(actions) do
   rex.action{
@@ -48,5 +54,7 @@ for _, action in ipairs(actions) do
     category = "Clankerhouse",
     run = function(ctx) open_popup(ctx, action.mode) end,
   }
-  if os.getenv("CLANKERHOUSE_REX_KEYS") ~= "off" then rex.bind(action.key, action.name) end
+  local key = keys[action.id]
+  if key == nil then key = action.key end
+  if key then rex.bind(key, action.name) end
 end

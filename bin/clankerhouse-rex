@@ -27,6 +27,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 
 export CLANKERHOUSE_MULTIPLEXER=rex
 export CLANKERHOUSE_INSTANCE=${CLANKERHOUSE_INSTANCE:-rex}
+# Without systemd (macOS) a harness cannot get a scope of its own, so it runs as the pane's child.
+command -v systemd-run >/dev/null 2>&1 || export CLANKERHOUSE_PROCESS_OWNER=${CLANKERHOUSE_PROCESS_OWNER:-disabled}
 # shellcheck source=/dev/null
 . "$CLANKERHOUSE_LIBEXEC/clankerhouse-mux"
 
@@ -62,6 +64,10 @@ user_manager() {
     [[ -z "${CLANKERHOUSE_REX_NO_SYSTEMD:-}" && "${XDG_RUNTIME_DIR:-}" == "/run/user/$(id -u)" && -S "$XDG_RUNTIME_DIR/systemd/private" ]]
 }
 
+# The command line and environment of a process, on Linux from /proc and elsewhere from ps.
+process_command() { if [[ -r /proc/$1/cmdline ]]; then tr '\0' ' ' <"/proc/$1/cmdline"; else ps -p "$1" -o command= 2>/dev/null; fi; }
+process_environment() { if [[ -r /proc/$1/environ ]]; then tr '\0' '\n' <"/proc/$1/environ"; else ps eww -p "$1" -o command= 2>/dev/null | tr ' ' '\n'; fi; }
+
 server_running() {
     [[ -S "$DAEMON_SOCKET" ]] || return 1
     "$NATIVE_BINARY" --server-health "$OWNER" >/dev/null 2>&1
@@ -74,8 +80,8 @@ stop_daemon() {
     fi
     local pid=
     [[ -r "$STATE_DIR/server.pid" ]] && pid=$(<"$STATE_DIR/server.pid")
-    if [[ "$pid" =~ ^[0-9]+$ ]] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'src/daemon.ts --server' \
-        && tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -Fqx "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR"; then
+    if [[ "$pid" =~ ^[0-9]+$ ]] && process_command "$pid" | grep -q 'src/daemon.ts --server' \
+        && process_environment "$pid" | grep -Fqx "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR"; then
         kill "$pid" 2>/dev/null || true
         for _ in {1..100}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
     fi
@@ -86,7 +92,7 @@ stop_daemon() {
 daemon_env() {
     local name
     for name in HOME USER LOGNAME SHELL PATH LANG LANGUAGE TZ TMPDIR XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME \
-        DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK REX_BIN CLANKERHOUSE_REX_SERVER CLANKERHOUSE_NOTIFY_COMMAND CLANKERHOUSE_TIMEZONE; do
+        DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK REX_BIN CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER CLANKERHOUSE_NOTIFY_COMMAND CLANKERHOUSE_TIMEZONE; do
         [[ -z "${!name:-}" ]] || printf '%s=%s\n' "$name" "${!name}"
     done
     env | grep -E '^LC_[A-Z_]+=' || true
@@ -108,7 +114,9 @@ start_daemon() {
             "--property=StandardOutput=append:$LOG_FILE" "--property=StandardError=append:$LOG_FILE" \
             "${setenv[@]}" -- "$bun_path" src/daemon.ts --server
     else
-        env -i "${environment[@]}" setsid nohup "$bun_path" src/daemon.ts --server >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
+        local -a detach=()
+        command -v setsid >/dev/null 2>&1 && detach=(setsid)
+        env -i "${environment[@]}" ${detach[@]+"${detach[@]}"} nohup "$bun_path" src/daemon.ts --server >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
         disown
     fi
 }

@@ -70,7 +70,11 @@ fn context() -> Result<Option<Context>, String> {
     } else {
         format!("-{instance}")
     };
-    let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
+    // No /proc on macOS: the home directory belongs to the same account.
+    let uid = fs::metadata("/proc/self")
+        .or_else(|_| fs::metadata(env::var("HOME").unwrap_or_default()))
+        .map_err(|e| e.to_string())?
+        .uid();
     let runtime_root = env::var("XDG_RUNTIME_DIR").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "/tmp".into());
     let state_home = env::var("XDG_STATE_HOME")
         .ok()

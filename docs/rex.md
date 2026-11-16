@@ -68,10 +68,15 @@ the hc lane it always performs an open.
    rex config check && rex config reload
    ```
 
-   This defines `clankerhouse_jump`, `_repo`, `_delete`, `_scratch` and `_needs_me`, bound to Alt-K, Alt-B, Alt-D,
-   Alt-N and Alt-I. Each opens `bin/clankerhouse-rex --popup` in a floating layer over the focused pane; the layer closes
-   when the picker exits. `CLANKERHOUSE_REX_KEYS=off` in the server's environment defines the actions without binding
-   keys, and `CLANKERHOUSE_REX_LAUNCHER` names another launcher.
+   This defines `clankerhouse_jump`, `_repo`, `_delete`, `_scratch` and `_needs_me`, bound to Cmd+K (replacing the
+   app's Change Session), Cmd+B, Shift+Cmd+K, Cmd+E and Cmd+I; a `clankerhouse_keys` table set before the `dofile`
+   changes them. Load it on every machine whose Rex server should have a picker, the Mac included: each server runs its
+   own launcher, so a local session opens the local picker and a remote host's session opens that host's. Each opens `bin/clankerhouse-rex --popup` in a floating layer over the focused pane; the layer closes
+   when the picker exits. `CLANKERHOUSE_REX_LAUNCHER` names another launcher.
+
+   On macOS, without systemd or /proc, harnesses run as the pane's child (`CLANKERHOUSE_PROCESS_OWNER=disabled`), the
+   daemon is a detached process, and process facts come from `ps` and `lsof`. Rex runs each program there under
+   login(1), which the adapter looks past.
 
 3. Start the daemon once (the popup also starts it on demand):
 

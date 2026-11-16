@@ -4,12 +4,12 @@
  * unless REX_REQUIRED is set.
  */
 import { afterAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { rexClaudeSettings } from "../harness-launch"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
-import { REX_POPUP_LABEL_PREFIX, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
+import { psProcessGroups, REX_POPUP_LABEL_PREFIX, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
 const scratch = () => mkdtempSync(join(tmpdir(), "ch-rex-test-"))
 const observeScript = join(import.meta.dir, "..", "..", "share", "rex", "observe.lua")
@@ -199,6 +199,12 @@ describe("Rex adapter, scripted", () => {
     expect(rexChangeKind("not json")).toBeUndefined()
   })
 
+  test("groups ps output by process group, as macOS observes foreground members", () => {
+    const groups = psProcessGroups("  100   100 /bin/bash /opt/ch/bin/clankerhouse-harness-lifecycle -- claude\n  101   100 claude --session-id s\n  200   200 -zsh\nnoise\n")
+    expect(groups.get(100)!.map((member) => member.name)).toEqual(["bash", "claude"])
+    expect(groups.get(200)!.map((member) => member.argv)).toEqual([["-zsh"]])
+  })
+
   test("labels, launch commands and the lane's Claude hooks", () => {
     expect(rexLabel("  a\nb  ")).toBe("a b")
     expect(rexLaunchCommand(["x"], { A: "1" })).toEqual(["env", ...REX_UNSET_ON_SPAWN.flatMap((name) => ["-u", name]), "A=1", "x"])
@@ -235,7 +241,7 @@ describe.skipIf(!started)("Rex adapter against a real server", () => {
     const session = (await adapter.observe()).sessions.find((candidate) => candidate.id === created.nativeSessionId)!
     expect(session).toMatchObject({ nativeName: "repo@main", workshopId: "w-1" })
     expect(session.windows.map((window) => window.nativeName)).toEqual(["claude", "tests"])
-    expect(session.windows[0]!.panes[0]).toMatchObject({ id: created.nativePaneId, harness: "claude", command: "sleep", currentPath: "/tmp", agentStatus: { agent: "claude", status: "blocked", blockedKind: "permission" } })
+    expect(session.windows[0]!.panes[0]).toMatchObject({ id: created.nativePaneId, harness: "claude", command: "sleep", currentPath: realpathSync("/tmp"), agentStatus: { agent: "claude", status: "blocked", blockedKind: "permission" } })
     expect(session.windows[1]!.panes[0]!.id).toBe(second.nativePaneId)
 
     await adapter.rename(windowLocation(created.nativeSessionId, second.nativeWindowId), "renamed")

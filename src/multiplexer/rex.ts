@@ -175,6 +175,53 @@ const argvOf = (pid: number | undefined) => {
   try { return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean) } catch { return undefined }
 }
 
+interface GroupMember { pid: number; name?: string; argv?: string[]; cwd?: string }
+
+/** Without /proc (macOS), one `ps` per observation names every process group's members. */
+export const psProcessGroups = (output: string) => {
+  const groups = new Map<number, GroupMember[]>()
+  for (const line of output.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+    if (!match) continue
+    const argv = match[3]!.trim().split(/\s+/)
+    const member = { pid: Number(match[1]), name: argv[0]!.split("/").pop(), argv }
+    groups.set(Number(match[2]), [...(groups.get(Number(match[2])) ?? []), member])
+  }
+  return groups
+}
+
+const readProcessGroups = () => {
+  if (process.platform === "linux") return undefined
+  try { return psProcessGroups(Bun.spawnSync(["ps", "-axo", "pid=,pgid=,command="], { stdout: "pipe", stderr: "ignore" }).stdout.toString()) } catch { return undefined }
+}
+
+/** `lsof -Fn` output for `-d cwd`: each process's working directory. */
+export const lsofWorkingDirectories = (output: string) => {
+  const cwds = new Map<number, string>()
+  let pid: number | undefined
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1))
+    else if (line.startsWith("n") && pid !== undefined) cwds.set(pid, line.slice(1))
+  }
+  return cwds
+}
+
+/** Without /proc, one `lsof` for every pid that needs one. */
+const readWorkingDirectories = (pids: number[]) => {
+  if (process.platform === "linux" || !pids.length) return new Map<number, string>()
+  try { return lsofWorkingDirectories(Bun.spawnSync(["lsof", "-a", "-d", "cwd", "-Fn", "-p", pids.join(",")], { stdout: "pipe", stderr: "ignore" }).stdout.toString()) } catch { return new Map<number, string>() }
+}
+
+/** macOS Rex starts each program under login(1), which leads the group without being what runs there. */
+const LAUNCH_WRAPPERS = new Set(["login"])
+
+/** The foreground group: Rex names its leader, which for a harness is the lifecycle wrapper; the harness is another member. */
+const foregroundMembers = (leader: GroupMember, groups: Map<number, GroupMember[]> | undefined, cwds?: Map<number, string>): GroupMember[] => {
+  if (!groups) return foregroundGroup(leader)
+  const members = [leader, ...(groups.get(leader.pid) ?? []).filter((member) => member.pid !== leader.pid)]
+  return members.map((member) => ({ ...member, cwd: member.cwd || cwds?.get(member.pid) }))
+}
+
 const pickClaims = (values: Record<string, string>, scope: ClaimScope) =>
   Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith("_") && !key.startsWith(SHOWN_LABEL_PREFIX) && claimScopeOf(key as ClaimKey) === scope)) as ClaimMap
 
@@ -260,6 +307,11 @@ export class RexAdapter implements Multiplexer {
   /** `rex do` already returns process facts for every block in the one call, so the `processInfo` options change nothing. */
   async observe(): Promise<MultiplexerSnapshot> {
     const observed = await this.observation()
+    const groups = readProcessGroups()
+    const cwds = groups ? readWorkingDirectories(list<RexObservedSession>(observed.sessions).flatMap((session) => list<RexObservedWindow>(session.windows).flatMap((window) => list<RexObservedBlock>(window.blocks).flatMap((block) => {
+      const leader = block.process?.foreground?.pid
+      return leader ? (groups.get(leader) ?? []).map((member) => member.pid) : []
+    })))) : undefined
     const instanceId = `rex:${observed.host_id}`
     const now = this.now()
     const attachedSessions = new Set(list<RexObservedClient>(observed.clients).filter((client) => client.kind === "app" || client.kind === "ios").flatMap((client) => list<string>(client.session_ids)))
@@ -277,7 +329,7 @@ export class RexAdapter implements Multiplexer {
         for (const block of list<RexObservedBlock>(window.blocks)) {
           live.add(block.block_id)
           if (block.creator !== REX_TERMINAL_CREATOR || block.label.startsWith(REX_POPUP_LABEL_PREFIX)) continue
-          panes.push(this.paneOf(block, panes.length, window, observed.instance_id, now))
+          panes.push(this.paneOf(block, panes.length, window, observed.instance_id, now, groups, cwds))
         }
         windows.push({
           id: window.window_id,
@@ -314,13 +366,15 @@ export class RexAdapter implements Multiplexer {
     return { kind: "rex", instanceId, sessions }
   }
 
-  private paneOf(block: RexObservedBlock, index: number, window: RexObservedWindow, serverInstance: string, now: number): MultiplexerPane {
+  private paneOf(block: RexObservedBlock, index: number, window: RexObservedWindow, serverInstance: string, now: number, groups: Map<number, GroupMember[]> | undefined, cwds: Map<number, string> | undefined): MultiplexerPane {
     const values = this.claims.all(block.block_id)
     const claims = pickClaims(values, "pane")
     const records = list<RexStatusRecord>(block.program_status?.records)
     if (records.length && !values[REPORTED_KEY]) this.claims.write(block.block_id, REPORTED_KEY, String(now))
     const child = block.process?.child ?? undefined
     const foreground = block.process?.foreground ?? undefined
+    const members = foreground ? foregroundMembers({ pid: foreground.pid, name: foreground.name, argv: argvOf(foreground.pid) ?? (foreground.argv0 ? [foreground.argv0] : undefined), cwd: foreground.cwd }, groups, cwds) : []
+    const running = members.find((member) => !LAUNCH_WRAPPERS.has(member.name ?? "")) ?? members[0]
     const lead = leadRecord(records)
     const reportedAt = lead?.updated_at ? Date.parse(lead.updated_at) : undefined
     const spawnedAt = Number(values[SPAWNED_KEY] ?? 0)
@@ -331,9 +385,9 @@ export class RexAdapter implements Multiplexer {
       id: block.block_id,
       index: String(index),
       pid: child?.pid ? String(child.pid) : "",
-      command: (foreground?.name ?? child?.name ?? "").toLowerCase(),
+      command: (running?.name ?? child?.name ?? "").toLowerCase(),
       title: block.title ?? "",
-      currentPath: foreground?.cwd || child?.cwd || "",
+      currentPath: running?.cwd || foreground?.cwd || child?.cwd || "",
       // Rex reports no output activity; the last status report is the nearest fact.
       activity: Math.floor((reportedAt ?? spawnedAt) / 1000),
       active: block.block_id === window.focused_block_id,
@@ -346,8 +400,7 @@ export class RexAdapter implements Multiplexer {
       processInfo: {
         shellPid: child?.pid,
         foregroundProcessGroupId: foreground?.pid,
-        // Rex names the group's leader, the lifecycle wrapper for a harness; the harness is another member of its group.
-        foregroundProcesses: foreground ? foregroundGroup({ pid: foreground.pid, name: foreground.name, argv: argvOf(foreground.pid) ?? (foreground.argv0 ? [foreground.argv0] : undefined), cwd: foreground.cwd }) : [],
+        foregroundProcesses: members,
       },
       agentStatus: this.agentStatusOf(lead, harness, Boolean(values[REPORTED_KEY]) || records.length > 0, spawnedAt, now),
       ...(harnessGone ? { harnessGone: true } : {}),

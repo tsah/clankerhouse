@@ -423,6 +423,8 @@ struct App {
     mutation: Option<PendingMutation>,
     delete_only: bool,
     animation_frame: usize,
+    /// The flat list's first visible row (shown at the bottom); None until the first paint puts the selection there.
+    list_start: Option<usize>,
     mode: Mode,
     repositories: Vec<RepositoryRow>,
     branches: Vec<BranchRow>,
@@ -1261,6 +1263,7 @@ impl App {
             mutation: None,
             delete_only: false,
             animation_frame: 0,
+            list_start: None,
             mode: Mode::Jump,
             repositories: Vec::new(),
             branches: Vec::new(),
@@ -1323,6 +1326,7 @@ impl App {
             mutation: None,
             delete_only: false,
             animation_frame: 0,
+            list_start: None,
             mode: Mode::Jump,
             repositories: Vec::new(),
             branches: Vec::new(),
@@ -2861,10 +2865,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
     let list_area = areas[1];
     let height = list_area.height.saturating_sub(2) as usize;
-    let start = app
-        .selected
-        .saturating_sub(height / 2)
-        .min(app.rows.len().saturating_sub(height));
+    // As in fzf: the picker opens with the selection on the row nearest the prompt and scrolls only when it leaves view.
+    let mut start = app.list_start.unwrap_or(app.selected);
+    if app.selected < start {
+        start = app.selected;
+    } else if height > 0 && app.selected >= start + height {
+        start = app.selected + 1 - height;
+    }
+    let start = start.min(app.rows.len().saturating_sub(height));
+    app.list_start = Some(start);
     let end = (start + height).min(app.rows.len());
     let now = std::time::UNIX_EPOCH.elapsed().map_or(0, |elapsed| elapsed.as_secs());
     let items = app.rows[start..end]

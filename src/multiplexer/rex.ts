@@ -12,6 +12,7 @@
  */
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { DAEMON_INTERNAL_ENV_KEYS } from "../client-environment"
 import { applicationRoot } from "../installation"
 import { foregroundGroup, type GroupMember } from "./process-group"
 import { runtimeDirFor, stateDirFor } from "../paths"
@@ -54,6 +55,8 @@ const SHOWN_LABEL_PREFIX = "lbl_"
 
 /** Identity a terminal must never take from the spawner's environment. `spawn` unsets whichever the caller did not set. */
 export const REX_UNSET_ON_SPAWN = [
+  // A command's own markers (src/client-environment.ts) never reach a terminal it starts.
+  ...DAEMON_INTERNAL_ENV_KEYS,
   "CLANKER_ID", "CLANKER_SESSION_ID", "CLANKERHOUSE_WORKSHOP_ID", "CLANKERHOUSE_PARENT_WORKSHOP_ID", "CLANKERHOUSE_CURRENT_SESSION", "CLANKERHOUSE_MODE", "CLANKERHOUSE_REX_FOCUS", "CLANKERHOUSE_REX_CLIENT",
   "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE",
   "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION",

@@ -134,6 +134,8 @@ describe("Rex adapter, scripted", () => {
     expect(command).not.toContain("CLANKER_ID=parent")
     // The spawner's pane address is removed; the identity the request sets is not.
     expect(command.join(" ")).toContain("-u HERDR_PANE_ID")
+    // A mutation's own marker never reaches the terminal it starts, even when the spawner had it.
+    expect(command.join(" ")).toContain("-u CLANKERHOUSE_DAEMON_INTERNAL")
     expect(command.join(" ")).not.toContain("-u CLANKER_ID")
     expect(claims.all("block:new")).toEqual({ _epoch: "inst-2", _spawned: "42" })
 

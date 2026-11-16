@@ -2,11 +2,17 @@
 
 set -euo pipefail
 
+# Portable stand-ins for GNU-only coreutils flags (realpath, sha256sum, mv), so the installer runs on macOS too.
+absolute_path() { python3 -c 'import os, sys; print(os.path.realpath(os.path.expanduser(sys.argv[1])))' "$1"; }
+existing_path() { python3 -c 'import os, sys; p = os.path.realpath(sys.argv[1]); os.stat(p); print(p)' "$1"; }
+sha256_text() { python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'; }
+# Rename over DESTINATION itself, even when it is a symlink to a directory.
+replace_path() { python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"; }
+
 source_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 prefix=${CLANKERHOUSE_PREFIX:-${PREFIX:-$HOME/.local}}
 with_systemd=false
 with_integrations=false
-with_herdr=false
 dry_run=false
 force=false
 no_daemon_handoff=false
@@ -16,14 +22,13 @@ preflight_hook=
 activation_hook=
 
 usage() {
-    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--herdr] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
+    echo "Usage: scripts/install [--prefix PATH] [--systemd] [--integrations] [--runtime-dir PATH --herdr-socket PATH | --no-daemon-handoff] [--preflight-hook PATH] [--activation-hook PATH] [--dry-run] [--force]"
 }
 while (($#)); do
     case "$1" in
         --prefix) prefix=${2:?}; shift 2 ;;
         --systemd) with_systemd=true; shift ;;
         --integrations) with_integrations=true; shift ;;
-        --herdr) with_herdr=true; shift ;;
         --runtime-dir) runtime_dir=${2:?}; shift 2 ;;
         --herdr-socket) herdr_socket=${2:?}; shift 2 ;;
         --no-daemon-handoff) no_daemon_handoff=true; shift ;;
@@ -36,12 +41,12 @@ while (($#)); do
     esac
 done
 [[ "$prefix" != *$'\n'* ]] || { echo "Install prefix may not contain a newline" >&2; exit 2; }
-prefix=$(realpath -m -- "$prefix")
+prefix=$(absolute_path "$prefix")
 if [[ -n "$runtime_dir" || -n "$herdr_socket" ]]; then
     [[ -n "$runtime_dir" && -n "$herdr_socket" ]] || { echo "--runtime-dir and --herdr-socket must be supplied together" >&2; exit 2; }
     [[ "$no_daemon_handoff" == false ]] || { echo "Cannot combine an isolated daemon selection with --no-daemon-handoff" >&2; exit 2; }
-    runtime_dir=$(realpath -m -- "$runtime_dir")
-    herdr_socket=$(realpath -m -- "$herdr_socket")
+    runtime_dir=$(absolute_path "$runtime_dir")
+    herdr_socket=$(absolute_path "$herdr_socket")
 fi
 for hook in "$preflight_hook" "$activation_hook"; do
     [[ -z "$hook" || -x "$hook" ]] || { echo "Install fault hook is not executable: $hook" >&2; exit 2; }
@@ -52,7 +57,7 @@ active="$lib_dir/clankerhouse"
 versions="$lib_dir/clankerhouse-versions"
 bin_dir="$prefix/bin"
 state_root=${XDG_STATE_HOME:-$HOME/.local/state}/clankerhouse/installations
-manifest="$state_root/$(printf '%s' "$prefix" | sha256sum | cut -d' ' -f1).files"
+manifest="$state_root/$(printf '%s' "$prefix" | sha256_text).files"
 daemon_hook="$source_root/scripts/install-daemon-hook"
 stage=
 active_tmp=
@@ -83,7 +88,7 @@ install_symlink() {
     mkdir -p "$(dirname "$destination")"
     temporary="$(dirname "$destination")/.$(basename "$destination").next.$$"
     ln -s "$source" "$temporary"
-    mv -Tf "$temporary" "$destination"
+    replace_path "$temporary" "$destination"
 }
 
 refuse_unmanaged "$active" "installation"
@@ -169,7 +174,7 @@ versions={shlex.quote(versions)}
 target=$(readlink -f -- "$active") || {{ echo "Clankerhouse has no valid active installation" >&2; exit 1; }}
 case "$target/" in
   "$versions/"*) [ -f "$target/.clankerhouse-install" ] || {{ echo "Refusing unvalidated Clankerhouse target: $target" >&2; exit 1; }} ;;
-  "$active/") [ -f "$target/src/daemon.ts" ] || [ -f "$target/src/main.tsx" ] || {{ echo "Refusing invalid legacy Clankerhouse target: $target" >&2; exit 1; }} ;;
+  "$active/") [ -f "$target/src/runner.ts" ] || {{ echo "Refusing invalid legacy Clankerhouse target: $target" >&2; exit 1; }} ;;
   *) echo "Refusing unsafe Clankerhouse active target: $target" >&2; exit 1 ;;
 esac
 export CLANKERHOUSE_HOME="$target"
@@ -180,8 +185,19 @@ exec "$target/bin/{name}" "$@"
 Path(path).write_text(text, encoding="utf-8")
 PY
     chmod 755 "$temporary"
-    mv -Tf "$temporary" "$destination"
+    replace_path "$temporary" "$destination"
 done
+
+# Commands an earlier version installed and this one no longer ships (such as the retired Herdr and hc launchers).
+retired_commands=()
+if [[ -f "$manifest" ]]; then
+    while IFS= read -r path; do
+        [[ "$path" == "$bin_dir/"* && "$(dirname "$path")" == "$bin_dir" ]] || continue
+        [[ -x "$final/bin/$(basename "$path")" ]] && continue
+        rm -f -- "$path"
+        retired_commands+=("$path")
+    done < "$manifest"
+fi
 
 if [[ "$with_integrations" == true ]]; then
     declare -a links=(
@@ -202,22 +218,6 @@ if [[ "$with_integrations" == true ]]; then
         destination="$skill_root/clanker-coordination"
         install_symlink "$active/integrations/skills/clanker-coordination" "$destination"
     done
-    # OpenCode state comes from Herdr's pane-local OpenCode reporter (ADR-0006), which Herdr
-    # owns and keeps current; without it Herdr falls back to screen detection.
-    if command -v herdr >/dev/null 2>&1 && { command -v opencode >/dev/null 2>&1 || command -v opencode2 >/dev/null 2>&1; }; then
-        herdr integration install opencode >/dev/null \
-            || echo "Warning: herdr OpenCode integration install failed; OpenCode state falls back to Herdr screen detection" >&2
-    fi
-fi
-
-if [[ "$with_herdr" == true ]]; then
-    if command -v herdr >/dev/null 2>&1; then
-        # Run the staged installer ($final); the launcher path is the stable bin wrapper.
-        CLANKERHOUSE_HERDR_LAUNCHER="$bin_dir/clankerhouse-herdr" "$final/bin/clankerhouse-install-herdr" \
-            || echo "Warning: herdr keybinding install failed; core install continues" >&2
-    else
-        echo "Skipping --herdr: herdr binary not found on PATH" >&2
-    fi
 fi
 
 if [[ "$with_systemd" == true ]]; then
@@ -233,14 +233,14 @@ text = Path(source).read_text().replace("@CLANKERHOUSE_HOME@", active).replace("
 Path(destination).write_text(text)
 PY
         chmod 600 "$temporary"
-        mv -Tf "$temporary" "$destination"
+        replace_path "$temporary" "$destination"
     done
 fi
 
 previous_target=
 legacy_target=
 if [[ -L "$active" ]]; then
-    previous_target=$(realpath -e -- "$active")
+    previous_target=$(existing_path "$active")
     case "$previous_target/" in "$versions/"*) ;; *) echo "Refusing active target outside the managed versions directory: $previous_target" >&2; exit 1;; esac
     [[ -f "$previous_target/.clankerhouse-install" ]] || { echo "Refusing unvalidated active target: $previous_target" >&2; exit 1; }
 elif [[ -d "$active" ]]; then
@@ -273,7 +273,7 @@ PY
     active_tmp="$lib_dir/.clankerhouse-active.next.$$"
     rm -f -- "$active_tmp"
     ln -s "$relative" "$active_tmp"
-    mv -Tf "$active_tmp" "$active"
+    replace_path "$active_tmp" "$active"
     active_tmp=
 }
 switch_active "$final"
@@ -328,7 +328,7 @@ fi
 
 : > "$manifest_next"
 if [[ -f "$manifest" ]]; then
-    grep -Fxv -f <(for unit in "${retired_units[@]}"; do printf '%s\n' "$retired_unit_dir/$unit"; done) -- "$manifest" >> "$manifest_next" || true
+    grep -Fxv -f <(for unit in "${retired_units[@]}"; do printf '%s\n' "$retired_unit_dir/$unit"; done; for path in ${retired_commands[@]+"${retired_commands[@]}"}; do printf '%s\n' "$path"; done) -- "$manifest" >> "$manifest_next" || true
 fi
 record "$active"
 [[ -z "$previous_target" ]] || record "$previous_target"
@@ -348,4 +348,4 @@ mv "$manifest_next" "$manifest"
 trap - EXIT
 printf 'Installed Clankerhouse version %s\n' "$version_id"
 printf 'Active target: %s -> %s\n' "$active" "$final"
-printf 'Add %s to PATH and run clankerhouse-install-herdr (or pass --herdr) for Herdr key bindings.\n' "$bin_dir"
+printf 'Add %s to PATH; docs/rex.md sets up the Rex keys and the runner.\n' "$bin_dir"

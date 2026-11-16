@@ -1444,9 +1444,12 @@ impl App {
             return;
         }
         self.tab = next as usize;
-        self.selected = 0;
-        self.show_tab(true);
-        self.selected = self.rows.len().saturating_sub(1);
+        // The new tab opens like the picker does: on the current Workshop when this tab has it, otherwise on the row
+        // nearest the prompt, scrolled from there.
+        self.sessions = self.tab_sessions();
+        self.initialize_expansion();
+        self.rebuild(None);
+        self.list_start = None;
     }
 
     /// How to reach the `clankers` that owns the selected row: its host's ssh arguments, empty for this machine.
@@ -1956,6 +1959,7 @@ impl App {
         self.error.clear();
         self.clear_action_mode();
         self.rebuild(selected.as_deref());
+        self.list_start = None;
         if view.waiting() {
             self.selected = 0;
         }
@@ -6183,6 +6187,8 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, 2);
         assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.selected, 0, "a tab without the current Workshop opens on the row nearest the prompt, not the top one");
+        assert_eq!(app.list_start, None, "and scrolls from there");
         assert_eq!(app.selected_host_ssh(), vec!["tsah@puffin".to_string()]);
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));

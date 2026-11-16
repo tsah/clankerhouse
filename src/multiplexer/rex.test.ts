@@ -168,6 +168,17 @@ describe("Rex adapter, scripted", () => {
     expect(existsSync(join(claims.root, "session:s1"))).toBe(false)
   })
 
+  test("a focus no app will show says why", async () => {
+    const run: RexRun = async (args, options) => {
+      const method = args[2]
+      if (method === "client.list") return { exitCode: 0, stdout: JSON.stringify({ clients: [{ client_id: "client:app", info: { kind: "app" } }] }), stderr: "" }
+      if (method === "client.perform") return { exitCode: 1, stdout: "", stderr: 'Error: stream response "control-1" failed: Rex.app is not accepting actions. Turn on Remote Control in its Settings under Rex Server. (status=403 code=refused)' }
+      return { exitCode: 0, stdout: "{}", stderr: "" }
+    }
+    const adapter = new RexAdapter({ run, claims: new RexClaimStore(scratch()), observeScript, env: {} })
+    await expect(adapter.focus(paneLocation("session:s1", "window:w1", "block:b1"))).rejects.toThrow("Turn on Remote Control in its Settings under Rex Server.")
+  })
+
   test("prompts with a paste and a separate Enter, and interrupts by status", async () => {
     const claims = new RexClaimStore(scratch())
     let state = "working"

@@ -560,8 +560,14 @@ export class RexAdapter implements Multiplexer {
     if (location.nativePaneId) await this.call("session.focus_block", { session_id: session, block_id: location.nativePaneId })
     else if (location.nativeWindowId) await this.call("session.focus_window", { session_id: session, window_id: location.nativeWindowId })
     const args = { session_id: session, ...(location.nativeWindowId ? { window_id: location.nativeWindowId } : {}) }
-    await Promise.all((await this.appClients()).map((client) =>
-      this.call("client.perform", { client_id: client, action: "session.select", args, origin: "api", timeout_ms: REX_CLIENT_TIMEOUT_MS }, REX_CLIENT_TIMEOUT_MS + 2_000).catch(() => undefined)))
+    const outcomes = await Promise.all((await this.appClients()).map((client) =>
+      this.call("client.perform", { client_id: client, action: "session.select", args, origin: "api", timeout_ms: REX_CLIENT_TIMEOUT_MS }, REX_CLIENT_TIMEOUT_MS + 2_000).then(() => undefined, (error: unknown) => error)))
+    // The session is focused either way; when no app would show it, say why rather than leave the operator where they were.
+    const refusals = outcomes.filter((outcome): outcome is Error => outcome instanceof Error)
+    if (outcomes.length && refusals.length === outcomes.length) {
+      const refused = refusals.find((error) => error instanceof RexRequestError && error.code === "refused")
+      throw new Error(refused ? `Rex focused the session, but the app would not switch to it: ${/Turn on Remote Control[^(]*/.exec(refused.message)?.[0]?.trim() ?? refused.message}` : `Rex focused the session, but no app switched to it: ${refusals[0]!.message}`)
+    }
   }
 
   /** Paste, then Enter as a key of its own, as a person would. */

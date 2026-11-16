@@ -36,7 +36,7 @@ interface PersistedReport {
 }
 
 // Pane address: the Multiplexer pane that hosts this process.
-const pane = (process.env.CLANKERHOUSE_MULTIPLEXER === "hc" ? process.env.HC_TERMINAL_ID : process.env.HERDR_PANE_ID)?.trim() || "";
+const pane = (process.env.CLANKERHOUSE_MULTIPLEXER === "hc" ? process.env.HC_TERMINAL_ID : process.env.CLANKERHOUSE_MULTIPLEXER === "rex" ? process.env.REX_BLOCK : process.env.HERDR_PANE_ID)?.trim() || "";
 const clankersCli = process.env.CLANKERHOUSE_CLANKERS?.trim() || "clankers";
 const sessionless = process.argv.includes("--no-session");
 const requestedInstance = process.env.CLANKERHOUSE_INSTANCE?.trim() || "";

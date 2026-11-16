@@ -6,10 +6,14 @@ import { HcAdapter } from "./hc"
 import { HerdrAdapter } from "./herdr"
 import type { Multiplexer } from "./interface"
 import { ManagedMultiplexer } from "./managed"
+import { RexAdapter } from "./rex"
 
-// `CLANKERHOUSE_MULTIPLEXER=hc` selects the herdr-core lane; Herdr stays the default.
-export const createMultiplexer = (options: { socketPath?: string } = {}): Multiplexer =>
-  Bun.env.CLANKERHOUSE_MULTIPLEXER === "hc" ? new HcAdapter({ socketPath: options.socketPath }) : new HerdrAdapter({ socketPath: options.socketPath })
+// `CLANKERHOUSE_MULTIPLEXER=hc` selects the herdr-core lane and `rex` the Rex lane; Herdr stays the default.
+export const createMultiplexer = (options: { socketPath?: string } = {}): Multiplexer => {
+  if (Bun.env.CLANKERHOUSE_MULTIPLEXER === "hc") return new HcAdapter({ socketPath: options.socketPath })
+  if (Bun.env.CLANKERHOUSE_MULTIPLEXER === "rex") return new RexAdapter()
+  return new HerdrAdapter({ socketPath: options.socketPath })
+}
 
 export const openManagedMultiplexer = (options: { registryPath?: string; socketPath?: string } = {}) =>
   new ManagedMultiplexer(createMultiplexer({ socketPath: options.socketPath }), { registryPath: options.registryPath })

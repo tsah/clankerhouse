@@ -530,6 +530,23 @@
         "In the Herdr app with two machines added, focus a terminal on each and confirm the top bar's machine name and counts change with it, and that Alt-K opens that machine's list",
         "Press Alt-M, choose the other machine while focus stays put, and confirm Alt-K and the counts go to it; confirm an unreachable machine is listed as such and cannot be chosen"
       ]
+    },
+    {
+      "id": "rex-lane",
+      "title": "Rex lane behind CLANKERHOUSE_MULTIPLEXER=rex: Rex sessions, tabs and panes as Workshops, a file Claim store shared with the Rust hook, OSC 7501 status, a native event stream, and the picker in a Rex popup",
+      "core": false,
+      "unit": [
+        "src/multiplexer/rex.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-rex"
+      ],
+      "manual": [
+        "With the Rex app connected to the server's machine and contrib/rex/clankerhouse.lua loaded from its init.lua, press Alt-K in any pane; confirm the picker opens floating over it and Escape closes it",
+        "Choose a Workshop in another session; confirm the app switches to that session and focuses the clanker's tab (with Remote Control on), or that the session's focus moved (with it off)",
+        "Spawn a Claude Workshop with Alt-B; confirm its state follows the turn (working, blocked on a permission prompt, done) and that clankers send --wait returns its reply",
+        "Restart the Rex server; confirm the Workshop's tabs come back as shells, the clanker is listed as interrupted, and clankers resume brings it back"
+      ]
     }
   ]
 }

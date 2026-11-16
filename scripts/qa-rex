@@ -1,0 +1,111 @@
+#!/bin/bash
+# The Rex lane end to end, on a private Rex server under scratch XDG directories: launcher, daemon, per-terminal identity,
+# Claims through the CLI and the Rust hook, the daemon's projection, and the Alt-K popup from the lane's Rex config.
+# Needs rex; skips without it unless REX_REQUIRED is set. Never touches the account's own Rex server or Clankerhouse state.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+rex=${REX_BIN:-$(command -v rex || true)}
+if [[ -z "$rex" ]]; then
+    [[ -z "${REX_REQUIRED:-}" ]] || { echo "REX_REQUIRED is set but rex is not installed" >&2; exit 1; }
+    echo "skip: rex is not installed"; exit 0
+fi
+
+root=$(mktemp -d /tmp/qa-rex.XXXXXX)
+launcher="$repo/bin/clankerhouse-rex"
+clankers="$repo/bin/clankers"
+hook="$repo/native-client/target/release/clankerhouse-hook"
+mkdir -p -m 700 "$root/runtime" "$root/state" "$root/config/rex" "$root/work"
+export XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config"
+export CLANKERHOUSE_MULTIPLEXER=rex CLANKERHOUSE_INSTANCE=qa-rex-$$ CLANKERHOUSE_REX_SERVER="unix://$root/rex.sock" CLANKERHOUSE_PROCESS_OWNER=disabled
+runtime="$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE"
+R() { "$rex" --autostart=false --server "$CLANKERHOUSE_REX_SERVER" "$@"; }
+failures=0
+cleanup() {
+    "$launcher" --stop-server >/dev/null 2>&1 || true
+    R server stop >/dev/null 2>&1 || true
+    rm -rf -- "$root"
+}
+trap cleanup EXIT INT TERM
+
+ok() { printf '  ok: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() { local what=$1; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
+contains() { [[ "$1" == *"$2"* ]]; }
+field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
+screen_has() { [[ "$(R capture -s "$1" -b "$2" --unwrap 2>/dev/null)" == *"$3"* ]]; }
+
+cat >"$root/config/rex/init.lua" <<EOF
+dofile("$repo/contrib/rex/clankerhouse.lua")
+EOF
+# The popup runs in a terminal of this server, so the server hands it the scratch lane.
+server_env=()
+for name in XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME CLANKERHOUSE_INSTANCE CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER PATH; do server_env+=(--env "$name=${!name}"); done
+R server start --state-dir "$root/rex-state" --config "$root/config/rex/init.lua" "${server_env[@]}" >/dev/null
+
+# Everything a clanker's shell would hand a launcher; none of it may reach the daemon or a new terminal.
+export CLANKER_ID=outsider-clanker CLANKERHOUSE_WORKSHOP_ID=outsider-workshop HERDR_PANE_ID=w9:p9 HC_TERMINAL_ID=t9 CLAUDE_CODE_CHILD_SESSION=1
+
+echo "== launcher starts a healthy daemon on the lane's own server"
+"$launcher" --ensure-server
+health=$("$launcher" --health)
+check "Rex answers" contains "$health" '"rex":"reachable"'
+check "daemon reports healthy" contains "$health" '"daemon":"healthy"'
+check "instance id names the server's host" contains "$("$clankers" mux instance-id)" "rex:$(R api call server.status '{}' | field host_id)"
+daemon_pid=$(<"$runtime/server.pid")
+check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|HC_TERMINAL_ID|CLAUDE_CODE_CHILD_SESSION)='"
+
+echo "== identity is per terminal"
+script='echo "id=${CLANKER_ID:-none} herdr=${HERDR_PANE_ID:-none} hc=${HC_TERMINAL_ID:-none} lane=${CLANKERHOUSE_MULTIPLEXER:-none} pane=${REX_BLOCK:-none}"; exec sleep 300'
+first=$("$clankers" mux spawn --new-session qa-one --cwd "$root/work" --env CLANKER_ID=clanker-a -- sh -c "$script")
+second=$("$clankers" mux spawn --new-session qa-two --cwd "$root/work" -- sh -c "$script")
+s1=$(field nativeSessionId <<<"$first"); p1=$(field nativePaneId <<<"$first")
+s2=$(field nativeSessionId <<<"$second"); p2=$(field nativePaneId <<<"$second")
+check "first terminal sees only its own identity and its pane" wait_for 30 screen_has "$s1" "$p1" "id=clanker-a herdr=none hc=none lane=rex pane=$p1"
+check "second terminal sees none" wait_for 30 screen_has "$s2" "$p2" "id=none herdr=none hc=none lane=rex"
+
+echo "== claims"
+"$clankers" mux claim --pane "$p1" clankerId clanker-a
+"$clankers" mux claim --session "$s1" workshopId "workshop-$(printf 'x%.0s' {1..200})"
+check "pane claim reads back" test "$("$clankers" mux read-claim --pane "$p1" clankerId)" = clanker-a
+check "a claim longer than a Rex label survives" test "$("$clankers" mux read-claim --session "$s1" workshopId | wc -c)" -gt 200
+check "pane-path resolves" test "$("$clankers" mux pane-path --pane "$p1")" = "$root/work"
+check "clanker-ids lists the session's clanker" test "$("$clankers" mux clanker-ids --session "$s1")" = clanker-a
+window=$("$clankers" mux spawn --session "$s1" --name tests --cwd "$root/work" -- sleep 300)
+check "a window joins its session" test "$(field nativeSessionId <<<"$window")" = "$s1"
+
+echo "== the native hook writes the lane's claim store"
+hooked=$("$clankers" mux spawn --new-session qa-hook --cwd "$root/work" --env CLANKER_ID=clanker-hook -- sh -c "echo '{\"session_id\":\"s-1\",\"cwd\":\"$root/work\"}' | '$hook' claude working; echo hook-rc=\$?; exec sleep 300")
+hs=$(field nativeSessionId <<<"$hooked"); hp=$(field nativePaneId <<<"$hooked")
+check "hook ran" wait_for 30 screen_has "$hs" "$hp" "hook-rc=0"
+check "hook claimed the clanker" wait_for 30 bash -c "[[ \$('$clankers' mux read-claim --pane '$hp' clankerId) == clanker-hook ]]"
+check "hook claimed the harness session" test "$("$clankers" mux read-claim --pane "$hp" harnessSessionId)" = s-1
+
+echo "== the daemon projects the lane"
+check "the daemon's snapshot holds the spawned sessions" wait_for 100 bash -c "grep -q '$s1' '$runtime/state.json' && grep -q '$hs' '$runtime/state.json'"
+
+echo "== Alt-K opens the picker in a popup over the pane, and it closes with the picker"
+R do -s "$s1" -b "$p1" clankerhouse_jump >/dev/null
+popup_of() { R api call -s "$1" session.view '{}' | python3 -c 'import json,sys
+for window in json.load(sys.stdin)["windows"]:
+    for layer in window["layers"]:
+        if layer["kind"] != "tiled":
+            print(layer["blocks"][0]["block_id"])'; }
+export rex
+export -f R popup_of
+check "a floating layer opens" wait_for 50 bash -c "[[ -n \$(popup_of '$s1') ]]"
+popup=$(popup_of "$s1")
+check "it shows the picker with this session current" wait_for 100 screen_has "$s1" "$popup" "current"
+check "the popup is never a pane" bash -c "! '$clankers' mux observe | grep -q '$popup'"
+check "the launcher recorded what it opened over" contains "$(cat "$runtime/popup.log")" "focus=$s1 "
+R send-key -s "$s1" -b "$popup" escape
+check "Escape closes it" wait_for 50 bash -c "[[ -z \$(popup_of '$s1') ]]"
+
+echo "== kill"
+"$clankers" mux kill --session "$s2"
+check "a killed session is gone" bash -c "! R ls | grep -q qa-two"
+
+if ((failures)); then printf '%d Rex lane check(s) failed\n' "$failures" >&2; exit 1; fi
+echo "Rex lane scenario passed"

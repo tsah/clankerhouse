@@ -3,7 +3,7 @@
  * clanker identity in the environment, inside its own systemd scope under the clanker budget.
  */
 import { unsetDaemonInternalArgs } from "./client-environment"
-import { binPath, libexecPath } from "./installation"
+import { applicationRoot, binPath, libexecPath } from "./installation"
 import { launchModel, launchResourceClass, validateModelName, type LaunchSpec, type LedgerClanker, type LedgerHarness, type ResourceClass } from "./clanker-ledger"
 
 const lifecycleWrapper = binPath("clankerhouse-harness-lifecycle")
@@ -15,6 +15,21 @@ const plannotatorEnv = () => [
   `PLANNOTATOR_REMOTE=${Bun.env.PLANNOTATOR_REMOTE || "1"}`,
   `PLANNOTATOR_PORT=${Bun.env.PLANNOTATOR_PORT || "19432-19439"}`,
 ]
+
+/** Claude hook event → the clanker state it reports; the same table `clankerhouse-install-claude-hooks` installs. */
+export const CLAUDE_HOOK_STATES: Readonly<Record<string, string>> = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", SessionEnd: "unknown" }
+
+/**
+ * The Rex lane's lifecycle hooks, handed to each Claude it starts with `--settings`. The global hooks the installer
+ * writes run only in Herdr and hc panes, so the lane needs no change to them, and its own checkout's hook reports.
+ */
+export const rexClaudeSettings = (hook = `${applicationRoot}/native-client/target/release/clankerhouse-hook`) => {
+  const quoted = `'${hook.replaceAll("'", `'\\''`)}'`
+  const command = (state: string) => `if [ -n "\${REX_BLOCK:-}" ] && [ -x ${quoted} ]; then exec ${quoted} claude ${state}; fi`
+  return JSON.stringify({ hooks: Object.fromEntries(Object.entries(CLAUDE_HOOK_STATES).map(([event, state]) => [event, [{ matcher: "*", hooks: [{ type: "command", command: command(state), timeout: 2 }] }]])) })
+}
+
+const laneClaudeArgs = () => Bun.env.CLANKERHOUSE_MULTIPLEXER === "rex" ? ["--settings", rexClaudeSettings()] : []
 
 export const harnessModelArgs = (harness: LedgerHarness | "codex", model?: string): string[] => {
   if (model === undefined) return []
@@ -86,7 +101,7 @@ export const harnessCommand = (input: HarnessLaunch, unit: string) => {
     command = ["env", ...env, lifecycleWrapper, "--", "pi", resume ? "--session" : "--session-id", session, ...piProfileArgs(input.cwd, profile, model), ...modelArgs, ...prompt]
   } else if (harness === "claude") {
     if (!session) throw new Error("Claude requires a session id")
-    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", resume ? "--resume" : "--session-id", session, ...(profile ? ["--agent", profile] : []), ...modelArgs, ...prompt]
+    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", ...laneClaudeArgs(), resume ? "--resume" : "--session-id", session, ...(profile ? ["--agent", profile] : []), ...modelArgs, ...prompt]
   } else {
     if (resume && !session) throw new Error("OpenCode resume requires a session id")
     command = ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, ...(profile ? ["--profile", profile] : []), ...(resume ? ["--session", session!] : []), "--", input.cwd, ...prompt]

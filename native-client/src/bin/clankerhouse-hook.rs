@@ -39,6 +39,8 @@ struct Context {
     pane: String,
     /// The hc lane: claims travel over hc's socket instead of Herdr's.
     hc: bool,
+    /// The Rex lane: claims live in the lane's own store, one file per pane and key under `state_dir/rex-claims`.
+    rex: bool,
     runtime_dir: PathBuf,
     state_dir: PathBuf,
 }
@@ -48,8 +50,10 @@ fn var(name: &str) -> String {
 }
 
 fn context() -> Result<Option<Context>, String> {
-    let hc = var("CLANKERHOUSE_MULTIPLEXER") == "hc";
-    let pane = var(if hc { "HC_TERMINAL_ID" } else { "HERDR_PANE_ID" });
+    let lane = var("CLANKERHOUSE_MULTIPLEXER");
+    let hc = lane == "hc";
+    let rex = lane == "rex";
+    let pane = var(if hc { "HC_TERMINAL_ID" } else if rex { "REX_BLOCK" } else { "HERDR_PANE_ID" });
     if pane.is_empty() {
         return Ok(None);
     }
@@ -75,6 +79,7 @@ fn context() -> Result<Option<Context>, String> {
     Ok(Some(Context {
         pane,
         hc,
+        rex,
         runtime_dir: PathBuf::from(format!("{runtime_root}/clankerhouse-{uid}{slug}")),
         state_dir: PathBuf::from(format!("{state_home}/clankerhouse{slug}")),
     }))
@@ -376,7 +381,19 @@ fn hc_request(method: &str, params: Value) -> Option<Value> {
     response.get("result").cloned()
 }
 
+/// The Rex lane's claim file for this pane, as `src/multiplexer/rex.ts` (`RexClaimStore`) lays it out.
+fn rex_claim_path(ctx: &Context, key: &str) -> Option<PathBuf> {
+    let valid = ctx.pane.split_once(':').is_some_and(|(kind, id)| {
+        !kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase()) && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    if valid { Some(ctx.state_dir.join("rex-claims").join(&ctx.pane).join(key)) } else { None }
+}
+
 fn read_claim(ctx: &Context, key: &str) -> Option<String> {
+    if ctx.rex {
+        let value = fs::read_to_string(rex_claim_path(ctx, key)?).ok()?;
+        return if value.is_empty() { None } else { Some(value) };
+    }
     if ctx.hc {
         let result = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
         let value = result.get("labels")?.get(herdr_token(key))?.as_str()?.to_string();
@@ -392,6 +409,10 @@ fn read_claim(ctx: &Context, key: &str) -> Option<String> {
 }
 
 fn pane_path(ctx: &Context) -> Option<PathBuf> {
+    // Asking Rex costs a process; the caller falls back to the hook's own directory.
+    if ctx.rex {
+        return None;
+    }
     if ctx.hc {
         let terminal = hc_request("terminal.get", json!({ "terminal": ctx.pane }))?;
         let path = terminal.get("foreground").and_then(|f| f.get("cwd")).or(terminal.get("cwd"))?.as_str()?;
@@ -404,6 +425,24 @@ fn pane_path(ctx: &Context) -> Option<PathBuf> {
 }
 
 fn write_claims(ctx: &Context, claims: &BTreeMap<&str, Option<String>>) {
+    if ctx.rex {
+        for (key, value) in claims {
+            let Some(path) = rex_claim_path(ctx, key) else { return };
+            match value.as_deref().filter(|value| !value.is_empty()) {
+                Some(value) => {
+                    if let Some(dir) = path.parent() {
+                        if private_dir(dir).is_ok() {
+                            let _ = write_atomic(&path, value.as_bytes());
+                        }
+                    }
+                }
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        return;
+    }
     if ctx.hc {
         // An empty value removes a label.
         let labels: Map<String, Value> =

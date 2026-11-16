@@ -1099,7 +1099,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
       const location = checkpoint.location as { nativeSessionId?: string; nativeWindowId?: string | null; nativePaneId?: string | null } | undefined
       // hc moves nothing itself: its focus only leaves the choice for the picker's launcher, and its current location
       // is the Herdr app's last report, which can be stale. Skipping it would lose the choice, so hc always records it.
-      const current = multiplexer.kind === "hc" ? undefined : await multiplexer.currentLocation()
+      // Rex keeps no focus outside its apps, and the daemon runs in none of its terminals, so it always opens too.
+      const current = multiplexer.kind === "hc" || multiplexer.kind === "rex" ? undefined : await multiplexer.currentLocation()
       const alreadyOpen = location && current?.nativeSessionId === location.nativeSessionId
         && (!location.nativeWindowId || current?.nativeWindowId === location.nativeWindowId)
         && (!location.nativePaneId || current?.nativePaneId === location.nativePaneId)

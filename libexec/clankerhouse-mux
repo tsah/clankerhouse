@@ -4,7 +4,7 @@
 # speak the Multiplexer's native protocol.
 #
 # Functions:
-#   ch_mux_pane                 -> this process's pane address (HERDR_PANE_ID, or HC_TERMINAL_ID on the hc lane)
+#   ch_mux_pane                 -> this process's pane address (HERDR_PANE_ID, HC_TERMINAL_ID on the hc lane, REX_BLOCK on the Rex lane)
 #   ch_mux_pane_read KEY        -> pane claim value
 #   ch_mux_pane_claim KEY VALUE -> write pane claim
 #   ch_mux_pane_unset KEY       -> clear pane claim
@@ -25,7 +25,11 @@ _ch_mux_run_clankers() {
 }
 
 ch_mux_pane() {
-    if [[ "${CLANKERHOUSE_MULTIPLEXER:-}" == hc ]]; then printf '%s\n' "${HC_TERMINAL_ID:-}"; else printf '%s\n' "${HERDR_PANE_ID:-}"; fi
+    case "${CLANKERHOUSE_MULTIPLEXER:-}" in
+        hc) printf '%s\n' "${HC_TERMINAL_ID:-}" ;;
+        rex) printf '%s\n' "${REX_BLOCK:-}" ;;
+        *) printf '%s\n' "${HERDR_PANE_ID:-}" ;;
+    esac
 }
 
 ch_mux_pane_read() {

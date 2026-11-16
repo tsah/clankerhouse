@@ -1,54 +1,51 @@
 #!/bin/bash
 
-# Orchestration API end to end in an isolated Herdr server, state, and runtime: a child
-# clanker reports to its parent Workshop, the parent's resumable watch wakes on reports,
-# settles, staleness, spawns, and exits exactly once, and Reports survive a daemon restart.
+# Orchestration API end to end on a private Rex server under scratch XDG directories: a child clanker reports to its
+# parent Workshop, the parent's resumable watch wakes on reports, settles, staleness, spawns, and exits exactly once,
+# and a clanker's own Routine survives a runner restart and wakes it.
+# Needs rex; skips without it unless REX_REQUIRED is set. Never touches the account's own Rex server or Clankerhouse state.
 set -euo pipefail
+# `clankers report` reads its payload from a non-terminal stdin; never wait on the caller's.
+exec </dev/null
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
-uid=$(id -u)
-root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-orchestration-$uid-$$"}")
-[[ "$root" =~ ^/tmp/qa-clankerhouse-orchestration-[A-Za-z0-9._-]+$ ]] || { echo "Refusing unsafe QA root: $root" >&2; exit 2; }
-marker="$root.clankerhouse-qa-owned"
-if [[ -e "$root" && ! -f "$marker" ]]; then echo "Refusing unowned QA root: $root" >&2; exit 2; fi
-rm -rf -- "$root"
-runtime="$root/runtime"
-state_home="$root/state"
-mkdir -p "$runtime" "$state_home" "$root/home" "$root/data"
-touch "$marker"
-server_pid=""
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+root=$(mktemp -d /tmp/qa-orchestration.XXXXXX)
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET CLANKER_ID CLANKERHOUSE_WORKSHOP_ID CLANKERHOUSE_PARENT_WORKSHOP_ID
+export CLANKERHOUSE_INSTANCE=qa-orch-$$
+qa_rex_isolate "$root"
+runtime=$qa_runtime
+mkdir -p "$root/home"
+qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home"
+    "REX_BLOCK=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=")
 watch_pid=""
 inbox_pid=""
 
 cleanup() {
-    for pid in "$watch_pid" "$server_pid" "$inbox_pid"; do
+    for pid in "$watch_pid" "$inbox_pid"; do
         if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
-    qa_herdr_stop
-    if [[ -f "$marker" ]]; then rm -rf -- "$root" "$marker"; fi
+    "${qa_env[@]}" "$repo/bin/clankerhouse-rex" --stop-runner >/dev/null 2>&1 || true
+    qa_rex_stop
+    rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
-# A fake Claude pane must never report the messaging socket of the Claude running this script.
-unset CLAUDE_CODE_MESSAGING_SOCKET
-unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
-herdr_status=0
-qa_herdr_start "$root/herdr" || herdr_status=$?
-[[ "$herdr_status" != 77 ]] || exit 0
-[[ "$herdr_status" == 0 ]] || exit "$herdr_status"
+rex_status=0
+qa_rex_start "$root" || rex_status=$?
+[[ "$rex_status" != 77 ]] || exit 0
+[[ "$rex_status" == 0 ]] || exit "$rex_status"
 
 fail() { echo "Clankerhouse orchestration QA failed: $*" >&2; exit 1; }
 json_assert() {
     python3 -c 'import json,sys; text=sys.stdin.read(); data=[json.loads(line) for line in text.splitlines() if line.strip()] if sys.argv[2:]==["lines"] else json.loads(text); assert eval(sys.argv[1], {"data": data}), (sys.argv[1], data)' "$@"
 }
 
-qa_env=(env "CLANKERHOUSE_HOME=$repo" "CLANKERHOUSE_BIN_DIR=" "CLANKERHOUSE_LIBEXEC=" "HOME=$root/home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$root/data"
-    "HERDR_ENV=" "HERDR_PANE_ID=" "CLANKERHOUSE_INSTANCE=" "CLANKER_ID=" "CLANKERHOUSE_WORKSHOP_ID=" "CLANKERHOUSE_PARENT_WORKSHOP_ID=")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 mux() { api mux "$@"; }
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
-hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env HERDR_PANE_ID="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
+hook() { local pane=$1 clanker=$2 state=$3 payload=$4; printf '%s' "$payload" | "${qa_env[@]}" env REX_BLOCK="$pane" CLANKER_ID="$clanker" "$repo/bin/clankerhouse-clanker-state-report" claude "$state"; }
 
 # One repository with three Workshops: parent -> child -> grandchild.
 parent="$root/repo"
@@ -69,31 +66,23 @@ read -r parent_id child_id grandchild_id <<<"$lineage"
 
 claude_pane() {
     local session=$1 path=$2 clanker=$3
-    local spawned pane
+    local spawned pane native_session
     spawned=$(mux spawn --new-session "$session" --name claude --cwd "$path" -- sleep 600)
-    mux claim --session "$(json_field nativeSessionId <<<"$spawned")" worktreePath "$path"
+    native_session=$(json_field nativeSessionId <<<"$spawned")
+    mux claim --session "$native_session" worktreePath "$path"
     pane=$(json_field nativePaneId <<<"$spawned")
     mux claim --pane "$pane" harness claude
     mux claim --pane "$pane" clankerId "$clanker"
-    printf '%s' "$pane"
+    printf '%s %s' "$native_session" "$pane"
 }
 parent_session=$(mux spawn --new-session qa-parent --name main --cwd "$parent" -- sleep 600 | json_field nativeSessionId)
 mux claim --session "$parent_session" worktreePath "$parent"
-child_pane=$(claude_pane qa-child "$root/child" clanker-qa-child)
+read -r child_session child_pane <<<"$(claude_pane qa-child "$root/child" clanker-qa-child)"
 hook "$child_pane" clanker-qa-child idle '{"hook_event_name":"SessionStart"}'
 
-start_daemon() {
-    "${qa_env[@]}" env CLANKERHOUSE_DEV_ROOT="$root/missing" CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_ROUTINE_PASS_MS=200 \
-        bun run "$repo/src/daemon.ts" --server >>"$root/server.log" 2>&1 &
-    server_pid=$!
-    for _ in {1..600}; do
-        [[ -S "$runtime/clankerhouse-$uid-herdr/daemon.sock" ]] && return 0
-        kill -0 "$server_pid" 2>/dev/null || { cat "$root/server.log" >&2; fail "daemon exited during startup"; }
-        sleep 0.05
-    done
-    cat "$root/server.log" >&2; ls -la "$runtime"/* >&2; fail "daemon socket did not appear"
-}
-start_daemon
+# The runner does the timed work (Routines); everything else here runs in the CLI with no background process.
+start_runner() { "${qa_env[@]}" "$repo/bin/clankerhouse-rex" --ensure-runner || { cat "$runtime/runner.log" >&2; fail "runner did not start"; }; }
+stop_runner() { "${qa_env[@]}" "$repo/bin/clankerhouse-rex" --stop-runner; }
 
 cursor="$root/orchestrator/watch.cursor"
 watch_once() { (cd "$parent" && api watch --children-of . --descendants --cursor-file "$cursor" --once "$@"); }
@@ -117,17 +106,6 @@ report --state question --message "Which retention?" --payload '{"options":["7d"
     | json_assert "data['to'] == '$parent_id' and data['workshopId'] == '$child_id' and data['clankerId'] == 'clanker-qa-child' and data['payload']['recommendation'] == '30d'"
 report --state working --no-parent | json_assert 'data["to"] is None'
 
-# P11: the daemon marks each child pane with its Workshop's parent, which Herdr's agent view filters on.
-for _ in {1..200}; do
-    [[ "$(mux read-claim --pane "$child_pane" paneWorkshopParentId 2>/dev/null)" == "$parent_id" ]] && break
-    sleep 0.05
-done
-[[ "$(mux read-claim --pane "$child_pane" paneWorkshopParentId)" == "$parent_id" ]] || fail "child pane did not get its parent Workshop claim"
-(cd "$parent" && api view children) | json_assert "data['view'] == 'children' and data['workshopId'] == '$parent_id' and data['label'] == 'children of main'"
-api view clear | json_assert 'data["view"] is None'
-set +e; (api view bogus) >/dev/null 2>&1; code=$?; set -e
-[[ $code -ne 0 ]] || fail "view accepted an unknown action"
-echo "PASS: child panes carry their parent Workshop and view children sets the Herdr agent view"
 report --state blocked --to clanker-qa-other | json_assert 'data["to"] == "clanker-qa-other"'
 printf '%s' '{"from":"stdin"}' | report --state done | json_assert 'data["payload"] == {"from": "stdin"}'
 for bad in '[]' '"text"' '{broken' "$(python3 -c 'import json; print(json.dumps({"x": "y" * 70000}))')"; do
@@ -142,11 +120,9 @@ json_assert "len(data) == 4 and all(event['type'] == 'reported' for event in dat
 expect_timeout 1
 echo "PASS: A1 reports reach the parent's watch with validated payloads"
 
-# A2: Reports are durable across a daemon restart, and status shows the newest.
-kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
-start_daemon
+# A2: Reports are durable (each CLI call is its own process), and status shows the newest.
 api status clanker-qa-child | json_assert 'data["lastReport"]["state"] == "done" and data["lastReport"]["payload"] == {"from": "stdin"} and data["state"] == "idle"'
-echo "PASS: A2 reports survive a daemon restart; status shows lastReport without changing lifecycle state"
+echo "PASS: A2 status shows the durable lastReport without changing lifecycle state"
 
 # A3 settled: one turn of the child settles; the event is emitted once.
 hook "$child_pane" clanker-qa-child working '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'
@@ -179,7 +155,7 @@ echo "PASS: A3 stale emitted once per silent stretch"
 # A3 spawned: a clanker in a new grandchild Workshop appears under --descendants.
 shallow() { (cd "$parent" && api watch --children-of "$parent_id" --cursor-file "$root/shallow.cursor" --once --timeout 1 2>/dev/null); }
 [[ -z "$(shallow || true)" ]] || fail "baseline children-only watch printed events"
-grandchild_pane=$(claude_pane qa-grandchild "$root/grandchild" clanker-qa-grandchild)
+read -r _ grandchild_pane <<<"$(claude_pane qa-grandchild "$root/grandchild" clanker-qa-grandchild)"
 watch_once --timeout 5 | json_assert "len(data) == 1 and data[0] == {**data[0], 'type': 'spawned', 'clankerId': 'clanker-qa-grandchild', 'workshopId': '$grandchild_id', 'parentWorkshopId': '$child_id'}" lines
 set +e; output=$(shallow); code=$?; set -e
 [[ $code -eq 124 && -z "$output" ]] || fail "a watch without --descendants followed a grandchild: $output"
@@ -187,7 +163,7 @@ echo "PASS: A3 spawned for a new descendant Workshop's clanker"
 
 # A3 exited: the child pane goes away.
 [[ "$(mux read-claim --pane "$child_pane" clankerId)" == clanker-qa-child ]] || fail "refusing to kill an unexpected pane"
-mux kill --pane "$child_pane"
+mux kill --session "$child_session" --pane "$child_pane"
 watch_once --timeout 5 | json_assert "len(data) == 1 and data[0]['type'] == 'exited' and data[0]['clankerId'] == 'clanker-qa-child' and data[0]['workshopId'] == '$child_id'" lines
 expect_timeout 1
 echo "PASS: A3 exited once"
@@ -201,9 +177,10 @@ hook "$grandchild_pane" clanker-qa-grandchild done '{"hook_event_name":"Stop","b
     | json_assert "len(data) == 1 and data[0]['type'] == 'reported' and data[0]['state'] == 'failed' and data[0]['to'] == '$child_id'" lines
 echo "PASS: --clanker watch"
 
-# R1: a clanker registers its own routine; it survives a daemon restart and wakes the clanker
+# R1: a clanker registers its own routine; it survives a runner restart and wakes the clanker
 # through the ordinary send path when due.
 routine() { (cd "$root/grandchild" && "${qa_env[@]}" env CLANKER_ID=clanker-qa-grandchild "$repo/bin/clankers" routine "$@"); }
+start_runner
 routine add --cron "0 9 * * 1-5" --tz Europe/Amsterdam --name standup --message "routine wake: check the board" >"$root/routine.json"
 json_assert "data['clankerId'] == 'clanker-qa-grandchild' and data['timeZone'] == 'Europe/Amsterdam' and data['state'] == 'active' and '09:00 Europe/Amsterdam' in data['nextFire']" <"$root/routine.json"
 routine_id=$(json_field routineId <"$root/routine.json")
@@ -222,11 +199,11 @@ bun --eval '
 ' "$inbox_sock" "$root/grandchild-inbox.jsonl" &
 inbox_pid=$!
 for _ in {1..100}; do [[ -S "$inbox_sock" ]] && break; sleep 0.05; done
-printf '%s' '{"hook_event_name":"SessionStart"}' | "${qa_env[@]}" env HERDR_PANE_ID="$grandchild_pane" CLANKER_ID=clanker-qa-grandchild CLAUDE_CODE_MESSAGING_SOCKET="$inbox_sock" \
+printf '%s' '{"hook_event_name":"SessionStart"}' | "${qa_env[@]}" env REX_BLOCK="$grandchild_pane" CLANKER_ID=clanker-qa-grandchild CLAUDE_CODE_MESSAGING_SOCKET="$inbox_sock" \
     "$repo/bin/clankerhouse-clanker-state-report" claude idle
-kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
+stop_runner
 routine list | json_assert "[r['routineId'] for r in data['routines']] == ['$routine_id']"
-# Bring the next occurrence forward to now, as if 09:00 had come while the daemon was down.
+# Bring the next occurrence forward to now, as if 09:00 had come while the runner was down.
 "${qa_env[@]}" bun --eval '
   const [modulePath, id] = process.argv.slice(1)
   const { RoutineStore } = await import(modulePath)
@@ -234,22 +211,22 @@ routine list | json_assert "[r['routineId'] for r in data['routines']] == ['$rou
   store.db.query("UPDATE routines SET next_fire_at = ?2 WHERE routine_id = ?1").run(id, Date.now() - 1000)
   store.close()
 ' "$repo/src/routines.ts" "$routine_id"
-start_daemon
+start_runner
 for _ in {1..200}; do
     routine show "$routine_id" | json_assert 'data["lastMessageId"] is not None' 2>/dev/null && break
     sleep 0.05
 done
-routine show "$routine_id" | json_assert 'data["lastOutcome"].startswith("fired") and data["lastError"] is None and data["nextFireAt"] > data["lastFiredAt"]' || fail "the due routine did not fire: $(cat "$root/server.log")"
+routine show "$routine_id" | json_assert 'data["lastOutcome"].startswith("fired") and data["lastError"] is None and data["nextFireAt"] > data["lastFiredAt"]' || fail "the due routine did not fire: $(cat "$runtime/runner.log")"
 wake_id=$(routine show "$routine_id" | json_field lastMessageId)
 "${qa_env[@]}" "$repo/bin/clankers" inbox list --all --clanker clanker-qa-grandchild \
     | json_assert "[m for m in data['messages'] if m['messageId'] == '$wake_id' and m['sender'] == 'routine:$routine_id' and m['source'] == 'routine' and m['text'] == 'routine wake: check the board']"
 python3 -c 'import json,sys; lines=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; assert len(lines) == 1 and lines[0]["message"]["content"].endswith("routine wake: check the board") and "from routine:" in lines[0]["message"]["content"], lines' "$root/grandchild-inbox.jsonl" \
     || fail "the wake did not reach the clanker's messaging socket"
-grep -q "Routine $routine_id woke clanker-qa-grandchild" "$root/server.log" || fail "the daemon did not log the wake"
+grep -q "Routine $routine_id woke clanker-qa-grandchild" "$runtime/runner.log" || fail "the runner did not log the wake"
 routine cancel "$routine_id" | json_assert 'data["cancelled"] is True'
 routine list | json_assert 'data["routines"] == []'
-echo "PASS: R1 a clanker's own routine survives a daemon restart and wakes it through the send path"
+echo "PASS: R1 a clanker's own routine survives a runner restart and wakes it through the send path"
 
 api --help | grep -q "clankers watch" || fail "help omits watch"
 api --help | grep -q "clankers routine add" || fail "help omits routine"
-echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport across daemon restart, watch reported/settled/stale/spawned/exited exactly once, cursor resume after kill, the children agent view, and a clanker's own routine firing after a daemon restart."
+echo "Clankerhouse orchestration QA passed: report addressing and validation, durable lastReport, watch reported/settled/stale/spawned/exited exactly once, cursor resume after kill, and a clanker's own routine firing after a runner restart."

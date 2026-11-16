@@ -6,28 +6,24 @@ set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
-rex=${REX_BIN:-$(command -v rex || true)}
-if [[ -z "$rex" ]]; then
-    [[ -z "${REX_REQUIRED:-}" ]] || { echo "REX_REQUIRED is set but rex is not installed" >&2; exit 1; }
-    echo "skip: rex is not installed"; exit 0
-fi
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
 
 root=$(mktemp -d /tmp/qa-rex.XXXXXX)
 launcher="$repo/bin/clankerhouse-rex"
 clankers="$repo/bin/clankers"
 hook="$repo/native-client/target/release/clankerhouse-hook"
-mkdir -p -m 700 "$root/runtime" "$root/state" "$root/config/rex" "$root/work"
-mkdir -p "$root/data" "$root/dev"
-export XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" CLANKERHOUSE_DEV_ROOT="$root/dev"
-export CLANKERHOUSE_MULTIPLEXER=rex CLANKERHOUSE_INSTANCE=qa-rex-$$ CLANKERHOUSE_REX_SERVER="unix://$root/rex.sock" CLANKERHOUSE_PROCESS_OWNER=disabled
-runtime="$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE"
-R() { "$rex" --autostart=false --server "$CLANKERHOUSE_REX_SERVER" "$@"; }
-export rex
-export -f R
+mkdir -p "$root/work" "$root/dev"
+export CLANKERHOUSE_INSTANCE=qa-rex-$$
+qa_rex_isolate "$root"
+runtime=$qa_runtime
+R() { qa_rex "$@"; }
+export qa_rex_bin
+export -f R qa_rex
 failures=0
 cleanup() {
     "$launcher" --stop-runner >/dev/null 2>&1 || true
-    R server stop >/dev/null 2>&1 || true
+    qa_rex_stop
     rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
@@ -40,13 +36,11 @@ field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])'
 wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
 screen_has() { [[ "$(R capture -s "$1" -b "$2" --unwrap 2>/dev/null)" == *"$3"* ]]; }
 
-cat >"$root/config/rex/init.lua" <<EOF
-dofile("$repo/contrib/rex/clankerhouse.lua")
-EOF
 # The popup runs in a terminal of this server, so the server hands it the scratch lane.
-server_env=()
-for name in XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME CLANKERHOUSE_DEV_ROOT CLANKERHOUSE_INSTANCE CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER PATH; do server_env+=(--env "$name=${!name}"); done
-R server start --state-dir "$root/rex-state" --config "$root/config/rex/init.lua" "${server_env[@]}" >/dev/null
+status=0; qa_rex_start "$root" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
+export qa_rex_sock
 
 # Everything a clanker's shell would hand a launcher; none of it may reach the runner or a new terminal.
 export CLANKER_ID=outsider-clanker CLANKERHOUSE_WORKSHOP_ID=outsider-workshop HERDR_PANE_ID=w9:p9 HC_TERMINAL_ID=t9 CLAUDE_CODE_CHILD_SESSION=1
@@ -107,8 +101,7 @@ for window in json.load(sys.stdin)["windows"]:
     for layer in window["layers"]:
         if layer["kind"] != "tiled":
             print(layer["blocks"][0]["block_id"])'; }
-export rex
-export -f R popup_of
+export -f popup_of
 check "a floating layer opens" wait_for 50 bash -c "[[ -n \$(popup_of '$s1') ]]"
 popup=$(popup_of "$s1")
 check "it shows the picker with this session current" wait_for 100 screen_has "$s1" "$popup" "current"

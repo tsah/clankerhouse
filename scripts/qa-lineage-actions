@@ -1,7 +1,8 @@
 #!/bin/bash
 
+# Attach and delete-lineage actions on a private Rex server: attach candidates need no repository cache, deleting a
+# middle Workshop splices its child to the surviving parent everywhere, and the CLI detaches and reparents.
 set -euo pipefail
-export HERDR_ENV= HERDR_PANE_ID=
 
 uid=$(id -u)
 root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-lineage-actions-$uid-$$"}")
@@ -10,19 +11,12 @@ if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
     exit 1
 fi
 marker="$root.clankerhouse-qa-owned"
-runtime="$root/runtime"
-state_home="$root/state"
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-server_pid=""
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
 
 cleanup() {
-    if [[ -n "$server_pid" ]]; then
-        kill -TERM "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
-    fi
-    qa_herdr_stop
+    qa_rex_stop
     if [[ -f "$marker" ]]; then rm -rf "$root"; rm -f "$marker"; fi
 }
 trap cleanup EXIT INT TERM
@@ -32,8 +26,11 @@ if [[ -e "$root" && ! -f "$marker" ]]; then
     exit 1
 fi
 rm -rf "$root"
-mkdir -p "$runtime" "$state_home" "$root/data" "$root/home" "$root/dev"
+mkdir -p "$root/home" "$root/dev"
 touch "$marker"
+export HOME="$root/home" CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_INSTANCE=qa-lineage-$$ CLANKERHOUSE_OPENCODE_STATUS=/bin/true
+qa_rex_isolate "$root"
+runtime=$qa_runtime
 
 origin="$root/dev/repository"
 parent_path="$origin"
@@ -48,7 +45,7 @@ git -C "$origin" commit -qm "Initial fixture"
 git -C "$origin" worktree add -q -b middle "$middle_path"
 git -C "$origin" worktree add -q -b child "$child_path"
 
-lineage=$(env HOME="$root/home" XDG_STATE_HOME="$state_home" bun --eval '
+lineage=$(bun --eval '
   const [modulePath, parentPath, middlePath, childPath] = process.argv.slice(1)
   const { identifyWorkshopSync, registerWorkshop } = await import(modulePath)
   const parent = registerWorkshop(identifyWorkshopSync(parentPath))
@@ -60,76 +57,44 @@ parent_id=$(jq -r '.parent.workshopId' <<<"$lineage")
 middle_id=$(jq -r '.middle.workshopId' <<<"$lineage")
 child_id=$(jq -r '.child.workshopId' <<<"$lineage")
 
-clankers() {
-    env HOME="$root/home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" XDG_DATA_HOME="$root/data" CLANKERHOUSE_HOME="$repo" "$repo/bin/clankers" "$@"
-}
+clankers() { "$repo/bin/clankers" "$@"; }
 workspace_id() {
-    qa_herdr workspace list | jq -r --arg label "$1" '.result.workspaces[] | select(.label == $label) | .workspace_id'
+    clankers mux observe | jq -r --arg name "$1" '.sessions[] | select(.nativeName == $name) | .id'
 }
 create_session() {
     local name=$1 path=$2 workshop_id=$3 parent_workshop_id=$4 id
-    id=$(qa_herdr workspace create --cwd "$path" --label "$name" --no-focus | jq -r '.result.workspace.workspace_id')
+    id=$(clankers mux spawn --new-session "$name" --cwd "$path" -- sleep 3600 | jq -r .nativeSessionId)
     clankers mux claim --session "$id" worktreePath "$path"
     clankers mux claim --session "$id" workshopId "$workshop_id"
     if [[ -n "$parent_workshop_id" ]]; then
         clankers mux claim --session "$id" workshopParentId "$parent_workshop_id"
     fi
 }
-qa_herdr_start "$root/herdr"
+status=0
+qa_rex_start "$root" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
 create_session qa-parent "$parent_path" "$parent_id" ""
 create_session qa-middle "$middle_path" "$middle_id" "$parent_id"
 create_session qa-child "$child_path" "$child_id" "$middle_id"
 
-# No repository picker cache is created. Attachment eligibility must arrive in
-# the daemon projection consumed by the native TUI client.
-env \
-    HOME="$root/home" \
-    XDG_RUNTIME_DIR="$runtime" \
-    XDG_STATE_HOME="$state_home" \
-    XDG_DATA_HOME="$root/data" \
-    CLANKERHOUSE_HOME="$repo" \
-    CLANKERHOUSE_DEV_ROOT="$root/dev" \
-    CLANKERHOUSE_OPENCODE_STATUS=/bin/true \
-    bun run "$repo/src/daemon.ts" --server >"$root/server.log" 2>&1 &
-server_pid=$!
-daemon_socket="$runtime/clankerhouse-$uid-herdr/daemon.sock"
-for _ in {1..600}; do
-    [[ -S "$daemon_socket" ]] && break
-    kill -0 "$server_pid" 2>/dev/null || {
-        printf 'Clankerhouse lineage-actions daemon exited during startup:\n' >&2
-        cat "$root/server.log" >&2
-        exit 1
-    }
-    sleep 0.05
-done
-[[ -S "$daemon_socket" ]] || { printf 'Expected daemon socket %s\n' "$daemon_socket" >&2; exit 1; }
-[[ ! -e "$runtime/clankerhouse-$uid-herdr/repositories.json" ]] || { printf 'Unexpected repository picker cache in isolated attachment scenario\n' >&2; exit 1; }
+# No repository picker cache is created. Attachment eligibility must arrive in the snapshot the native TUI client reads.
+[[ ! -e "$runtime/repositories.json" ]] || { printf 'Unexpected repository picker cache in isolated attachment scenario\n' >&2; exit 1; }
+snapshot_row() { clankers snapshot | jq -c --arg id "$1" '.sessions[] | select(.workshopId == $id)'; }
+child_row=$(snapshot_row "$child_id")
+[[ -n "$child_row" ]] || { printf 'child Workshop was not in the snapshot\n' >&2; exit 1; }
+candidates=$(jq -c '.attachmentCandidateWorkshopIds' <<<"$child_row")
+[[ "$candidates" == "[\"$parent_id\"]" ]] || { printf 'Expected cache-independent parent candidate %s, got %s\n' "$parent_id" "$candidates" >&2; exit 1; }
+[[ ! -e "$runtime/repositories.json" ]] || { printf 'A snapshot wrote the repository picker cache\n' >&2; exit 1; }
 
-SOCKET_PATH="$daemon_socket" PARENT_ID="$parent_id" CHILD_ID="$child_id" MIDDLE_PATH="$middle_path" bun --eval '
-  const [transportPath] = process.argv.slice(1)
-  const { getSnapshot, submitMutation, waitForOperation } = await import(transportPath)
-  const socket = process.env.SOCKET_PATH
-  const parentId = process.env.PARENT_ID
-  const childId = process.env.CHILD_ID
-  const snapshot = await getSnapshot(socket)
-  const child = snapshot.sessions.find((row) => row.workshopId === childId)
-  if (!child) throw new Error("child Workshop was not projected")
-  if (JSON.stringify(child.attachmentCandidateWorkshopIds) !== JSON.stringify([parentId])) {
-    throw new Error(`expected cache-independent parent candidate ${parentId}, got ${JSON.stringify(child.attachmentCandidateWorkshopIds)}`)
-  }
-  const mutate = async (key, intent) => {
-    const submitted = await submitMutation(socket, key, intent)
-    return waitForOperation(socket, submitted.operation.operationId, { timeoutMs: 120_000 })
-  }
-  await mutate("delete-middle", { type: "delete", kind: "worktree", session: "qa-middle", path: process.env.MIDDLE_PATH, confirmed: true })
-' "$repo/src/transport/index.ts"
+clankers mutate --json "$(jq -cn --arg path "$middle_path" '{type: "delete", kind: "worktree", session: "qa-middle", path: $path, confirmed: true}')" >/dev/null
 
 [[ ! -d "$middle_path" ]] || { printf 'Expected deleted middle worktree to be absent\n' >&2; exit 1; }
 [[ -z "$(workspace_id qa-middle)" ]] || { printf 'Expected deleted middle session to be absent\n' >&2; exit 1; }
 child_session=$(workspace_id qa-child)
 [[ -n "$child_session" ]] || { printf 'Expected child session to survive\n' >&2; exit 1; }
 
-db="$state_home/clankerhouse-herdr/workshops.sqlite3"
+db="$XDG_STATE_HOME/clankerhouse-$CLANKERHOUSE_INSTANCE/workshops.sqlite3"
 actual_parent=$(sqlite3 "$db" "select coalesce(parent_id, '') from workshops where id = '$child_id';")
 removed=$(sqlite3 "$db" "select count(*) from workshops where id = '$middle_id';")
 claimed_parent=$(clankers mux read-claim --session "$child_session" workshopParentId)
@@ -139,17 +104,10 @@ manifest_parent=$(jq -r '.parentWorkshopId // ""' "$child_path/.clankerhouse/wor
 [[ "$claimed_parent" == "$parent_id" ]] || { printf 'Expected child session parent claim %s, got %s\n' "$parent_id" "$claimed_parent" >&2; exit 1; }
 [[ "$manifest_parent" == "$parent_id" ]] || { printf 'Expected child manifest parent %s, got %s\n' "$parent_id" "$manifest_parent" >&2; exit 1; }
 
-snapshot_parent=$(SOCKET_PATH="$daemon_socket" CHILD_ID="$child_id" bun --eval '
-  const [transportPath] = process.argv.slice(1)
-  const { getSnapshot } = await import(transportPath)
-  const snapshot = await getSnapshot(process.env.SOCKET_PATH)
-  const child = snapshot.sessions.find((row) => row.workshopId === process.env.CHILD_ID)
-  if (!child) throw new Error("spliced child disappeared from projection")
-  console.log(child.parentWorkshopId || "")
-' "$repo/src/transport/index.ts")
+snapshot_parent=$(snapshot_row "$child_id" | jq -r '.parentWorkshopId // ""')
 [[ "$snapshot_parent" == "$parent_id" ]] || { printf 'Expected projected child parent %s, got %s\n' "$parent_id" "$snapshot_parent" >&2; exit 1; }
 
-# The CLI moves a parent link through the daemon, so the registry, manifest, and session claim agree.
+# The CLI moves a parent link in-process, so the registry, manifest, and session claim agree.
 expect_parent() {
     local want=$1 actual
     actual=$(sqlite3 "$db" "select coalesce(parent_id, '') from workshops where id = '$child_id';")
@@ -185,4 +143,4 @@ jq -e '.parentWorkshopId == null' <<<"$(clankers workshop detach --cwd "$child_p
 expect_parent ""
 [[ "$(workspace_id qa-child)" == "$child_session" ]] || { printf 'Expected the child session to survive detach\n' >&2; exit 1; }
 
-printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, session claim, and projection to the available parent; the CLI detaches and reparents through the daemon and rejects cycles and unknown Workshops.\n'
+printf 'Clankerhouse lineage actions QA passed: attach candidates require no repository cache, and one middle-Workshop delete immediately splices its child declaration, manifest, session claim, and projection to the available parent; the CLI detaches and reparents and rejects cycles and unknown Workshops.\n'

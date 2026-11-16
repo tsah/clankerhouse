@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone spawn --model acceptance. Requires Bun, Git, Herdr and real Worktrunk.
-Only external harnesses are faked. Set CLANKERHOUSE_SPAWN_MODEL_QA_KEEP=1 to keep
-isolated evidence (the private Herdr server is still stopped).
+"""Standalone spawn --model acceptance on a private Rex server. Requires Bun, Git, Rex and
+real Worktrunk; skips without Rex unless REX_REQUIRED is set. Only external harnesses are
+faked. Set CLANKERHOUSE_SPAWN_MODEL_QA_KEEP=1 to keep isolated evidence (the private Rex
+server is still stopped).
 """
 import hashlib
 import json
@@ -24,7 +25,7 @@ clanker = os.environ.get("CLANKER_ID", "unexpected")
 mode = "resume" if "--session" in argv or "--resume" in argv else "initial"
 path = pathlib.Path(os.environ["CLANKERHOUSE_QA_LOG_DIR"]) / (clanker + "." + mode + ".json")
 record = {"harness": harness, "argv": argv, "cwd": os.getcwd(), "complete": False,
-          "pane": os.environ.get("HERDR_PANE_ID"),
+          "pane": os.environ.get("REX_BLOCK"),
           "workshopId": os.environ.get("CLANKERHOUSE_WORKSHOP_ID"), "parentWorkshopId": os.environ.get("CLANKERHOUSE_PARENT_WORKSHOP_ID")}
 def save():
     pending = path.with_suffix(".tmp")
@@ -38,7 +39,7 @@ try:
         flag = ("--session" if harness == "pi" else "--resume") if mode == "resume" else "--session-id"
         session = argv[argv.index(flag) + 1]
         record["sessionId"] = session
-        subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "mux", "claim", "--pane", os.environ["HERDR_PANE_ID"],
+        subprocess.run([os.environ["CLANKERHOUSE_CLANKERS"], "mux", "claim", "--pane", os.environ["REX_BLOCK"],
                         "harnessSessionId", session], check=True, capture_output=True, timeout=15)
     record["complete"] = True
     save()
@@ -62,15 +63,17 @@ def require(condition, message):
 def main():
     repo = Path(__file__).resolve().parent.parent
     tools = {name: shutil.which(name) for name in ("bun", "git", "wt", "python3")}
-    tools["herdr"] = os.environ.get("HERDR_BIN") or shutil.which("herdr")
-    require(all(tools.values()), "Required executables: bun, git, herdr, wt, python3")
+    tools["rex"] = os.environ.get("REX_BIN") or shutil.which("rex")
+    if not tools["rex"] and not os.environ.get("REX_REQUIRED"):
+        print("skip: rex is not installed (set REX_BIN, or REX_REQUIRED to fail instead)", file=sys.stderr)
+        return
+    require(all(tools.values()), "Required executables: bun, git, rex, wt, python3")
     root = Path(tempfile.mkdtemp(prefix="qa-clankerhouse-spawn-model-", dir="/tmp"))
     token = uuid.uuid4().hex
     marker = root / ".qa-owned"
     marker.write_text(token)
-    socket = root / "config/herdr/herdr.sock"
-    live_socket = Path.home() / ".config/herdr/herdr.sock"
-    server = None
+    socket = root / "rex.sock"
+    server = False
     keep = os.environ.get("CLANKERHOUSE_SPAWN_MODEL_QA_KEEP") == "1"
     env = {}
 
@@ -88,36 +91,34 @@ def main():
     def observe():
         return json.loads(cli("mux", "observe").stdout)["sessions"]
 
-    def herdr_panes():
-        # Topology straight from the isolated runtime: it never touches Clankerhouse state.
-        return json.loads(run([tools["herdr"], "pane", "list"], timeout=10).stdout)["result"]["panes"]
+    def rex(*args, check=True, timeout=10):
+        # Only ever the explicit scratch socket, with autostart off, so nothing can reach the account's server.
+        return run([tools["rex"], "--autostart=false", "--server", f"unix://{socket}", *args], check=check, timeout=timeout)
+
+    def rex_blocks():
+        # Topology straight from the isolated server: it never touches Clankerhouse state.
+        rows = []
+        for session in json.loads(rex("ls", "--json").stdout)["sessions"]:
+            view = json.loads(rex("api", "call", "-s", session["session_id"], "session.view", "{}").stdout)
+            for window in view["windows"]:
+                for layer in window["layers"]:
+                    rows += [(session["session_id"], window["window_id"], block["block_id"]) for block in layer["blocks"]]
+        return rows
 
     def panes():
-        # Herdr pane ids are never reused, so they also prove a terminal was not replaced.
-        return {f"{pane['pane_id']}:{pane['tab_id']}" for pane in herdr_panes()}
+        # Rex block ids are never reused, so they also prove a terminal was not replaced.
+        return {f"{block}:{window}" for _, window, block in rex_blocks()}
 
     def windows_holding(pane_id):
         # The session that holds the pane, as its ordered window ids.
-        rows = herdr_panes()
-        workspace = next((pane["workspace_id"] for pane in rows if pane["pane_id"] == pane_id), None)
-        return list(dict.fromkeys(pane["tab_id"] for pane in rows if pane["workspace_id"] == workspace)) if workspace else []
+        rows = rex_blocks()
+        session = next((row[0] for row in rows if row[2] == pane_id), None)
+        return list(dict.fromkeys(row[1] for row in rows if row[0] == session)) if session else []
 
     def stop_server():
-        # Never `herdr server stop`: a mis-scoped client can resolve the live default
-        # socket. Signal only the isolated process group, after revalidating its endpoint.
-        if server is None or server.poll() is not None:
+        if not server:
             return True
-        try:
-            environ = Path(f"/proc/{server.pid}/environ").read_bytes().split(b"\0")
-        except OSError:
-            environ = []
-        if f"HERDR_SOCKET_PATH={socket}".encode() in environ:
-            os.killpg(server.pid, signal.SIGTERM)
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            return False
-        return True
+        return rex("server", "stop", check=False).returncode == 0 or rex("ls", check=False).returncode != 0
 
     def ledger():
         return json.loads(cli("ledger").stdout)
@@ -163,8 +164,8 @@ def main():
             "PI_CODING_AGENT_DIR": str(root / "pi"), "CLAUDE_CONFIG_DIR": str(root / "home/.claude"),
             "CODEX_HOME": str(root / "home/.codex"), "BUN_INSTALL": str(root / "home/.bun"),
             "BUN_INSTALL_CACHE_DIR": str(root / "cache/bun"),
-            "HERDR_CONFIG_PATH": str(root / "config/herdr/config.toml"), "HERDR_SOCKET_PATH": str(socket),
-            "HERDR_CLIENT_SOCKET_PATH": str(root / "config/herdr/herdr-client.sock"), "HERDR_STARTUP_CWD": str(root),
+            "CLANKERHOUSE_MULTIPLEXER": "rex", "CLANKERHOUSE_REX_SERVER": f"unix://{socket}",
+            "CLANKERHOUSE_INSTANCE": f"qa-spawn-model-{os.getpid()}",
             "CLANKERHOUSE_HOME": str(repo), "CLANKERHOUSE_BIN_DIR": str(repo / "bin"),
             "CLANKERHOUSE_LIBEXEC": str(repo / "libexec"),
             "CLANKERHOUSE_CLANKERS": str(repo / "bin/clankers"),
@@ -193,19 +194,18 @@ def main():
             run([tools["git"], "-C", fixture, "add", "tracked.txt"])
             run([tools["git"], "-C", fixture, "commit", "-qm", "fixture"])
             fixtures[kind] = fixture
-        # Herdr resolves its default server independently of XDG_CONFIG_HOME, so every
-        # endpoint is pinned above and the server runs in a private process group. Panes
-        # inherit only this isolated environment.
-        require(socket != live_socket, "Refusing the live Herdr socket")
-        (root / "config/herdr").mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(root / "herdr.log", "w") as herdr_log:
-            server = subprocess.Popen([tools["herdr"], "server"], cwd=root, env=env, stdin=subprocess.DEVNULL,
-                                      stdout=herdr_log, stderr=subprocess.STDOUT, start_new_session=True)
+        # The server's socket, state and config live in the isolated root, outside every
+        # directory compared below. Its terminals inherit only this isolated environment.
+        (root / "rex-state").mkdir(mode=0o700)
+        (root / "rex-init.lua").write_text("")
+        started = rex("server", "start", "--state-dir", root / "rex-state", "--config", root / "rex-init.lua",
+                      *[f"--env={name}={value}" for name, value in env.items()], check=False, timeout=30)
+        server = True
+        require(started.returncode == 0, f"Isolated Rex server did not start: {started.stdout}{started.stderr}")
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not socket.is_socket() and server.poll() is None:
+        while time.monotonic() < deadline and rex("ls", check=False).returncode:
             time.sleep(0.05)
-        require(socket.is_socket(), f"Isolated Herdr server did not start: {(root / 'herdr.log').read_text()}")
-        require(not (live_socket.is_socket() and socket.samefile(live_socket)), "Isolated Herdr socket aliases the live server")
+        require(rex("ls", check=False).returncode == 0, "Isolated Rex server does not answer")
 
         def command(kind, harness, name):
             if kind == "direct":
@@ -218,8 +218,6 @@ def main():
             for directory in (root / "state", root / "runtime", root / "worktrees", root / "logs", *fixtures.values()):
                 for path in sorted(directory.rglob("*")):
                     relative = str(path.relative_to(root))
-                    if relative == "state/herdr" or relative.startswith("state/herdr/"):
-                        continue  # The isolated Herdr server's own state, written on its own schedule.
                     files[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "directory"
             return files, panes()
 
@@ -274,6 +272,10 @@ def main():
                 require(run([tools["git"], "-C", cwd, "branch", "--show-current"]).stdout.strip() == name,
                         "Wrong Worktrunk branch")
             argv = log["argv"]
+            if harness == "claude":
+                # On Rex each Claude carries the lane's lifecycle hooks, ahead of everything else.
+                require(argv[:1] == ["--settings"] and "clankerhouse-hook" in argv[1], f"Claude lacks the Rex lane hooks: {argv}")
+                argv = argv[2:]
             expected_model = model or ("qa/profile-default" if harness == "pi" and profile_name else None)
             expected = []
             if harness != "codex":
@@ -374,7 +376,9 @@ def main():
             clanker = result["clankerId"]
             require(cli("mux", "read-claim", "--pane", result["pane"], "clankerId").stdout.strip() == clanker,
                     "Refusing to kill a pane without the expected fixture ownership")
-            cli("mux", "kill", "--pane", result["pane"])
+            # A Rex block is addressed within its session.
+            session_id = next(row[0] for row in rex_blocks() if row[2] == result["pane"])
+            cli("mux", "kill", "--session", session_id, "--pane", result["pane"])
             deadline = time.monotonic() + 15
             while True:
                 attempt = cli("resume", clanker, check=False)
@@ -414,14 +418,14 @@ def main():
             raise RuntimeError(f"Refusing cleanup of unowned QA root: {root}")
         safe_to_remove = stop_server()
         if not safe_to_remove:
-            print("Private Herdr server did not stop", file=sys.stderr)
+            print("Private Rex server did not stop", file=sys.stderr)
         if keep or not safe_to_remove:
             print(f"QA evidence: {root}", file=sys.stderr)
         else:
             shutil.rmtree(root)
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
-        require(safe_to_remove, "Could not stop the private Herdr server; evidence retained")
+        require(safe_to_remove, "Could not stop the private Rex server; evidence retained")
 
 
 if __name__ == "__main__":

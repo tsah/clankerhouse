@@ -1,0 +1,74 @@
+#!/bin/bash
+# Source from a standalone QA scenario to run it against a private, isolated Rex server.
+# Never touches the account's own Rex server (its default socket) or Clankerhouse state.
+#
+#   qa_rex_isolate ROOT   Point every Clankerhouse path into ROOT: exports XDG_RUNTIME_DIR, XDG_STATE_HOME,
+#                         XDG_CONFIG_HOME, XDG_DATA_HOME, CLANKERHOUSE_DEV_ROOT (unless already set),
+#                         CLANKERHOUSE_INSTANCE (unless already set), CLANKERHOUSE_PROCESS_OWNER=disabled
+#                         (unless already set) and qa_runtime (the instance's runtime dir).
+#   qa_rex_start ROOT     Start a server whose socket, state and config live under ROOT. Exports
+#                         CLANKERHOUSE_MULTIPLEXER=rex and CLANKERHOUSE_REX_SERVER. The server's terminals get
+#                         the current XDG_*, CLANKERHOUSE_*, HOME and PATH, plus every name in QA_REX_ENV; the
+#                         Alt-K popup runs this checkout's launcher (CLANKERHOUSE_REX_LAUNCHER).
+#                         Returns 77 when rex is missing and REX_REQUIRED is not set, so callers can skip.
+#   qa_rex_stop           Stop exactly that server. Safe to call from an EXIT trap, and more than once.
+#   qa_rex ...            Run the rex CLI against the isolated server, never autostarting one.
+
+qa_rex_repo=$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+qa_rex_bin=${REX_BIN:-$(command -v rex || true)}
+qa_rex_sock=""
+# A scenario run from inside a Rex terminal must never address that terminal's server.
+unset REX_BLOCK REX_SESSION REX_SERVER
+
+qa_rex_isolate() {
+    local root=$1
+    mkdir -p -m 700 "$root/runtime" "$root/state" "$root/config" "$root/data"
+    export XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data"
+    export CLANKERHOUSE_DEV_ROOT="${CLANKERHOUSE_DEV_ROOT:-$root/dev}"
+    export CLANKERHOUSE_INSTANCE="${CLANKERHOUSE_INSTANCE:-qa-$$}"
+    export CLANKERHOUSE_PROCESS_OWNER="${CLANKERHOUSE_PROCESS_OWNER:-disabled}"
+    qa_runtime="$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE"
+}
+
+qa_rex_start() {
+    local root=$1 name
+    if [[ -z "$qa_rex_bin" ]]; then
+        if [[ -z "${REX_REQUIRED:-}" ]]; then
+            printf 'skip: rex is not installed (set REX_BIN, or REX_REQUIRED to fail instead)\n' >&2
+            return 77
+        fi
+        printf 'REX_REQUIRED is set but rex is not installed\n' >&2
+        return 1
+    fi
+    mkdir -p -m 700 "$root/rex-state" "$root/rex-config"
+    qa_rex_sock="$root/rex.sock"
+    export CLANKERHOUSE_MULTIPLEXER=rex CLANKERHOUSE_REX_SERVER="unix://$qa_rex_sock"
+    # The popup finds this checkout's launcher first, never the account's ~/.config/rex/clankerhouse-rex link.
+    export CLANKERHOUSE_REX_LAUNCHER="${CLANKERHOUSE_REX_LAUNCHER:-$qa_rex_repo/bin/clankerhouse-rex}"
+    printf 'dofile("%s/contrib/rex/clankerhouse.lua")\n' "$qa_rex_repo" >"$root/rex-config/init.lua"
+    local server_env=()
+    for name in $(compgen -e | grep -E '^(XDG_|CLANKERHOUSE_)') HOME PATH ${QA_REX_ENV:-}; do
+        [[ -n "${!name+x}" ]] && server_env+=(--env "$name=${!name}")
+    done
+    if ! qa_rex server start --state-dir "$root/rex-state" --config "$root/rex-config/init.lua" "${server_env[@]}" >"$root/rex-start.log" 2>&1; then
+        printf 'isolated rex server did not start at %s:\n' "$qa_rex_sock" >&2
+        cat "$root/rex-start.log" >&2
+        qa_rex_sock=""
+        return 1
+    fi
+    for _ in {1..200}; do qa_rex ls >/dev/null 2>&1 && return 0; sleep 0.05; done
+    printf 'isolated rex server at %s does not answer\n' "$qa_rex_sock" >&2
+    return 1
+}
+
+qa_rex_stop() {
+    [[ -n "$qa_rex_sock" ]] || return 0
+    # Only ever the explicit scratch socket, with autostart off, so a stop cannot reach the account's server.
+    qa_rex server stop >/dev/null 2>&1 || true
+    qa_rex_sock=""
+}
+
+qa_rex() {
+    [[ -n "$qa_rex_sock" ]] || { printf 'qa_rex: no isolated Rex server is running\n' >&2; return 1; }
+    "$qa_rex_bin" --autostart=false --server "unix://$qa_rex_sock" "$@"
+}

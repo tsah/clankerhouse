@@ -2,18 +2,25 @@
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
+# A harness under its own systemd scope outlives a closed Rex pane only until the scope stops; on a private Rex server.
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+command -v systemd-run >/dev/null 2>&1 || { echo "skip: no systemd (process ownership is a systemd scope)"; exit 0; }
 root=$(mktemp -d /tmp/clankerhouse-process-owner-XXXXXX)
 unit="clankerhouse-qa-${UID}-$$.scope"
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_INSTANCE=qa-process-owner-$$
+# The scope lives in the account's user manager, which systemctl and systemd-run find through the real runtime dir.
+user_runtime=${XDG_RUNTIME_DIR:-/run/user/$UID}
+user_systemctl() { XDG_RUNTIME_DIR="$user_runtime" systemctl --user "$@"; }
+qa_rex_isolate "$root"
 cleanup() {
-    systemctl --user stop "$unit" >/dev/null 2>&1 || true
-    qa_herdr_stop
+    user_systemctl stop "$unit" >/dev/null 2>&1 || true
+    qa_rex_stop
     rm -rf "$root"
 }
 trap cleanup EXIT INT TERM
 status=0
-qa_herdr_start "$root/herdr" || status=$?
+qa_rex_start "$root" || status=$?
 [[ "$status" != 77 ]] || exit 0
 [[ "$status" == 0 ]] || exit "$status"
 
@@ -31,16 +38,17 @@ wait
 SH
 chmod 755 "$root/tree"
 
-pane=$(qa_herdr workspace create --cwd "$root" --label qa --no-focus | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-qa_herdr pane run "$pane" "env QA_ROOT='$root' systemd-run --user --scope --quiet --unit='$unit' --property=KillMode=control-group --property=SendSIGKILL=yes --property=CollectMode=inactive-or-failed -- '$root/tree'" >/dev/null
+session=$("$repo/bin/clankers" mux spawn --new-session qa --cwd "$root" -- env QA_ROOT="$root" XDG_RUNTIME_DIR="$user_runtime" systemd-run --user --scope --quiet --unit="$unit" --property=KillMode=control-group --property=SendSIGKILL=yes --property=CollectMode=inactive-or-failed -- "$root/tree" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])')
 for _ in {1..100}; do [[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] && break; sleep 0.05; done
 [[ -s "$root/setsid.pid" && -s "$root/grandchild.pid" ]] || { echo "Owned descendants did not start" >&2; exit 1; }
 setsid_pid=$(<"$root/setsid.pid")
 grandchild_pid=$(<"$root/grandchild.pid")
 
-qa_herdr pane close "$pane" >/dev/null
+"$repo/bin/clankers" mux kill --session "$session"
+for _ in {1..100}; do qa_rex ls | grep -q "$session" || break; sleep 0.05; done
+! qa_rex ls | grep -q "$session" || { echo "Rex session survived its kill" >&2; exit 1; }
 kill -0 "$setsid_pid" 2>/dev/null || { echo "Fixture did not preserve the setsid child after pane loss" >&2; exit 1; }
-systemctl --user stop "$unit"
+user_systemctl stop "$unit"
 for _ in {1..100}; do
     ! kill -0 "$setsid_pid" 2>/dev/null && ! kill -0 "$grandchild_pid" 2>/dev/null && break
     sleep 0.05

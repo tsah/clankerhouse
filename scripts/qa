@@ -1,86 +1,76 @@
 #!/bin/bash
 # Complete native TUI interaction scenario. The Workshop topology and the native client
-# both live in a private, isolated Herdr server; the client is driven through Herdr's
-# pane input and screen-read operations.
+# both live in a private, isolated Rex server; the client is driven through Rex's
+# send/send-key and capture operations. Needs rex; skips without it unless REX_REQUIRED is set.
 
 set -euo pipefail
 
 uid=$(id -u)
-root=$(realpath -m -- "${CLANKERHOUSE_QA_ROOT:-"/tmp/qa-clankerhouse-tree-$uid-$$"}")
-if [[ ! "$root" =~ ^/tmp/qa-clankerhouse-[A-Za-z0-9._-]+$ ]]; then
-    printf 'Refusing unsafe Clankerhouse QA root: %s\n' "$root" >&2
-    exit 1
-fi
-qa_marker="$root.clankerhouse-qa-owned"
-runtime="$root/runtime"
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET
+unset HERDR_PANE_ID HERDR_ENV
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+
+# Digits only after the prefix: a fuzzy query must never match letters of a random suffix in fixture paths.
+root="/tmp/qa-tree-$uid-$$"
+mkdir -m 700 "$root" || { printf 'Refusing to reuse Clankerhouse QA root: %s\n' "$root" >&2; exit 1; }
+export CLANKERHOUSE_INSTANCE=qa-tree-$$
+qa_rex_isolate "$root"
 fixture_runtime="$root/fixture-runtime"
-state_home="$root/state"
-rtd="$runtime/clankerhouse-$uid-herdr"
-ch_state="$state_home/clankerhouse-herdr"
+state_home="$XDG_STATE_HOME"
+rtd=$qa_runtime
+ch_state="$state_home/clankerhouse-$CLANKERHOUSE_INSTANCE"
 cache_file="$rtd/state.json"
 lineage_capture_path="$root/lineage-render.txt"
 session="qa-workshop-tree"
-repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 export HOME="$root/home"
-export XDG_DATA_HOME="$root/data"
+export _ZO_DATA_DIR="$root/zoxide"
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
 # New Worktree fixtures must become visible immediately to the authoritative projection.
 export CLANKERHOUSE_DIRECTORY_REFRESH_MS=1
-# A fake Claude pane must never report the messaging socket of the Claude running this script.
-unset CLAUDE_CODE_MESSAGING_SOCKET
-unset CLANKERHOUSE_INSTANCE HERDR_PANE_ID HERDR_ENV
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
+export CLANKERHOUSE_OPENCODE_STATUS=/bin/true
+QA_REX_ENV="_ZO_DATA_DIR"
 
 cleanup() {
     if [[ "${CLANKERHOUSE_QA_KEEP:-0}" == "1" ]]; then
-        printf 'Retaining QA fixture at %s (isolated Herdr socket %s)\n' "$root" "${HERDR_SOCKET_PATH:-}" >&2
+        printf 'Retaining QA fixture at %s (isolated Rex server %s)\n' "$root" "${qa_rex_sock:-}" >&2
         return
     fi
-    server_pid_file="$rtd/server.pid"
-    if [[ -r "$server_pid_file" ]]; then
-        server_pid=$(<"$server_pid_file")
-        if [[ "$server_pid" =~ ^[0-9]+$ ]] && tr '\0' '\n' < "/proc/$server_pid/environ" 2>/dev/null | grep -Fx "XDG_RUNTIME_DIR=$runtime" >/dev/null; then
-            kill "$server_pid" 2>/dev/null || true
-        fi
-    fi
-    qa_herdr_stop
-    if [[ -f "$qa_marker" ]]; then
-        rm -rf "$root"
-    fi
+    "$repo/bin/clankerhouse-rex" --stop-runner >/dev/null 2>&1 || true
+    qa_rex_stop
+    rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
 
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
-mux() { env XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" "$repo/bin/clankers" mux "$@"; }
-# Workspace NAME with a first tab WINDOW at CWD; prints "WORKSPACE PANE".
+mux() { "$repo/bin/clankers" mux "$@"; }
+# Session NAME with a first window WINDOW at CWD; prints "SESSION PANE".
 spawn_session() {
     local out
     out=$(mux spawn --new-session "$1" --name "$2" --cwd "$3" -- sleep 300)
     printf '%s %s\n' "$(json_field nativeSessionId <<<"$out")" "$(json_field nativePaneId <<<"$out")"
 }
-# Tab NAME in WORKSPACE at CWD running ARGV...; prints its pane.
+# Window NAME in SESSION at CWD running ARGV...; prints its pane.
 spawn_window() {
     local workspace=$1 name=$2 cwd=$3
     shift 3
     mux spawn --session "$workspace" --name "$name" --cwd "$cwd" -- "$@" | json_field nativePaneId
 }
-workspace_exists() { qa_herdr workspace get "$1" >/dev/null 2>&1; }
-pane_exists() { qa_herdr pane get "$1" >/dev/null 2>&1; }
-focused_field() { qa_herdr api snapshot | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["snapshot"].get(sys.argv[1]) or "")' "$1"; }
+workspace_exists() { qa_rex session inspect "$1" >/dev/null 2>&1; }
+pane_exists() { qa_rex block inspect -s "$qa_ws" "$1" >/dev/null 2>&1; }
+# The block focused in SESSION's active window. Rex keeps focus per session; without an app client no session is "the" focused one.
+focused_block() { qa_rex api call -s "$1" session.view '{}' | python3 -c 'import json,sys
+view = json.load(sys.stdin)
+print(next((w.get("focused_block_id") or "" for w in view["windows"] if w["window_id"] == view.get("active_window_id")), ""))'; }
 
 capture_screen() {
-    qa_herdr pane read "$picker_pane" --source visible 2>/dev/null || true
+    qa_rex capture -s "$qa_ws" -b "$picker_pane" 2>/dev/null || true
 }
-send_keys() { qa_herdr pane send-keys "$picker_pane" "$@" >/dev/null; }
-send_text() { qa_herdr pane send-text "$picker_pane" "$1" >/dev/null; }
+send_keys() { qa_rex send-key -s "$qa_ws" -b "$picker_pane" "$@" >/dev/null; }
+send_text() { qa_rex send -s "$qa_ws" -b "$picker_pane" "$1" >/dev/null; }
 
-refresh_daemon() {
-    bun --eval '
-      const [modulePath, socketPath] = process.argv.slice(1)
-      const { refreshProjection } = await import(modulePath)
-      await refreshProjection(socketPath)
-    ' "$repo/src/transport/index.ts" "$rtd/daemon.sock"
-}
 wait_for_text() {
     local pattern=$1
     local capture=""
@@ -200,17 +190,18 @@ PY
 }
 
 
-# Open the native client as a new tab of the current Workshop and make it the driven pane.
+# Open the native client as a new window of the current Workshop and make it the driven pane.
+# Its exit status lands in picker-exit once it quits.
 open_picker_window() {
-    picker_pane=$(spawn_window "$qa_ws" "$1" "$repo" bash -c "$picker_command")
+    rm -f "$root/picker-exit"
+    picker_pane=$(spawn_window "$qa_ws" "$1" "$repo" bash -c "$picker_command; echo \$? > '$root/picker-exit'")
 }
-# Quit the client like a user would. Closing the pane instead would signal its whole
-# process group, including a daemon the launcher just started.
+# Quit the client like a user would.
 close_picker() {
     pane_exists "$picker_pane" || return 0
     # Esc first clears any query, then closes.
     for _ in {1..4}; do
-        send_keys esc 2>/dev/null || true
+        send_keys escape 2>/dev/null || true
         for _ in {1..20}; do
             pane_exists "$picker_pane" || return 0
             sleep 0.05
@@ -330,14 +321,7 @@ write_fixture_cache() {
     ' "$variant" "$cache_file"
 }
 
-if [[ -e "$root" && ! -f "$qa_marker" ]]; then
-    printf 'Refusing to replace unowned Clankerhouse QA root: %s\n' "$root" >&2
-    exit 1
-fi
-rm -rf "$root"
-mkdir -p "$HOME" "$XDG_DATA_HOME" "$runtime" "$ch_state/activity" "$root/zoxide" "$root/dev" "$root/bin"
-touch "$qa_marker"
-qa_herdr_start "$root/herdr"
+mkdir -p "$HOME" "$ch_state/activity" "$root/zoxide" "$root/dev" "$root/bin"
 
 # Match the standalone launcher's non-login PATH.
 # shellcheck source=/dev/null
@@ -353,6 +337,19 @@ sleep 1
 exec "$real_wt" "\$@"
 SH
 chmod +x "$root/bin/wt"
+# Synthetic fixtures paint only their cache file: this clankers computes no snapshot and runs no mutation.
+cat > "$root/bin/fixture-clankers" <<'SH'
+#!/bin/bash
+[[ "$*" == "snapshot --watch" ]] && exec sleep 3600
+exit 1
+SH
+chmod +x "$root/bin/fixture-clankers"
+# Mutations the picker runs reach the held Worktrunk above.
+export PATH="$root/bin:$PATH"
+
+status=0; qa_rex_start "$root" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
 
 for recovery_repo in recovery-old recovery-durable recovery-edited; do
     recovery_path="$root/dev/$recovery_repo"
@@ -379,6 +376,18 @@ git -C "$nested_fixture_repository" config user.email "clankerhouse-qa@example.i
 touch "$nested_fixture_repository/fixture"
 git -C "$nested_fixture_repository" add fixture
 git -C "$nested_fixture_repository" commit -qm "Nested test fixture"
+
+# A linked worktree with no session. It exists before the first discovery: an open picker serves the
+# directories discovered when it opened, and the runner rediscovers on its own slow schedule.
+sessionless_worktree="$root/dev/qa-delete-sessionless"
+sessionless_origin="$root/dev/lonely-origin"
+git init -q -b main "$sessionless_origin"
+git -C "$sessionless_origin" config user.name "Clankerhouse QA"
+git -C "$sessionless_origin" config user.email "clankerhouse-qa@example.invalid"
+touch "$sessionless_origin/fixture"
+git -C "$sessionless_origin" add fixture
+git -C "$sessionless_origin" commit -qm "Initial fixture"
+git -C "$sessionless_origin" worktree add -q -b qa-delete-sessionless "$sessionless_worktree"
 
 mkdir -p "$root/recovery-ledger-only"
 recovery_now=$(date +%s%3N)
@@ -413,10 +422,11 @@ lineage_tsv=$(LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_
     [process.env.LINEAGE_FIX_JAVA_SESSION, javaPath, java.workshopId, java.parentWorkshopId ?? ""],
   ].map((row) => row.join("\t")).join("\n"))
 ' "$repo/src/workshop.ts" "$lineage_root" "$lineage_fix_coverage" "$lineage_fix_java" "$ch_state/workshops.sqlite3")
-declare -A lineage_pi_panes=()
+declare -A lineage_pi_panes=() lineage_sessions=()
 while IFS=$'\t' read -r lineage_session lineage_path lineage_workshop lineage_parent; do
     [[ -n "$lineage_session" ]] || continue
     read -r lineage_ws _ < <(spawn_session "$lineage_session" main "$lineage_path")
+    lineage_sessions[$lineage_session]=$lineage_ws
     mux claim --session "$lineage_ws" worktreePath "$lineage_path"
     mux claim --session "$lineage_ws" workshopId "$lineage_workshop"
     [[ -z "$lineage_parent" ]] || mux claim --session "$lineage_ws" workshopParentId "$lineage_parent"
@@ -431,12 +441,12 @@ read -r qa_ws main_pane < <(spawn_session "$session" qa-main "$root")
 pi_pane=$(spawn_window "$qa_ws" pi "$root" sleep 300)
 mux claim --pane "$pi_pane" harness pi
 
-recovery_json=$(env XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" _ZO_DATA_DIR="$root/zoxide" CLANKERHOUSE_DEV_ROOT="$root/dev" CLANKERHOUSE_OPENCODE_STATUS=/bin/true bun run "$repo/src/daemon.ts" --dump-state)
+recovery_json=$("$repo/bin/clankers" snapshot)
 RECOVERY_JSON="$recovery_json" RECOVERY_ROOT="$root/dev" LEDGER_ONLY="$root/recovery-ledger-only" INDEPENDENT_REPOSITORY="$independent_repository" NESTED_FIXTURE_REPOSITORY="$nested_fixture_repository" python3 - <<'PY'
 import json
 import os
 
-rows = json.loads(os.environ["RECOVERY_JSON"])
+rows = json.loads(os.environ["RECOVERY_JSON"])["sessions"]
 root = os.environ["RECOVERY_ROOT"]
 paths = [row["path"] for row in rows]
 old = f"{root}/recovery-old"
@@ -462,7 +472,7 @@ for lineage_pane in "$lineage_root_pi_pane" "$lineage_fix_coverage_pi_pane" "$li
     lineage_state_file="$state_dir/${lineage_pane//[^A-Za-z0-9_.%-]/_}.json"
     printf '{"harness":"pi","state":"done","pane":"%s","updatedAt":%s,"hookEvent":"agent_settled"}\n' "$lineage_pane" "$lineage_now" > "$lineage_state_file"
 done
-env HERDR_PANE_ID="$pi_pane" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state_home" "$repo/bin/clankerhouse-clanker-state-report" pi working </dev/null
+(cd "$root" && env REX_BLOCK="$pi_pane" REX_SESSION="$qa_ws" "$repo/bin/clankerhouse-clanker-state-report" pi working </dev/null)
 [[ -s "$state_file" ]] || { printf 'Expected clanker state report for %s\n' "$pi_pane" >&2; exit 1; }
 ACTIVITY_DIR="$ch_state/activity" ACTIVITY_PATH="$root" python3 - <<'PY'
 import json
@@ -473,7 +483,9 @@ records = [json.loads(path.read_text()) for path in Path(os.environ["ACTIVITY_DI
 assert any(record["path"] == os.environ["ACTIVITY_PATH"] and record["source"] == "clanker" for record in records), records
 PY
 
-picker_command="env PATH='$root/bin:$PATH' CLANKERHOUSE_DIRECTORY_REFRESH_MS=1 XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/bin/clankerhouse-herdr'"
+# The server's terminals already carry this lane's XDG_*, CLANKERHOUSE_* and PATH.
+live_picker_command="env CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/bin/clankerhouse-rex'"
+picker_command=$live_picker_command
 open_picker_window picker
 wait_for_text "qa-workshop-tree"
 wait_for_text "edited"
@@ -486,10 +498,7 @@ close_picker
 now=$(date +%s%3N)
 jq --argjson now "$now" '.state = "blocked" | .updatedAt = $now | .hookEvent = "question"' "$state_file" > "$state_file.tmp"
 mv "$state_file.tmp" "$state_file"
-rm -f "$cache_file"
-# Compatibility lifecycle files are read on explicit refresh; native Pi reports
-# use direct daemon IPC and schedule this refresh themselves.
-refresh_daemon
+# The watched snapshot follows the clanker-state directory; nothing needs a refresh.
 open_picker_window picker
 wait_for_text "qa-workshop-tree"
 attention_row=""
@@ -499,7 +508,7 @@ for _ in {1..60}; do
     [[ "$attention_row" == *"▲"* ]] && break
     sleep 0.1
 done
-[[ "$attention_row" == *"▲"* ]] || { printf 'Expected the static Herdr blocked glyph on qa-workshop-tree, last row: %s\n' "$attention_row" >&2; exit 1; }
+[[ "$attention_row" == *"▲"* ]] || { printf 'Expected the static blocked glyph on qa-workshop-tree, last row: %s\n' "$attention_row" >&2; exit 1; }
 close_picker
 
 rm -f "$cache_file"
@@ -531,13 +540,14 @@ PY
 
 close_picker
 
-# Synthetic contract fixtures use a separate runtime so the authoritative
-# daemon cannot overwrite their one-time crash fallback.
-cache_file="$fixture_runtime/clankerhouse-$uid-herdr/state.json"
-mkdir -p "$(dirname "$cache_file")"
+# Synthetic contract fixtures use a separate runtime so the runner cannot overwrite
+# the cache they paint from.
+cache_file="$fixture_runtime/state.json"
+mkdir -p -m 700 "$fixture_runtime"
+printf '{"version":1,"entries":{}}\n' > "$fixture_runtime/repositories.json"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
-# They never poll JSON and never compete with the authoritative test daemon.
-picker_command="env PATH='$root/bin:$PATH' CLANKERHOUSE_DIRECTORY_REFRESH_MS=1 XDG_RUNTIME_DIR='$fixture_runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/native-client/target/release/clankerhouse-native'"
+# They never poll JSON, and their watched snapshot never delivers, so only the cache paints.
+picker_command="env CLANKERHOUSE_RUNTIME_DIR='$fixture_runtime' CLANKERS='$root/bin/fixture-clankers' CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/native-client/target/release/clankerhouse-native'"
 open_picker_window lineage-visual
 wait_for_text "$lineage_root_session"
 # The newest child is initially selected. Searching and clearing must return
@@ -581,7 +591,7 @@ assert any(ordered(line, "·", "✓", "pi") and "done" in line for line in lines
 PY
 if [[ "${CLANKERHOUSE_QA_VISUAL:-0}" == "1" ]]; then
     printf 'Lineage fixture ready: %s\n' "$lineage_capture_path"
-    printf 'Re-read it with: HERDR_SOCKET_PATH=%q herdr pane read %q --source visible\n' "$HERDR_SOCKET_PATH" "$picker_pane"
+    printf 'Re-read it with: rex --autostart=false --server %q capture -s %q -b %q\n' "unix://$qa_rex_sock" "$qa_ws" "$picker_pane"
     exit 0
 fi
 close_picker
@@ -623,13 +633,13 @@ for _ in {1..6}; do send_keys backspace; done
 wait_for_restored_view "$scrolled_view"
 send_text "no-such-target"
 wait_for_text "0 targets"
-send_keys esc
+send_keys escape
 wait_for_restored_view "$scrolled_view"
 for _ in {1..20}; do send_keys down; done
 wait_for_selected_row "qa-workshop-tree"
 unfiltered_view=$(capture_view)
 # The client does not enable bracketed paste, so a terminal delivers pasted text as
-# plain input; Herdr's send-text is that delivery.
+# plain input; Rex's send is that delivery.
 send_text "z-root"
 wait_for_selected_row "z-root"
 wait_for_text "2 targets"
@@ -654,7 +664,7 @@ send_keys enter
 sleep 0.2
 pane_exists "$picker_pane" || { printf 'Enter unexpectedly closed the no-match picker\n' >&2; exit 1; }
 wait_for_text "0 targets"
-send_keys esc
+send_keys escape
 wait_for_restored_view "$unfiltered_view"
 close_picker
 
@@ -665,8 +675,7 @@ send_keys up
 wait_for_selected_row "refresh-keep"
 write_fixture_cache refresh-updated
 sleep 0.3
-# A live client must not poll the fallback file. Socket update/reconnect behavior
-# is covered by qa-daemon and native transport tests.
+# A live client must not poll the cache file; it follows only its watched snapshot.
 wait_for_absent_text "refresh-new-top"
 wait_for_text "refresh-remove"
 wait_for_selected_row "refresh-keep"
@@ -682,71 +691,54 @@ wait_for_text "crowded-branch"
 large_current_view=$(capture_view)
 send_text "crowded-root"
 wait_for_selected_row "crowded-root"
-send_keys left esc
+send_keys left escape
 wait_for_restored_view "$large_current_view"
 close_picker
 rm -f "$cache_file"
 cache_file="$rtd/state.json"
-picker_command="env PATH='$root/bin:$PATH' CLANKERHOUSE_DIRECTORY_REFRESH_MS=1 XDG_RUNTIME_DIR='$runtime' XDG_STATE_HOME='$state_home' _ZO_DATA_DIR='$root/zoxide' CLANKERHOUSE_HOME='$repo' CLANKERHOUSE_BIN_DIR='$repo/bin' CLANKERHOUSE_LIBEXEC='$repo/libexec' CLANKERHOUSE_DEV_ROOT='$root/dev' CLANKERHOUSE_OPENCODE_STATUS=/bin/true CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/bin/clankerhouse-herdr'"
+picker_command=$live_picker_command
 
 now=$(date +%s%3N)
 jq --argjson now "$now" '.state = "done" | .updatedAt = $now | .hookEvent = "agent_settled"' "$state_file" > "$state_file.tmp"
 mv "$state_file.tmp" "$state_file"
-rm -f "$cache_file"
-refresh_daemon
 open_picker_window picker
 wait_for_text "qa-workshop-tree"
 wait_for_text "pi"
 wait_for_row_glyph "qa-workshop-tree" "✓"
 
-pi_panes="$pi_pane $lineage_root_pi_pane $lineage_fix_coverage_pi_pane $lineage_fix_java_pi_pane"
+# Each pi pane with its session; a new window never takes its session's focus, so a focused pi is the jump's.
+pi_targets="$qa_ws=$pi_pane"
+for lineage_session in "${!lineage_pi_panes[@]}"; do
+    pi_targets+=" ${lineage_sessions[$lineage_session]}=${lineage_pi_panes[$lineage_session]}"
+done
+focused_pi() {
+    local target
+    for target in $pi_targets; do
+        [[ "$(focused_block "${target%%=*}")" == "${target#*=}" ]] && return 0
+    done
+    return 1
+}
+focused_pi && { printf 'A pi pane was focused before the jump\n' >&2; exit 1; }
 send_text "pi"
 wait_for_selected_detail "pi"
 send_keys enter
-active=""
+jumped=0
 for _ in {1..100}; do
-    active=$(focused_field focused_pane_id)
-    [[ " $pi_panes " == *" $active "* ]] && break
+    focused_pi && { jumped=1; break; }
     sleep 0.05
 done
-[[ " $pi_panes " == *" $active "* ]] || { printf 'Expected Herdr focus on a pi pane (%s), got %s\n' "$pi_panes" "$active" >&2; exit 1; }
+[[ "$jumped" == 1 ]] || { printf 'Expected Rex focus on a pi pane (%s)\n' "$pi_targets" >&2; exit 1; }
+for _ in {1..100}; do [[ -f "$root/picker-exit" ]] && break; sleep 0.05; done
+[[ "$(cat "$root/picker-exit" 2>/dev/null)" == 0 ]] || { printf 'The jump did not exit the picker cleanly: %s\n' "$(cat "$root/picker-exit" 2>/dev/null)" >&2; exit 1; }
 
-# Herdr owns seen. This fake Pi reports to no daemon, so Herdr holds no settled status for
-# it, and its finished turn counts as seen exactly while its pane is focused.
+# This fake Pi reports no Rex status, so its finished turn renders done in the snapshot. (Seen, which renders
+# a focused finished turn idle, needs an app client showing the session; none attaches to this server.)
 pi_state() {
-    refresh_daemon
-    bun --eval '
-      const [modulePath, socketPath, pane] = process.argv.slice(1)
-      const { getSnapshot } = await import(modulePath)
-      const snapshot = await getSnapshot(socketPath)
-      console.log(snapshot.sessions.flatMap((s) => s.details).find((d) => d.kind === "clanker" && d.target?.pane === pane)?.state ?? "")
-    ' "$repo/src/transport/index.ts" "$rtd/daemon.sock" "$pi_pane"
+    "$repo/bin/clankers" snapshot | PANE="$pi_pane" python3 -c 'import json,os,sys
+rows = json.load(sys.stdin)["sessions"]
+print(next((d["state"] for r in rows for d in r["details"] if d["kind"] == "clanker" and (d.get("target") or {}).get("pane") == os.environ["PANE"]), ""))'
 }
-herdr_focus_pane() {
-    python3 - "$qa_herdr_sock" "$1" <<'PY'
-import json,socket,sys
-def call(method, params):
-    sock=socket.socket(socket.AF_UNIX); sock.connect(sys.argv[1])
-    sock.sendall((json.dumps({"id":"qa","method":method,"params":params})+"\n").encode())
-    data=b""
-    while b"\n" not in data: data += sock.recv(65536)
-    reply=json.loads(data.split(b"\n",1)[0]); assert "error" not in reply, reply
-    return reply["result"]
-pane=call("pane.get",{"pane_id":sys.argv[2]})["pane"]
-call("workspace.focus",{"workspace_id":pane["workspace_id"]}); call("tab.focus",{"tab_id":pane["tab_id"]}); call("pane.focus",{"pane_id":sys.argv[2]})
-PY
-}
-# The picker's jump above focuses through the daemon and can land after a direct focus, so
-# focus the pane until Herdr keeps it.
-for _ in {1..20}; do
-    herdr_focus_pane "$pi_pane"
-    sleep 0.3
-    [[ "$(focused_field focused_pane_id)" == "$pi_pane" ]] && break
-done
-[[ "$(pi_state)" == idle ]] || { printf 'Expected the focused finished clanker to render idle\n' >&2; exit 1; }
-herdr_focus_pane "$main_pane"
-[[ "$(pi_state)" == done ]] || { printf 'Expected the unfocused finished clanker to render done\n' >&2; exit 1; }
-refresh_daemon
+[[ "$(pi_state)" == done ]] || { printf 'Expected the finished clanker to render done, got %s\n' "$(pi_state)" >&2; exit 1; }
 
 open_picker_window picker
 wait_for_row_glyph "qa-workshop-tree" "✓"
@@ -767,14 +759,14 @@ for _ in {1..100}; do
     sleep 0.05
 done
 if pane_exists "$main_pane"; then
-    printf 'Expected confirmed Alt-D to destroy pane %s\n' "$main_pane" >&2
+    printf 'Expected confirmed Alt-D to destroy pane %s\n%s\n' "$main_pane" "$(capture_screen)" >&2
     exit 1
 fi
 # The native client remains open after a successful mutation. Wait for its final
 # subscribed projection before clearing the prior query and reusing the picker.
 wait_for_text "0 targets"
 wait_for_absent_text "Deleting target"
-send_keys esc
+send_keys escape
 wait_for_text "qa-workshop-tree"
 
 origin="$root/dev/delete-origin"
@@ -788,8 +780,6 @@ git -C "$origin" add fixture
 git -C "$origin" commit -qm "Initial fixture"
 git -C "$origin" worktree add -q -b qa-delete-final "$worktree"
 read -r delete_ws _ < <(spawn_session "$delete_session" final "$worktree")
-rm -f "$cache_file"
-refresh_daemon
 wait_for_text "qa-delete-final"
 send_text "final"
 wait_for_text "qa-delete-final"
@@ -822,17 +812,15 @@ fi
 wait_for_text "0 targets"
 wait_for_absent_text "Deleting target"
 # Successful deletion keeps the same picker open and interactive.
-send_keys esc
+send_keys escape
 wait_for_text "qa-workshop-tree"
-send_keys esc
+send_keys escape
 sleep 0.2
 
 parent_worktree="$root/dev/qa-delete-parent"
 parent_session="qa-delete-parent"
 git -C "$origin" worktree add -q -b qa-delete-parent "$parent_worktree"
 read -r parent_ws _ < <(spawn_session "$parent_session" parent "$parent_worktree")
-rm -f "$cache_file"
-refresh_daemon
 
 close_picker
 open_picker_window picker-parent-delete
@@ -866,29 +854,12 @@ send_text "qa-delete-parent"
 wait_for_text "0 targets"
 
 # A linked worktree remains deletable even when it has no multiplexer session.
-send_keys esc
-sessionless_worktree="$root/dev/qa-delete-sessionless"
-sessionless_origin="$root/dev/sessionless-origin"
-git init -q -b main "$sessionless_origin"
-git -C "$sessionless_origin" config user.name "Clankerhouse QA"
-git -C "$sessionless_origin" config user.email "clankerhouse-qa@example.invalid"
-touch "$sessionless_origin/fixture"
-git -C "$sessionless_origin" add fixture
-git -C "$sessionless_origin" commit -qm "Initial fixture"
-git -C "$sessionless_origin" worktree add -q -b qa-delete-sessionless "$sessionless_worktree"
-rm -f "$cache_file"
-refresh_daemon
+send_keys escape
 sessionless_projected=0
-# Ask the authoritative daemon: state.json is rewritten only when the projection changes,
-# and directory discovery settles across refreshes.
 for _ in {1..100}; do
-    if bun --eval '
-      const [modulePath, socketPath, path] = process.argv.slice(1)
-      const { getSnapshot, refreshProjection } = await import(modulePath)
-      await refreshProjection(socketPath)
-      const snapshot = await getSnapshot(socketPath)
-      process.exit(snapshot.sessions.some((row) => row.path === path && row.target?.type === "directory") ? 0 : 1)
-    ' "$repo/src/transport/index.ts" "$rtd/daemon.sock" "$sessionless_worktree" 2>/dev/null
+    if "$repo/bin/clankers" snapshot 2>/dev/null | WORKTREE="$sessionless_worktree" python3 -c 'import json,os,sys
+rows = json.load(sys.stdin)["sessions"]
+sys.exit(0 if any(row["path"] == os.environ["WORKTREE"] and row["target"]["type"] == "directory" for row in rows) else 1)'
     then
         sessionless_projected=1
         break
@@ -916,7 +887,7 @@ fi
 wait_for_absent_text "$sessionless_worktree"
 wait_for_absent_text "Deleting target"
 
-# The daemon owns an accepted deletion after the picker exits. Hold real
+# An accepted deletion outlives the picker that ran it. Hold real
 # Worktrunk at its effect boundary and jump elsewhere BEFORE releasing it.
 async_worktree="$root/dev/qa-delete-async"
 async_session=qa-delete-async
@@ -924,8 +895,7 @@ jump_session=qa-delete-jump
 git -C "$origin" worktree add -q -b qa-delete-async "$async_worktree"
 read -r async_ws _ < <(spawn_session "$async_session" main "$async_worktree")
 read -r jump_ws _ < <(spawn_session "$jump_session" main "$root")
-refresh_daemon
-send_keys esc
+send_keys escape
 wait_for_text "qa-workshop-tree"
 send_text "$async_session"
 wait_for_selected_row "$async_session"
@@ -939,17 +909,14 @@ send_text y
 for _ in {1..100}; do [[ -f "$root/delete-started" ]] && break; sleep 0.05; done
 [[ -f "$root/delete-started" && -d "$async_worktree" ]] || { printf 'Deletion did not reach its held Worktrunk stage\n' >&2; exit 1; }
 wait_for_text "navigation available"
-send_keys esc
+send_keys escape
 wait_for_absent_text "> $async_session"
 send_text "$jump_session"
 wait_for_selected_row "$jump_session"
 send_keys enter
-for _ in {1..100}; do
-    active=$(focused_field focused_workspace_id)
-    [[ "$active" == "$jump_ws" ]] && break
-    sleep 0.05
-done
-[[ "$active" == "$jump_ws" && -d "$async_worktree" ]] || { printf 'Picker did not jump before deletion completed\n' >&2; exit 1; }
+# Rex keeps no global focus without an app client: the jump is the picker exiting cleanly from its Open.
+for _ in {1..100}; do [[ -f "$root/picker-exit" ]] && break; sleep 0.05; done
+[[ "$(cat "$root/picker-exit" 2>/dev/null)" == 0 && -d "$async_worktree" ]] || { printf 'Picker did not jump before deletion completed (exit %s)\n' "$(cat "$root/picker-exit" 2>/dev/null)" >&2; exit 1; }
 workspace_exists "$async_ws" || { printf 'Delete fixture completed before jump\n' >&2; exit 1; }
 rm "$root/delete-paused"
 for _ in {1..160}; do
@@ -961,4 +928,4 @@ if workspace_exists "$async_ws"; then printf 'Background deletion left its sessi
 workspace_exists "$jump_ws" || { printf 'Background deletion closed the jump destination\n' >&2; exit 1; }
 git -C "$origin" show-ref --verify --quiet refs/heads/qa-delete-async || { printf 'Background deletion removed branch history\n' >&2; exit 1; }
 
-printf 'Clankerhouse QA passed: neutral-last bottom-up ordering with last-seen priority within each group, durable recovery ordering, nested fixture repository exclusion, long-list scrolling, typed and bracketed-paste search, no-match Enter, socket-authoritative updates with one-time fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static Herdr status symbols, focus acknowledgement, persistent picker state, confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction, and jumping away during daemon-owned deletion behave correctly.\n'
+printf 'Clankerhouse QA passed: neutral-last bottom-up ordering with last-seen priority within each group, durable recovery ordering, nested fixture repository exclusion, long-list scrolling, typed and bracketed-paste search, no-match Enter, watched-snapshot updates with a cache-only fallback, connector-aligned colored state glyphs, compact lineage-only connectors, inline summary names, expanded detail bullets, static status symbols, jump focus, persistent picker state, confirmed pane/final-worktree/parent-worktree/sessionless-worktree destruction, and jumping away during a deletion that outlives the picker behave correctly.\n'

@@ -262,7 +262,7 @@
         "src/clanker-ledger.test.ts"
       ],
       "standalone": [
-        "scripts/qa-daemon",
+        "scripts/qa-runner",
         "scripts/qa-install"
       ],
       "manual": [
@@ -335,7 +335,7 @@
         "src/diagnostics.test.ts"
       ],
       "standalone": [
-        "scripts/qa-daemon",
+        "scripts/qa-runner",
         "scripts/qa"
       ],
       "manual": [
@@ -409,7 +409,7 @@
         "src/last-messages.test.ts"
       ],
       "standalone": [
-        "scripts/qa-daemon",
+        "scripts/qa-runner",
         "scripts/qa",
         "scripts/qa-native-hot"
       ],

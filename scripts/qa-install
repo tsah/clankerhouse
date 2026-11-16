@@ -1,47 +1,65 @@
 #!/bin/bash
-
+# The atomic installer end to end, into a scratch --prefix with a scratch HOME and XDG directories: same-filesystem
+# staging, atomic active resolution, preflight and activation rollback, the runner following the active version,
+# optional integrations and user units, settings migration, the installed Claude hooks inside a private Rex terminal,
+# ownership and state preservation. systemctl and herdr are stubs, so no real unit, daemon or Herdr config is touched.
+# Needs GNU coreutils (the installer does) and skips without them; needs rex for the in-terminal hook check and skips
+# without it unless REX_REQUIRED is set.
 set -euo pipefail
-export HERDR_ENV= HERDR_PANE_ID=
+unset HERDR_ENV HERDR_PANE_ID HC_TERMINAL_ID CLANKERHOUSE_HOME CLANKERHOUSE_BIN_DIR CLANKERHOUSE_LIBEXEC
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# The installer relies on GNU realpath -m, mv -T, stat -c and sha256sum.
+if ! { realpath -m / >/dev/null 2>&1 && mv --version 2>/dev/null | grep -q GNU && command -v sha256sum >/dev/null 2>&1; }; then
+    printf 'skip: the installer needs GNU coreutils\n' >&2
+    exit 0
+fi
 real_home=$HOME
 root=$(realpath -m -- "${CLANKERHOUSE_INSTALL_QA_ROOT:-$real_home/.cache/qa-clankerhouse-install-$(id -u)-$$}")
 rustup_home=${RUSTUP_HOME:-$real_home/.rustup}
 cargo_home=${CARGO_HOME:-$real_home/.cargo}
+bun_cache=${BUN_INSTALL_CACHE_DIR:-$real_home/.bun/install/cache}
 case "$root" in "$real_home/.cache/qa-clankerhouse-install-"*) ;; *) echo "Refusing unsafe install QA root: $root" >&2; exit 2;; esac
 home="$root/home"
-runtime="$root/runtime"
-state="$root/state"
 prefix="$root/prefix"
 fake_bin="$root/fake-bin"
-socket=""
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+export CLANKERHOUSE_INSTANCE=qa-install-$$
+mkdir -p "$home" "$fake_bin" "$root/work"
+export HOME="$home"
+qa_rex_isolate "$root"
+runtime=$XDG_RUNTIME_DIR
+state=$XDG_STATE_HOME
+config=$XDG_CONFIG_HOME
+launcher_of() { if [[ -x "$prefix/bin/clankerhouse-rex" ]]; then printf '%s\n' "$prefix/bin/clankerhouse-rex"; else printf '%s\n' "$repo/bin/clankerhouse-rex"; fi; }
 cleanup() {
-    if [[ -L "$prefix/lib/clankerhouse" && -S "$socket" ]]; then
-        target=$(readlink -f "$prefix/lib/clankerhouse" 2>/dev/null || true)
-        if [[ -n "$target" && -d "$runtime" ]]; then
-            "$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --herdr-socket "$socket" --application "$target" >/dev/null 2>&1 || true
-        fi
-    fi
-    HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state" PATH="$fake_bin:$PATH" \
-        "$repo/scripts/uninstall" --prefix "$prefix" --force >/dev/null 2>&1 || true
-    qa_herdr_stop
+    "$(launcher_of)" --stop-runner >/dev/null 2>&1 || true
+    "$repo/scripts/uninstall" --prefix "$prefix" --force >/dev/null 2>&1 || true
+    qa_rex_stop
     rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$home" "$runtime" "$state" "$fake_bin"
-chmod 700 "$runtime"
+
+failures=0
+ok() { printf '  ok: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() { local what=$1; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
+wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
 
 cat > "$fake_bin/systemctl" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
 exit 0
 SH
-# Herdr's OpenCode integration is installed only where OpenCode is on PATH.
+# The installer still offers Herdr's OpenCode integration when herdr is on PATH; never reach the real one.
+cat > "$fake_bin/herdr" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CLANKERHOUSE_QA_HERDR_LOG"
+exit 0
+SH
 printf '#!/bin/sh\nexit 0\n' > "$fake_bin/opencode"
-chmod 755 "$fake_bin/opencode"
-chmod 755 "$fake_bin/systemctl"
+chmod 755 "$fake_bin/systemctl" "$fake_bin/herdr" "$fake_bin/opencode"
 cat > "$root/fail-preflight" <<'SH'
 #!/bin/sh
 printf 'injected preflight failure for %s\n' "$1" >&2
@@ -54,13 +72,8 @@ exit 72
 SH
 chmod 755 "$root/fail-preflight" "$root/fail-activation"
 
-export HOME="$home"
-export XDG_CONFIG_HOME="$home/.config"
-export XDG_RUNTIME_DIR="$runtime"
-export XDG_STATE_HOME="$state"
-export RUSTUP_HOME="$rustup_home"
-export CARGO_HOME="$cargo_home"
-export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log"
+export RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" BUN_INSTALL_CACHE_DIR="$bun_cache"
+export CLANKERHOUSE_QA_SYSTEMCTL_LOG="$root/systemctl.log" CLANKERHOUSE_QA_HERDR_LOG="$root/herdr.log"
 export PATH="$fake_bin:$PATH"
 export CLAUDE_CONFIG_DIR="$home/.claude"
 
@@ -84,112 +97,114 @@ config.mkdir()
 }, indent=2) + "\n")
 PY
 
-qa_herdr_start "$root/herdr"
-socket=$HERDR_SOCKET_PATH
-# The isolated server keeps its own config; installed integrations use the QA home.
-export XDG_CONFIG_HOME="$home/.config"
-state_dir="$runtime/clankerhouse-$(id -u)-herdr"
+# The in-terminal hook check runs in a pane of this private server.
+status=0; qa_rex_start "$root" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
 
-# Unmanaged fixed installs remain protected before staging or daemon activity.
-mkdir -p "$root/unmanaged-prefix/lib/clankerhouse"
-printf 'unmanaged\n' > "$root/unmanaged-prefix/lib/clankerhouse/keep"
-if "$repo/scripts/install" --prefix "$root/unmanaged-prefix" --no-daemon-handoff >/dev/null 2>&1; then
-    echo "Installer replaced an unmanaged fixed installation" >&2
-    exit 1
-fi
-[[ -f "$root/unmanaged-prefix/lib/clankerhouse/keep" ]]
-
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --herdr >/dev/null
 active="$prefix/lib/clankerhouse"
 versions="$prefix/lib/clankerhouse-versions"
-[[ -L "$active" ]]
+runner_pid() { cat "$qa_runtime/runner.pid" 2>/dev/null; }
+runner_runs() { local pid; pid=$(runner_pid) && kill -0 "$pid" 2>/dev/null && [[ "$(readlink -e "/proc/$pid/cwd")" == "$1" ]]; }
+# --no-daemon-handoff means the caller quiesces; the runner is the only background process to stop.
+quiesce() { "$prefix/bin/clankerhouse-rex" --stop-runner; }
+# The installer stages and tests a full checkout; the lane's own settings must not leak into those unit tests.
+run_install() {
+    local name
+    local -a strip=()
+    for name in $(compgen -e | grep -E '^(CLANKERHOUSE_|REX_)' | grep -vx CLANKERHOUSE_QA_SYSTEMCTL_LOG | grep -vx CLANKERHOUSE_QA_HERDR_LOG); do strip+=(-u "$name"); done
+    env "${strip[@]}" "$repo/scripts/install" "$@" >>"$root/install.log" 2>&1
+}
+installed() { run_install "$@" || { printf 'install %s failed; its log ends:\n' "$*" >&2; tail -n 30 "$root/install.log" >&2; return 1; }; }
+version_count() { find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l; }
+
+echo "== an unmanaged fixed install stays protected before staging"
+mkdir -p "$root/unmanaged-prefix/lib/clankerhouse"
+printf 'unmanaged\n' > "$root/unmanaged-prefix/lib/clankerhouse/keep"
+check "the installer refuses an unmanaged installation" bash -c "! '$repo/scripts/install' --prefix '$root/unmanaged-prefix' --no-daemon-handoff >/dev/null 2>&1"
+check "and leaves it alone" test -f "$root/unmanaged-prefix/lib/clankerhouse/keep"
+
+echo "== a fresh install activates one validated version"
+installed --prefix "$prefix"
 old_target=$(readlink -f "$active")
-[[ "$old_target/" == "$versions/"* && -f "$old_target/.clankerhouse-install" ]]
-[[ -S "$state_dir/daemon.sock" ]]
-"$prefix/bin/clankerhouse-doctor" >/dev/null
-"$prefix/bin/clankers" help >/dev/null
-nvim --headless -u NONE --cmd "set runtimepath^=$active" \
-    '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
-herdr_config="$XDG_CONFIG_HOME/herdr/config.toml"
-grep -q 'key = "alt+k"' "$herdr_config"
-grep -F "command = \"$prefix/bin/clankerhouse-herdr" "$herdr_config" >/dev/null
-grep -q 'resume_agents_on_restore = false' "$herdr_config"
-
-# A failed preflight never quiesces or switches the selected isolated daemon.
-old_pid=$(<"$state_dir/server.pid")
-if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --preflight-hook "$root/fail-preflight" >/dev/null 2>&1; then
-    echo "Injected preflight failure unexpectedly succeeded" >&2
-    exit 1
+check "the active path is a link" test -L "$active"
+check "into a validated managed version" bash -c "[[ '$old_target/' == '$versions/'* && -f '$old_target/.clankerhouse-install' ]]"
+check "the doctor passes" bash -c "'$prefix/bin/clankerhouse-doctor' >'$root/doctor.out' 2>&1 || { grep broken '$root/doctor.out' >&2; false; }"
+check "clankers runs" bash -c "'$prefix/bin/clankers' help >/dev/null"
+if command -v nvim >/dev/null 2>&1; then
+    check "the Neovim plugin loads from the active path" nvim --headless -u NONE --cmd "set runtimepath^=$active" \
+        '+lua require("clankerhouse").setup(); if vim.fn.exists(":ClankerAsk") ~= 2 then vim.cmd.cquit(1) end' +qa
 fi
-[[ "$(readlink -f "$active")" == "$old_target" ]]
-[[ "$(<"$state_dir/server.pid")" == "$old_pid" ]]
-"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --herdr-socket "$socket" --application "$old_target"
+"$prefix/bin/clankerhouse-rex" --ensure-runner
+check "the installed launcher runs the runner from the active version" runner_runs "$old_target"
 
-# A failed new-daemon health/activation hook atomically restores and probes old.
-before_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
-if "$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --activation-hook "$root/fail-activation" >/dev/null 2>&1; then
-    echo "Injected activation failure unexpectedly succeeded" >&2
-    exit 1
-fi
-[[ "$(readlink -f "$active")" == "$old_target" ]]
-[[ -x "$old_target/bin/clankers" ]]
-"$prefix/bin/clankers" help >/dev/null
-"$repo/scripts/install-daemon-hook" restart --runtime-dir "$runtime" --herdr-socket "$socket" --application "$old_target"
-after_versions=$(find "$versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' | wc -l)
-[[ "$after_versions" == "$before_versions" ]]
-rollback_pid=$(<"$state_dir/server.pid")
-[[ "$(readlink -e "/proc/$rollback_pid/cwd")" == "$old_target" ]]
+echo "== a failed preflight changes nothing"
+old_pid=$(runner_pid)
+check "an injected preflight failure fails the install" bash -c "! '$repo/scripts/install' --prefix '$prefix' --no-daemon-handoff --preflight-hook '$root/fail-preflight' >>'$root/install.log' 2>&1"
+check "the active version is unchanged" test "$(readlink -f "$active")" = "$old_target"
+check "the runner was not touched" bash -c "[[ \$(cat '$qa_runtime/runner.pid') == '$old_pid' ]] && kill -0 '$old_pid'"
+
+echo "== a failed activation restores the previous version atomically"
+quiesce
+before_versions=$(version_count)
+if run_install --prefix "$prefix" --no-daemon-handoff --activation-hook "$root/fail-activation"; then fail "an injected activation failure fails the install"
+elif grep -q 'injected activation failure' "$root/install.log"; then ok "an injected activation failure fails the install"
+else fail "the activation-failure install failed before activation"; tail -n 30 "$root/install.log" >&2; fi
+check "the previous version is active again" test "$(readlink -f "$active")" = "$old_target"
+check "and still runs" bash -c "[[ -x '$old_target/bin/clankers' ]] && '$prefix/bin/clankers' help >/dev/null"
+check "the failed version is removed" test "$(version_count)" = "$before_versions"
+"$prefix/bin/clankerhouse-rex" --ensure-runner
+check "the runner comes back on the restored version" runner_runs "$old_target"
 
 # An integrations upgrade removes our Pi extension link left under its pre-rename name.
 legacy_pi_extension=tmux-clanker-lifecycle.ts
 mkdir -p "$home/.pi/agent/extensions"
 ln -s "$active/integrations/pi/$legacy_pi_extension" "$home/.pi/agent/extensions/$legacy_pi_extension"
 
-# A successful upgrade retains the old version, moves optional links through the
-# stable active path, and renders user units through stable validated wrappers.
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations --systemd >/dev/null
+echo "== an upgrade keeps the old version and moves links through the stable path"
+quiesce
+installed --prefix "$prefix" --no-daemon-handoff --integrations --systemd
 new_target=$(readlink -f "$active")
-[[ "$new_target" != "$old_target" && -d "$old_target" ]]
-[[ ! -e "$home/.pi/agent/extensions/$legacy_pi_extension" && ! -L "$home/.pi/agent/extensions/$legacy_pi_extension" ]]
-new_pid=$(<"$state_dir/server.pid")
-[[ "$(readlink -e "/proc/$new_pid/cwd")" == "$new_target" ]]
-[[ -L "$home/.pi/agent/extensions/clanker-lifecycle.ts" ]]
-[[ "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" == "$active/integrations/pi/clanker-lifecycle.ts" ]]
-[[ -L "$home/.config/opencode/plugins/clankerhouse-lifecycle.ts" ]]
-if command -v herdr >/dev/null 2>&1; then [[ -f "$home/.config/opencode/plugins/herdr-agent-state.js" ]]; fi
-[[ -L "$home/.agents/skills/clanker-coordination" ]]
-[[ -L "$home/.claude/skills/clanker-coordination" ]]
-[[ -L "$home/.codex/skills/clanker-coordination" ]]
-opencode_plugin="$home/.config/opencode/plugins/clankerhouse-lifecycle.ts"
-opencode_skill="$home/.config/opencode/skills/clanker-coordination"
-plugin_inode=$(stat -c %i "$opencode_plugin")
-plugin_mtime=$(stat -c %Y "$opencode_plugin")
-skill_inode=$(stat -c %i "$opencode_skill")
-skill_mtime=$(stat -c %Y "$opencode_skill")
+check "a new version is active and the old one kept" bash -c "[[ '$new_target' != '$old_target' && -d '$old_target' ]]"
+"$prefix/bin/clankerhouse-rex" --ensure-runner
+check "the runner starts on the new version" runner_runs "$new_target"
+check "the pre-rename Pi link is gone" bash -c "[[ ! -e '$home/.pi/agent/extensions/$legacy_pi_extension' && ! -L '$home/.pi/agent/extensions/$legacy_pi_extension' ]]"
+check "the Pi extension links through the active path" test "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" = "$active/integrations/pi/clanker-lifecycle.ts"
+check "the OpenCode plugin is linked" test -L "$config/opencode/plugins/clankerhouse-lifecycle.ts"
+for skill_root in "$home/.agents/skills" "$home/.claude/skills" "$home/.codex/skills" "$home/.pi/agent/skills" "$config/opencode/skills"; do
+    check "the coordination skill is linked under ${skill_root#"$root/"}" test -L "$skill_root/clanker-coordination"
+done
+check "user units are rendered" bash -c "ls '$config/systemd/user/'clankerhouse-* >/dev/null 2>&1"
+opencode_plugin="$config/opencode/plugins/clankerhouse-lifecycle.ts"
+opencode_skill="$config/opencode/skills/clanker-coordination"
+plugin_stamp=$(stat -c %i:%Y "$opencode_plugin")
+skill_stamp=$(stat -c %i:%Y "$opencode_skill")
 
 # A unit of a retired feature that an earlier install recorded is stopped and
 # deleted by any later install, even without --systemd.
 manifest="$state/clankerhouse/installations/$(printf '%s' "$(realpath -m -- "$prefix")" | sha256sum | cut -d' ' -f1).files"
-retired_unit="$home/.config/systemd/user/clankerhouse-spot-watch.service"
+retired_unit="$config/systemd/user/clankerhouse-spot-watch.service"
 printf '[Service]\nExecStart=/bin/true\n' > "$retired_unit"
 printf '%s\n' "$retired_unit" >> "$manifest"
 
-# Reinstalling integrations whose stable targets are already correct must not
-# replace their symlink inodes and trigger live harness/plugin reloads.
-"$repo/scripts/install" --prefix "$prefix" --runtime-dir "$runtime" --herdr-socket "$socket" --integrations >/dev/null
-[[ ! -e "$retired_unit" ]]
-grep -Fx -- '--user disable --now clankerhouse-spot-watch.service' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
-! grep -Fx -- "$retired_unit" "$manifest" >/dev/null
-new_target=$(readlink -f "$active")
-[[ "$(stat -c %i "$opencode_plugin")" == "$plugin_inode" ]]
-[[ "$(stat -c %Y "$opencode_plugin")" == "$plugin_mtime" ]]
-[[ "$(stat -c %i "$opencode_skill")" == "$skill_inode" ]]
-[[ "$(stat -c %Y "$opencode_skill")" == "$skill_mtime" ]]
+echo "== a reinstall leaves correct integration links alone and retires old units"
+quiesce
+installed --prefix "$prefix" --no-daemon-handoff --integrations
+newest_target=$(readlink -f "$active")
+"$prefix/bin/clankerhouse-rex" --ensure-runner
+check "the runner starts on the reinstalled version" runner_runs "$newest_target"
+check "the retired unit is deleted" test ! -e "$retired_unit"
+check "and disabled" grep -qFx -- '--user disable --now clankerhouse-spot-watch.service' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
+check "and dropped from the manifest" bash -c "! grep -Fx -- '$retired_unit' '$manifest' >/dev/null"
+check "the OpenCode plugin link was not replaced" test "$(stat -c %i:%Y "$opencode_plugin")" = "$plugin_stamp"
+check "the OpenCode skill link was not replaced" test "$(stat -c %i:%Y "$opencode_skill")" = "$skill_stamp"
+check "user units were reloaded" grep -qFx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG"
+check "but never enabled" bash -c "! grep -F -- '--user enable' '$CLANKERHOUSE_QA_SYSTEMCTL_LOG' >/dev/null"
 
+echo "== Claude settings are migrated and the installed hooks behave"
 hook="$active/native-client/target/release/clankerhouse-hook"
-grep -F "$hook" "$home/.claude/settings.json" >/dev/null
-pane=$(qa_herdr pane list | jq -r '.result.panes[0].pane_id')
-python3 - "$home/.claude/settings.json" "$hook" "$pane" "$state_dir" <<'PY'
+check "Claude settings address the hook through the active path" grep -qF "$hook" "$home/.claude/settings.json"
+if python3 - "$home/.claude/settings.json" "$hook" "$root/pre-tool.sh" <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
 settings = Path(sys.argv[1])
@@ -205,9 +220,7 @@ assert backup.stat().st_mode & 0o777 == 0o600
 
 # Run the actual installed commands, not merely inspect generated JSON.
 # A plain Claude terminal must not invoke even an installed reporter.
-env = dict(os.environ)
-for key in ("HERDR_ENV", "HERDR_PANE_ID"):
-    env.pop(key, None)
+env = {k: v for k, v in os.environ.items() if k not in ("REX_BLOCK", "REX_SESSION", "HERDR_PANE_ID", "HC_TERMINAL_ID")}
 owned = [h["command"] for entries in data["hooks"].values() for entry in entries for h in entry["hooks"] if sys.argv[2] in h.get("command", "")]
 assert len(owned) == 6, owned
 payload = '{"hook_event_name":"PreToolUse"}'
@@ -217,37 +230,52 @@ def run_hook(command, environment):
 for command in owned:
     run_hook(command, env)
 
-# Inside the isolated Herdr pane, lifecycle reporting still works.
-pane = sys.argv[3]
-pane_env = {**env, "HERDR_ENV": "1", "HERDR_PANE_ID": pane}
-pre_tool = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-run_hook(pre_tool, pane_env)
-reports = [json.loads(path.read_text()) for path in (Path(sys.argv[4]) / "clanker-state").glob("*.json")]
-assert len(reports) == 1, reports
-report = reports[0]
-assert report["harness"] == "claude" and report["state"] == "working" and report["pane"] == pane, report
-
 # Simulate settings shared with an environment where the installed path is absent.
 reporter = Path(sys.argv[2])
 hidden = reporter.with_name(reporter.name + ".qa-hidden")
 reporter.rename(hidden)
 try:
-    for environment in (env, pane_env):
+    for environment in (env, {**env, "REX_BLOCK": "qa-absent-block"}):
         for command in owned:
             run_hook(command, environment)
 finally:
     hidden.rename(reporter)
+Path(sys.argv[3]).write_text(data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] + "\n")
 PY
-grep -Fx -- '--user daemon-reload' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
-! grep -F -- '--user enable' "$CLANKERHOUSE_QA_SYSTEMCTL_LOG" >/dev/null
+then ok "settings are migrated and the hooks stay silent outside a terminal"; else fail "settings migration and outside-a-terminal hook runs"; fi
 
-# Uninstall only after an explicit isolated quiesce; package ownership removes
-# every retained version while preserving runtime and durable state roots.
-"$repo/scripts/install-daemon-hook" quiesce --runtime-dir "$runtime" --herdr-socket "$socket" --application "$new_target"
+# Inside a private Rex terminal, the installed PreToolUse command reports lifecycle state.
+reported() {
+    python3 - "$qa_runtime/clanker-state" "$1" 2>/dev/null <<'PY'
+import json, sys
+from pathlib import Path
+reports = [json.loads(path.read_text()) for path in Path(sys.argv[1]).glob("*.json")]
+assert len(reports) == 1, reports
+report = reports[0]
+assert report["harness"] == "claude" and report["state"] == "working" and report["pane"] == sys.argv[2], report
+PY
+}
+screen_has() { [[ "$(qa_rex capture -s "$1" -b "$2" --unwrap 2>/dev/null)" == *"$3"* ]]; }
+if [[ -f "$root/pre-tool.sh" ]]; then
+    spawned=$("$prefix/bin/clankers" mux spawn --new-session qa-install-hook --cwd "$root/work" -- \
+        sh -c "printf '%s' '{\"hook_event_name\":\"PreToolUse\"}' | sh '$root/pre-tool.sh'; echo hook-rc=\$?; exec sleep 300")
+    hs=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["nativeSessionId"])' <<<"$spawned")
+    hp=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["nativePaneId"])' <<<"$spawned")
+    check "the installed hook command ran in the terminal" wait_for 50 screen_has "$hs" "$hp" hook-rc=0
+    check "and reported the terminal's state" wait_for 30 reported "$hp"
+    "$prefix/bin/clankers" mux kill --session "$hs" >/dev/null 2>&1 || true
+fi
+
+echo "== uninstall after an explicit quiesce removes every version and keeps state"
+last_pid=$(runner_pid || true)
+quiesce
+check "the runner is stopped" bash -c "[[ -n '$last_pid' ]] && ! kill -0 '$last_pid' 2>/dev/null"
 printf 'preserve\n' > "$state/preserved-state"
 "$repo/scripts/uninstall" --prefix "$prefix" >/dev/null
-[[ ! -e "$active" && ! -L "$active" && ! -e "$versions" ]]
-[[ -f "$state/preserved-state" && -d "$runtime" ]]
-! grep -q 'clankerhouse-clanker-state-report\|clankerhouse-hook' "$home/.claude/settings.json"
-grep -q qa-custom-start "$home/.claude/settings.json"
-printf 'Clankerhouse install QA passed: same-filesystem staging, atomic active resolution, isolated daemon handoff, preflight/activation rollback, optional integrations/systemd, ownership, and state preservation behave correctly.\n'
+check "no active path or versions remain" bash -c "[[ ! -e '$active' && ! -L '$active' && ! -e '$versions' ]]"
+check "runtime and durable state are preserved" bash -c "[[ -f '$state/preserved-state' && -d '$runtime' ]]"
+check "our Claude hooks are removed" bash -c "! grep -q 'clankerhouse-clanker-state-report\|clankerhouse-hook' '$home/.claude/settings.json'"
+check "custom Claude hooks are kept" grep -q qa-custom-start "$home/.claude/settings.json"
+
+if ((failures)); then printf '%d install check(s) failed\n' "$failures" >&2; exit 1; fi
+printf 'Clankerhouse install QA passed: same-filesystem staging, atomic active resolution, preflight/activation rollback, the runner following the active version, optional integrations/systemd, ownership, and state preservation behave correctly.\n'

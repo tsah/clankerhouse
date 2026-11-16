@@ -1,0 +1,96 @@
+#!/bin/bash
+# The runner end to end on a private Rex server under scratch XDG directories: the launcher starts exactly one runner,
+# reports its health, and stops it; the runner alone writes the snapshot cache (state.json) and follows Rex changes into
+# it; snapshots, diagnostics and the native tree dump read Rex directly and work with no runner; a stale pid file never
+# fools the launcher; nothing listens on a socket. Needs rex; skips without it unless REX_REQUIRED is set.
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+export CLANKERHOUSE_HOME="$repo" CLANKERHOUSE_BIN_DIR="$repo/bin" CLANKERHOUSE_LIBEXEC="$repo/libexec"
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+
+root=$(mktemp -d /tmp/qa-runner.XXXXXX)
+launcher="$repo/bin/clankerhouse-rex"
+clankers="$repo/bin/clankers"
+native="$repo/native-client/target/release/clankerhouse-native"
+export CLANKERHOUSE_INSTANCE=qa-runner-$$ CLANKERHOUSE_OPENCODE_STATUS=/bin/true
+qa_rex_isolate "$root"
+runtime=$qa_runtime
+cache="$runtime/state.json"
+mkdir -p "$root/work"
+failures=0
+cleanup() {
+    "$launcher" --stop-runner >/dev/null 2>&1 || true
+    qa_rex_stop
+    rm -rf -- "$root"
+}
+trap cleanup EXIT INT TERM
+
+ok() { printf '  ok: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() { local what=$1; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
+wait_for() { local tries=$1; shift; for _ in $(seq 1 "$tries"); do if "$@"; then return 0; fi; sleep 0.1; done; return 1; }
+jqe() { jq -e "$@" >/dev/null; }
+alive() { kill -0 "$1" 2>/dev/null; }
+dead() { ! kill -0 "$1" 2>/dev/null; }
+cache_has() { [[ -s "$cache" ]] && jq -e --arg name "$1" 'any(.sessions[]; .name == $name or .displayName == $name or (tostring | contains($name)))' "$cache" >/dev/null 2>&1; }
+
+status=0
+qa_rex_start "$root" || status=$?
+[[ "$status" != 77 ]] || exit 0
+[[ "$status" == 0 ]] || exit "$status"
+"$clankers" mux spawn --new-session qa-runner-one --cwd "$root/work" -- sleep 600 >/dev/null
+
+echo "== without a runner, reads still work and write nothing"
+check "health reports Rex up and the runner down" bash -c "out=\$('$launcher' --health); rc=\$?; [[ \$rc == 1 && \$out == *'\"rex\":\"reachable\"'* && \$out == *'\"runner\":\"down\"'* ]]"
+snapshot=$("$clankers" snapshot)
+check "a one-shot snapshot holds the session" jqe 'any(.sessions[]; tostring | contains("qa-runner-one"))' <<<"$snapshot"
+diagnostics=$("$clankers" diagnose --json)
+check "diagnostics are healthy and count one session row" jqe '.healthy == true and .counts.sessions == 1 and .counts.renderedSessionRows == 1' <<<"$diagnostics"
+tree=$("$native" --dump-tree)
+check "the native tree dump shows one session row" jqe '.version == 1 and (.rows | length) == 1 and .rows[0].target.type == "session"' <<<"$tree"
+check "no reader wrote the snapshot cache" test ! -e "$cache"
+
+echo "== the launcher starts one runner"
+"$launcher" --ensure-runner
+pid=$(<"$runtime/runner.pid")
+check "the runner is alive" alive "$pid"
+check "health reports it running" bash -c "'$launcher' --health | grep -q '\"runner\":\"running\"'"
+check "the runtime directory is private" test "$(stat -c '%a' "$runtime")" = 700
+"$launcher" --ensure-runner
+check "a second ensure keeps the same runner" test "$(<"$runtime/runner.pid")" = "$pid"
+check "exactly one runner runs for this instance" test "$(pgrep -f 'cli.ts runner' | while read -r p; do tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -Fqx "CLANKERHOUSE_RUNTIME_DIR=$runtime" && echo "$p"; done | wc -l)" = 1
+check "nothing listens on a socket in the runtime directory" test -z "$(find "$runtime" -type s)"
+
+echo "== the runner keeps the cache"
+check "it writes the cache with the session" wait_for 100 cache_has qa-runner-one
+check "the cache is the snapshot payload" jqe '(.sessions | type) == "array" and (.version | type) == "number"' "$cache"
+two=$("$clankers" mux spawn --new-session qa-runner-two --cwd "$root/work" -- sleep 600 | jq -r .nativeSessionId)
+check "and follows a new Rex session into it" wait_for 100 cache_has qa-runner-two
+"$clankers" mux kill --session "$two"
+check "and a killed one out of it" wait_for 100 bash -c "! jq -e 'any(.sessions[]; tostring | contains(\"qa-runner-two\"))' '$cache' >/dev/null"
+
+echo "== stop and restart"
+"$launcher" --stop-runner
+check "stop ends the runner" wait_for 50 dead "$pid"
+check "and removes its pid file" test ! -e "$runtime/runner.pid"
+check "the cache remains for the picker's first paint" test -s "$cache"
+check "health reports the runner down" bash -c "! '$launcher' --health >/dev/null"
+# A stale pid file naming a live process that is not this instance's runner must not count as one.
+sleep 600 &
+impostor=$!
+echo "$impostor" >"$runtime/runner.pid"
+check "a stale pid file is not a runner" bash -c "'$launcher' --health | grep -q '\"runner\":\"down\"'"
+"$launcher" --ensure-runner
+restarted=$(<"$runtime/runner.pid")
+check "ensure starts a fresh runner over a stale pid file" bash -c "[[ '$restarted' != '$impostor' ]] && kill -0 '$restarted'"
+check "and leaves the impostor alone" alive "$impostor"
+kill "$impostor" 2>/dev/null || true
+kill -KILL "$restarted"
+check "a killed runner reads as down" wait_for 50 bash -c "'$launcher' --health | grep -q '\"runner\":\"down\"'"
+"$launcher" --ensure-runner
+check "and ensure brings one back" bash -c "kill -0 \$(<'$runtime/runner.pid')"
+
+if ((failures)); then printf '%d runner check(s) failed\n' "$failures" >&2; exit 1; fi
+echo "Runner scenario passed"

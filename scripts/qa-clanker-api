@@ -1,43 +1,38 @@
 #!/bin/bash
-
+# The Clanker API end to end on a private Rex server under scratch XDG directories: discovery, identity, status and
+# capabilities, native sends and waits, report waiting, Claude settlement, and unsupported transports.
+# Needs rex; skips without it unless REX_REQUIRED is set. Never touches the account's own Rex server or Clankerhouse state.
 set -euo pipefail
+# `clankers report` reads its payload from a non-terminal stdin; never wait on the caller's.
+exec </dev/null
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-# shellcheck source=lib/qa-herdr-server
-. "$repo/scripts/lib/qa-herdr-server"
-root=${CLANKER_API_QA_ROOT:-"/tmp/qa-clanker-api-$$"}
-case "$root" in /tmp/qa-clanker-api-*) ;; *) echo "Refusing unsafe QA root: $root" >&2; exit 2 ;; esac
-if [[ -e "$root" ]]; then
-    [[ -f "$root/.qa-owned" ]] || { echo "Refusing unowned QA root: $root" >&2; exit 2; }
-    rm -rf -- "$root"
-fi
-mkdir -p "$root"
-touch "$root/.qa-owned"
-
-runtime="$root/runtime"
-state_home="$root/state"
+# shellcheck source=lib/qa-rex-server
+. "$repo/scripts/lib/qa-rex-server"
+root=$(mktemp -d /tmp/qa-clanker-api.XXXXXX)
+# A fake Claude pane must never report the messaging socket of the Claude running this script.
+unset CLAUDE_CODE_MESSAGING_SOCKET CLANKER_ID CLANKERHOUSE_WORKSHOP_ID CLANKERHOUSE_PARENT_WORKSHOP_ID
+export CLANKERHOUSE_INSTANCE=qa-capi-$$
+qa_rex_isolate "$root"
+runtime=$qa_runtime
 fixture="$root/repo"
 other_fixture="$root/other-repo"
-report_dir="$runtime/clankerhouse-$(id -u)-herdr/clanker-state"
+report_dir="$runtime/clanker-state"
 qa_home="$root/home"
-data_home="$root/data"
-mkdir -p "$runtime" "$state_home" "$report_dir" "$qa_home" "$data_home"
+mkdir -p "$report_dir" "$qa_home"
 chmod 700 "$report_dir"
 server_pid=""
 
 cleanup() {
     if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
-    qa_herdr_stop
-    [[ -f "$root/.qa-owned" ]] && rm -rf -- "$root"
+    qa_rex_stop
+    rm -rf -- "$root"
 }
 trap cleanup EXIT INT TERM
-# A fake Claude pane must never report the messaging socket of the Claude running this script.
-unset CLAUDE_CODE_MESSAGING_SOCKET
-unset CLANKERHOUSE_INSTANCE HERDR_ENV HERDR_PANE_ID
-herdr_status=0
-qa_herdr_start "$root/herdr" || herdr_status=$?
-[[ "$herdr_status" != 77 ]] || exit 0
-[[ "$herdr_status" == 0 ]] || exit "$herdr_status"
+rex_status=0
+qa_rex_start "$root" || rex_status=$?
+[[ "$rex_status" != 77 ]] || exit 0
+[[ "$rex_status" == 0 ]] || exit "$rex_status"
 
 fail() { echo "Clankerhouse clanker API QA failed: $*" >&2; exit 1; }
 json_assert() {
@@ -54,7 +49,7 @@ for directory in "$fixture" "$other_fixture"; do
     git -C "$directory" commit -qm fixture
 done
 
-qa_env=(env "HOME=$qa_home" "XDG_RUNTIME_DIR=$runtime" "XDG_STATE_HOME=$state_home" "XDG_DATA_HOME=$data_home" "DOTFILES_DIR=$repo")
+qa_env=(env "HOME=$qa_home" "DOTFILES_DIR=$repo")
 api() { "${qa_env[@]}" "$repo/bin/clankers" "$@"; }
 mux() { api mux "$@"; }
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
@@ -93,7 +88,7 @@ printf '%s' '{"harness":"pi","clankerId":"clanker-qa-pi","pane":"'"$pi_pane"'","
 printf '%s' '{"harness":"claude","clankerId":"clanker-qa-claude","pane":"'"$claude_pane"'","state":"done","generation":1,"settledGeneration":1,"updatedAt":1,"hookEvent":"Stop"}' > "$claude_report"
 printf '%s' '{"harness":"opencode","clankerId":"clanker-qa-opencode","pane":"'"$opencode_pane"'","state":"unknown","generation":0,"settledGeneration":0,"updatedAt":1}' > "$opencode_report"
 
-native_socket="$runtime/clankerhouse-$(id -u)/clanker-sockets/qa-pi.sock"
+native_socket="$runtime/clanker-sockets/qa-pi.sock"
 mkdir -p "$(dirname "$native_socket")"
 cat > "$root/native-server.py" <<'PY'
 import json, os, socket, sys, threading, time
@@ -159,7 +154,7 @@ for _ in {1..50}; do [[ -S "$native_socket" ]] && break; sleep 0.02; done
 [[ -S "$native_socket" ]] || fail "native socket did not start"
 mux claim --pane "$pi_pane" clankerSocket "$native_socket"
 
-# Subprocess workers using `pi --no-session` inherit the parent's HERDR_PANE_ID.
+# Subprocess workers using `pi --no-session` inherit the parent's REX_BLOCK.
 # Loading the global lifecycle extension in such a worker
 # must leave the parent's identity, report, socket, and Recovery untouched.
 cat > "$root/sessionless-extension.ts" <<EOF
@@ -186,7 +181,7 @@ before_options=$(pane_claims "$pi_pane")
 before_report=$(sha256sum "$pi_report")
 before_sockets=$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)
 sessionless_handlers=$("${qa_env[@]}" env \
-    HERDR_PANE_ID="$pi_pane" \
+    REX_BLOCK="$pi_pane" \
     CLANKER_ID=clanker-qa-pi \
     CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" \
     SESSIONLESS_RECOVERY_LOG="$root/sessionless-recovery.log" \
@@ -199,7 +194,7 @@ sessionless_handlers=$("${qa_env[@]}" env \
 
 # SDK workers have no --no-session argv marker. They load multiple extension
 # instances within one process, but only the visible TUI context owns the pane.
-# Exercise real claims/report/socket adapters on this isolated Herdr server.
+# Exercise real claims/report/socket adapters on this isolated Rex server.
 cp "$pi_report" "$root/pi-before-sdk.json"
 python3 - "$pi_report" <<'PY'
 import json, sys
@@ -229,7 +224,7 @@ for (const mode of ["print", "json", "rpc"]) {
   await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx)
 }
 EOF
-"${qa_env[@]}" env HERDR_PANE_ID="$pi_pane" CLANKER_ID=clanker-qa-pi \
+"${qa_env[@]}" env REX_BLOCK="$pi_pane" CLANKER_ID=clanker-qa-pi \
     CLANKERHOUSE_CLANKERS="$root/unexpected-clankers" SESSIONLESS_RECOVERY_LOG="$root/sdk-recovery.log" \
     bun "$root/sdk-extension.ts"
 [[ "$(pane_claims "$pi_pane")" == "$before_options" ]] || fail "SDK Pi worker replaced parent pane identity"
@@ -247,14 +242,14 @@ printf '%s' "$filtered" | json_assert 'len(data) == 4 and {row["harness"] for ro
 codex_id=$(printf '%s' "$filtered" | python3 -c 'import json,sys; print(next(row["id"] for row in json.load(sys.stdin) if row["harness"]=="codex"))')
 [[ "$codex_id" == clanker-* ]] || fail "Codex pane did not receive a stable ID"
 [[ "$(mux read-claim --pane "$codex_pane" clankerId)" == "$codex_id" ]] || fail "Codex ID was not stored as a pane claim"
-qa_herdr workspace rename "$api_session" qa-clanker-api-renamed >/dev/null
+qa_rex session rename "$api_session" qa-clanker-api-renamed >/dev/null
 filtered_again=$(api list --cwd "$fixture")
 [[ "$codex_id" == "$(printf '%s' "$filtered_again" | python3 -c 'import json,sys; print(next(row["id"] for row in json.load(sys.stdin) if row["harness"]=="codex"))')" ]] || fail "clanker ID changed after session rename"
 
 # Status and capability matrix.
 api status clanker-qa-pi | json_assert 'data["id"] == "clanker-qa-pi" and data["state"] == "done"'
 api capabilities clanker-qa-pi | json_assert 'data["capabilities"]["send"] == "unix-socket" and data["capabilities"]["wait"] == "reports" and data["capabilities"]["result"] == "reports"'
-api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] == "multiplexer-prompt" and data["capabilities"]["result"] == "transcript" and data["capabilities"]["deliveryModes"] == ["queued", "followUp"]'
+api capabilities clanker-qa-claude | json_assert 'data["capabilities"]["wait"] == "reports" and data["capabilities"]["send"] == "multiplexer-prompt" and data["capabilities"]["result"] == "transcript" and data["capabilities"]["deliveryModes"] == ["queued", "followUp", "restart"]'
 api capabilities clanker-qa-opencode | json_assert 'data["capabilities"]["wait"] is False and data["capabilities"]["send"] is False and data["capabilities"]["result"] is False'
 set +e
 unknown_error=$(api status clanker-missing 2>&1 >/dev/null); unknown_code=$?
@@ -272,11 +267,11 @@ printf '%s' "$duplicate_error" | json_assert 'data["error"]["code"] == "AMBIGUOU
 mux claim --pane "$opencode_pane" clankerId clanker-qa-opencode
 
 # Native sends, delivery modes, waits, and result generations. Pane output must not change.
-before=$(qa_herdr pane read "$pi_pane" --source recent)
+before=$(qa_rex capture -s "$api_session" -b "$pi_pane" --unwrap)
 printf 'default' | api send clanker-qa-pi --wait | json_assert 'data["afterGeneration"] == 1 and data["result"]["generation"] == 2 and data["result"]["reply"] == "result:default"'
 printf 'steered' | api send clanker-qa-pi --delivery steer --wait | json_assert 'data["delivery"] == "steer" and data["result"]["generation"] == 3'
 printf 'followed' | api send clanker-qa-pi --delivery follow-up --wait | json_assert 'data["delivery"] == "followUp" and data["result"]["generation"] == 4'
-after=$(qa_herdr pane read "$pi_pane" --source recent)
+after=$(qa_rex capture -s "$api_session" -b "$pi_pane" --unwrap)
 [[ "$before" == "$after" ]] || fail "native send modified the Pi terminal pane"
 api result clanker-qa-pi | json_assert 'data["generation"] == 4 and data["reply"] == "result:followed"'
 api result clanker-qa-pi --generation 2 | json_assert 'data["generation"] == 2 and data["reply"] == "result:default"'
@@ -290,15 +285,15 @@ printf '%s' "$mismatch" | json_assert 'data["error"]["code"] == "UNAVAILABLE"'
 
 # Generic report waiting, stale-identity reset, and no-after active-generation semantics.
 printf '%s' '{"harness":"codex","clankerId":"clanker-stale","pane":"'"$codex_pane"'","state":"done","generation":99,"settledGeneration":99,"updatedAt":1}' > "$codex_report"
-printf '{}' | "${qa_env[@]}" env HERDR_PANE_ID="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex working
+printf '{}' | "${qa_env[@]}" env REX_BLOCK="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex working
 python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["clankerId"]==sys.argv[2] and data["generation"]==1 and data["settledGeneration"]==0' "$codex_report" "$codex_id"
-printf '{}' | "${qa_env[@]}" env HERDR_PANE_ID="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex done
+printf '{}' | "${qa_env[@]}" env REX_BLOCK="$codex_pane" CLANKER_ID="$codex_id" "$repo/bin/clankerhouse-clanker-state-report" codex done
 api wait "$codex_id" --after 0 --timeout 2 | json_assert 'data["settledGeneration"] == 1'
 
 # A foreground Stop with a running native background task is not completion.
 # Replay the documented Claude payload through the real reporter and API; do not
 # infer background work from the fixture's processes or scrape terminal output.
-claude_reporter=("${qa_env[@]}" env HERDR_PANE_ID="$claude_pane" CLANKER_ID=clanker-qa-claude "$repo/bin/clankerhouse-clanker-state-report" claude)
+claude_reporter=("${qa_env[@]}" env REX_BLOCK="$claude_pane" CLANKER_ID=clanker-qa-claude "$repo/bin/clankerhouse-clanker-state-report" claude)
 printf '%s' '{"hook_event_name":"UserPromptSubmit"}' | "${claude_reporter[@]}" working
 printf '%s' '{"hook_event_name":"Stop","background_tasks":[{"id":"shell-task","type":"shell","status":"running"}]}' | "${claude_reporter[@]}" done
 api status clanker-qa-claude | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
@@ -329,14 +324,13 @@ set -e
 printf '%s' "$timeout_error" | json_assert 'data["error"]["code"] == "TIMEOUT"'
 pane_exists "$claude_pane" || fail "timeout destroyed its pane"
 
-# Claude send goes only through Herdr's validated agent prompt, which refuses a pane
-# that no recognized interactive agent owns; it never falls back to raw input.
-claude_before=$(qa_herdr pane read "$claude_pane" --source recent)
-set +e
-printf x | api send clanker-qa-claude >/dev/null 2>&1; claude_send_code=$?
-set -e
-[[ $claude_send_code -ne 0 ]] || fail "Claude send succeeded without a recognized interactive agent"
-[[ "$(qa_herdr pane read "$claude_pane" --source recent)" == "$claude_before" ]] || fail "rejected Claude send modified the pane"
+# Claude send without a messaging socket goes through Rex's agent prompt (a paste, then Enter) after the pane's
+# Clanker claim is revalidated; the text reaches that pane only.
+pi_before=$(qa_rex capture -s "$api_session" -b "$pi_pane" --unwrap)
+printf 'claude-prompt-text' | api send clanker-qa-claude | json_assert 'data["delivery"] == "immediate" and data["transport"] != "inbox" and data.get("confirmed") is True'
+for _ in {1..50}; do [[ "$(qa_rex capture -s "$api_session" -b "$claude_pane" --unwrap)" == *claude-prompt-text* ]] && break; sleep 0.1; done
+[[ "$(qa_rex capture -s "$api_session" -b "$claude_pane" --unwrap)" == *claude-prompt-text* ]] || fail "Claude send did not reach its pane through the agent prompt"
+[[ "$(qa_rex capture -s "$api_session" -b "$pi_pane" --unwrap)" == "$pi_before" ]] || fail "Claude send modified another pane"
 
 # Unsupported capability errors.
 for command in "send clanker-qa-claude --delivery steer" "wait clanker-qa-opencode" "send clanker-qa-opencode" "result clanker-qa-opencode"; do
@@ -355,4 +349,4 @@ if rg -n 'send-keys|send-text|send_keys|send_text|pane\.read|"read"' \
     fail "production clanker communication path contains forbidden raw pane manipulation"
 fi
 
-echo "Clankerhouse clanker API QA passed: discovery, stable identity, filtering, rename safety, duplicate rejection, status/capabilities, native sends, delivery modes, correlated waits/results, terminal non-mutation, identity mismatch, report waiting, Claude background-task settlement, stale-report reset, timeout behavior, and unsupported transports all behave correctly."
+echo "Clankerhouse clanker API QA passed: discovery, stable identity, filtering, rename safety, duplicate rejection, status/capabilities, native sends, delivery modes, correlated waits/results, terminal non-mutation, identity mismatch, report waiting, Claude background-task settlement, stale-report reset, timeout behavior, the Claude agent prompt, and unsupported transports all behave correctly."

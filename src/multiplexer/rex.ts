@@ -512,7 +512,26 @@ export class RexAdapter implements Multiplexer {
     return result
   }
 
+  /**
+   * A location whose session is unknown (a caller holding only a pane or window id, such as `clankers mux kill --pane`)
+   * gets its session from Rex; Rex methods on a block or window need the session that holds it.
+   */
+  private async located(location: NativeLocation): Promise<NativeLocation> {
+    if (location.nativeSessionId || (!location.nativePaneId && !location.nativeWindowId)) return location
+    const observed = await this.observation()
+    for (const session of list<RexObservedSession>(observed.sessions)) {
+      for (const window of list<RexObservedWindow>(session.windows)) {
+        if (location.nativeWindowId && window.window_id === location.nativeWindowId) return { ...location, nativeSessionId: session.session_id }
+        if (location.nativePaneId && list<RexObservedBlock>(window.blocks).some((block) => block.block_id === location.nativePaneId)) {
+          return { ...location, nativeSessionId: session.session_id, nativeWindowId: location.nativeWindowId ?? window.window_id }
+        }
+      }
+    }
+    throw new RexRequestError("locate", "not_found", `no Rex session holds ${location.nativePaneId ?? location.nativeWindowId}`)
+  }
+
   async kill(location: NativeLocation) {
+    location = await this.located(location)
     const scope = locationScope(location)
     try {
       if (scope === "session") await this.call("session.destroy", { session_id: location.nativeSessionId })
@@ -525,6 +544,7 @@ export class RexAdapter implements Multiplexer {
   }
 
   async rename(location: NativeLocation, name: string) {
+    location = await this.located(location)
     const scope = locationScope(location)
     const label = rexLabel(name)
     if (scope === "session") await this.call("session.set_label", { session_id: location.nativeSessionId, label })
@@ -554,6 +574,7 @@ export class RexAdapter implements Multiplexer {
    * for with its `session.select` action; an app with Remote Control off refuses, and the session is still focused.
    */
   async focus(location: NativeLocation) {
+    location = await this.located(location)
     const session = location.nativeSessionId
     if (location.nativePaneId) await this.call("session.focus_block", { session_id: session, block_id: location.nativePaneId })
     else if (location.nativeWindowId) await this.call("session.focus_window", { session_id: session, window_id: location.nativeWindowId })
@@ -570,6 +591,7 @@ export class RexAdapter implements Multiplexer {
 
   /** Paste, then Enter as a key of its own, as a person would. */
   async promptAgent(location: NativeLocation, text: string) {
+    location = await this.located(location)
     if (!location.nativePaneId) throw new Error("Agent prompt requires a pane location")
     const target = { session_id: location.nativeSessionId, block_id: location.nativePaneId }
     await this.call("block.event", { ...target, event: { type: "paste", payload: { text } } })
@@ -587,6 +609,7 @@ export class RexAdapter implements Multiplexer {
    * each with a short look at its status, since one ESC only leaves INSERT in vim-mode Claude.
    */
   async interruptAgent(location: NativeLocation): Promise<AgentInterruptOutcome> {
+    location = await this.located(location)
     if (!location.nativePaneId) throw new Error("Agent interrupt requires a pane location")
     const key = (name: string) => this.call("block.event", { session_id: location.nativeSessionId, block_id: location.nativePaneId, event: { type: "key", payload: { key: name } } })
     const state = await this.leadStatus(location)

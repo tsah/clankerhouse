@@ -272,10 +272,8 @@ def main():
                 require(run([tools["git"], "-C", cwd, "branch", "--show-current"]).stdout.strip() == name,
                         "Wrong Worktrunk branch")
             argv = log["argv"]
-            if harness == "claude":
-                # On Rex each Claude carries the lane's lifecycle hooks, ahead of everything else.
-                require(argv[:1] == ["--settings"] and "clankerhouse-hook" in argv[1], f"Claude lacks the Rex lane hooks: {argv}")
-                argv = argv[2:]
+            # Claude's lifecycle hooks are the global ones (clankerhouse-install-claude-hooks), never per launch.
+            require("--settings" not in argv, f"Claude was launched with per-launch hooks: {argv}")
             expected_model = model or ("qa/profile-default" if harness == "pi" and profile_name else None)
             expected = []
             if harness != "codex":

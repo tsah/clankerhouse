@@ -592,6 +592,18 @@ const executeDaemonMutation: MutationExecutor = async (intent, execution) => {
 }
 
 
+/** Finishes every mutation whose process died mid-way (the runner calls this on each pass). */
+export const resumeUnfinishedMutations = async () => {
+  ensurePrivateRuntimeDirectory()
+  const store = openOperationStore()
+  try {
+    const journal = await OperationJournal.open(executeDaemonMutation, store)
+    await journal.idle()
+  } finally {
+    store.close()
+  }
+}
+
 export interface MutationOutcome { operationId: string; state: string; stage: string; result?: unknown; error?: string }
 
 /**

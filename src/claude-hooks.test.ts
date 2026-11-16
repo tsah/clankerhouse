@@ -98,13 +98,13 @@ describe("Claude hook installation", () => {
     const upgraded = f.install()
     for (const [event, state] of Object.entries(states)) {
       expect(upgraded.hooks[event]![0]!.hooks[0]).toEqual({ type: "command", timeout: 2,
-        command: `if { [ -n "\${HERDR_PANE_ID:-}" ] || [ -n "\${HC_TERMINAL_ID:-}" ]; } && [ -x ${f.bin}/clankerhouse-hook ]; then exec ${f.bin}/clankerhouse-hook claude ${state}; fi` })
+        command: `if [ -n "\${REX_BLOCK:-}" ] && [ -x ${f.bin}/clankerhouse-hook ]; then exec ${f.bin}/clankerhouse-hook claude ${state}; fi` })
     }
     expect(upgraded.hooks.Stop![0]!.hooks).toHaveLength(2)
     expect(upgraded.hooks.Stop![0]!.hooks[1]).toEqual({ type: "command", command: "echo custom-stop", timeout: 10 })
   })
 
-  test("global hooks are silent no-ops outside a Multiplexer, even when the reporter exists", () => {
+  test("global hooks are silent no-ops outside a Rex pane, even when the reporter exists", () => {
     const f = fixture()
     const reporter = join(f.bin, "clankerhouse-hook")
     mkdirSync(f.bin)
@@ -119,10 +119,10 @@ describe("Claude hook installation", () => {
     }
   })
 
-  test("missing reporters are silent no-ops both outside and inside Multiplexers", () => {
+  test("missing reporters are silent no-ops both outside and inside Rex panes", () => {
     const f = fixture()
     const installed = f.install()
-    for (const paneEnv of [{}, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }]) {
+    for (const paneEnv of [{}, { REX_BLOCK: "block:p1" }]) {
       for (const event of Object.keys(installed.hooks)) {
         const result = Bun.spawnSync(["sh", "-c", commands(installed, event)[0]!], { env: { ...f.env, ...paneEnv } })
         expect(result.exitCode, result.stderr.toString()).toBe(0)
@@ -140,7 +140,7 @@ describe("Claude hook installation", () => {
     writeFileSync(reporter, '#!/bin/sh\nprintf "%s\\n%s\\n" "$1" "$2" > "$HOOK_RESULT"\ncat >> "$HOOK_RESULT"\n', { mode: 0o755 })
     const installed = f.install()
     const states = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", SessionEnd: "unknown" }
-    for (const paneEnv of [{ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" }]) {
+    for (const paneEnv of [{ REX_BLOCK: "block:p1" }]) {
       for (const [event, state] of Object.entries(states)) {
         const input = '{"session_id":"test-session","hook_event_name":"' + event + '"}'
         const result = Bun.spawnSync(["sh", "-c", commands(installed, event)[0]!], {

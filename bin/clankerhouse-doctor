@@ -15,7 +15,7 @@ required() { command -v "$1" >/dev/null 2>&1 && ok "$1: $(command -v "$1")" || f
 optional() { command -v "$1" >/dev/null 2>&1 && ok "$1: $(command -v "$1")" || warn "$1 is not installed"; }
 
 printf 'Clankerhouse home: %s\n' "$CLANKERHOUSE_HOME"
-[[ -f "$CLANKERHOUSE_HOME/src/daemon.ts" ]] && ok 'Bun daemon source' || fail 'Bun daemon source missing'
+[[ -f "$CLANKERHOUSE_HOME/src/runner.ts" && -f "$CLANKERHOUSE_HOME/src/cli.ts" ]] && ok 'Bun CLI and runner source' || fail 'Bun CLI or runner source missing'
 [[ -x "$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native" ]] && ok 'Rust native renderer' || fail 'Rust native renderer missing'
 [[ -x "$CLANKERHOUSE_BIN_DIR/clankers" ]] && ok 'clankers command' || fail 'clankers command missing'
 [[ -x "$CLANKERHOUSE_LIBEXEC/worktree-delete" ]] && ok 'worktree helper' || fail 'worktree helper missing'

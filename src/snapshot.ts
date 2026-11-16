@@ -80,7 +80,7 @@ const turnFacts = new Map<string, { turnStartedAt?: number; transcriptPath?: str
 /** Interrupted Clankers per Workshop, as of the last ledger sync. */
 let interruptedByWorkshop = new Map<string, Array<{ clankerId: string; at: number }>>()
 const lastTextCache = new Map<string, { key: string; text: string | null }>()
-let projectionEnrichmentCache: { refreshedAt: number; lineage: ReturnType<typeof readLineageSnapshot> } | undefined
+let projectionEnrichmentCache: { refreshedAt: number; version: string; lineage: ReturnType<typeof readLineageSnapshot> } | undefined
 export const invalidateProjectionEnrichment = () => { projectionEnrichmentCache = undefined }
 export const ensurePrivateRuntimeDirectory = () => {
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
@@ -213,15 +213,23 @@ const syncClankerLedger = (serverEpoch: string, sessions: readonly SessionRow[],
     ledgerSkipped = skippedReport
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (message !== ledgerSyncFailure) console.error(`Clanker ledger update failed: ${message}`)
+    // A read-only snapshot only reads the ledger; the runner owns it and reports its failures.
+    if (message !== ledgerSyncFailure && !readOnly) console.error(`Clanker ledger update failed: ${message}`)
     ledgerSyncFailure = message
   }
 }
 
+/** The Workshop store's files as they are now: any process's label or lineage write changes this. */
+const workshopStoreVersion = () => [workshopStatePath, `${workshopStatePath}-wal`].map((path) => {
+  try { const stat = statSync(path); return `${stat.mtimeMs}:${stat.size}` } catch { return "-" }
+}).join("|")
+
 const collectProjectionEnrichment = Effect.sync(() => {
-  if (projectionEnrichmentCache && Date.now() - projectionEnrichmentCache.refreshedAt < coldRefreshMs) return projectionEnrichmentCache
+  const version = workshopStoreVersion()
+  if (projectionEnrichmentCache && projectionEnrichmentCache.version === version && Date.now() - projectionEnrichmentCache.refreshedAt < coldRefreshMs) return projectionEnrichmentCache
   projectionEnrichmentCache = {
     refreshedAt: Date.now(),
+    version,
     lineage: readLineageSnapshot(),
   }
   return projectionEnrichmentCache
@@ -316,12 +324,18 @@ const collectDirectoriesUncached = Effect.all([collectDevWorktrees, collectZoxid
 )
 
 let directoryCache: { refreshedAt: number; rows: DirectoryRow[] } | undefined
-/** Directory discovery walks every dev repository, so its result is kept on disk for the next process. */
+/**
+ * Directory discovery walks every dev repository, so its result is kept on disk and shared: a process reloads it
+ * whenever another one (the runner's rediscovery, a CLI mutation) has written a newer copy.
+ */
+let directoryCacheMtime = 0
 const loadDirectoryCache = () => {
-  if (directoryCache) return
   try {
+    const mtime = statSync(directoryCachePath).mtimeMs
+    if (directoryCache && mtime <= directoryCacheMtime) return
     const cached = JSON.parse(readFileSync(directoryCachePath, "utf8")) as { refreshedAt?: number; rows?: DirectoryRow[] }
     if (typeof cached.refreshedAt === "number" && Array.isArray(cached.rows)) directoryCache = { refreshedAt: cached.refreshedAt, rows: cached.rows }
+    directoryCacheMtime = mtime
   } catch {}
 }
 const saveDirectoryCache = () => {
@@ -331,6 +345,7 @@ const saveDirectoryCache = () => {
     const temporary = `${directoryCachePath}.${process.pid}.tmp`
     writeFileSync(temporary, JSON.stringify(directoryCache), { mode: 0o600 })
     renameSync(temporary, directoryCachePath)
+    directoryCacheMtime = statSync(directoryCachePath).mtimeMs
   } catch {}
 }
 let directoryRefreshInFlight: Promise<DirectoryRow[]> | undefined
@@ -342,11 +357,15 @@ export const rememberDirectory = (row: DirectoryRow) => {
   const path = canonicalActivityPath(row.path)
   gitRecoveryCache.delete(path)
   gitMetaCache.delete(path)
+  // The activity mark keeps the row through the next rediscovery, which also covers a process with no cache yet.
+  if (!readOnly) markDirectoryActivity(path, row.activitySource === "opened" ? "opened" : "edited", row.activityAt ?? Date.now(), 0)
+  loadDirectoryCache()
   if (!directoryCache) return
   directoryCache = { ...directoryCache, rows: [...directoryCache.rows.filter((candidate) => candidate.path !== path), { ...row, path }] }
   saveDirectoryCache()
 }
 export const forgetMissingDirectories = () => {
+  loadDirectoryCache()
   if (!directoryCache) return
   const rows = directoryCache.rows.filter((row) => existsSync(row.path))
   if (rows.length === directoryCache.rows.length) return

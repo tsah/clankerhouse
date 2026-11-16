@@ -60,16 +60,11 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "process ownership scenario" scripts/qa-process-owner
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "status hooks scenario" scripts/qa-status-hooks
-    # Ported to Rex; pending a product fix: a Workshop stopped from the CLI drops out of the snapshot (src/snapshot.ts rememberDirectory).
-    pending "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
+    run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
     # Skips without rex unless REX_REQUIRED is set.
     run "Rex lane scenario" scripts/qa-rex
-    # Ported to Rex; pending product fixes: bin/clankerhouse-doctor requires the removed src/daemon.ts, and the installed
-    # Claude hooks never run in a Rex terminal (bin/clankerhouse-install-claude-hooks guards on HERDR_PANE_ID/HC_TERMINAL_ID).
-    pending "atomic installer and rollback scenario" scripts/qa-install
-    # Ported to Rex; pending product fixes: Alt-D on a pane closes no Rex block (no session id), an open picker misses
-    # label/lineage changes for 60 s, and a deletion dies with the picker that started it.
-    pending "complete native TUI interaction scenario" scripts/qa
+    run "atomic installer and rollback scenario" scripts/qa-install
+    run "complete native TUI interaction scenario" scripts/qa
 fi
 
 ((${#pending[@]})) && printf '\n\033[1;33m%d scenario(s) pending a product fix after their Rex port: %s\033[0m\n' "${#pending[@]}" "${pending[*]}"

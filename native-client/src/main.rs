@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     io::{self, BufRead, BufReader, IsTerminal},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -3798,6 +3799,7 @@ fn cli_mutation_on(
     }
     let intent = serde_json::to_string(intent).map_err(|error| error.to_string())?;
     let child = clankers_command(ssh, &["mutate", "--json", &intent])
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3814,7 +3816,10 @@ fn cli_mutation_with(
     on_submitted: impl FnOnce(),
 ) -> Result<serde_json::Value, String> {
     let intent = serde_json::to_string(intent).map_err(|error| error.to_string())?;
+    // Its own process group: closing the picker's terminal after a jump must not kill a mutation (a worktree delete)
+    // part way. One that dies anyway is finished by the runner.
     let child = Command::new(clankers)
+        .process_group(0)
         .args(["mutate", "--json", &intent])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -7,7 +7,6 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { rexClaudeSettings } from "../harness-launch"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
 import { psProcessGroups, REX_POPUP_LABEL_PREFIX, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
@@ -216,13 +215,9 @@ describe("Rex adapter, scripted", () => {
     expect(groups.get(200)!.map((member) => member.argv)).toEqual([["-zsh"]])
   })
 
-  test("labels, launch commands and the lane's Claude hooks", () => {
+  test("labels and launch commands", () => {
     expect(rexLabel("  a\nb  ")).toBe("a b")
     expect(rexLaunchCommand(["x"], { A: "1" })).toEqual(["env", ...REX_UNSET_ON_SPAWN.flatMap((name) => ["-u", name]), "A=1", "x"])
-    const settings = JSON.parse(rexClaudeSettings("/opt/it's/clankerhouse-hook"))
-    expect(Object.keys(settings.hooks).sort()).toEqual(["PermissionRequest", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"])
-    const command: string = settings.hooks.Stop[0].hooks[0].command
-    expect(command).toBe(`if [ -n "\${REX_BLOCK:-}" ] && [ -x '/opt/it'\\''s/clankerhouse-hook' ]; then exec '/opt/it'\\''s/clankerhouse-hook' claude done; fi`)
   })
 })
 

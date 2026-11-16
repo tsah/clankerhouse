@@ -7,7 +7,7 @@
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { deliverQueuedMessages } from "./clanker-api"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
-import { reapDoneWorkshops } from "./mutations"
+import { reapDoneWorkshops, resumeUnfinishedMutations } from "./mutations"
 import { withOrchestrationStore } from "./orchestration"
 import { fireRoutinesThroughSend } from "./routine-api"
 import { daemonMultiplexer, ensurePrivateRuntimeDirectory, invalidateProjectionEnrichment, latestHerdOf, onSnapshot, refreshProjectionSnapshot, refreshStaleDirectories, runtimeDir, scheduleProjectionRefresh } from "./snapshot"
@@ -126,6 +126,8 @@ export const runRunner = async () => {
     }
   })()
   while (true) {
+    // A mutation whose process died (a picker closed mid-delete) finishes here rather than on the next one.
+    try { await resumeUnfinishedMutations() } catch (error) { console.error(`Resuming unfinished mutations failed: ${error instanceof Error ? error.message : String(error)}`) }
     try { await refreshProjectionSnapshot() } catch (error) { console.error(error instanceof Error ? error.message : String(error)) }
     await Bun.sleep(refreshMs)
   }

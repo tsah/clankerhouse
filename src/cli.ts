@@ -84,7 +84,12 @@ const runSnapshotCommand = async (parsed: ParsedArgs) => {
   const watch = parsed.has("--watch")
   parsed.has("--read-only")
   if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\nUsage: clankers snapshot [--watch]`)
-  const emit = (snapshot: unknown) => {
+  let emitted = ""
+  // A line only when the rows changed (ages included, which move at most every minute).
+  const emit = (snapshot: { sessions: SessionRow[] }) => {
+    const key = JSON.stringify(snapshot.sessions)
+    if (key === emitted) return
+    emitted = key
     try { process.stdout.write(`${JSON.stringify(snapshot)}\n`) } catch { process.exit(0) }
   }
   process.stdout.on("error", () => process.exit(0))
@@ -108,8 +113,10 @@ const runSnapshotCommand = async (parsed: ParsedArgs) => {
   const { watch: watchPath } = await import("node:fs")
   const { stateDirFor } = await import("./paths")
   for (const directory of [stateDirFor(), `${runtimeDirFor()}/clanker-state`]) {
-    try { mkdirSync(directory, { recursive: true, mode: 0o700 }); watchPath(directory, schedule) } catch {}
+    // Reading a WAL database touches its -shm file; only real writes matter.
+    try { mkdirSync(directory, { recursive: true, mode: 0o700 }); watchPath(directory, (_event, name) => { if (!name || !/(-shm|\.tmp|\.lock)$/.test(String(name))) schedule() }) } catch {}
   }
+  // Ages and git state move without an event; a slow pass emits only if a row changed.
   setInterval(schedule, 15_000)
   const multiplexer = openManagedMultiplexer()
   for await (const _change of multiplexer.changes(new AbortController().signal)) schedule()

@@ -15,6 +15,7 @@
 #   clankerhouse-rex --ensure-runner start the runner, then exit (--ensure-server is the same)
 #   clankerhouse-rex --stop-runner   stop the runner; Rex, its terminals and the picker keep working (--stop-server)
 #   clankerhouse-rex --health        print Rex and runner health; exit 1 when either is down
+#   clankerhouse-rex --clankers ARGS run this checkout's clankers with the lane's environment (how other hosts reach it)
 #   clankerhouse-rex --help          print this
 #
 # The runner (`clankers runner`) does timed work only: queued messages, Routines, Status Event sinks, the done-Workshop
@@ -45,6 +46,8 @@ command -v systemd-run >/dev/null 2>&1 || export CLANKERHOUSE_PROCESS_OWNER=${CL
 
 # Nothing here draws or starts anything: no terminal is needed.
 case "${1:-}" in
+    # Another host's picker reaches this one's clankers through here: ssh HOST ~/.config/rex/clankerhouse-rex --clankers ...
+    --clankers) exec "$CLANKERHOUSE_BIN_DIR/clankers" "${@:2}" ;;
     --settled) exec "$CLANKERHOUSE_BIN_DIR/clankers" settled "${@:2}" ;;
     -h|--help) awk 'NR > 1 && /^set -euo pipefail$/ { exit } NR > 1 && /^#/ { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     --needs-me)

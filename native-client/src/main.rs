@@ -209,6 +209,21 @@ struct SessionRow {
     attachment_candidate_workshop_ids: Option<Vec<String>>,
     #[serde(default, rename = "needsMe")]
     needs_me: Option<NeedsMe>,
+    /// The Rex host this row lives on, when the picker shows more than one; set by the picker, not the snapshot.
+    #[serde(skip)]
+    host: Option<String>,
+}
+
+/// One Rex host's tab: its rows, and how to reach its `clankers` when it is another machine.
+#[derive(Clone, Debug, Default)]
+struct HostTab {
+    label: String,
+    /// `ssh` arguments that reach the host; empty for the machine the picker runs on.
+    ssh: Vec<String>,
+    sessions: Vec<SessionRow>,
+    /// A snapshot has arrived from the host.
+    seen: bool,
+    error: String,
 }
 
 #[derive(Deserialize)]
@@ -429,6 +444,10 @@ struct App {
     scratch: bool,
     /// What Jump mode lists: everything (Alt-F), or the Workshops that need the operator (Alt-I, Alt-E).
     view: View,
+    /// The Rex hosts the picker shows, this machine first.
+    hosts: Vec<HostTab>,
+    /// 0 is All; otherwise `hosts[tab - 1]`.
+    tab: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -748,6 +767,7 @@ fn done_group_row(group: DoneGroup, depth: usize, is_last: bool) -> TreeRow {
             parent_workshop_id: None,
             attachment_candidate_workshop_ids: None,
             needs_me: None,
+            host: None,
         },
         detail: None,
         state: ClankerState::Unknown,
@@ -1260,6 +1280,8 @@ impl App {
             repository_identities: HashMap::new(),
             scratch: false,
             view: View::Flat,
+            hosts: vec![HostTab { label: local_host_label(), ..HostTab::default() }],
+            tab: 1,
         };
         app.repository_identities = repository_identities(&app.cache_path);
         let snapshot: Snapshot = serde_json::from_slice(
@@ -1320,6 +1342,8 @@ impl App {
             repository_identities,
             scratch: false,
             view: View::Flat,
+            hosts: vec![HostTab { label: local_host_label(), ..HostTab::default() }],
+            tab: 1,
         }
     }
 
@@ -1351,20 +1375,85 @@ impl App {
         Ok(())
     }
 
+    /// This machine's snapshot.
     fn apply_snapshot(&mut self, snapshot: Snapshot, initial: bool) -> Result<(), String> {
+        self.apply_host_snapshot(0, snapshot, initial)
+    }
+
+    fn apply_host_snapshot(&mut self, index: usize, snapshot: Snapshot, initial: bool) -> Result<(), String> {
         if snapshot.version != CACHE_VERSION {
             return Err(format!(
                 "Snapshot version {} is unsupported",
                 snapshot.version
             ));
         }
+        let Some(host) = self.hosts.get_mut(index) else { return Ok(()) };
+        host.sessions = snapshot.sessions;
+        host.seen = true;
+        host.error.clear();
+        let shown = self.tab == 0 || self.tab == index + 1;
+        if shown || initial {
+            self.show_tab(initial);
+        }
+        Ok(())
+    }
+
+    /// The rows of the current tab: one host's, or on All every host's, each named by its host.
+    fn tab_sessions(&self) -> Vec<SessionRow> {
+        // Rows name their host only on All, where hosts mix.
+        let several = self.hosts.len() > 1 && self.tab == 0;
+        let tagged = |host: &HostTab| -> Vec<SessionRow> {
+            host.sessions
+                .iter()
+                .cloned()
+                .map(|mut session| {
+                    session.host = several.then(|| host.label.clone());
+                    session
+                })
+                .collect()
+        };
+        match self.tab {
+            0 => self.hosts.iter().flat_map(tagged).collect(),
+            tab => self.hosts.get(tab - 1).map(tagged).unwrap_or_default(),
+        }
+    }
+
+    fn show_tab(&mut self, initial: bool) {
         let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
-        self.sessions = snapshot.sessions;
+        self.sessions = self.tab_sessions();
         if initial {
             self.initialize_expansion();
         }
         self.rebuild(selected_key.as_deref());
-        Ok(())
+    }
+
+    /// Tabs are All, then each host; `step` moves through them, wrapping when `wrap` is set.
+    fn step_tab(&mut self, step: isize, wrap: bool) {
+        let count = self.hosts.len() + 1;
+        if count <= 2 {
+            return;
+        }
+        let next = self.tab as isize + step;
+        let next = if wrap { next.rem_euclid(count as isize) } else { next.clamp(0, count as isize - 1) };
+        if next as usize == self.tab {
+            return;
+        }
+        self.tab = next as usize;
+        self.selected = 0;
+        self.show_tab(true);
+        self.selected = self.rows.len().saturating_sub(1);
+    }
+
+    /// How to reach the `clankers` that owns the selected row: its host's ssh arguments, empty for this machine.
+    fn selected_host_ssh(&self) -> Vec<String> {
+        let label = match self.tab {
+            0 => self.rows.get(self.selected).and_then(|row| row.session.host.clone()),
+            tab => self.hosts.get(tab - 1).map(|host| host.label.clone()),
+        };
+        label
+            .and_then(|label| self.hosts.iter().find(|host| host.label == label))
+            .map(|host| host.ssh.clone())
+            .unwrap_or_default()
     }
 
     fn initialize_expansion(&mut self) {
@@ -2417,6 +2506,7 @@ fn session_meta(session: &SessionRow, current: bool) -> String {
         .join(" ")
     };
     [
+        session.host.as_deref(),
         current.then_some("current"),
         elsewhere_status(session),
         (!meta.is_empty()).then_some(meta.as_str()),
@@ -2684,6 +2774,39 @@ fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect
     );
 }
 
+/// The host tab bar: All, then each host with its open sessions and how many need the operator; empty with one host.
+fn host_tab_spans(app: &App) -> Vec<Span<'static>> {
+    if app.hosts.len() <= 1 {
+        return Vec::new();
+    }
+    let tab = |label: String, selected: bool| {
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(Color::LightCyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Span::styled(format!(" {label} "), style)
+    };
+    let mut spans = vec![Span::raw("  "), tab("All".into(), app.tab == 0)];
+    for (index, host) in app.hosts.iter().enumerate() {
+        let open = host.sessions.iter().filter(|session| matches!(session.target, Target::Session { .. })).count();
+        let needing = host.sessions.iter().filter(|session| session.needs_me.as_ref().is_some_and(|reason| reason.snoozed_until.is_none() && reason.waiting_on.is_none())).count();
+        let label = if !host.error.is_empty() {
+            format!("{} ✕", host.label)
+        } else if !host.seen {
+            format!("{} …", host.label)
+        } else if needing > 0 {
+            format!("{} {open} · {needing}!", host.label)
+        } else {
+            format!("{} {open}", host.label)
+        };
+        spans.push(Span::raw(" "));
+        spans.push(tab(label, app.tab == index + 1));
+    }
+    spans.push(Span::styled("  Tab host", Style::default().fg(Color::DarkGray)));
+    spans
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
     let areas = Layout::vertical([
         Constraint::Length(1),
@@ -2701,18 +2824,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     frame.render_widget(
-        Line::from(vec![
+        Line::from([vec![
             Span::styled(
                 "Clankerhouse · Flat",
                 Style::default()
                     .fg(Color::LightCyan)
                     .add_modifier(Modifier::BOLD),
-            ),
+            )], host_tab_spans(app), vec![
             Span::styled(
                 "  Alt-I needs me · Alt-E eldest · Alt-K branches · Alt-R/A/L/D/S actions · ←/→ expand · Alt-. done · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
-        ]),
+        ]].concat()),
         areas[0],
     );
     let list_area = areas[1];
@@ -2962,11 +3085,11 @@ fn needs_me_height(row: &TreeRow) -> usize {
 
 fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(
-        Line::from(vec![
+        Line::from([vec![
             Span::styled(
                 if app.view == View::Eldest { "Clankerhouse · Waiting longest" } else { "Clankerhouse · Needs me" },
                 Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
-            ),
+            )], host_tab_spans(app), vec![
             Span::styled(
                 if app.view == View::Eldest {
                     "  eldest first · Alt-I freshest · Alt-F flat · Alt-S snooze · Alt-D done · Enter jump · Esc close"
@@ -2975,7 +3098,7 @@ fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
                 },
                 Style::default().fg(Color::DarkGray),
             ),
-        ]),
+        ]].concat()),
         areas[0],
     );
     let list_area = areas[1];
@@ -3043,6 +3166,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     {
         app.error = "An action is already running; navigation and opening remain available".into();
         return None;
+    }
+    // Host tabs: Tab and Shift+Tab cycle through All and each host, Shift+←/→ step without wrapping.
+    if app.mode == Mode::Jump && app.hosts.len() > 1 {
+        match (key.code, key.modifiers.contains(KeyModifiers::SHIFT)) {
+            (KeyCode::Tab, false) => { app.step_tab(1, true); return None; }
+            (KeyCode::BackTab, _) | (KeyCode::Tab, true) => { app.step_tab(-1, true); return None; }
+            (KeyCode::Right, true) => { app.step_tab(1, false); return None; }
+            (KeyCode::Left, true) => { app.step_tab(-1, false); return None; }
+            _ => {}
+        }
     }
 
     if app.mode == Mode::DeleteConfirm {
@@ -3486,6 +3619,82 @@ fn clankers_bin() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("clankers"))
 }
 
+/// This machine's name for its host tab.
+fn local_host_label() -> String {
+    Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "this machine".into())
+}
+
+/// The other Rex hosts this machine's server knows, with the ssh arguments that reach each one: an `ssh://` endpoint
+/// names an account and a machine whose `~/.config/rex/clankerhouse-rex` serves its `clankers`.
+fn remote_hosts() -> Vec<HostTab> {
+    let Ok(output) = Command::new(env::var("REX_BIN").unwrap_or_else(|_| "rex".into()))
+        .args(["--autostart=false", "hosts", "--json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let Ok(listed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return Vec::new() };
+    let local = local_host_label();
+    listed
+        .get("hosts")
+        .and_then(|hosts| hosts.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let host = entry.get("host")?;
+            let label = host.get("label")?.as_str()?.to_string();
+            if label == local {
+                return None;
+            }
+            let endpoint = host.get("endpoints")?.as_array()?.iter().filter_map(|value| value.as_str()).find(|value| value.starts_with("ssh://"))?;
+            Some(HostTab { label, ssh: ssh_arguments(endpoint)?, ..HostTab::default() })
+        })
+        .collect()
+}
+
+/// `ssh://[user@]host[:port]` as ssh arguments.
+fn ssh_arguments(endpoint: &str) -> Option<Vec<String>> {
+    let rest = endpoint.strip_prefix("ssh://")?.trim_end_matches('/');
+    let (destination, port) = match rest.rsplit_once(':') {
+        Some((destination, port)) if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() => (destination, Some(port)),
+        _ => (rest, None),
+    };
+    if destination.is_empty() {
+        return None;
+    }
+    let mut arguments = vec!["-o".to_string(), "BatchMode=yes".to_string(), "-o".to_string(), "ConnectTimeout=5".to_string()];
+    if let Some(port) = port {
+        arguments.extend(["-p".to_string(), port.to_string()]);
+    }
+    arguments.push(destination.to_string());
+    Some(arguments)
+}
+
+/// A `clankers` invocation on this machine, or through ssh and the remote host's linked launcher.
+fn clankers_command(ssh: &[String], arguments: &[&str]) -> Command {
+    if ssh.is_empty() {
+        let mut command = Command::new(clankers_bin());
+        command.args(arguments);
+        return command;
+    }
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let remote = std::iter::once("\"$HOME\"/.config/rex/clankerhouse-rex --clankers".to_string())
+        .chain(arguments.iter().map(|argument| quote(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut command = Command::new("ssh");
+    command.args(ssh).arg(remote);
+    command
+}
+
 /// One snapshot computed now by `clankers snapshot`.
 fn cli_snapshot() -> Result<Snapshot, String> {
     let output = Command::new(clankers_bin())
@@ -3510,24 +3719,26 @@ fn stop_watcher() {
     }
 }
 
-/// Streams snapshots from `clankers snapshot --watch`, one JSON line each, restarting it with backoff when it ends.
-fn watch_loop(sender: Sender<Snapshot>) {
+/// Streams one host's snapshots from its `clankers snapshot --watch`, one JSON line each, restarting it with backoff
+/// when it ends. Host 0 is this machine; the others run over ssh.
+fn watch_host(index: usize, ssh: Vec<String>, sender: Sender<(usize, Snapshot)>) {
     let mut delay = Duration::from_millis(50);
     loop {
-        if let Ok(mut child) = Command::new(clankers_bin())
-            .args(["snapshot", "--watch"])
+        if let Ok(mut child) = clankers_command(&ssh, &["snapshot", "--watch"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
         {
-            WATCHER.store(child.id(), Ordering::SeqCst);
+            if index == 0 {
+                WATCHER.store(child.id(), Ordering::SeqCst);
+            }
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     let Ok(snapshot) = serde_json::from_str::<Snapshot>(&line) else { continue };
                     delay = Duration::from_millis(50);
-                    if sender.send(snapshot).is_err() {
+                    if sender.send((index, snapshot)).is_err() {
                         let _ = child.kill();
                         let _ = child.wait();
                         return;
@@ -3573,17 +3784,30 @@ fn scratch_target(spawned: &str) -> Result<Target, String> {
 }
 
 fn cli_mutation(intent: &MutationIntent) -> Result<serde_json::Value, String> {
-    cli_mutation_with(&clankers_bin(), intent, || {})
+    cli_mutation_on(&[], intent, || {})
 }
 
-/// Runs a mutation through `clankers mutate`, which journals it; `on_submitted` runs once it has started.
-fn cli_mutation_with_submission(
+/// A mutation on the host `ssh` reaches (this machine when empty).
+fn cli_mutation_on(
+    ssh: &[String],
     intent: &MutationIntent,
     on_submitted: impl FnOnce(),
 ) -> Result<serde_json::Value, String> {
-    cli_mutation_with(&clankers_bin(), intent, on_submitted)
+    if ssh.is_empty() {
+        return cli_mutation_with(&clankers_bin(), intent, on_submitted);
+    }
+    let intent = serde_json::to_string(intent).map_err(|error| error.to_string())?;
+    let child = clankers_command(ssh, &["mutate", "--json", &intent])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Unable to reach the host: {error}"))?;
+    on_submitted();
+    mutation_output(child.wait_with_output().map_err(|error| error.to_string())?)
 }
 
+/// Runs a mutation through `clankers mutate`, which journals it; `on_submitted` runs once it has started.
 fn cli_mutation_with(
     clankers: &Path,
     intent: &MutationIntent,
@@ -3598,7 +3822,10 @@ fn cli_mutation_with(
         .spawn()
         .map_err(|error| format!("Unable to run clankers mutate: {error}"))?;
     on_submitted();
-    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    mutation_output(child.wait_with_output().map_err(|error| error.to_string())?)
+}
+
+fn mutation_output(output: std::process::Output) -> Result<serde_json::Value, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // The CLI prints a versioned error object; show its message.
@@ -3725,14 +3952,14 @@ fn handle_external_requests(app: &mut App) -> Option<AppCommand> {
 fn run(
     mut terminal: DefaultTerminal,
     mut app: App,
-    snapshots: Receiver<Snapshot>,
-) -> io::Result<AppCommand> {
+    snapshots: Receiver<(usize, Snapshot)>,
+) -> io::Result<(AppCommand, Vec<String>)> {
     let mut pending_key = None;
     let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
     loop {
         while let Ok(update) = mutation_receiver.try_recv() {
             if let Some(command) = apply_mutation_update(&mut app, update) {
-                return Ok(command);
+                return Ok((command, app.selected_host_ssh()));
             }
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
@@ -3759,19 +3986,20 @@ fn run(
             match dispatch_command(&mut app, command) {
                 CommandDispatch::Background(intent) => {
                     let sender = mutation_sender.clone();
+                    let ssh = app.selected_host_ssh();
                     thread::spawn(move || {
-                        let result = cli_mutation_with_submission(&intent, || {
+                        let result = cli_mutation_on(&ssh, &intent, || {
                             let _ = sender.send(MutationUpdate::Submitted);
                         });
                         let _ = sender.send(MutationUpdate::Finished(result));
                     });
                 }
-                CommandDispatch::Exit(command) => return Ok(command),
+                CommandDispatch::Exit(command) => return Ok((command, app.selected_host_ssh())),
                 CommandDispatch::Continue => {}
             }
         }
-        while let Ok(snapshot) = snapshots.try_recv() {
-            if let Err(error) = app.apply_snapshot(snapshot, false) {
+        while let Ok((index, snapshot)) = snapshots.try_recv() {
+            if let Err(error) = app.apply_host_snapshot(index, snapshot, false) {
                 app.error = error;
             }
         }
@@ -3805,18 +4033,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let check = arguments.iter().any(|argument| argument == "--check");
     let delete_current = arguments.iter().any(|argument| argument == "--delete-current");
     let interactive = !(dump_tree || check || delete_current);
-    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    let (snapshot_sender, snapshot_receiver) = mpsc::channel::<(usize, Snapshot)>();
     // The picker paints at once from the runner's last snapshot and catches up from the watcher; the headless options and
     // deletion confirmation need a snapshot computed now.
     let cached = interactive && cache_path.exists();
     if interactive {
-        thread::spawn(move || watch_loop(snapshot_sender));
+        let sender = snapshot_sender.clone();
+        thread::spawn(move || watch_host(0, Vec::new(), sender));
     }
     let live_snapshot = if cached {
         Err("served from the cache".to_string())
     } else if interactive {
         snapshot_receiver
             .recv_timeout(Duration::from_secs(30))
+            .map(|(_, snapshot)| snapshot)
             .map_err(|_| "no snapshot from clankers snapshot --watch".to_string())
     } else {
         cli_snapshot()
@@ -3890,6 +4120,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if env::var("CLANKERHOUSE_MODE").as_deref() == Ok("needs-me") {
         app.set_view(View::NeedsMe);
     }
+    // Every other Rex host this machine knows gets a tab, fed by its own `clankers snapshot --watch` over ssh.
+    if interactive && env::var("CLANKERHOUSE_HOST_TABS").as_deref() != Ok("off") {
+        for host in remote_hosts() {
+            let index = app.hosts.len();
+            let (ssh, sender) = (host.ssh.clone(), snapshot_sender.clone());
+            app.hosts.push(host);
+            thread::spawn(move || watch_host(index, ssh, sender));
+        }
+    }
     // Without a terminal ratatui::init panics; say what to use instead.
     if !io::stdout().is_terminal() {
         return Err(io::Error::other("The picker needs a terminal. For the needs-me list without one: clankers needs-me [--json] [--eldest | --flat]").into());
@@ -3903,9 +4142,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run(terminal, app, snapshot_receiver);
     ratatui::restore();
     stop_watcher();
-    match result? {
+    let (command, ssh) = result?;
+    // Opening and deleting run on the chosen row's host; creating a Workshop stays on this one.
+    match command {
         AppCommand::Close => Ok(()),
-        AppCommand::Submit(intent) => cli_mutation(&intent)
+        AppCommand::Submit(intent) => cli_mutation_on(&ssh, &intent, || {})
             .map(|_| ())
             .map_err(|error| io::Error::other(error).into()),
         AppCommand::CreateAndOpen(intent @ MutationIntent::Create { .. }) => {
@@ -5880,5 +6121,57 @@ mod tests {
             ("○", Color::Rgb(148, 163, 184))
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    fn host_session(name: &str, needs: bool) -> SessionRow {
+        serde_json::from_value(serde_json::json!({
+            "name": name, "path": format!("/{name}"), "recency": 1,
+            "target": {"type": "session", "session": name},
+            "needsMe": if needs { serde_json::json!({"reason": "asked", "since": 1.0}) } else { serde_json::Value::Null },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn host_tabs_show_one_host_or_all_of_them_named_and_route_actions_to_the_row_host() {
+        let mut app = App::new_empty(PathBuf::from("/nonexistent/state.json"), String::new());
+        app.hosts[0].label = "mac".into();
+        app.hosts[0].sessions = vec![host_session("local-one", false)];
+        app.hosts[0].seen = true;
+        app.hosts.push(HostTab { label: "puffin".into(), ssh: vec!["tsah@puffin".into()], sessions: vec![host_session("remote-one", true), host_session("remote-two", false)], seen: true, ..HostTab::default() });
+        app.show_tab(true);
+        assert_eq!(app.sessions.iter().map(|session| session.name.as_str()).collect::<Vec<_>>(), vec!["local-one"]);
+        assert_eq!(app.sessions[0].host, None);
+        assert!(app.selected_host_ssh().is_empty());
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, 2);
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.selected_host_ssh(), vec!["tsah@puffin".to_string()]);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, 0, "Tab wraps to All");
+        assert_eq!(app.sessions.len(), 3);
+        assert!(app.sessions.iter().all(|session| session.host.is_some()), "rows name their host on All");
+        let remote = app.rows.iter().position(|row| row.session.name == "remote-one").unwrap();
+        app.selected = remote;
+        assert_eq!(app.selected_host_ssh(), vec!["tsah@puffin".to_string()]);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(app.tab, 0, "Shift+Left does not wrap");
+        handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.tab, 2, "Shift+Tab wraps back");
+        let tabs = host_tab_spans(&app).iter().map(|span| span.content.to_string()).collect::<String>();
+        assert!(tabs.contains(" All ") && tabs.contains(" mac 1 ") && tabs.contains(" puffin 2 · 1! "), "{tabs}");
+    }
+
+    #[test]
+    fn ssh_endpoints_become_ssh_arguments_and_remote_commands_quote_their_arguments() {
+        assert_eq!(ssh_arguments("ssh://tsah@puffin").unwrap().last().unwrap(), "tsah@puffin");
+        let with_port = ssh_arguments("ssh://u@h:2222").unwrap();
+        assert!(with_port.windows(2).any(|pair| pair == ["-p", "2222"]) && with_port.last().unwrap() == "u@h");
+        assert!(ssh_arguments("unix:///x").is_none());
+        let command = clankers_command(&["h".to_string()], &["mutate", "--json", "{\"a\":\"it's\"}"]);
+        let arguments = command.get_args().map(|argument| argument.to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert_eq!(arguments.last().unwrap(), "\"$HOME\"/.config/rex/clankerhouse-rex --clankers 'mutate' '--json' '{\"a\":\"it'\\''s\"}'");
     }
 }

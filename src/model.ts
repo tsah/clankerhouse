@@ -113,14 +113,13 @@ export interface MergedClankerState {
  * Nothing here moves a generation, so waits, results and message acknowledgement are unaffected.
  */
 export const withReportedStatus = (hook: { state: ClankerState; updatedAt: number }, runtime: ReportedRuntimeStatus | undefined): MergedClankerState => {
-  if (!runtime) return { state: hook.state }
-  if (runtime.status === "blocked") {
-    if (runtime.blockedKind === "startup" && hook.updatedAt > 0) return { state: hook.state }
-    if (hook.state !== "blocked" && runtime.reportedAt < hook.updatedAt) return { state: hook.state }
-    return { state: "blocked", ...(runtime.blockedKind ? { blockedKind: runtime.blockedKind } : {}), ...(runtime.message ? { blockedMessage: runtime.message } : {}) }
-  }
-  if (hook.state === "blocked" && runtime.status === "working" && runtime.reportedAt > hook.updatedAt) return { state: "working" }
-  return { state: hook.state }
+  // The agent's own status report (OSC 7501, through Rex) is the truth for its state. The lifecycle hook's state stands
+  // in only where the agent reports none; the hook remains the record of turns, generations and messages.
+  if (!runtime || runtime.status === "unknown") return { state: hook.state }
+  // Rex's "no status since it started" guess yields to a hook that has heard from the harness.
+  if (runtime.status === "blocked" && runtime.blockedKind === "startup" && hook.updatedAt > 0) return { state: hook.state }
+  if (runtime.status === "blocked") return { state: "blocked", ...(runtime.blockedKind ? { blockedKind: runtime.blockedKind } : {}), ...(runtime.message ? { blockedMessage: runtime.message } : {}) }
+  return { state: runtime.status }
 }
 
 /**

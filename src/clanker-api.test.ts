@@ -285,9 +285,9 @@ describe("Rex semantic prompt transport", () => {
     hook("working", 1_000)
     agentStatus = { agent: "claude", status: "blocked", blockedKind: "question", message: "red or blue?", reportedAt: 2_000 }
     expect(await status()).toMatchObject({ state: "blocked", blockedKind: "question", blockedMessage: "red or blue?", generation: 3, settledGeneration: 2 })
-    // A hook event after the report is newer, so the hook stands.
+    // The harness's own report stands even when a hook event is newer: Rex is the truth for agent status.
     agentStatus = { ...agentStatus, reportedAt: 500 }
-    expect(await status()).toMatchObject({ state: "working" })
+    expect(await status()).toMatchObject({ state: "blocked", blockedKind: "question" })
     // A startup silence means nothing once the hook has reported.
     agentStatus = { agent: "claude", status: "blocked", blockedKind: "startup", reportedAt: 5_000 }
     expect((await status()).state).toBe("working")
@@ -295,11 +295,12 @@ describe("Rex semantic prompt transport", () => {
     hook("blocked", 1_000)
     agentStatus = { agent: "claude", status: "working", reportedAt: 2_000 }
     expect(await status()).toMatchObject({ state: "working", generation: 3, settledGeneration: 2 })
-    agentStatus = { agent: "claude", status: "working", reportedAt: 900 }
-    expect((await status()).state).toBe("blocked")
-    // Screen detection or a mirror carries no reportedAt and changes nothing.
-    agentStatus = { agent: "claude", status: "blocked", blockedKind: "question" }
+    // A turn that ended with a background shell still running: the harness says done, the hook would say working.
     hook("working", 1_000)
+    agentStatus = { agent: "claude", status: "done", reportedAt: 900 }
+    expect((await status()).state).toBe("done")
+    // Without a status from the harness, the hook's state stands in.
+    agentStatus = { agent: "claude", status: "unknown" }
     expect((await status()).state).toBe("working")
 
     harnessGone = true

@@ -141,7 +141,7 @@ describe("session resource projection", () => {
     expect(project("done", true)).toBe("done")
   })
 
-  test("a newer blocked the harness reported itself shows over its hook; a harness hc keep replaced shows unknown", () => {
+  test("the status the harness reports through Rex shows over its hook; a replaced harness shows unknown", () => {
     const project = (window: Partial<MuxWindow>) => projectResources(inputs({
       sessions: [muxSession({ attached: true })],
       windows: [muxWindow({ command: "claude", name: "claude", active: false, clankerId: "clanker-1", explicitHarness: "claude", ...window })],
@@ -150,9 +150,9 @@ describe("session resource projection", () => {
     const state = (window: Partial<MuxWindow>) => project(window)?.state
     expect(project({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", message: "Which env?", reportedAt: 3_650_500 } }))
       .toMatchObject({ state: "blocked", blockedKind: "question", blockedMessage: "Which env?" })
-    expect(state({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_649_000 } })).toBe("working")
-    // Herdr's own status is screen detection or Clankerhouse's mirror, never newer evidence.
-    expect(state({ agentStatus: { agent: "claude", status: "blocked" } })).toBe("working")
+    expect(state({ agentStatus: { agent: "claude", status: "blocked", blockedKind: "question", reportedAt: 3_649_000 } })).toBe("blocked")
+    expect(state({ agentStatus: { agent: "claude", status: "done", reportedAt: 3_649_000 } })).toBe("done")
+    expect(state({ agentStatus: { agent: "claude", status: "unknown" } })).toBe("working")
     expect(project({ harnessGone: true, agentStatus: { agent: "claude", status: "unknown" } })).toMatchObject({ state: "unknown", gone: true })
   })
 

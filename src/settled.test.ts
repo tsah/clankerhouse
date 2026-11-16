@@ -108,17 +108,11 @@ describe("clankers settled", () => {
       line({ type: "assistant", timestamp: "2026-11-12T10:03:00Z", message: { id: "m2", role: "assistant", content: [{ type: "text", text: "Ready for your review: https://github.com/acme/repo/pull/42\n\nMerge, or hold?" }] } }),
     ].join(""))
     writeFileSync(join(runtime, "clanker-state", "t3.json"), JSON.stringify({ harness: "claude", clankerId: "c-t3", pane: "t3", generation: 2, settledGeneration: 2, updatedAt: 350, transcriptPath: transcript }))
-    const server = Bun.listen({
-      unix: join(runtime, "daemon.sock"),
-      socket: {
-        data(socket, data) {
-          const request = JSON.parse(data.toString().trim())
-          socket.write(`${JSON.stringify({ version: 1, id: request.id, ok: true, result: { version: 11, revision: { source: "test", sequence: 1 }, generatedAt: 5, sessions: rows } })}\n`)
-        },
-      },
-    })
-    const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec") }
-    return { env, transcript, stop: () => server.stop(true) }
+    // A snapshot saved with `clankers snapshot`, replayed instead of computing one from Rex.
+    const snapshotFile = join(root, "snapshot.json")
+    writeFileSync(snapshotFile, JSON.stringify({ version: 11, revision: { source: "test", sequence: 1 }, generatedAt: 5, sessions: rows }))
+    const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec"), CLANKERHOUSE_SNAPSHOT: snapshotFile }
+    return { env, transcript, stop: () => {} }
   }
 
   // No terminal: stdin ignored, stdout a pipe.

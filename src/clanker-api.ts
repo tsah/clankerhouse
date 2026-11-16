@@ -8,7 +8,6 @@ import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
 import { MessageConflictError, OrchestrationStore, clankerBusy, generatedMessageId, promptFor, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type MessageEvent, type PromptObservation, type SendStatus, type StoredMessage } from "./orchestration"
 import { runtimeDirFor } from "./paths"
-import { getHerd } from "./transport/client"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
 /**
@@ -256,25 +255,6 @@ export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMet
 export const discoverPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[]> =>
   paneMetadataFromSnapshot(await multiplexer.observe({ processInfo: false }))
 
-// The daemon observes on every Multiplexer change and at least every refresh interval, so an
-// older herd means it is stuck and the caller observes for itself.
-const DAEMON_HERD_MAX_AGE_MS = 60_000
-const DAEMON_HERD_TIMEOUT_MS = 2_000
-
-/**
- * The daemon's newest herd, or undefined when no daemon for this Multiplexer instance answers.
- * Polling callers read it so that many waiters cost the Multiplexer nothing.
- */
-const daemonPaneMetadata = async (multiplexer: ManagedMultiplexer): Promise<PaneMetadata[] | undefined> => {
-  const socketPath = `${runtimeRoot()}/daemon.sock`
-  if (!existsSync(socketPath)) return undefined
-  try {
-    const [herd, instanceId] = await Promise.all([getHerd<PaneMetadata>(socketPath, { timeoutMs: DAEMON_HERD_TIMEOUT_MS }), multiplexer.instanceId()])
-    if (herd.instanceId !== instanceId || Date.now() - herd.observedAt > DAEMON_HERD_MAX_AGE_MS || !Array.isArray(herd.panes)) return undefined
-    return herd.panes
-  } catch { return undefined }
-}
-
 /**
  * Where clanker rows come from. A caller that injects no Multiplexer reads the daemon's herd
  * when one answers; `multiplexer` observes directly, for a caller whose target the daemon has
@@ -286,8 +266,9 @@ interface DiscoveredRecords { records: ClankerRecord[]; source: RecordSource }
 
 const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, strict: boolean, allowDaemon: boolean, observed?: PaneMetadata[]): Promise<DiscoveredRecords> => {
   const multiplexer = injected ?? openManagedMultiplexer()
-  let rows: PaneMetadata[] | undefined = observed ?? (allowDaemon && !injected ? await daemonPaneMetadata(multiplexer) : undefined)
-  const source: RecordSource = rows ? "daemon" : "multiplexer"
+  // One Rex observation is one cheap call, so every caller observes for itself.
+  let rows: PaneMetadata[] | undefined = observed
+  const source: RecordSource = "multiplexer"
   if (!rows) {
     try { rows = await discoverPaneMetadata(multiplexer) }
     catch (error) {

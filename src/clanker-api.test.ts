@@ -7,7 +7,6 @@ import { clankerStatus, deliverQueuedMessages, resultForClanker, generatedClanke
 import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import { advanceProjection } from "./projection"
-import { startSnapshotServer } from "./transport"
 import { FAKE_REX_HOST, fakeRex, writeRexClaims } from "./fixtures/fake-rex"
 
 /** The text a prompt carried, without the `[clankerhouse msg-... from ...]` tag. */
@@ -649,57 +648,3 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
 
 })
 
-describe("clanker discovery through the daemon's herd", () => {
-  const restores: Array<() => void> = []
-  afterEach(() => { for (const restore of restores.splice(0)) restore() })
-
-  // A Rex server that logs requests and knows one session with one Claude block.
-  const rexServer = (root: string, clankerId: string, paneId: string) => {
-    const rex = fakeRex(join(root, "rex"), [{ id: "session:w1", label: "repo@main", windows: [{ id: "window:t1", label: "claude", blocks: [{ id: paneId, program: "claude", cwd: "/repo" }] }] }])
-    const stateDir = join(root, "state", "clankerhouse-unit")
-    writeRexClaims(stateDir, "session:w1", { worktreePath: "/repo" })
-    writeRexClaims(stateDir, paneId, { clankerId, harness: "claude" })
-    return rex
-  }
-
-  const isolate = async (herdPanes: unknown[], clankerId: string, paneId: string) => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-herd-"))
-    roots.push(root)
-    const rex = rexServer(root, clankerId, paneId)
-    const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, CLANKERHOUSE_INSTANCE: process.env.CLANKERHOUSE_INSTANCE, REX_BIN: process.env.REX_BIN, CLANKERHOUSE_REX_SERVER: process.env.CLANKERHOUSE_REX_SERVER }
-    process.env.XDG_STATE_HOME = join(root, "state")
-    process.env.XDG_RUNTIME_DIR = join(root, "runtime")
-    process.env.CLANKERHOUSE_INSTANCE = "unit"
-    process.env.REX_BIN = rex.bin
-    delete process.env.CLANKERHOUSE_REX_SERVER
-    restores.push(() => { for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value })
-    const runtime = join(root, "runtime", `clankerhouse-${process.getuid?.() ?? "user"}-unit`)
-    mkdirSync(join(runtime, "clanker-state"), { recursive: true })
-    const daemon = await startSnapshotServer({
-      socketPath: join(runtime, "daemon.sock"),
-      initialSnapshot: advanceProjection(undefined, [], 10, "test", Date.now()),
-      herd: () => ({ instanceId: `rex:${FAKE_REX_HOST}`, observedAt: Date.now(), panes: herdPanes }),
-    })
-    restores.push(() => { void daemon.close() })
-    return rex
-  }
-
-  const herdPane = (id: string, pane: string) => ({ harness: "claude", id, socketPath: "", sessionId: "session:w1", session: "repo@main", window: "window:t1", name: "claude", pane, cwd: "/repo", worktreePath: "/repo", focused: false })
-
-  test("lists and polls clankers from the daemon without asking the Multiplexer", async () => {
-    const rex = await isolate([herdPane("clanker-herd", "block:p1")], "clanker-herd", "block:p1")
-
-    expect((await listClankers()).map((clanker) => clanker.id)).toEqual(["clanker-herd"])
-    expect(await clankerStatus("clanker-herd")).toMatchObject({ id: "clanker-herd", pane: "block:p1", harness: "claude" })
-    // Matching the herd to this server costs a status call; nothing observes the server.
-    expect(rex.calls().filter((call) => !call.startsWith("api server.status "))).toEqual([])
-  })
-
-  test("observes the Multiplexer, without process facts, for a clanker the daemon has not seen yet", async () => {
-    const rex = await isolate([], "clanker-new", "block:p2")
-
-    expect(await clankerStatus("clanker-new")).toMatchObject({ id: "clanker-new", pane: "block:p2" })
-    // One `rex do` observation carries every block's process facts; nothing asks for more.
-    expect(rex.calls().filter((call) => !call.startsWith("api server.status "))).toEqual(["do"])
-  })
-})

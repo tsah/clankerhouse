@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { randomUUID } from "node:crypto"
-import { existsSync, fstatSync, readFileSync, statSync } from "node:fs"
+import { existsSync, fstatSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
 import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
@@ -17,7 +17,8 @@ import { diagnoseProjection } from "./diagnostics"
 import type { SessionRow, Target } from "./model"
 import { allWorkshopCreatedAt, allWorkshopLabels, bootstrapRepositoryFromManifests, projectSnapshot, reconcileRepositoryWorkshops, workshopDetails, workshopForId, workshopLabels, workshopTree } from "./workshop"
 import { ensureDirectorySession, ensureSession, identity, resumeClanker, spawnClanker, spawnWorkshop, type Harness } from "./workflow"
-import { getSnapshot, submitMutation, waitForOperation } from "./transport"
+import { runMutation } from "./mutations"
+import { refreshProjectionSnapshot, setSnapshotReadOnly } from "./snapshot"
 import type { MutationIntent } from "./transport"
 import { mutationStages } from "./daemon-mutations"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
@@ -27,7 +28,6 @@ import { lastMessages } from "./last-messages"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
 import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
-const daemonSocketPath = `${runtimeDirFor()}/daemon.sock`
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
 
 export const mutationProgressSteps = (intent: MutationIntent): readonly string[] => {
@@ -45,25 +45,74 @@ export const mutationProgressSteps = (intent: MutationIntent): readonly string[]
 // Fetching the base and checking out a large repository takes longer than an ordinary mutation.
 const workshopCreateTimeoutMs = 10 * 60_000
 
-const routeCompatibilityMutation = async (intent: MutationIntent, options: { timeoutMs?: number } = {}) => {
-  if (Bun.env.CLANKERHOUSE_DAEMON_INTERNAL === "1" || Bun.env.CLANKERHOUSE_LEGACY_MUTATIONS === "1" || !existsSync(daemonSocketPath)) return undefined
+/**
+ * Runs a Workshop mutation in this process as a journaled, staged operation (src/mutations.ts), reporting progress
+ * steps when asked. A mutation's own `clankers` subprocesses set CLANKERHOUSE_DAEMON_INTERNAL and take the direct path.
+ */
+const routeCompatibilityMutation = async (intent: MutationIntent, _options: { timeoutMs?: number } = {}) => {
+  if (Bun.env.CLANKERHOUSE_DAEMON_INTERNAL === "1" || Bun.env.CLANKERHOUSE_LEGACY_MUTATIONS === "1") return undefined
   const progressSteps = Bun.env.CLANKERHOUSE_PROGRESS === "1" ? mutationProgressSteps(intent) : []
   let reported = -1
   const reportThrough = (index: number) => {
     while (reported < Math.min(index, progressSteps.length - 1)) console.error(`${progressPrefix}${progressSteps[++reported]}`)
   }
   reportThrough(0)
-  const submitted = await submitMutation(daemonSocketPath, randomUUID(), intent)
   const stages = mutationStages(intent)
-  const operation = await waitForOperation(daemonSocketPath, submitted.operation.operationId, {
-    timeoutMs: options.timeoutMs,
-    onStatus: (current) => {
-      const completed = current.stage === "completed" ? stages.length : stages.indexOf(current.stage)
-      reportThrough(completed + 1)
-    },
+  const outcome = await runMutation(intent, {
+    onStage: (stage) => reportThrough((stage === "completed" ? stages.length : stages.indexOf(stage)) + 1),
   })
+  if (outcome.state !== "succeeded") throw new Error(outcome.error ?? `Mutation ${outcome.operationId} ${outcome.state}`)
   reportThrough(progressSteps.length - 1)
-  return { routed: true as const, result: operation.result }
+  return { routed: true as const, result: outcome.result }
+}
+
+/** A read-only snapshot of what the picker shows, computed from Rex and the stores. */
+const currentSnapshot = async () => {
+  // A snapshot saved with `clankers snapshot > FILE` replays instead, for a report on an earlier moment.
+  const saved = Bun.env.CLANKERHOUSE_SNAPSHOT?.trim()
+  if (saved) return JSON.parse(readFileSync(saved, "utf8")) as { sessions: SessionRow[]; generatedAt: number }
+  setSnapshotReadOnly(true)
+  return refreshProjectionSnapshot()
+}
+
+/**
+ * `clankers snapshot [--watch]`: the picker's rows as one JSON line, and with --watch a new line whenever Rex, the
+ * Workshop and orchestration stores or a clanker's state change (and every 15 s, for ages and git state). Read-only:
+ * the runner keeps the ledger and caches. Ends when its reader goes away.
+ */
+const runSnapshotCommand = async (parsed: ParsedArgs) => {
+  const watch = parsed.has("--watch")
+  parsed.has("--read-only")
+  if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\nUsage: clankers snapshot [--watch]`)
+  const emit = (snapshot: unknown) => {
+    try { process.stdout.write(`${JSON.stringify(snapshot)}\n`) } catch { process.exit(0) }
+  }
+  process.stdout.on("error", () => process.exit(0))
+  emit(await currentSnapshot())
+  if (!watch) return
+  let pending: ReturnType<typeof setTimeout> | undefined
+  let running = false
+  let again = false
+  const recompute = () => {
+    if (running) { again = true; return }
+    running = true
+    void currentSnapshot().then(emit, (error) => console.error(error instanceof Error ? error.message : String(error))).finally(() => {
+      running = false
+      if (again) { again = false; schedule() }
+    })
+  }
+  const schedule = () => {
+    if (pending) clearTimeout(pending)
+    pending = setTimeout(recompute, 150)
+  }
+  const { watch: watchPath } = await import("node:fs")
+  const { stateDirFor } = await import("./paths")
+  for (const directory of [stateDirFor(), `${runtimeDirFor()}/clanker-state`]) {
+    try { mkdirSync(directory, { recursive: true, mode: 0o700 }); watchPath(directory, schedule) } catch {}
+  }
+  setInterval(schedule, 15_000)
+  const multiplexer = openManagedMultiplexer()
+  for await (const _change of multiplexer.changes(new AbortController().signal)) schedule()
 }
 
 export interface ParsedArgs {
@@ -430,6 +479,9 @@ export const usage = `Usage:
   clankers ledger [--state open|closed | --interrupted] [--workshop ID]
   clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
   clankers resume CLANKER_ID [--prompt TEXT]
+  clankers snapshot [--watch]
+  clankers mutate --json INTENT [--idempotency-key KEY]
+  clankers runner
   clankers mux kind|capabilities|pane-address-env|observe|current-location
   clankers mux claim|read-claim (--pane PANE|--window WINDOW|--session SESSION) KEY [VALUE|--unset]
   clankers mux kill|focus (--pane PANE|--window WINDOW|--session SESSION)
@@ -554,8 +606,7 @@ const runNeedsMeCommand = async (parsed: ParsedArgs) => {
   if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${usageLine}`)
   if (eldest && flat) throw new Error(`--eldest and --flat are mutually exclusive\n${usageLine}`)
   const order: NeedsMeOrder = flat ? "flat" : eldest ? "eldest" : "freshest"
-  if (!existsSync(daemonSocketPath)) throw new Error(`Clankerhouse daemon is not running (no ${daemonSocketPath}); start it with clankerhouse-hc --ensure-server`)
-  const snapshot = await getSnapshot<SessionRow>(daemonSocketPath, { timeoutMs: 5000 })
+  const snapshot = await currentSnapshot()
   // The snapshot carries label values only, and no creation time; the registry has both. A failed read only leaves them out.
   let labels = new Map<string, Readonly<Record<string, string>>>()
   let createdAt = new Map<string, number>()
@@ -602,8 +653,7 @@ const runSettledCommand = async (parsed: ParsedArgs) => {
   const key = parsed.take("--key")
   if (parsed.args.length) throw new Error(`Unexpected argument: ${parsed.args[0]}\n${settledUsage}`)
   if (after && key) throw new Error(`--after and --key are mutually exclusive\n${settledUsage}`)
-  if (!existsSync(daemonSocketPath)) throw new Error(`Clankerhouse daemon is not running (no ${daemonSocketPath}); start it with clankerhouse-hc --ensure-server`)
-  const snapshot = await getSnapshot<SessionRow>(daemonSocketPath, { timeoutMs: 5000 })
+  const snapshot = await currentSnapshot()
   let labels = new Map<string, Readonly<Record<string, string>>>()
   let created = new Map<string, number>()
   try { labels = allWorkshopLabels() } catch {}
@@ -645,6 +695,19 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   if (["list", "status", "capabilities", "wait", "send", "send-status", "inbox", "messages", "result", "report", "watch"].includes(command)) return runClankerApi(command, parsed)
 
   if (command === "mux") return runMultiplexerCli(parsed)
+  if (command === "snapshot") return runSnapshotCommand(parsed)
+  if (command === "mutate") {
+    const json = parsed.take("--json")
+    const idempotencyKey = parsed.take("--idempotency-key")
+    if (!json) throw new Error("Usage: clankers mutate --json INTENT [--idempotency-key KEY]")
+    const outcome = await runMutation(JSON.parse(json) as MutationIntent, { idempotencyKey })
+    if (outcome.state !== "succeeded") throw new Error(outcome.error ?? `Mutation ${outcome.operationId} ${outcome.state}`)
+    return console.log(JSON.stringify(outcome.result ?? null))
+  }
+  if (command === "runner") {
+    const { runRunner } = await import("./runner")
+    return runRunner()
+  }
   if (command === "hooks") return runHooksCommand(parsed)
   if (command === "routine" || command === "routines") return runRoutineCommand(parsed)
 
@@ -655,7 +718,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     const path = parsed.take("--path")
     if (!session || !parsed.has("--yes") || (kind === "worktree" && !path)) throw new Error("Usage: clankers delete session|worktree --session SESSION [--path PATH] --yes")
     const routed = await routeCompatibilityMutation({ type: "delete", kind, session, confirmed: true, ...(path ? { path } : {}) })
-    if (!routed) throw new Error("Clankerhouse daemon is required for durable deletion")
+    if (!routed) throw new Error("A Clankerhouse mutation cannot delete from inside another one")
     if (Bun.env.CLANKERHOUSE_PROGRESS !== "1") console.log(JSON.stringify(routed.result ?? { deleted: true }))
     return
   }
@@ -666,7 +729,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
   if (command === "diagnose") {
     const json = parsed.has("--json")
     const strict = parsed.has("--strict")
-    const snapshot = await getSnapshot<SessionRow>(daemonSocketPath)
+    const snapshot = await currentSnapshot()
     const report = diagnoseProjection(snapshot.sessions)
     if (json) console.log(JSON.stringify(report, null, 2))
     else {
@@ -810,7 +873,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
     }
     if (subcommand === "stop") {
       const routed = await routeCompatibilityMutation({ type: "workshop.stop", path: resolve(cwd) })
-      if (!routed) throw new Error("Clankerhouse daemon is required to stop a Workshop")
+      if (!routed) throw new Error("A Clankerhouse mutation cannot stop a Workshop from inside another one")
       return console.log(JSON.stringify(routed.result))
     }
     if (subcommand === "detach" || subcommand === "reparent") {
@@ -822,7 +885,7 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
       const workshop = selector !== undefined ? resolveWorkshopSelector(selector) : workshopForLabelTarget({ path: resolve(cwd) })
       const parent = parentSelector ? resolveWorkshopSelector(parentSelector, workshop.canonicalPath) : undefined
       const routed = await routeCompatibilityMutation(parent ? { type: "reparent", workshopId: workshop.workshopId, parentWorkshopId: parent.workshopId } : { type: "detach", workshopId: workshop.workshopId })
-      if (!routed) throw new Error("Clankerhouse daemon is required to change a Workshop's parent")
+      if (!routed) throw new Error("A Clankerhouse mutation cannot change a Workshop's parent from inside another one")
       const updated = workshopForId(workshop.workshopId)
       return console.log(JSON.stringify({ workshopId: workshop.workshopId, parentWorkshopId: updated?.parentWorkshopId ?? null, previousParentWorkshopId: workshop.parentWorkshopId, revision: updated?.revision, changed: updated?.revision !== workshop.revision }))
     }

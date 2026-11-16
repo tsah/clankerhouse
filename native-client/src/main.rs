@@ -1,12 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, BufReader, IsTerminal, Write},
-    os::unix::net::UnixStream,
+    io::{self, BufRead, BufReader, IsTerminal},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -3474,122 +3473,73 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     None
 }
 
-fn rpc_with_timeout(
-    socket_path: &Path,
-    method: &str,
-    params: Option<serde_json::Value>,
-    timeout: Duration,
-) -> Result<serde_json::Value, String> {
-    let mut stream = UnixStream::connect(socket_path).map_err(|error| error.to_string())?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| error.to_string())?;
-    let id = format!("native-{}-{}", std::process::id(), method);
-    let mut request = serde_json::json!({"version": 1, "id": id, "method": method});
-    if let Some(params) = params {
-        request["params"] = params;
+/// The `clankers` CLI that computes snapshots and runs mutations: CLANKERS from the launcher, else beside this binary's
+/// checkout through CLANKERHOUSE_BIN_DIR.
+fn clankers_bin() -> PathBuf {
+    if let Ok(path) = env::var("CLANKERS")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
-    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
-    let response: serde_json::Value =
-        serde_json::from_str(&line).map_err(|error| error.to_string())?;
-    if response.get("ok").and_then(|value| value.as_bool()) != Some(true) {
-        return Err(response
-            .pointer("/error/message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("daemon request failed")
-            .into());
-    }
-    response
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "daemon response omitted result".into())
+    env::var("CLANKERHOUSE_BIN_DIR")
+        .map(|bin| Path::new(&bin).join("clankers"))
+        .unwrap_or_else(|_| PathBuf::from("clankers"))
 }
 
-fn rpc(
-    socket_path: &Path,
-    method: &str,
-    params: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    rpc_with_timeout(socket_path, method, params, Duration::from_secs(5))
+/// One snapshot computed now by `clankers snapshot`.
+fn cli_snapshot() -> Result<Snapshot, String> {
+    let output = Command::new(clankers_bin())
+        .arg("snapshot")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("Unable to run clankers snapshot: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())
 }
 
-fn server_health(socket_path: &Path, expected_owner: &str) -> Result<(), String> {
-    let health = rpc_with_timeout(
-        socket_path,
-        "server.health",
-        None,
-        Duration::from_millis(750),
-    )?;
-    let healthy = health
-        .get("healthy")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
-    let owner = health
-        .get("owner")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if healthy && owner == expected_owner {
-        Ok(())
-    } else {
-        Err(format!(
-            "daemon health owner mismatch: expected {expected_owner}, observed {owner}"
-        ))
+/// The running `clankers snapshot --watch`, killed when the picker exits so it does not wait for its next change.
+static WATCHER: AtomicU32 = AtomicU32::new(0);
+
+fn stop_watcher() {
+    let pid = WATCHER.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        // SIGTERM is 15 on Linux and macOS.
+        unsafe { libc_kill(pid as i32, 15) };
     }
 }
 
-fn socket_snapshot(socket_path: &Path) -> Result<Snapshot, String> {
-    serde_json::from_value(rpc(socket_path, "snapshot.get", None)?)
-        .map_err(|error| error.to_string())
-}
-
-fn subscribe_loop(socket_path: PathBuf, sender: Sender<Snapshot>) {
+/// Streams snapshots from `clankers snapshot --watch`, one JSON line each, restarting it with backoff when it ends.
+fn watch_loop(sender: Sender<Snapshot>) {
     let mut delay = Duration::from_millis(50);
     loop {
-        match UnixStream::connect(&socket_path) {
-            Ok(mut stream) => {
-                let request = serde_json::json!({"version": 1, "id": "native-subscribe", "method": "snapshots.subscribe"});
-                if writeln!(stream, "{request}").is_ok() {
+        if let Ok(mut child) = Command::new(clankers_bin())
+            .args(["snapshot", "--watch"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            WATCHER.store(child.id(), Ordering::SeqCst);
+            if let Some(stdout) = child.stdout.take() {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    let Ok(snapshot) = serde_json::from_str::<Snapshot>(&line) else { continue };
                     delay = Duration::from_millis(50);
-                    for line in BufReader::new(stream).lines() {
-                        let Ok(line) = line else { break };
-                        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
-                            break;
-                        };
-                        if message.get("event").and_then(|value| value.as_str()) == Some("snapshot")
-                            && let Ok(snapshot) =
-                                serde_json::from_value::<Snapshot>(message["snapshot"].clone())
-                            && sender.send(snapshot).is_err()
-                        {
-                            return;
-                        }
+                    if sender.send(snapshot).is_err() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
                     }
                 }
             }
-            Err(_) => {}
+            let _ = child.kill();
+            let _ = child.wait();
         }
         thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_secs(2));
     }
-}
-
-fn rpc_retry(
-    socket_path: &Path,
-    method: &str,
-    params: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let mut last_error = String::new();
-    for attempt in 0..40 {
-        match rpc(socket_path, method, params.clone()) {
-            Ok(value) => return Ok(value),
-            Err(error) => last_error = error,
-        }
-        thread::sleep(Duration::from_millis((25 * (attempt + 1)).min(500)));
-    }
-    Err(last_error)
 }
 
 /// Creates a scratch Workshop in `repository` with its harness running, through the CLI that owns
@@ -3622,77 +3572,56 @@ fn scratch_target(spawned: &str) -> Result<Target, String> {
     })
 }
 
-fn daemon_mutation(
-    socket_path: &Path,
-    intent: &MutationIntent,
-) -> Result<serde_json::Value, String> {
-    daemon_mutation_with_submission(socket_path, intent, || {})
+fn cli_mutation(intent: &MutationIntent) -> Result<serde_json::Value, String> {
+    cli_mutation_with(&clankers_bin(), intent, || {})
 }
 
-fn daemon_mutation_with_submission(
-    socket_path: &Path,
+/// Runs a mutation through `clankers mutate`, which journals it; `on_submitted` runs once it has started.
+fn cli_mutation_with_submission(
     intent: &MutationIntent,
     on_submitted: impl FnOnce(),
 ) -> Result<serde_json::Value, String> {
-    let key = format!(
-        "native-{}-{}",
-        std::process::id(),
-        std::time::UNIX_EPOCH
-            .elapsed()
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let submitted = rpc_retry(
-        socket_path,
-        "mutation.submit",
-        Some(serde_json::json!({"idempotencyKey": key, "intent": intent})),
-    )?;
-    let operation_id = submitted
-        .pointer("/operation/operationId")
-        .and_then(|value| value.as_str())
-        .ok_or("daemon omitted operation id")?
-        .to_string();
-    if submitted.pointer("/operation/state").and_then(serde_json::Value::as_str) == Some("failed") {
-        return Err(submitted.pointer("/operation/error").and_then(serde_json::Value::as_str)
-            .unwrap_or("daemon operation failed").into());
-    }
-    on_submitted();
-    for _ in 0..1200 {
-        let operation = rpc_retry(
-            socket_path,
-            "operation.status",
-            Some(serde_json::json!({"operationId": operation_id})),
-        )?;
-        match operation.get("state").and_then(|value| value.as_str()) {
-            Some("succeeded") => {
-                return Ok(operation
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null));
-            }
-            Some("failed") => {
-                return Err(operation
-                    .get("error")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("daemon operation failed")
-                    .into());
-            }
-            _ => thread::sleep(Duration::from_millis(25)),
-        }
-    }
-    Err("daemon operation timed out".into())
+    cli_mutation_with(&clankers_bin(), intent, on_submitted)
 }
 
-fn refresh_repository_cache_if_unavailable(
-    socket_path: &Path,
-    cache_path: &Path,
-) -> Result<bool, String> {
+fn cli_mutation_with(
+    clankers: &Path,
+    intent: &MutationIntent,
+    on_submitted: impl FnOnce(),
+) -> Result<serde_json::Value, String> {
+    let intent = serde_json::to_string(intent).map_err(|error| error.to_string())?;
+    let child = Command::new(clankers)
+        .args(["mutate", "--json", &intent])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Unable to run clankers mutate: {error}"))?;
+    on_submitted();
+    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // The CLI prints a versioned error object; show its message.
+        let message = serde_json::from_str::<serde_json::Value>(stderr.trim())
+            .ok()
+            .and_then(|value| value.pointer("/error/message").and_then(|message| message.as_str()).map(str::to_string))
+            .unwrap_or_else(|| stderr.trim().to_string());
+        return Err(if message.is_empty() { "mutation failed".into() } else { message });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(stdout.trim()).map_err(|error| error.to_string())
+}
+
+fn refresh_repository_cache_if_unavailable(cache_path: &Path, clankers: &Path) -> Result<bool, String> {
     if repository_cache(cache_path).is_some() {
         return Ok(false);
     }
-    daemon_mutation(socket_path, &MutationIntent::RepositoryRefresh)?;
+    cli_mutation_with(clankers, &MutationIntent::RepositoryRefresh, || {})?;
     if repository_cache(cache_path).is_none() {
-        return Err("daemon repository refresh completed without writing repositories.json".into());
+        return Err("repository refresh completed without writing repositories.json".into());
     }
     Ok(true)
 }
@@ -3762,6 +3691,8 @@ fn runtime_root() -> Result<PathBuf, String> {
 unsafe extern "C" {
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, signal: i32) -> i32;
 }
 
 fn coalesce_escape_prefix(first: KeyEvent, second: KeyEvent) -> (KeyEvent, Option<KeyEvent>) {
@@ -3795,7 +3726,6 @@ fn run(
     mut terminal: DefaultTerminal,
     mut app: App,
     snapshots: Receiver<Snapshot>,
-    socket_path: &Path,
 ) -> io::Result<AppCommand> {
     let mut pending_key = None;
     let (mutation_sender, mutation_receiver) = mpsc::channel::<MutationUpdate>();
@@ -3829,9 +3759,8 @@ fn run(
             match dispatch_command(&mut app, command) {
                 CommandDispatch::Background(intent) => {
                     let sender = mutation_sender.clone();
-                    let mutation_socket_path = socket_path.to_path_buf();
                     thread::spawn(move || {
-                        let result = daemon_mutation_with_submission(&mutation_socket_path, &intent, || {
+                        let result = cli_mutation_with_submission(&intent, || {
                             let _ = sender.send(MutationUpdate::Submitted);
                         });
                         let _ = sender.send(MutationUpdate::Finished(result));
@@ -3850,14 +3779,13 @@ fn run(
     }
 }
 
-const USAGE: &str = "Usage: clankerhouse-native [--dump-tree | --check | --delete-current | --server-health OWNER]
+const USAGE: &str = "Usage: clankerhouse-native [--dump-tree | --check | --delete-current]
 
 The Clankerhouse picker. Without an option it draws on the terminal and needs one; launch it through
 clankerhouse-rex. The options print and exit without a terminal:
   --dump-tree             the flat list's rows as JSON
-  --check                 count the daemon snapshot's sessions
+  --check                 count the snapshot's sessions
   --delete-current        confirm deleting CLANKERHOUSE_CURRENT_SESSION (draws; needs a terminal)
-  --server-health OWNER   exit 0 when the daemon is healthy and owned by OWNER
 For the needs-me list without a terminal: clankers needs-me [--json] [--eldest | --flat]";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3867,14 +3795,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let runtime = runtime_root().map_err(io::Error::other)?;
-    let socket_path = runtime.join("daemon.sock");
-    if let Some(index) = arguments.iter().position(|argument| argument == "--server-health") {
-        let expected_owner = arguments
-            .get(index + 1)
-            .ok_or_else(|| io::Error::other("--server-health requires EXPECTED_OWNER"))?;
-        return server_health(&socket_path, expected_owner)
-            .map_err(|error| io::Error::other(error).into());
-    }
 
     let current_session = env::var("CLANKERHOUSE_CURRENT_SESSION")
         .ok()
@@ -3884,16 +3804,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dump_tree = arguments.iter().any(|argument| argument == "--dump-tree");
     let check = arguments.iter().any(|argument| argument == "--check");
     let delete_current = arguments.iter().any(|argument| argument == "--delete-current");
-    let authoritative_snapshot = socket_snapshot(&socket_path);
-    if delete_current && authoritative_snapshot.is_err() {
-        return Err(io::Error::other("Deletion confirmation requires a live daemon snapshot").into());
+    let interactive = !(dump_tree || check || delete_current);
+    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    // The picker paints at once from the runner's last snapshot and catches up from the watcher; the headless options and
+    // deletion confirmation need a snapshot computed now.
+    let cached = interactive && cache_path.exists();
+    if interactive {
+        thread::spawn(move || watch_loop(snapshot_sender));
     }
-    let repository_cache_error = if dump_tree || check || delete_current || authoritative_snapshot.is_err() {
-        None
+    let live_snapshot = if cached {
+        Err("served from the cache".to_string())
+    } else if interactive {
+        snapshot_receiver
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "no snapshot from clankers snapshot --watch".to_string())
     } else {
-        refresh_repository_cache_if_unavailable(&socket_path, &cache_path).err()
+        cli_snapshot()
     };
-    let mut app = match authoritative_snapshot {
+    if delete_current && live_snapshot.is_err() {
+        return Err(io::Error::other("Deletion confirmation requires a live snapshot").into());
+    }
+    let repository_cache_error = if interactive {
+        refresh_repository_cache_if_unavailable(&cache_path, &clankers_bin()).err()
+    } else {
+        None
+    };
+    let mut app = match live_snapshot {
         Ok(snapshot) => App::from_snapshot(cache_path, current_session, snapshot),
         Err(_) => App::new(cache_path, current_session),
     }
@@ -3958,41 +3894,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !io::stdout().is_terminal() {
         return Err(io::Error::other("The picker needs a terminal. For the needs-me list without one: clankers needs-me [--json] [--eldest | --flat]").into());
     }
-    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
-    let subscription_path = socket_path.clone();
-    thread::spawn(move || subscribe_loop(subscription_path, snapshot_sender));
     let _delete_signal = unsafe {
         signal_hook::low_level::register(signal_hook::consts::SIGUSR1, || {
             DELETE_REQUESTED.store(true, Ordering::SeqCst);
         })?
     };
     let terminal = ratatui::init();
-    let result = run(terminal, app, snapshot_receiver, &socket_path);
+    let result = run(terminal, app, snapshot_receiver);
     ratatui::restore();
+    stop_watcher();
     match result? {
         AppCommand::Close => Ok(()),
-        AppCommand::Submit(intent) => daemon_mutation(&socket_path, &intent)
+        AppCommand::Submit(intent) => cli_mutation(&intent)
             .map(|_| ())
             .map_err(|error| io::Error::other(error).into()),
         AppCommand::CreateAndOpen(intent @ MutationIntent::Create { .. }) => {
-            let result = daemon_mutation(&socket_path, &intent).map_err(io::Error::other)?;
+            let result = cli_mutation(&intent).map_err(io::Error::other)?;
             let target: Target = serde_json::from_value(
                 result
                     .get("target")
                     .cloned()
-                    .ok_or_else(|| io::Error::other("daemon omitted created target"))?,
+                    .ok_or_else(|| io::Error::other("the create mutation returned no target"))?,
             )?;
-            daemon_mutation(
-                &socket_path,
-                &MutationIntent::Open { target },
-            )
+            cli_mutation(&MutationIntent::Open { target })
             .map(|_| ())
             .map_err(|error| io::Error::other(error).into())
         }
         AppCommand::CreateAndOpen(_) => unreachable!("create flow emitted a non-create intent"),
         AppCommand::Scratch { repository } => {
             let target = spawn_scratch(&repository).map_err(io::Error::other)?;
-            daemon_mutation(&socket_path, &MutationIntent::Open { target })
+            cli_mutation(&MutationIntent::Open { target })
                 .map(|_| ())
                 .map_err(|error| io::Error::other(error).into())
         }
@@ -4105,71 +4036,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_invalid_repository_caches_are_regenerated_through_the_daemon() {
+    fn missing_and_invalid_repository_caches_are_regenerated_through_clankers() {
+        use std::os::unix::fs::PermissionsExt;
         let root = env::temp_dir().join(format!(
             "clankerhouse-native-repository-refresh-test-{}",
             std::process::id()
         ));
         let cache_path = root.join("state.json");
-        let socket_path = root.join("daemon.sock");
         fs::create_dir_all(&root).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
-        let server_root = root.clone();
-        let server = thread::spawn(move || {
-            for _ in 0..4 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut line)
-                    .unwrap();
-                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                let result = match request["method"].as_str().unwrap() {
-                    "mutation.submit" => {
-                        assert_eq!(request["params"]["intent"]["type"], "repository.refresh");
-                        serde_json::json!({
-                            "operation": { "operationId": "refresh-operation" },
-                            "replayed": false
-                        })
-                    }
-                    "operation.status" => {
-                        fs::write(
-                            server_root.join("repositories.json"),
-                            r#"{"version":1,"entries":{"/repo":{"commonDir":"/repo/.git"}}}"#,
-                        )
-                        .unwrap();
-                        serde_json::json!({
-                            "operationId": "refresh-operation",
-                            "state": "succeeded",
-                            "result": { "repositories": [] }
-                        })
-                    }
-                    method => panic!("unexpected daemon method {method}"),
-                };
-                let response = serde_json::json!({
-                    "version": 1,
-                    "id": request["id"],
-                    "ok": true,
-                    "result": result
-                });
-                writeln!(stream, "{response}").unwrap();
-            }
-        });
+        // A stand-in `clankers` that checks it was asked for a repository refresh and writes the cache, as the real one does.
+        let clankers = root.join("clankers");
+        fs::write(
+            &clankers,
+            format!(
+                "#!/bin/sh\ncase \"$3\" in *repository.refresh*) ;; *) echo \"unexpected $*\" >&2; exit 1 ;; esac\nprintf '%s' '{{\"version\":1,\"entries\":{{\"/repo\":{{\"commonDir\":\"/repo/.git\"}}}}}}' > '{}'\necho '{{\"repositories\":[]}}'\n",
+                root.join("repositories.json").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&clankers, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert_eq!(
-            refresh_repository_cache_if_unavailable(&socket_path, &cache_path),
-            Ok(true)
-        );
+        assert_eq!(refresh_repository_cache_if_unavailable(&cache_path, &clankers), Ok(true));
         assert_eq!(
             repository_identities(&cache_path).get("/repo"),
             Some(&"/repo/.git".to_string())
         );
 
         fs::write(root.join("repositories.json"), "not json").unwrap();
-        assert_eq!(
-            refresh_repository_cache_if_unavailable(&socket_path, &cache_path),
-            Ok(true)
-        );
-        server.join().unwrap();
+        assert_eq!(refresh_repository_cache_if_unavailable(&cache_path, &clankers), Ok(true));
         assert_eq!(
             repository_identities(&cache_path).get("/repo"),
             Some(&"/repo/.git".to_string())
@@ -4192,7 +4086,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            refresh_repository_cache_if_unavailable(&root.join("missing.sock"), &cache_path),
+            refresh_repository_cache_if_unavailable(&cache_path, &root.join("missing-clankers")),
             Ok(false)
         );
         fs::remove_dir_all(root).unwrap();

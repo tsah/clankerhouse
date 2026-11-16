@@ -6,20 +6,12 @@ const root = resolve(import.meta.dir, "..")
 const read = (path: string) => readFileSync(resolve(root, path), "utf8")
 
 describe("renderer contraction", () => {
-  test("ships a Bun daemon without the obsolete interactive renderer", () => {
-    expect(existsSync(resolve(root, "src/daemon.ts"))).toBe(true)
-    expect(existsSync(resolve(root, "src/main.tsx"))).toBe(false)
-    expect(existsSync(resolve(root, "src/picker.ts"))).toBe(false)
-    expect(existsSync(resolve(root, "src/presentation.ts"))).toBe(false)
-
-    const daemon = read("src/daemon.ts")
-    expect(daemon).not.toContain("@opentui")
-    expect(daemon).not.toContain("solid-js")
-    expect(daemon).not.toContain("function App(")
-    expect(daemon).toContain("--server")
-    expect(daemon).toContain("--dump-state")
-    expect(daemon).toContain("--dump-cache")
-    expect(daemon).toContain("Rust native client")
+  test("ships no long-running daemon or interactive Bun renderer, only a runner for timed work", () => {
+    for (const gone of ["src/daemon.ts", "src/main.tsx", "src/picker.ts", "src/presentation.ts", "src/transport/server.ts", "src/transport/client.ts"]) expect(existsSync(resolve(root, gone))).toBe(false)
+    const runner = read("src/runner.ts")
+    expect(runner).not.toContain("@opentui")
+    expect(runner).not.toContain("listen(")
+    expect(runner).toContain("fireRoutinesThroughSend")
   })
 
   test("has no renderer dependencies or JSX compiler configuration", () => {
@@ -28,7 +20,7 @@ describe("renderer contraction", () => {
     expect(pkg.dependencies["@opentui/solid"]).toBeUndefined()
     expect(pkg.dependencies["solid-js"]).toBeUndefined()
     expect(pkg.scripts.start).toBe("bin/clankerhouse")
-    expect(pkg.scripts.server).toContain("src/daemon.ts")
+    expect(pkg.scripts.runner).toContain("runner")
 
     const tsconfig = JSON.parse(read("tsconfig.json")) as { compilerOptions: Record<string, unknown> }
     expect(tsconfig.compilerOptions.jsx).toBeUndefined()
@@ -41,8 +33,8 @@ describe("renderer contraction", () => {
     expect(read("bin/clankerhouse-native")).toContain("clankerhouse-rex")
 
     const rex = read("bin/clankerhouse-rex")
-    expect(rex).toContain("src/daemon.ts --server")
+    expect(rex).toContain("cli.ts runner")
     expect(rex).toContain("clankerhouse-native")
-    expect(rex).not.toContain("bun src/main.tsx")
+    expect(rex).not.toContain("daemon.ts")
   })
 })

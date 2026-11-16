@@ -31,6 +31,11 @@ const requiredText = (value: string, label: string) => {
   return text
 }
 
+const processAlive = (pid: number) => {
+  try { process.kill(pid, 0); return true }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM" }
+}
+
 export class OperationStore {
   private constructor(private readonly db: Database, private readonly clock: () => number) {}
 
@@ -53,7 +58,8 @@ export class OperationStore {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       completed_at INTEGER,
-      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0)
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      owner_pid INTEGER
     )`)
     return new OperationStore(db, options.now ?? Date.now)
   }
@@ -94,13 +100,15 @@ export class OperationStore {
       const current = this.operation(id)
       if (!current) throw new Error(`Unknown operation ${id}`)
       if (current.status === "succeeded") return current
-      this.db.query("UPDATE operations SET status = 'running', error = NULL, completed_at = NULL, attempts = attempts + 1, updated_at = ?2 WHERE id = ?1").run(id, now)
+      this.db.query("UPDATE operations SET status = 'running', error = NULL, completed_at = NULL, attempts = attempts + 1, updated_at = ?2, owner_pid = ?3 WHERE id = ?1").run(id, now, process.pid)
       return this.operation(id)!
     }).immediate()
   }
 
+  /** Unfinished operations no live process is running: their owner exited mid-way, or never started them. */
   resumableOperations(kindPrefix = "mutation.") {
-    return (this.db.query("SELECT id FROM operations WHERE kind LIKE ?1 AND status IN ('pending', 'running') ORDER BY created_at, id").all(`${kindPrefix}%`) as Array<{ id: string }>).map((row) => this.operation(row.id)!)
+    const rows = this.db.query("SELECT id, owner_pid FROM operations WHERE kind LIKE ?1 AND status IN ('pending', 'running') ORDER BY created_at, id").all(`${kindPrefix}%`) as Array<{ id: string; owner_pid: number | null }>
+    return rows.filter((row) => row.owner_pid === null || row.owner_pid === process.pid || !processAlive(row.owner_pid)).map((row) => this.operation(row.id)!)
   }
 
   advanceOperation(id: string, stageValue: string, status: DurableOperationRecord["status"], options: { expectedStage?: string; result?: unknown; error?: string | null; now?: number } = {}) {

@@ -1,7 +1,7 @@
 {
   "name": "clankerhouse",
   "version": "0.1.0",
-  "description": "Herdr-native workshops, visible harness sessions, and a durable clanker ledger",
+  "description": "Rex-native workshops, visible harness sessions, and a durable clanker ledger",
   "license": "MIT",
   "author": "Tsah Weiss",
   "repository": {
@@ -14,7 +14,7 @@
   },
   "type": "module",
   "keywords": [
-    "herdr",
+    "rex",
     "tui",
     "worktree",
     "developer-tools"
@@ -32,7 +32,7 @@
   },
   "scripts": {
     "start": "bin/clankerhouse",
-    "server": "bun run src/daemon.ts --server",
+    "runner": "bun src/cli.ts runner",
     "check": "tsc --noEmit",
     "test": "bun test",
     "test:all": "./test",

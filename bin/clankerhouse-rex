@@ -1,24 +1,26 @@
 #!/bin/bash
-# Clankerhouse on the Rex lane (CLANKERHOUSE_MULTIPLEXER=rex). Rex draws the sessions, tabs and panes, and its config binds
-# the keys (contrib/rex/clankerhouse.lua) that open the picker in a floating popup over the focused pane. This launcher
-# starts the daemon and runs the picker; choosing a target moves Rex's focus, so there is nothing to attach to afterwards.
+# Clankerhouse on Rex. Rex draws the sessions, tabs and panes, and its config binds the keys (contrib/rex/clankerhouse.lua)
+# that open the picker in a floating popup over the focused pane. This launcher makes sure the runner is up and runs the
+# picker, which reads Rex and the stores itself (`clankers snapshot --watch`); choosing a target moves Rex's focus.
 #
 #   clankerhouse-rex [picker args]   run the picker in this terminal
-#   clankerhouse-rex --repo          open at repository selection (Herdr's Alt-B)
-#   clankerhouse-rex --delete        delete the current session (Herdr's Alt-D)
-#   clankerhouse-rex --scratch       pick a repository for a scratch Workshop (Herdr's Alt-N)
-#   clankerhouse-rex --needs-me      open the list in its needs-me view (Herdr's Alt-I); inside, Alt-I/E/F switch views
+#   clankerhouse-rex --repo          open at repository selection
+#   clankerhouse-rex --delete        delete the current session
+#   clankerhouse-rex --scratch       pick a repository for a scratch Workshop
+#   clankerhouse-rex --needs-me      open the list in its needs-me view; inside, Alt-I/E/F switch views
 #   clankerhouse-rex --needs-me --json [--eldest|--flat]  print that list instead, no terminal needed (clankers needs-me)
 #   clankerhouse-rex --settled [clankers settled args]  every session with nothing in progress and its last replies
 #   clankerhouse-rex --popup --focus 'SESSION WINDOW BLOCK' [--client CLIENT] [--repo|--delete|--scratch|--needs-me]
 #                                    the picker in a Rex popup over BLOCK, opened by CLIENT; the popup closes on a choice
-#   clankerhouse-rex --ensure-server start the daemon, then exit
-#   clankerhouse-rex --stop-server   stop the daemon; Rex and its terminals keep running
-#   clankerhouse-rex --health        print Rex and daemon health; exit 1 when either is down
+#   clankerhouse-rex --ensure-runner start the runner, then exit (--ensure-server is the same)
+#   clankerhouse-rex --stop-runner   stop the runner; Rex, its terminals and the picker keep working (--stop-server)
+#   clankerhouse-rex --health        print Rex and runner health; exit 1 when either is down
 #   clankerhouse-rex --help          print this
 #
-# The daemon runs as a systemd user service, not in a Rex terminal, so closing a pane or restarting Rex never takes it
-# down. Where no user manager is reachable it runs in its own session with a scrubbed environment.
+# The runner (`clankers runner`) does timed work only: queued messages, Routines, Status Event sinks, the done-Workshop
+# reaper, directory rediscovery and the clanker ledger. It runs as a systemd user service, not in a Rex terminal, so
+# closing a pane or restarting Rex never takes it down; without a user manager it runs detached with a scrubbed
+# environment.
 set -euo pipefail
 
 # Resolve links first: each machine links this launcher at ~/.config/rex/clankerhouse-rex for the Rex config to find.
@@ -41,7 +43,7 @@ command -v systemd-run >/dev/null 2>&1 || export CLANKERHOUSE_PROCESS_OWNER=${CL
 # shellcheck source=/dev/null
 . "$CLANKERHOUSE_LIBEXEC/clankerhouse-mux"
 
-# Nothing here draws or starts anything: no terminal is needed, and a down daemon stays down.
+# Nothing here draws or starts anything: no terminal is needed.
 case "${1:-}" in
     --settled) exec "$CLANKERHOUSE_BIN_DIR/clankers" settled "${@:2}" ;;
     -h|--help) awk 'NR > 1 && /^set -euo pipefail$/ { exit } NR > 1 && /^#/ { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
@@ -54,20 +56,17 @@ case "${1:-}" in
 esac
 
 command -v bun >/dev/null 2>&1 || { echo "Clankerhouse requires bun" >&2; exit 1; }
-command -v "${REX_BIN:-rex}" >/dev/null 2>&1 || { echo "Clankerhouse's Rex lane requires rex" >&2; exit 1; }
+command -v "${REX_BIN:-rex}" >/dev/null 2>&1 || { echo "Clankerhouse requires rex" >&2; exit 1; }
 
 cd "$CLANKERHOUSE_HOME" || exit 1
 
 STATE_DIR="$(ch_runtime_dir)"
-LOG_FILE="$STATE_DIR/server.log"
-DAEMON_SOCKET="$STATE_DIR/daemon.sock"
-LOCK_FILE="$STATE_DIR/server.lock"
+LOG_FILE="$STATE_DIR/runner.log"
+PID_FILE="$STATE_DIR/runner.pid"
 NATIVE_BINARY="$CLANKERHOUSE_HOME/native-client/target/release/clankerhouse-native"
 CLANKERS="$CLANKERHOUSE_BIN_DIR/clankers"
-UNIT="clankerhouse-daemon-${CLANKERHOUSE_INSTANCE//[^A-Za-z0-9_-]/-}.service"
+UNIT="clankerhouse-runner-${CLANKERHOUSE_INSTANCE//[^A-Za-z0-9_-]/-}.service"
 export CLANKERHOUSE_RUNTIME_DIR="$STATE_DIR"
-
-[[ -x "$NATIVE_BINARY" ]] || { echo "Native client is not built: $NATIVE_BINARY" >&2; exit 1; }
 
 user_manager() {
     [[ -z "${CLANKERHOUSE_REX_NO_SYSTEMD:-}" && "${XDG_RUNTIME_DIR:-}" == "/run/user/$(id -u)" && -S "$XDG_RUNTIME_DIR/systemd/private" ]]
@@ -77,31 +76,33 @@ user_manager() {
 process_command() { if [[ -r /proc/$1/cmdline ]]; then tr '\0' ' ' <"/proc/$1/cmdline"; else ps -p "$1" -o command= 2>/dev/null; fi; }
 process_environment() { if [[ -r /proc/$1/environ ]]; then tr '\0' '\n' <"/proc/$1/environ"; else ps eww -p "$1" -o command= 2>/dev/null | tr ' ' '\n'; fi; }
 
-server_running() {
-    [[ -S "$DAEMON_SOCKET" ]] || return 1
-    "$NATIVE_BINARY" --server-health "$OWNER" >/dev/null 2>&1
+# The runner of this instance: its pid file names a live `clankers runner` with this runtime directory.
+runner_pid() {
+    local pid=
+    [[ -r "$PID_FILE" ]] && pid=$(<"$PID_FILE")
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && process_command "$pid" | grep -q 'cli.ts runner' \
+        && process_environment "$pid" | grep -Fqx "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR" && printf '%s\n' "$pid"
 }
 
-stop_daemon() {
+stop_runner() {
     if user_manager; then
         systemctl --user stop "$UNIT" 2>/dev/null || true
         systemctl --user reset-failed "$UNIT" 2>/dev/null || true
     fi
-    local pid=
-    [[ -r "$STATE_DIR/server.pid" ]] && pid=$(<"$STATE_DIR/server.pid")
-    if [[ "$pid" =~ ^[0-9]+$ ]] && process_command "$pid" | grep -q 'src/daemon.ts --server' \
-        && process_environment "$pid" | grep -Fqx "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR"; then
+    local pid
+    pid=$(runner_pid || true)
+    if [[ -n "$pid" ]]; then
         kill "$pid" 2>/dev/null || true
         for _ in {1..100}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
     fi
-    rm -f "$DAEMON_SOCKET"
+    rm -f "$PID_FILE"
 }
 
-# One explicit environment for both paths, so nothing of the invoking clanker or pane reaches the daemon.
-daemon_env() {
+# One explicit environment for both paths, so nothing of the invoking clanker or pane reaches the runner.
+runner_env() {
     local name
     for name in HOME USER LOGNAME SHELL PATH LANG LANGUAGE TZ TMPDIR XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME \
-        DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK REX_BIN CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER CLANKERHOUSE_NOTIFY_COMMAND CLANKERHOUSE_TIMEZONE; do
+        DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK REX_BIN CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER CLANKERHOUSE_TIMEZONE CLANKERHOUSE_DEV_ROOT _ZO_DATA_DIR; do
         [[ -z "${!name:-}" ]] || printf '%s=%s\n' "$name" "${!name}"
     done
     env | grep -E '^LC_[A-Z_]+=' || true
@@ -109,11 +110,11 @@ daemon_env() {
         "CLANKERHOUSE_BIN_DIR=$CLANKERHOUSE_BIN_DIR" "CLANKERHOUSE_LIBEXEC=$CLANKERHOUSE_LIBEXEC" "CLANKERHOUSE_RUNTIME_DIR=$STATE_DIR"
 }
 
-start_daemon() {
+start_runner() {
     local bun_path line
     local -a environment=()
     bun_path=$(command -v bun)
-    while IFS= read -r line; do environment+=("$line"); done < <(daemon_env)
+    while IFS= read -r line; do environment+=("$line"); done < <(runner_env)
     if user_manager; then
         local -a setenv=()
         for line in "${environment[@]}"; do setenv+=("--setenv=$line"); done
@@ -121,51 +122,43 @@ start_daemon() {
         systemd-run --user --quiet --unit="$UNIT" --collect "--working-directory=$CLANKERHOUSE_HOME" \
             --property=Restart=on-failure --property=RestartSec=2 --property=KillMode=mixed --property=TimeoutStopSec=10s \
             "--property=StandardOutput=append:$LOG_FILE" "--property=StandardError=append:$LOG_FILE" \
-            "${setenv[@]}" -- "$bun_path" src/daemon.ts --server
+            "${setenv[@]}" -- "$bun_path" src/cli.ts runner
     else
         local -a detach=()
         command -v setsid >/dev/null 2>&1 && detach=(setsid)
-        env -i "${environment[@]}" ${detach[@]+"${detach[@]}"} nohup "$bun_path" src/daemon.ts --server >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
+        env -i "${environment[@]}" ${detach[@]+"${detach[@]}"} nohup "$bun_path" src/cli.ts runner >>"$LOG_FILE" 2>&1 </dev/null &
         disown
     fi
 }
 
-case "${1:-}" in
-    --stop-server) stop_daemon; exit 0 ;;
-    --health)
-        status=0
-        if "${REX_BIN:-rex}" --autostart=false ${CLANKERHOUSE_REX_SERVER:+--server "$CLANKERHOUSE_REX_SERVER"} --timeout 2s server status >/dev/null 2>&1; then echo '{"rex":"reachable"}'; else echo '{"rex":"down"}'; status=1; fi
-        OWNER=$("$CLANKERS" mux instance-id 2>/dev/null || true)
-        if [[ -n "$OWNER" ]] && server_running; then echo '{"daemon":"healthy"}'; else echo '{"daemon":"down"}'; status=1; fi
-        exit "$status"
-        ;;
-esac
+ensure_runner() {
+    [[ -n "$(runner_pid || true)" ]] && return 0
+    start_runner
+    for _ in {1..100}; do [[ -n "$(runner_pid || true)" ]] && return 0; sleep 0.05; done
+    printf 'Clankerhouse runner did not start; see %s\n' "$LOG_FILE" >&2
+    return 1
+}
 
 mkdir -p -m 700 "$STATE_DIR"
 if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -O "$STATE_DIR" ]]; then
     echo "Refusing unsafe Clankerhouse runtime directory: $STATE_DIR" >&2; exit 1
 fi
 chmod 700 "$STATE_DIR"
-OWNER=$("$CLANKERS" mux instance-id) || { echo "No Rex server answers; start one with: rex server install" >&2; exit 1; }
-exec 9>"$LOCK_FILE"
-flock 9
-ready=false
-if server_running; then
-    ready=true
-else
-    stop_daemon
-    rm -f "$STATE_DIR/server.pid" "$STATE_DIR/state.json"
-    start_daemon
-    for _ in {1..1200}; do
-        if server_running; then ready=true; break; fi
-        sleep 0.05
-    done
-fi
-[[ "$ready" == true ]] || { printf 'Clankerhouse Rex daemon did not become healthy; see %s\n' "$LOG_FILE" >&2; exit 1; }
-flock -u 9
-exec 9>&-
 
-[[ ${1:-} == "--ensure-server" ]] && exit 0
+case "${1:-}" in
+    --stop-runner|--stop-server) stop_runner; exit 0 ;;
+    --ensure-runner|--ensure-server) ensure_runner; exit $? ;;
+    --health)
+        status=0
+        if "${REX_BIN:-rex}" --autostart=false ${CLANKERHOUSE_REX_SERVER:+--server "$CLANKERHOUSE_REX_SERVER"} --timeout 2s server status >/dev/null 2>&1; then echo '{"rex":"reachable"}'; else echo '{"rex":"down"}'; status=1; fi
+        if [[ -n "$(runner_pid || true)" ]]; then echo '{"runner":"running"}'; else echo '{"runner":"down"}'; status=1; fi
+        exit "$status"
+        ;;
+esac
+
+[[ -x "$NATIVE_BINARY" ]] || { echo "Native client is not built: $NATIVE_BINARY" >&2; exit 1; }
+# The picker works without the runner; it is started for what the picker cannot do alone (delivery, Routines, sinks).
+ensure_runner || true
 
 if [[ ${1:-} == "--popup" ]]; then
     shift
@@ -206,4 +199,5 @@ if [[ ${1:-} == "--delete" ]]; then
     set -- --delete-current "$@"
 fi
 
+export CLANKERS
 exec "$NATIVE_BINARY" "$@"

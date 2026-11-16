@@ -1,6 +1,6 @@
 #!/bin/bash
-# The Rex lane end to end, on a private Rex server under scratch XDG directories: launcher, daemon, per-terminal identity,
-# Claims through the CLI and the Rust hook, the daemon's projection, and the Alt-K popup from the lane's Rex config.
+# The Rex lane end to end, on a private Rex server under scratch XDG directories: launcher, runner, per-terminal identity,
+# Claims through the CLI and the Rust hook, snapshots (one-shot and watched), mutations, and the Alt-K popup.
 # Needs rex; skips without it unless REX_REQUIRED is set. Never touches the account's own Rex server or Clankerhouse state.
 set -euo pipefail
 
@@ -17,13 +17,16 @@ launcher="$repo/bin/clankerhouse-rex"
 clankers="$repo/bin/clankers"
 hook="$repo/native-client/target/release/clankerhouse-hook"
 mkdir -p -m 700 "$root/runtime" "$root/state" "$root/config/rex" "$root/work"
-export XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config"
+mkdir -p "$root/data" "$root/dev"
+export XDG_RUNTIME_DIR="$root/runtime" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" CLANKERHOUSE_DEV_ROOT="$root/dev"
 export CLANKERHOUSE_MULTIPLEXER=rex CLANKERHOUSE_INSTANCE=qa-rex-$$ CLANKERHOUSE_REX_SERVER="unix://$root/rex.sock" CLANKERHOUSE_PROCESS_OWNER=disabled
 runtime="$XDG_RUNTIME_DIR/clankerhouse-$(id -u)-$CLANKERHOUSE_INSTANCE"
 R() { "$rex" --autostart=false --server "$CLANKERHOUSE_REX_SERVER" "$@"; }
+export rex
+export -f R
 failures=0
 cleanup() {
-    "$launcher" --stop-server >/dev/null 2>&1 || true
+    "$launcher" --stop-runner >/dev/null 2>&1 || true
     R server stop >/dev/null 2>&1 || true
     rm -rf -- "$root"
 }
@@ -42,20 +45,20 @@ dofile("$repo/contrib/rex/clankerhouse.lua")
 EOF
 # The popup runs in a terminal of this server, so the server hands it the scratch lane.
 server_env=()
-for name in XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME CLANKERHOUSE_INSTANCE CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER PATH; do server_env+=(--env "$name=${!name}"); done
+for name in XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME CLANKERHOUSE_DEV_ROOT CLANKERHOUSE_INSTANCE CLANKERHOUSE_REX_SERVER CLANKERHOUSE_PROCESS_OWNER PATH; do server_env+=(--env "$name=${!name}"); done
 R server start --state-dir "$root/rex-state" --config "$root/config/rex/init.lua" "${server_env[@]}" >/dev/null
 
-# Everything a clanker's shell would hand a launcher; none of it may reach the daemon or a new terminal.
+# Everything a clanker's shell would hand a launcher; none of it may reach the runner or a new terminal.
 export CLANKER_ID=outsider-clanker CLANKERHOUSE_WORKSHOP_ID=outsider-workshop HERDR_PANE_ID=w9:p9 HC_TERMINAL_ID=t9 CLAUDE_CODE_CHILD_SESSION=1
 
-echo "== launcher starts a healthy daemon on the lane's own server"
-"$launcher" --ensure-server
+echo "== launcher starts the runner on the lane's own server"
+"$launcher" --ensure-runner
 health=$("$launcher" --health)
 check "Rex answers" contains "$health" '"rex":"reachable"'
-check "daemon reports healthy" contains "$health" '"daemon":"healthy"'
+check "the runner is running" contains "$health" '"runner":"running"'
 check "instance id names the server's host" contains "$("$clankers" mux instance-id)" "rex:$(R api call server.status '{}' | field host_id)"
-daemon_pid=$(<"$runtime/server.pid")
-check "daemon environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$daemon_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|HC_TERMINAL_ID|CLAUDE_CODE_CHILD_SESSION)='"
+runner_pid=$(<"$runtime/runner.pid")
+check "runner environment has no clanker identity" bash -c "! tr '\\0' '\\n' </proc/$runner_pid/environ | grep -qE '^(CLANKER_ID|HERDR_PANE_ID|HC_TERMINAL_ID|CLAUDE_CODE_CHILD_SESSION)='"
 
 echo "== identity is per terminal"
 script='echo "id=${CLANKER_ID:-none} herdr=${HERDR_PANE_ID:-none} hc=${HC_TERMINAL_ID:-none} lane=${CLANKERHOUSE_MULTIPLEXER:-none} pane=${REX_BLOCK:-none}"; exec sleep 300'
@@ -83,8 +86,19 @@ check "hook ran" wait_for 30 screen_has "$hs" "$hp" "hook-rc=0"
 check "hook claimed the clanker" wait_for 30 bash -c "[[ \$('$clankers' mux read-claim --pane '$hp' clankerId) == clanker-hook ]]"
 check "hook claimed the harness session" test "$("$clankers" mux read-claim --pane "$hp" harnessSessionId)" = s-1
 
-echo "== the daemon projects the lane"
-check "the daemon's snapshot holds the spawned sessions" wait_for 100 bash -c "grep -q '$s1' '$runtime/state.json' && grep -q '$hs' '$runtime/state.json'"
+echo "== snapshots and mutations need no daemon"
+"$clankers" snapshot >"$root/snapshot.json"
+check "a one-shot snapshot holds the spawned sessions" bash -c "grep -q '$s1' '$root/snapshot.json' && grep -q '$hs' '$root/snapshot.json'"
+check "the runner keeps the cache the picker paints from" wait_for 100 bash -c "grep -q '$s1' '$runtime/state.json'"
+"$clankers" snapshot --watch >"$root/watch.jsonl" 2>/dev/null &
+watcher=$!
+check "a watched snapshot starts at once" wait_for 100 bash -c "[[ \$(wc -l <'$root/watch.jsonl') -ge 1 ]]"
+R session rename "$s2" qa-two-renamed >/dev/null
+check "and follows a Rex change" wait_for 100 bash -c "tail -n 1 '$root/watch.jsonl' | grep -q qa-two-renamed"
+kill "$watcher" 2>/dev/null || true
+renamed=$("$clankers" mutate --json "{\"type\":\"rename\",\"session\":\"qa-two-renamed\",\"displayName\":\"qa-two\"}")
+check "a mutation runs in the CLI and reports its result" contains "$renamed" "qa-two"
+check "it renamed the Rex session" bash -c "R ls | grep -q qa-two"
 
 echo "== Alt-K opens the picker in a popup over the pane, and it closes with the picker"
 R do -s "$s1" -b "$p1" clankerhouse_jump >/dev/null

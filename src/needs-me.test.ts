@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { ClankerState, DetailRow, SessionRow } from "./model"
@@ -213,7 +213,7 @@ describe("clankers needs-me", () => {
   const roots: string[] = []
   afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
-  /** A daemon socket that answers snapshot.get with the fixture, and a registry with labels and creation times. */
+  /** A saved snapshot of the fixture, and a registry with labels and creation times. */
   const daemon = async () => {
     const root = mkdtempSync(join(tmpdir(), "clankerhouse-needs-me-"))
     roots.push(root)
@@ -231,19 +231,12 @@ describe("clankers needs-me", () => {
       INSERT INTO workshops VALUES ('w3', 'r', '/late', 'late', NULL, 1, 1234, 1);
       INSERT INTO workshop_labels VALUES ('w3', 'stage', 'needs-input', 1), ('w3', 'title', 'Late question', 1), ('w3', '_snooze', 'x:1:2', 1);`)
     db.close()
-    const server = Bun.listen({
-      unix: join(runtime, "daemon.sock"),
-      socket: {
-        data(socket, data) {
-          const request = JSON.parse(data.toString().trim())
-          const result = request.method === "snapshot.get" ? { version: 11, revision: { source: "test", sequence: 1 }, generatedAt: 5, sessions: fixture.sessions } : undefined
-          socket.write(`${JSON.stringify(result ? { version: 1, id: request.id, ok: true, result } : { version: 1, id: request.id, ok: false, error: { code: "UNSUPPORTED", message: request.method } })}\n`)
-        },
-      },
-    })
+    // A snapshot saved with `clankers snapshot`, replayed instead of computing one from Rex.
+    const snapshotFile = join(root, "snapshot.json")
+    writeFileSync(snapshotFile, JSON.stringify({ version: 11, revision: { source: "test", sequence: 1 }, generatedAt: 5, sessions: fixture.sessions }))
     // Only what a headless caller has: no terminal, nothing of the invoking clanker or Rex.
-    const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec") }
-    return { env, stop: () => server.stop(true) }
+    const env = { PATH: Bun.env.PATH!, HOME: root, XDG_RUNTIME_DIR: join(root, "run"), XDG_STATE_HOME: join(root, "state"), CLANKERHOUSE_INSTANCE: instance, CLANKERHOUSE_HOME: repo, CLANKERHOUSE_BIN_DIR: join(repo, "bin"), CLANKERHOUSE_LIBEXEC: join(repo, "libexec"), CLANKERHOUSE_SNAPSHOT: snapshotFile }
+    return { env, stop: () => {} }
   }
 
   const run = async (command: string[], env: Record<string, string>) => {
@@ -279,15 +272,6 @@ describe("clankers needs-me", () => {
       expect(text.stdout.split("\n")[0]).toBe(`${fixture.counts.needsMe} need you · ${fixture.counts.open} open`)
       expect(text.stdout).toContain("1. asked late  asked")
     } finally { stop() }
-  })
-
-  test("says so when the daemon is down instead of starting one", async () => {
-    const { env, stop } = await daemon()
-    stop()
-    rmSync(join(env.XDG_RUNTIME_DIR, `clankerhouse-${process.getuid!()}-${env.CLANKERHOUSE_INSTANCE}`, "daemon.sock"), { force: true })
-    const result = await run([join(repo, "bin/clankers"), "needs-me", "--json"], env)
-    expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain("daemon is not running")
   })
 
   test("the Rex launcher's help and its needs-me view need no terminal and start nothing", async () => {

@@ -236,16 +236,16 @@
       ]
     },
     {
-      "id": "daemon-transport",
-      "title": "Authoritative socket snapshots, subscriptions, refresh, leases, and operations",
+      "id": "snapshot-and-runner",
+      "title": "Snapshots computed on demand from Rex and the stores (`clankers snapshot [--watch]`), in-process journaled mutations (`clankers mutate`), and the runner for timed work",
       "core": true,
       "unit": [
-        "src/transport/transport.test.ts",
-        "src/transport/producer-lease.test.ts",
+        "src/operation-store.test.ts",
+        "src/daemon-mutations.test.ts",
         "src/projection.test.ts"
       ],
       "standalone": [
-        "scripts/qa-daemon"
+        "scripts/qa-rex"
       ],
       "manual": [
         "Start an isolated daemon",

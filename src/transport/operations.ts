@@ -30,6 +30,7 @@ export class OperationJournal {
   readonly #byId = new Map<string, OperationRecord>()
   readonly #byKey = new Map<string, OperationRecord>()
   readonly #running = new Set<string>()
+  readonly #runs = new Map<string, Promise<void>>()
   readonly #registry?: DurableRegistry
   readonly #execute: MutationExecutor
 
@@ -45,7 +46,7 @@ export class OperationJournal {
         const operation = protocolRecord(durable)
         journal.#remember(operation)
       }
-      for (const operation of journal.#byId.values()) void journal.#run(operation)
+      for (const operation of journal.#byId.values()) void journal.#start(operation)
     }
     return journal
   }
@@ -82,7 +83,7 @@ export class OperationJournal {
     if (existing) {
       if (!sameJson(existing.intent, intent)) throw new Error("idempotency key was already used for a different intent")
       this.#refresh(existing)
-      if (existing.state === "failed") void this.#run(existing)
+      if (existing.state === "failed") void this.#start(existing)
       return { operation: existing, replayed: true }
     }
 
@@ -97,9 +98,24 @@ export class OperationJournal {
       operation = { operationId: randomUUID(), idempotencyKey, intent, state: "queued", stage: "registered", attempts: 0, createdAt: now, updatedAt: now }
     }
     this.#remember(operation)
-    if (operation.state !== "succeeded") void this.#run(operation)
+    if (operation.state !== "succeeded") void this.#start(operation)
     return { operation, replayed }
   }
+
+  #start(operation: OperationRecord) {
+    const running = this.#run(operation).finally(() => this.#runs.delete(operation.operationId))
+    if (!this.#runs.has(operation.operationId)) this.#runs.set(operation.operationId, running)
+    return running
+  }
+
+  /** Resolves once the operation's current run has settled, with its record. */
+  async settled(operationId: string) {
+    await this.#runs.get(operationId)
+    return this.get(operationId)
+  }
+
+  /** Resolves once every run this journal started, including resumed ones, has settled. */
+  async idle() { while (this.#runs.size) await Promise.allSettled([...this.#runs.values()]) }
 
   async #checkpoint(operation: OperationRecord, stage: string, result?: unknown) {
     if (this.#registry) {

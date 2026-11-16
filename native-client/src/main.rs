@@ -2808,14 +2808,34 @@ fn host_tab_spans(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
-fn draw(frame: &mut Frame, app: &mut App) {
-    let areas = Layout::vertical([
+/// The list's content lines in the current mode: what the box needs to hold.
+fn content_lines(app: &App) -> usize {
+    match app.mode {
+        Mode::Jump if app.view.waiting() => app.rows.iter().map(needs_me_height).sum::<usize>().max(1),
+        Mode::NewBase | Mode::Rename | Mode::DeleteConfirm => 4,
+        _ => app.active_len().max(1),
+    }
+}
+
+/// Header, list box, path line and prompt, stacked from the bottom: a short list sits just above the prompt, as the
+/// picker grows upward from it, instead of at the top of a tall popup.
+fn anchored_areas(area: ratatui::layout::Rect, content: usize) -> std::rc::Rc<[ratatui::layout::Rect]> {
+    let room = area.height.saturating_sub(3);
+    let list = (content as u16).saturating_add(2).min(room).max(3.min(room));
+    let spacer = area.height.saturating_sub(list + 3);
+    let parts = Layout::vertical([
+        Constraint::Length(spacer),
         Constraint::Length(1),
-        Constraint::Min(1),
+        Constraint::Length(list),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .split(frame.area());
+    .split(area);
+    parts[1..].to_vec().into()
+}
+
+fn draw(frame: &mut Frame, app: &mut App) {
+    let areas = anchored_areas(frame.area(), content_lines(app));
     if app.mode != Mode::Jump {
         draw_flat_picker(frame, app, &areas);
         return;

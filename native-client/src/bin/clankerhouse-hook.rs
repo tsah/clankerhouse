@@ -179,11 +179,18 @@ fn run(args: &[String]) -> Result<(), String> {
             state = "working".into();
         }
     }
+    let prompt_id = text(&payload, "prompt_id");
+    let previous_prompts: &[Value] = previous.get("prompts").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    // Claude runs every matching hook entry, so with the lifecycle hooks registered from two settings
+    // sources this hook sees each submission twice. The second sighting is the same prompt, not a copy.
+    let resubmitted = hook_event.as_deref() == Some("UserPromptSubmit")
+        && text(&previous, "hookEvent") == "UserPromptSubmit"
+        && same_submission(&prompt_id, payload.get("prompt").and_then(Value::as_str).unwrap_or_default(), previous_prompts);
     // The messaging socket does not deduplicate, so a sender retries an unacknowledged message
     // with the same id; a copy this session already took is blocked here instead of run twice.
-    if hook_event.as_deref() == Some("UserPromptSubmit") {
+    if hook_event.as_deref() == Some("UserPromptSubmit") && !resubmitted {
         let prompt = payload.get("prompt").and_then(Value::as_str).unwrap_or_default();
-        if redelivered(prompt, previous.get("prompts").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()) {
+        if redelivered(prompt, previous_prompts) {
             println!("{}", json!({ "decision": "block", "reason": "clankerhouse: this message was already delivered" }));
             return Ok(());
         }
@@ -192,7 +199,6 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut generation = previous.get("generation").and_then(Value::as_u64).unwrap_or(0);
     let mut settled = previous.get("settledGeneration").and_then(Value::as_u64).unwrap_or(0);
     let mut started_at = previous.get("generationStartedAt").cloned().unwrap_or(Value::Null);
-    let prompt_id = text(&payload, "prompt_id");
     let previous_prompt_id = text(&previous, "promptId");
     if (hook_event.as_deref() == Some("UserPromptSubmit")
         && !joins_running_turn(&previous_state, &previous_prompt_id, &prompt_id))
@@ -211,15 +217,18 @@ fn run(args: &[String]) -> Result<(), String> {
     // Queued sends are acknowledged by the message ids tagged in the prompt that started a turn
     // (or, for untagged sends from older clients, by its hash), so the
     // last few submissions stay in the record across the hooks that rewrite it.
-    let mut prompts: Vec<Value> = previous.get("prompts").and_then(Value::as_array).cloned().unwrap_or_default();
-    if hook_event.as_deref() == Some("UserPromptSubmit") {
+    let mut prompts: Vec<Value> = previous_prompts.to_vec();
+    if hook_event.as_deref() == Some("UserPromptSubmit") && !resubmitted {
         if let Some(prompt) = payload.get("prompt").and_then(Value::as_str) {
+            let mut entry = json!({ "sha256": prompt_sha256(prompt), "generation": generation });
             let ids = message_ids(prompt);
-            if ids.is_empty() {
-                prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation }));
-            } else {
-                prompts.push(json!({ "sha256": prompt_sha256(prompt), "generation": generation, "messageIds": ids }));
+            if !ids.is_empty() {
+                entry["messageIds"] = json!(ids);
             }
+            if !prompt_id.is_empty() {
+                entry["promptId"] = json!(prompt_id);
+            }
+            prompts.push(entry);
             let excess = prompts.len().saturating_sub(PROMPT_HISTORY);
             prompts.drain(..excess);
         }
@@ -426,6 +435,15 @@ fn restart_tagged(prompt: &str) -> bool {
     rest.find(']').is_some_and(|end| rest[..end].ends_with(", restart"))
 }
 
+/// The last recorded prompt is this one, with Claude's `prompt_id` for it. A prompt absorbed mid-turn shares
+/// the turn's id, so the text must match too; without an id no two sightings match.
+fn same_submission(prompt_id: &str, prompt: &str, prompts: &[Value]) -> bool {
+    let Some(last) = prompts.last() else { return false };
+    !prompt_id.is_empty()
+        && last.get("promptId").and_then(Value::as_str) == Some(prompt_id)
+        && last.get("sha256").and_then(Value::as_str) == Some(prompt_sha256(prompt).as_str())
+}
+
 /// A clankerhouse message (a prompt that opens with its tag) whose ids were all taken before.
 fn redelivered(prompt: &str, prompts: &[Value]) -> bool {
     if !prompt.trim_start().starts_with("[clankerhouse msg-") {
@@ -499,7 +517,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{joins_running_turn, message_ids, prompt_sha256, redelivered, restart_tagged, sha256_hex};
+    use super::{joins_running_turn, message_ids, prompt_sha256, redelivered, restart_tagged, same_submission, sha256_hex};
 
     #[test]
     fn only_a_prompt_with_the_running_turns_id_joins_it() {
@@ -537,6 +555,20 @@ mod tests {
         // A human quoting a tag mid-prompt is never blocked.
         assert!(!redelivered("see [clankerhouse msg-a] above", &seen));
         assert!(!redelivered("[clankerhouse msg-a] hi", &[]));
+    }
+
+    #[test]
+    fn only_the_last_recorded_prompt_with_its_id_is_the_same_submission() {
+        let a = prompt_sha256("a");
+        let b = prompt_sha256("b");
+        let seen = vec![json!({ "generation": 1, "promptId": "p1", "sha256": a }), json!({ "generation": 2, "promptId": "p2", "sha256": b })];
+        assert!(same_submission("p2", "b", &seen));
+        assert!(!same_submission("p1", "a", &seen));
+        // A different prompt absorbed into the same turn carries the same id.
+        assert!(!same_submission("p2", "c", &seen));
+        assert!(!same_submission("", "b", &seen));
+        assert!(!same_submission("p2", "b", &[json!({ "generation": 1, "sha256": b })]));
+        assert!(!same_submission("p2", "b", &[]));
     }
 
     #[test]

@@ -93,6 +93,8 @@ export const ensurePrivateRuntimeDirectory = () => {
 export const runCommand = (cmd: string[], options: { cwd?: string; allowFailure?: boolean } = {}) =>
   Effect.tryPromise({
     try: async () => {
+      // An optional tool that is not installed (allowFailure) reads as no output, not as a failed snapshot.
+      if (options.allowFailure && !Bun.which(cmd[0]!)) return ""
       const proc = Bun.spawn(cmd, { cwd: options.cwd ?? repoRoot, stdout: "pipe", stderr: "pipe" })
       const [stdout, stderr, exitCode] = await Promise.all([
         new Response(proc.stdout).text(),
@@ -288,7 +290,11 @@ const collectGitRecoveryActivity = (path: string) => {
 
 const devRoot = Bun.env.CLANKERHOUSE_DEV_ROOT ?? `${Bun.env.HOME ?? ""}/dev`
 const collectDevWorktrees = existsSync(devRoot)
-  ? runCommand(["fd", "--hidden", "--exclude", ".archive", "--type", "directory", "^\\.git$", devRoot], { allowFailure: true }).pipe(
+  ? runCommand(Bun.which("fd")
+      ? ["fd", "--hidden", "--exclude", ".archive", "--type", "directory", "^\\.git$", devRoot]
+      // Without fd, find does the same walk: skip .archive and node_modules, and stop at each repository's .git.
+      : ["find", devRoot, "(", "-name", ".archive", "-o", "-name", "node_modules", ")", "-prune", "-o", "-type", "d", "-name", ".git", "-prune", "-print"],
+    { allowFailure: true }).pipe(
       Effect.flatMap((output) => Effect.forEach(
         output.split("\n").filter(Boolean),
         (gitDir) => runCommand(["git", "-C", dirname(gitDir), "worktree", "list", "--porcelain"], { allowFailure: true }).pipe(

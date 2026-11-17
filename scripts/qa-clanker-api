@@ -179,7 +179,7 @@ chmod +x "$root/unexpected-clankers"
 mux claim --pane "$pi_pane" harnessSessionId parent-session
 before_options=$(pane_claims "$pi_pane")
 before_report=$(sha256sum "$pi_report")
-before_sockets=$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)
+before_sockets=$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -exec basename {} \; | sort)
 sessionless_handlers=$("${qa_env[@]}" env \
     REX_BLOCK="$pi_pane" \
     CLANKER_ID=clanker-qa-pi \
@@ -189,7 +189,7 @@ sessionless_handlers=$("${qa_env[@]}" env \
 [[ "$sessionless_handlers" == '[]' ]] || fail "sessionless Pi registered lifecycle handlers"
 [[ "$(pane_claims "$pi_pane")" == "$before_options" ]] || fail "sessionless Pi replaced parent pane identity"
 [[ "$(sha256sum "$pi_report")" == "$before_report" ]] || fail "sessionless Pi replaced parent lifecycle report"
-[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "sessionless Pi created a native Clanker socket"
+[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -exec basename {} \; | sort)" == "$before_sockets" ]] || fail "sessionless Pi created a native Clanker socket"
 [[ ! -e "$root/sessionless-recovery.log" ]] || fail "sessionless Pi created or attested Recovery identity"
 
 # SDK workers have no --no-session argv marker. They load multiple extension
@@ -229,7 +229,7 @@ EOF
     bun "$root/sdk-extension.ts"
 [[ "$(pane_claims "$pi_pane")" == "$before_options" ]] || fail "SDK Pi worker replaced parent pane identity"
 [[ "$(sha256sum "$pi_report")" == "$sdk_before_report" ]] || fail "SDK Pi worker replaced parent lifecycle report"
-[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -printf '%f\n' | sort)" == "$before_sockets" ]] || fail "SDK Pi worker created a native Clanker socket"
+[[ "$(find "$(dirname "$native_socket")" -maxdepth 1 -type s -exec basename {} \; | sort)" == "$before_sockets" ]] || fail "SDK Pi worker created a native Clanker socket"
 [[ ! -e "$root/sdk-recovery.log" ]] || fail "SDK Pi worker created or attested Recovery identity"
 api status clanker-qa-pi | json_assert 'data["state"] == "working" and data["generation"] == 2 and data["settledGeneration"] == 1'
 mv "$root/pi-before-sdk.json" "$pi_report"

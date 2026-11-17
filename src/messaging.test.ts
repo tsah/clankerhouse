@@ -400,4 +400,31 @@ describe("native hook", () => {
     expect(JSON.parse(again.stdout)).toMatchObject({ decision: "block" })
     expect(record()).toMatchObject({ state: "done", generation: 1 })
   })
+
+  test("one submission seen by two registrations of the hook is let through by both, and a retried copy is still blocked", () => {
+    // Claude runs every matching hook entry, so a Claude whose lifecycle hooks are registered from two settings
+    // sources (a per-launch --settings and ~/.claude/settings.json) runs this hook twice for one prompt.
+    const { run, record } = hookRunner({})
+    const prompt = "[clankerhouse msg-twice-1 from operator]\nShip it."
+    const submit = { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt_id: "p1", prompt }
+    expect(run("working", submit).stdout).toBe("")
+    expect(run("working", submit).stdout).toBe("")
+    expect(record()).toMatchObject({ state: "working", generation: 1, promptId: "p1" })
+    expect(record().prompts).toHaveLength(1)
+    run("done", { hook_event_name: "Stop", session_id: "s1" })
+    const retried = run("working", { ...submit, prompt_id: "p2" })
+    expect(JSON.parse(retried.stdout)).toMatchObject({ decision: "block" })
+    expect(record()).toMatchObject({ state: "done", generation: 1 })
+  })
+
+  test("a copy absorbed later in the turn that took the message is still blocked", () => {
+    const { run, record } = hookRunner({})
+    const prompt = "[clankerhouse msg-late-1 from operator]\nShip it."
+    expect(run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt_id: "p1", prompt }).stdout).toBe("")
+    run("working", { hook_event_name: "PreToolUse", session_id: "s1" })
+    // Claude gives a prompt it takes at a tool boundary the running turn's id.
+    const late = run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt_id: "p1", prompt })
+    expect(JSON.parse(late.stdout)).toMatchObject({ decision: "block" })
+    expect(record().prompts).toHaveLength(1)
+  })
 })

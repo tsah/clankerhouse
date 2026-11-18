@@ -180,6 +180,15 @@ clankers workshop label set waits-on=<other Workshop ID or branch>
 clankers workshop label unset waits-on   # once you no longer wait
 ```
 
+## Publishing a desk's report
+
+A desk (a Workshop labelled `role=desk`) links its latest report from the picker's
+Desks view (Alt-T) with the `report` Label. Set it whenever you publish the report:
+
+```bash
+clankers workshop label set report=<report URL>
+```
+
 ## Marking this Workshop Done
 
 When told to mark yourself or this Workshop done, set the built-in Label from

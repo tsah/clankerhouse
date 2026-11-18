@@ -16,9 +16,16 @@ const labelValuePattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/
 export const TITLE_KEY = "title"
 const titlePattern = /^[^\s\p{Cc}](?:[^\p{Cc}]{0,78}[^\s\p{Cc}])?$/u
 
+/** `role=desk` makes a Workshop a desk (src/desks.ts): the picker folds desks into one Desks group and lists them in its Desks view. */
+export const ROLE_KEY = "role"
+export const DESK_ROLE = "desk"
+/** A desk's report link, such as its long-lived Claude artifact. Its value is a URL, and like the title it is never a tag. */
+export const REPORT_KEY = "report"
+const reportPattern = /^https?:\/\/[^\s\p{Cc}]{1,500}$/u
+
 export const validLabelKey = (key: unknown): key is string => typeof key === "string" && labelKeyPattern.test(key)
 export const validLabelValue = (value: unknown, key?: string): value is string =>
-  typeof value === "string" && (key === TITLE_KEY ? titlePattern.test(value) : labelValuePattern.test(value))
+  typeof value === "string" && (key === TITLE_KEY ? titlePattern.test(value) : key === REPORT_KEY ? reportPattern.test(value) : labelValuePattern.test(value))
 
 /**
  * The branch a new Workshop gets for a title. Something already shaped like a branch name is
@@ -39,7 +46,7 @@ export const parseLabelAssignment = (text: string) => {
   const separator = text.indexOf("=")
   const key = separator < 0 ? "" : text.slice(0, separator)
   const value = separator < 0 ? "" : text.slice(separator + 1)
-  if (!validLabelKey(key) || !validLabelValue(value, key)) throw new Error(`Invalid label '${text}'; expected KEY=VALUE with a lowercase key and a value without whitespace (only title may contain spaces)`)
+  if (!validLabelKey(key) || !validLabelValue(value, key)) throw new Error(`Invalid label '${text}'; expected KEY=VALUE with a lowercase key and a value without whitespace (only title may contain spaces; report is an http(s) URL)`)
   return { key, value }
 }
 
@@ -57,8 +64,8 @@ export const applyLabelChange = (current: WorkshopLabels, key: string, value: st
   return { previous, labels: sorted(next), changed: true }
 }
 
-/** The labels shown as tags, ordered by key. The title is the row's name, never a tag, and hidden keys are left out. */
-export const visibleLabels = (labels: WorkshopLabels | undefined): WorkshopLabels => Object.fromEntries(Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY && !hiddenLabelKey(key)).toSorted(([left], [right]) => left.localeCompare(right)))
+/** The labels shown as tags, ordered by key. The title is the row's name and the report a link, never tags, and hidden keys are left out. */
+export const visibleLabels = (labels: WorkshopLabels | undefined): WorkshopLabels => Object.fromEntries(Object.entries(labels ?? {}).filter(([key]) => key !== TITLE_KEY && key !== REPORT_KEY && !hiddenLabelKey(key)).toSorted(([left], [right]) => left.localeCompare(right)))
 
 /** Presentation tags: values only, ordered by key. */
 export const labelTags = (labels: WorkshopLabels | undefined) => Object.values(visibleLabels(labels))

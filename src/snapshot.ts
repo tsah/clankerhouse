@@ -17,7 +17,7 @@ import { deliverQueuedMessages, harnessExited, listClankers, paneMetadataFromSna
 import { withOrchestrationStore, type ClankerReportRecord } from "./orchestration"
 import { workshopBase } from "./workshop-base"
 import { applicationRoot, binPath, libexecPath } from "./installation"
-import { allWorkshopLabels, attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, isLinkedWorktreeSync, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
+import { allWorkshopLabels, workshopLabelTimes, attachWorkshopToParent, attachmentCandidatesForWorkshop, changeWorkshopLabel, detachWorkshopFromParent, isLinkedWorktreeSync, readLineageSnapshot, spliceDeletedWorkshopFromLineage, workshopDetails, workshopForId, workshopForPath, workshopStatePath, workshopsWithLabel } from "./workshop"
 import { workshopStopPlan } from "./workshop-stop"
 import { sessionState } from "./model"
 import type { DetailRow, SessionRow } from "./model"
@@ -28,13 +28,15 @@ import { managedResourcesOf, openManagedMultiplexer, type ManagedMultiplexer } f
 import { instanceSlug, runtimeDirFor, stateHomeDefault } from "./paths"
 import { paneLocation, sessionLocation } from "./multiplexer/interface"
 import { openOperationStore, type OperationStore as DurableRegistry } from "./operation-store"
-import { openClankerLedger, pathWorkshopId, type ObservedClanker } from "./clanker-ledger"
+import { openClankerLedger, pathWorkshopId, type ClankerLedger, type ObservedClanker } from "./clanker-ledger"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 import { stopOwnedHarness } from "./harness-launch"
 import { createStagedMutationExecutor } from "./mutation-stages"
 import { completeDone, dispatchLabelsChangedHook, dispatchPostCreateHook, ensureWorkshopForLabels, workshopForLabelTarget } from "./workshop-hooks"
-import { DONE_LABEL, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
+import { DONE_LABEL, REPORT_KEY, TITLE_KEY, doneTtlMs, reapDecision } from "./labels"
+import { annotateDesks, isDeskLabels } from "./desks"
+import { withRoutineStore, type Routine } from "./routines"
 import type { MutationExecution, MutationExecutor } from "./operation-journal"
 import { parseClankerObservation, selectCurrentLifecycleObservations } from "./server/observations"
 import type { LifecycleObservation } from "./server/observations"
@@ -496,6 +498,7 @@ const collectSessions = Effect.all([
       saveGitMetaCache()
       if (multiplexer.serverEpoch) syncClankerLedger(multiplexer.serverEpoch, projection.sessions, multiplexer.windows)
       annotateNeedsMe(projection.sessions)
+      annotateDeskRows(projection.sessions)
       return projection.sessions
     }))
   }),
@@ -558,6 +561,32 @@ const annotateNeedsMe = (rows: SessionRow[]) => {
     const reason = needsMe(row, facts)
     if (reason) row.needsMe = reason
   }
+}
+
+/** Marks desk Workshops (`role=desk`) with their report link and next Routine run (src/desks.ts); a failed read only hides them. */
+const annotateDeskRows = (rows: SessionRow[]) => {
+  let labels = new Map<string, Record<string, string>>()
+  try { labels = allWorkshopLabels() } catch { return }
+  // Most snapshots have no desk; only a desk needs the Routine store and the ledger.
+  if (!rows.some((row) => row.workshopId && isDeskLabels(labels.get(row.workshopId)))) return
+  let reportTimes = new Map<string, number>()
+  try { reportTimes = workshopLabelTimes(REPORT_KEY) } catch {}
+  let routines: Routine[] = []
+  try { routines = withRoutineStore((store) => store.list()) } catch {}
+  let ledger: ClankerLedger | undefined
+  try {
+    annotateDesks(rows, {
+      labels: (workshopId) => labels.get(workshopId),
+      reportAt: (workshopId) => reportTimes.get(workshopId),
+      routines,
+      clankerWorkshop: (clankerId) => {
+        try {
+          ledger ??= openClankerLedger()
+          return ledger.get(clankerId)?.workshopId
+        } catch { return undefined }
+      },
+    })
+  } finally { ledger?.close() }
 }
 
 const readCachePayload = () => {

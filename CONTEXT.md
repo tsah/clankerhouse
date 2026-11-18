@@ -72,11 +72,14 @@ An internal record intentionally maintained by Clankerhouse: stable correlation 
 
 ## Label
 
-A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering or identity. Clankerhouse itself understands exactly one Label, Done; the only other Labels it acts on are the operator's "your move" set, which lists a Workshop under Needs Me, `waits-on` and the hidden `_snooze`, which move a Workshop down that list.
+A `key=value` Declaration attached to a Workshop, such as `stage=retro`. A key holds one value, so setting it replaces the previous one. Clankerhouse stores, projects, and announces Labels, and shows the visible ones on the Workshop's Multiplexer sessions as presentation (Herdr workspace tokens), never as claims; a repository gives them meaning through its Workshop Hooks. Labels never affect ordering or identity. Clankerhouse itself understands exactly one Label, Done; the only other Labels it acts on are the operator's "your move" set, which lists a Workshop under Needs Me, `waits-on` and the hidden `_snooze`, which move a Workshop down that list, and `role=desk` with its `report` link, which make a Workshop a Desk.
 
 ## Title
 
 The Label `title`: a Workshop's human name, set by the operator when creating it and editable afterwards. It is free text, is presented as the Workshop's name, and is mirrored to the Multiplexer session name. A new Workshop's branch is derived from its Title; the Title can change later, the branch does not. Like every Display Name it never establishes identity.
+
+**Desk**:
+A Workshop labelled `role=desk`: a standing Workshop that runs on a Routine and keeps one long-lived report, linked by its `report` Label (a URL, never shown as a tag). The picker folds every Desk under one unpinned Desks group in the flat list and lists them one per row, with their next Routine run and report, in the Desks view (Alt-T). Like every Label it never affects identity.
 
 ## Done
 

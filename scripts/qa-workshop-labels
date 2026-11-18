@@ -159,6 +159,18 @@ unset_result=$(clankers workshop label unset stage --cwd "$feature_path")
 [[ "$(projected_labels)" == '[]' ]] || fail "Expected the projection to drop the removed label"
 if clankers workshop label set 'Stage=bad value' --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected an invalid label to be rejected"; fi
 
+# role=desk makes a desk: the snapshot marks it for the picker's Desks group and view, with its report link, which is
+# never a tag.
+report_url="https://claude.ai/code/artifact/0b5c8a2e-6f1d-4c33-9a2b-7f1e0d9c4a11"
+clankers workshop label set role=desk --cwd "$feature_path" >/dev/null
+clankers workshop label set "report=$report_url" --cwd "$feature_path" >/dev/null
+projected_desk=$(snapshot_row "$feature_path" '[.labels, .desk.report, .desk.routines, (.desk.reportAt | type)]')
+[[ "$projected_desk" == "[[\"desk\"],\"$report_url\",0,\"number\"]" ]] || fail "Expected a desk with its report link and no report tag, got $projected_desk"
+if clankers workshop label set "report=not a url" --cwd "$feature_path" >/dev/null 2>&1; then fail "Expected a report that is not a URL to be rejected"; fi
+clankers workshop label unset role --cwd "$feature_path" >/dev/null
+clankers workshop label unset report --cwd "$feature_path" >/dev/null
+[[ "$(snapshot_row "$feature_path" '.desk')" == null ]] || fail "Expected the desk mark to go with role=desk"
+
 # A merged Workshop's worktree may already be deleted; it is still labelled by branch or ID.
 merged_path="$root/dev/merged"
 git -C "$origin" worktree add -q -b merged "$merged_path"

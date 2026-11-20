@@ -10,7 +10,7 @@ tree; dotfiles may retain only compatibility launchers and personal configuratio
 - `src/`: the `clankers` CLI, snapshots, mutations, the runner, Workshops and the clanker ledger
 - `native-client/`: the picker and the lifecycle hook
 - `contrib/rex/`: the Rex config module; `share/rex/`: the Lua the adapter runs in Rex
-- `integrations/`: Pi, OpenCode, and the shared coordination skill
+- `integrations/`: Pi, OpenCode, and the shared skills (`clanker-coordination`, `handoff`)
 - `share/systemd/user/`: user-unit templates rendered by the installer
 
 ## Prefix installation
@@ -27,7 +27,9 @@ use the active path. Existing unmanaged files are never replaced without `--forc
 path is recorded beneath `$XDG_STATE_HOME/clankerhouse/installations`, and commands a newer version no longer ships are
 removed.
 
-`--integrations` installs the Claude hooks, the Pi and OpenCode extensions and the coordination skill. `--rex` links
+`--integrations` installs the Claude hooks, the Pi and OpenCode extensions, and links every skill under
+`integrations/skills` into the Agents, Claude, Pi, OpenCode and Codex skill directories. Like every destination, a skill
+link the installer did not create is refused unless `--force` is given. `--rex` links
 `~/.config/rex/clankerhouse-rex` to the stable launcher, points the module `dofile` line in `~/.config/rex/init.lua` at
 the active target, reloads Rex's config, and restarts the runner, which otherwise keeps the version it started with.
 Uninstall removes only paths in the installation manifest and preserves `$XDG_STATE_HOME/clankerhouse-<instance>`.

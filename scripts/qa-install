@@ -166,7 +166,9 @@ check "the pre-rename Pi link is gone" bash -c "[[ ! -e '$home/.pi/agent/extensi
 check "the Pi extension links through the active path" test "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" = "$active/integrations/pi/clanker-lifecycle.ts"
 check "the OpenCode plugin is linked" test -L "$config/opencode/plugins/clankerhouse-lifecycle.ts"
 for skill_root in "$home/.agents/skills" "$home/.claude/skills" "$home/.codex/skills" "$home/.pi/agent/skills" "$config/opencode/skills"; do
-    check "the coordination skill is linked under ${skill_root#"$root/"}" test -L "$skill_root/clanker-coordination"
+    for skill in clanker-coordination handoff; do
+        check "the $skill skill is linked under ${skill_root#"$root/"}" test "$(readlink "$skill_root/$skill")" = "$active/integrations/skills/$skill"
+    done
 done
 check "user units are rendered" bash -c "ls '$config/systemd/user/'clankerhouse-* >/dev/null 2>&1"
 opencode_plugin="$config/opencode/plugins/clankerhouse-lifecycle.ts"

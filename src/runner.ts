@@ -9,7 +9,8 @@ import { deliverQueuedMessages } from "./clanker-api"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { reapDoneWorkshops, resumeUnfinishedMutations } from "./mutations"
 import { withOrchestrationStore } from "./orchestration"
-import { fireRoutinesThroughSend } from "./routine-api"
+import { fireRoutinesThroughSend, routineNoticeEvent } from "./routine-api"
+import type { RoutineNotice } from "./routines"
 import { daemonMultiplexer, ensurePrivateRuntimeDirectory, invalidateProjectionEnrichment, latestHerdOf, onSnapshot, refreshProjectionSnapshot, refreshStaleDirectories, runtimeDir, scheduleProjectionRefresh } from "./snapshot"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
 
@@ -55,13 +56,14 @@ const startQueuedDelivery = () => {
 const ROUTINE_PASS_MS = Number(Bun.env.CLANKERHOUSE_ROUTINE_PASS_MS ?? 15_000) || 15_000
 let routinePassRunning = false
 let routinePassFailure = ""
+let routineNotify: ((notice: RoutineNotice) => void) | undefined
 const runRoutinePass = () => {
   if (routinePassRunning) return
   routinePassRunning = true
-  void fireRoutinesThroughSend(daemonMultiplexer())
+  void fireRoutinesThroughSend(daemonMultiplexer(), { notify: routineNotify })
     .then((fired) => {
       for (const entry of fired) {
-        if (entry.outcome === "fired") console.error(`Routine ${entry.routineId} woke ${entry.clankerId} (${entry.messageId})`)
+        if (entry.outcome === "fired" || entry.outcome === "resumed" || entry.outcome === "caught-up") console.error(`Routine ${entry.routineId} woke ${entry.clankerId} (${entry.messageId})${entry.outcome === "fired" ? "" : `, ${entry.outcome}`}`)
         else console.error(`Routine ${entry.routineId} for ${entry.clankerId}: ${entry.outcome}${entry.error ? `: ${entry.error}` : ""}`)
       }
       routinePassFailure = ""
@@ -106,6 +108,11 @@ export const runRunner = async () => {
     requestObservation: scheduleProjectionRefresh,
   })
   stops.push(() => statusHooks.stop())
+  // A broken or ended Routine goes to the sinks that want `routine.*` (the operator's phone).
+  routineNotify = (notice) => {
+    const sinks = statusHooks.publish([routineNoticeEvent(notice)])
+    console.error(`Routine ${notice.routine.routineId} ${notice.kind}: ${notice.reason} (${sinks ? `sent to ${sinks} sink${sinks === 1 ? "" : "s"}` : "no sink wants routine events"})`)
+  }
   stops.push(onSnapshot((sessions) => {
     void statusHooks.observed()
     void reapDoneWorkshops(sessions).catch((error) => console.error(`Done Workshop reaper failed: ${error instanceof Error ? error.message : String(error)}`))

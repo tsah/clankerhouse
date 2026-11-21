@@ -130,7 +130,17 @@ the way `clankers send` would: it arrives as a prompt tagged
 `[clankerhouse msg-… from routine:ROUTINE_ID]`, at once when you are idle, or
 queued until your turn ends. Act on it as an instruction you scheduled for
 yourself. Cancel routines you no longer need; they persist across daemon
-restarts and end only when cancelled or when your clanker is closed.
+restarts.
+
+A routine belongs to your Workshop, not to this one session. If you close and
+come back as a new clanker in the same Workshop, the routine follows you, and
+`clankers routine list` shows it. When no clanker is running there at a fire,
+the daemon resumes the Workshop's last session first. It ends a routine only
+when the Workshop is marked done or removed, and the operator is told when that
+happens. If a routine breaks (a resume fails, or a wake never reaches your
+session), the operator gets one push and a needs-me row. The last missed fire
+runs once when you are back. After you fix it, `clankers routine dismiss
+ROUTINE_ID` clears an alert that is left over.
 
 ## Watching child Workshops
 

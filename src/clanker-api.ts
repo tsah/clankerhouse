@@ -669,6 +669,47 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
   } finally { store.close() }
 }
 
+/** The last `limit` bytes of a file, or "" when it cannot be read. */
+const fileTail = (path: string, limit = 4 * 1024 * 1024) => {
+  try {
+    const bytes = readFileSync(path)
+    return bytes.subarray(Math.max(0, bytes.length - limit)).toString("utf8")
+  } catch { return "" }
+}
+
+/**
+ * Whether a handed-over message reached the clanker's session: the hook saw it submitted (acked),
+ * or its tag is in the session transcript. A message sitting typed but unsent in the input box is
+ * neither. `queued` waits behind a turn by design; `lost` was dropped, or its clanker is gone.
+ */
+export async function messageDeliveryProof(clankerId: string, messageId: string, multiplexer?: ManagedMultiplexer): Promise<"landed" | "queued" | "unconfirmed" | "lost"> {
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  if (!message || message.clankerId !== clankerId || message.state === "orphaned") return "lost"
+  if (message.state === "acked" || message.handledAt !== null) return "landed"
+  if (message.state === "queued") return "queued"
+  let clanker: ClankerRecord
+  try { clanker = await findRecord(clankerId, multiplexer) }
+  catch (error) { return error instanceof ClankerApiError && error.code === "NOT_FOUND" ? "lost" : "unconfirmed" }
+  const transcript = typeof clanker.report?.transcriptPath === "string" ? clanker.report.transcriptPath : ""
+  if (transcript && fileTail(transcript).includes(messageId)) return "landed"
+  return "unconfirmed"
+}
+
+/**
+ * Type a handed-over message that never reached the session into the clanker's pane once more,
+ * with its tag, so the hook acknowledges it by id. False when the pane cannot take typing now (a
+ * running turn, or the operator's focus); the message is left as it was.
+ */
+export async function retypeMessage(clankerId: string, messageId: string, multiplexer?: ManagedMultiplexer): Promise<boolean> {
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  if (!message || message.clankerId !== clankerId || message.state !== "delivered") return false
+  const clanker = await findRecord(clankerId, multiplexer)
+  if (clanker.capabilities.send !== "messaging-socket" && clanker.capabilities.send !== "multiplexer-prompt") return false
+  if (!readyForDelivery(clanker)) return false
+  const result = await promptClaimedPane(multiplexer ?? openManagedMultiplexer(), clanker, promptFor(message).prompt)
+  return result.confirmed
+}
+
 /** The clanker running this command: `CLANKER_ID`, else the current pane's claim. */
 const selfClankerId = async () => {
   const { reportingClankerId } = await import("./report")

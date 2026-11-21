@@ -209,9 +209,22 @@ export const nextCronTime = (schedule: CronSchedule, after: number, timeZone: st
 
 export type RoutineState = "active" | "ended"
 
+/**
+ * Why a Routine needs the operator: `broken` while its workshop cannot be reached (resume failed, a
+ * delivery did not land), `ended` when it stopped for good. Raised once per breakage, which is
+ * what makes it one notification however many fires it misses; a delivery that lands clears it.
+ */
+export interface RoutineAlert { kind: "broken" | "ended"; reason: string; at: number }
+
+/** A delivered wake still waiting for its proof: the clanker's session has not shown it yet. */
+export interface RoutineProof { messageId: string; clankerId: string; scheduledAt: number; since: number; retyped: boolean; redelivered: boolean }
+
 export interface Routine {
   routineId: string
+  /** The clanker that took the Routine's last wake; the Routine follows its workshop, not this id. */
   clankerId: string
+  /** The workshop the Routine belongs to; null for a Routine from before workshops owned them, until its first fire. */
+  workshopId: string | null
   name: string | null
   cron: string
   timeZone: string
@@ -228,11 +241,16 @@ export interface Routine {
   lastOutcome: string | null
   lastError: string | null
   endedReason: string | null
+  alert: RoutineAlert | null
+  /** The newest occurrence that could not be delivered; it fires once when a clanker is back in the workshop. */
+  missedAt: number | null
+  proof: RoutineProof | null
 }
 
 interface RoutineRow {
   routine_id: string
   clanker_id: string
+  workshop_id: string | null
   name: string | null
   cron: string
   time_zone: string
@@ -248,11 +266,22 @@ interface RoutineRow {
   last_outcome: string | null
   last_error: string | null
   ended_reason: string | null
+  alert_kind: RoutineAlert["kind"] | null
+  alert_reason: string | null
+  alert_at: number | null
+  missed_at: number | null
+  proof_message_id: string | null
+  proof_clanker_id: string | null
+  proof_scheduled_at: number | null
+  proof_since: number | null
+  proof_retyped: number | null
+  proof_redelivered: number | null
 }
 
 const fromRow = (row: RoutineRow): Routine => ({
   routineId: row.routine_id,
   clankerId: row.clanker_id,
+  workshopId: row.workshop_id,
   name: row.name,
   cron: row.cron,
   timeZone: row.time_zone,
@@ -268,6 +297,11 @@ const fromRow = (row: RoutineRow): Routine => ({
   lastOutcome: row.last_outcome,
   lastError: row.last_error,
   endedReason: row.ended_reason,
+  alert: row.alert_kind ? { kind: row.alert_kind, reason: row.alert_reason ?? "", at: row.alert_at ?? row.updated_at } : null,
+  missedAt: row.missed_at,
+  proof: row.proof_message_id && row.proof_clanker_id
+    ? { messageId: row.proof_message_id, clankerId: row.proof_clanker_id, scheduledAt: row.proof_scheduled_at ?? 0, since: row.proof_since ?? 0, retyped: row.proof_retyped === 1, redelivered: row.proof_redelivered === 1 }
+    : null,
 })
 
 export const MAX_ROUTINE_MESSAGE_BYTES = 64 * 1024
@@ -296,6 +330,21 @@ const scheduleOrThrow = (cron: string, timeZone: string, now: number) => {
   if (next === null) throw new RoutineInputError(`Cron expression '${schedule.expression}' never fires`)
   return { cron: schedule.expression, timeZone: zone, next }
 }
+
+/** Columns added after the first release; a store from then gains them on open. */
+const ADDED_COLUMNS: ReadonlyArray<[string, string]> = [
+  ["workshop_id", "TEXT"],
+  ["alert_kind", "TEXT"],
+  ["alert_reason", "TEXT"],
+  ["alert_at", "INTEGER"],
+  ["missed_at", "INTEGER"],
+  ["proof_message_id", "TEXT"],
+  ["proof_clanker_id", "TEXT"],
+  ["proof_scheduled_at", "INTEGER"],
+  ["proof_since", "INTEGER"],
+  ["proof_retyped", "INTEGER"],
+  ["proof_redelivered", "INTEGER"],
+]
 
 export class RoutineStore {
   private constructor(readonly db: Database) {}
@@ -329,17 +378,24 @@ export class RoutineStore {
       CREATE INDEX IF NOT EXISTS routines_due_idx ON routines(state, next_fire_at);
       CREATE INDEX IF NOT EXISTS routines_clanker_idx ON routines(clanker_id, created_at);
     `)
+    const present = new Set((db.query("PRAGMA table_info(routines)").all() as Array<{ name: string }>).map((column) => column.name))
+    for (const [column, type] of ADDED_COLUMNS) {
+      if (present.has(column)) continue
+      try { db.exec(`ALTER TABLE routines ADD COLUMN ${column} ${type}`) }
+      catch (error) { if (!/duplicate column/i.test(String(error))) throw error }
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS routines_workshop_idx ON routines(workshop_id, created_at)")
     return new RoutineStore(db)
   }
 
   close() { this.db.close() }
 
-  add(input: { clankerId: string; cron: string; timeZone: string; message: string; name?: string | null; createdBy: string; now?: number }): Routine {
+  add(input: { clankerId: string; workshopId?: string | null; cron: string; timeZone: string; message: string; name?: string | null; createdBy: string; now?: number }): Routine {
     const now = input.now ?? Date.now()
     const { cron, timeZone, next } = scheduleOrThrow(input.cron, input.timeZone, now)
-    const row = this.db.query(`INSERT INTO routines (routine_id, clanker_id, name, cron, time_zone, message, state, created_at, created_by, updated_at, next_fire_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?7, ?9) RETURNING *`)
-      .get(generatedRoutineId(), input.clankerId, checkedName(input.name), cron, timeZone, checkedMessage(input.message), now, input.createdBy, next) as RoutineRow
+    const row = this.db.query(`INSERT INTO routines (routine_id, clanker_id, workshop_id, name, cron, time_zone, message, state, created_at, created_by, updated_at, next_fire_at)
+      VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?7, ?9) RETURNING *`)
+      .get(generatedRoutineId(), input.clankerId, checkedName(input.name), cron, timeZone, checkedMessage(input.message), now, input.createdBy, next, input.workshopId ?? null) as RoutineRow
     return fromRow(row)
   }
 
@@ -348,9 +404,12 @@ export class RoutineStore {
     return row ? fromRow(row) : undefined
   }
 
-  list(options: { clankerId?: string; includeEnded?: boolean } = {}): Routine[] {
-    const rows = this.db.query("SELECT * FROM routines WHERE (?1 IS NULL OR clanker_id = ?1) AND (?2 = 1 OR state = 'active') ORDER BY created_at, routine_id")
-      .all(options.clankerId ?? null, options.includeEnded ? 1 : 0) as RoutineRow[]
+  /** A clanker's Routines are its own and those of its workshop, whichever clanker took their last wake. */
+  list(options: { clankerId?: string; workshopId?: string; includeEnded?: boolean } = {}): Routine[] {
+    const rows = this.db.query(`SELECT * FROM routines
+      WHERE ((?1 IS NULL AND ?2 IS NULL) OR clanker_id = ?1 OR workshop_id = ?2) AND (?3 = 1 OR state = 'active')
+      ORDER BY created_at, routine_id`)
+      .all(options.clankerId ?? null, options.workshopId ?? null, options.includeEnded ? 1 : 0) as RoutineRow[]
     return rows.map(fromRow)
   }
 
@@ -384,6 +443,18 @@ export class RoutineStore {
     return rows.map(fromRow)
   }
 
+  /** Active Routines with a missed occurrence or a delivery still waiting for its proof. */
+  unsettled(): Routine[] {
+    const rows = this.db.query("SELECT * FROM routines WHERE state = 'active' AND (missed_at IS NOT NULL OR proof_message_id IS NOT NULL) ORDER BY created_at, routine_id").all() as RoutineRow[]
+    return rows.map(fromRow)
+  }
+
+  /** Routines that need the operator: broken ones, and ones that ended loudly within `endedForMs`. */
+  alerts(now = Date.now(), endedForMs = ROUTINE_ENDED_ALERT_MS): Routine[] {
+    const rows = this.db.query("SELECT * FROM routines WHERE alert_kind IS NOT NULL AND (alert_kind = 'broken' OR alert_at >= ?1) ORDER BY alert_at, routine_id").all(now - endedForMs) as RoutineRow[]
+    return rows.map(fromRow)
+  }
+
   /**
    * Move a due Routine on to its next occurrence after `now`, only if nobody else already did:
    * the compare-and-set on the scheduled time makes each occurrence fire at most once.
@@ -405,10 +476,70 @@ export class RoutineStore {
       .run(routineId, outcome.outcome, outcome.error ?? null, outcome.fired ? 1 : 0, outcome.at, outcome.messageId ?? null)
   }
 
+  /** Remember the workshop of a Routine created before workshops owned Routines. */
+  bindWorkshop(routineId: string, workshopId: string) {
+    this.db.query("UPDATE routines SET workshop_id = ?2 WHERE routine_id = ?1 AND workshop_id IS NULL").run(routineId, workshopId)
+  }
+
+  /** A wake was handed to `clankerId`: it now owns the Routine, and the proof clock starts. */
+  delivered(routineId: string, delivery: { clankerId: string; messageId: string; scheduledAt: number; at: number; redelivered?: boolean }) {
+    this.db.query(`UPDATE routines SET clanker_id = ?2, missed_at = NULL, proof_message_id = ?3, proof_clanker_id = ?2,
+        proof_scheduled_at = ?4, proof_since = ?5, proof_retyped = 0, proof_redelivered = ?6 WHERE routine_id = ?1`)
+      .run(routineId, delivery.clankerId, delivery.messageId, delivery.scheduledAt, delivery.at, delivery.redelivered ? 1 : 0)
+  }
+
+  /** The proof clock restarts, after a retry by typing or while the wake still waits in the queue. */
+  proofRestarted(routineId: string, at: number, retyped: boolean) {
+    this.db.query("UPDATE routines SET proof_since = ?2, proof_retyped = CASE WHEN ?3 = 1 THEN 1 ELSE proof_retyped END WHERE routine_id = ?1").run(routineId, at, retyped ? 1 : 0)
+  }
+
+  /** The wake reached the session: the Routine works again. */
+  landed(routineId: string, at: number) {
+    this.db.query(`UPDATE routines SET proof_message_id = NULL, proof_clanker_id = NULL, proof_scheduled_at = NULL, proof_since = NULL, proof_retyped = NULL, proof_redelivered = NULL,
+        alert_kind = CASE WHEN alert_kind = 'broken' THEN NULL ELSE alert_kind END,
+        alert_reason = CASE WHEN alert_kind = 'broken' THEN NULL ELSE alert_reason END,
+        alert_at = CASE WHEN alert_kind = 'broken' THEN NULL ELSE alert_at END,
+        last_outcome = 'landed', last_error = NULL, updated_at = ?2 WHERE routine_id = ?1`).run(routineId, at)
+  }
+
+  clearProof(routineId: string) {
+    this.db.query("UPDATE routines SET proof_message_id = NULL, proof_clanker_id = NULL, proof_scheduled_at = NULL, proof_since = NULL, proof_retyped = NULL, proof_redelivered = NULL WHERE routine_id = ?1").run(routineId)
+  }
+
+  /**
+   * An occurrence could not be delivered: keep the newest one for catch-up, and raise the alert
+   * unless this breakage already did. True when the alert is new, which is when to notify.
+   */
+  broke(routineId: string, failure: { reason: string; at: number; missedAt: number | null }): boolean {
+    return this.db.transaction(() => {
+      if (failure.missedAt !== null) this.db.query("UPDATE routines SET missed_at = MAX(COALESCE(missed_at, 0), ?2) WHERE routine_id = ?1").run(routineId, failure.missedAt)
+      return this.db.query("UPDATE routines SET alert_kind = 'broken', alert_reason = ?2, alert_at = ?3 WHERE routine_id = ?1 AND alert_kind IS NULL AND state = 'active'")
+        .run(routineId, failure.reason, failure.at).changes === 1
+    }).immediate()
+  }
+
+  /** Keep an occurrence for catch-up without raising an alert. */
+  missed(routineId: string, scheduledAt: number) {
+    this.db.query("UPDATE routines SET missed_at = MAX(COALESCE(missed_at, 0), ?2) WHERE routine_id = ?1").run(routineId, scheduledAt)
+  }
+
+  /** The operator has seen the alert. */
+  dismissAlert(routineId: string): Routine {
+    const row = this.db.query("UPDATE routines SET alert_kind = NULL, alert_reason = NULL, alert_at = NULL WHERE routine_id = ?1 RETURNING *").get(routineId) as RoutineRow | null
+    if (!row) throw new RoutineNotFoundError(routineId)
+    return fromRow(row)
+  }
+
+  /** End a Routine for good, loudly: the alert stays for the operator to see. */
   end(routineId: string, reason: string, now = Date.now()) {
-    this.db.query("UPDATE routines SET state = 'ended', ended_reason = ?2, next_fire_at = NULL, updated_at = ?3 WHERE routine_id = ?1").run(routineId, reason, now)
+    this.db.query(`UPDATE routines SET state = 'ended', ended_reason = ?2, next_fire_at = NULL, updated_at = ?3, missed_at = NULL,
+        proof_message_id = NULL, proof_clanker_id = NULL, proof_scheduled_at = NULL, proof_since = NULL, proof_retyped = NULL, proof_redelivered = NULL,
+        alert_kind = 'ended', alert_reason = ?2, alert_at = ?3 WHERE routine_id = ?1`).run(routineId, reason, now)
   }
 }
+
+/** How long a Routine that ended loudly stays in the needs-me list unless dismissed. */
+export const ROUTINE_ENDED_ALERT_MS = 7 * 86_400_000
 
 export class RoutineNotFoundError extends Error {
   constructor(readonly routineId: string) {
@@ -435,37 +566,152 @@ export const describeRoutine = (routine: Routine) => ({
 
 /** A missed occurrence older than this (the daemon was down) is skipped rather than fired late. */
 export const ROUTINE_CATCH_UP_MS = 60 * 60_000
+/** How long a handed-over wake may go unseen in the session before it is retried by typing, and again before it counts as lost. */
+export const ROUTINE_PROOF_MS = 3 * 60_000
+/** Resumes one pass may wait for; past this, a fire keeps its occurrence and tries again at the next fire, so broken Workshops cannot hold up healthy Routines. */
+export const ROUTINE_RESUMES_PER_PASS = 2
 
 export interface RoutineSendResult { messageId: string; delivery: string }
 
+/** Where a Routine's workshop stands at a fire: open (live or resumable), or finished for good. */
+export type RoutineWorkshopVerdict = { kind: "open"; workshopId: string | null } | { kind: "ended"; reason: string }
+
+/**
+ * Whether a handed-over wake reached the session: `landed` (the session shows it), `queued` (it
+ * waits behind a turn, by design), `unconfirmed` (handed over, not seen yet) or `lost` (dropped:
+ * its clanker went away, or the store no longer has it).
+ */
+export type RoutineDeliveryProof = "landed" | "queued" | "unconfirmed" | "lost"
+
+export interface RoutineNotice {
+  routine: Routine
+  kind: RoutineAlert["kind"]
+  reason: string
+  at: number
+}
+
 export interface FireRoutinesDeps {
-  /** Deliver through the ordinary send path; rejects when the clanker cannot take messages. */
-  send: (routine: Routine, requestId: string) => Promise<RoutineSendResult>
+  /** Deliver through the ordinary send path to `clankerId`; rejects when it cannot take messages. */
+  send: (routine: Routine, requestId: string, clankerId: string) => Promise<RoutineSendResult>
+  /** The Routine's workshop: open, or done, removed or self-destructed (which ends the Routine). Absent: always open, no workshop. */
+  workshop?: (routine: Routine) => RoutineWorkshopVerdict | Promise<RoutineWorkshopVerdict>
+  /** The live clanker in the workshop that takes the wake, if any. Absent: the Routine's own clanker. */
+  liveClanker?: (routine: Routine, workshopId: string | null) => Promise<string | undefined>
+  /** Resume the workshop's last session and wait for its input box; resolves to its clanker, rejects with why. */
+  resume?: (routine: Routine, workshopId: string | null) => Promise<string>
+  /** Whether a delivered wake has reached the session. Absent: every delivery counts as landed. */
+  proof?: (clankerId: string, messageId: string) => Promise<RoutineDeliveryProof>
+  /** Type the wake into the clanker's pane once more; false when the pane cannot take typing now. */
+  retype?: (clankerId: string, messageId: string) => Promise<boolean>
+  /** Tell the operator: called once per breakage and once when a Routine ends. */
+  notify?: (notice: RoutineNotice) => void | Promise<void>
   /** The stage of the Routine's previous wake message, if it is still waiting in the queue. */
   stillQueued?: (messageId: string) => boolean
-  /** True when the clanker is gone for good (its ledger row is closed), which ends its Routines. */
+  /** True when the clanker is gone for good (its ledger row is closed); used only for a Routine with no workshop. */
   clankerEnded?: (clankerId: string) => boolean
   now?: () => number
   catchUpMs?: number
+  proofMs?: number
+  resumesPerPass?: number
   storePath?: string
 }
 
-export interface FiredRoutine { routineId: string; clankerId: string; scheduledAt: number; outcome: "fired" | "skipped-missed" | "skipped-queued" | "failed" | "ended"; messageId?: string; error?: string }
+export type FiredOutcome = "fired" | "caught-up" | "resumed" | "landed" | "retyped" | "skipped-missed" | "skipped-queued" | "failed" | "ended"
+export interface FiredRoutine { routineId: string; clankerId: string; scheduledAt: number; outcome: FiredOutcome; messageId?: string; error?: string; notified?: boolean }
 
 const errorCode = (error: unknown) => (error as { code?: unknown })?.code
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 /**
- * Fire every due Routine once. Each occurrence is claimed before it is sent and sent with a
- * request id derived from it, so overlapping passes or a crash mid-send can never wake a clanker
- * twice for the same minute. Several missed occurrences collapse into the newest; one missed by
- * more than the catch-up window is skipped. A wake whose previous wake still waits in the queue
- * is skipped, so a long busy stretch never piles up wake-ups.
+ * One Routine pass. Each due occurrence is claimed before it is sent and sent with a request id
+ * derived from it, so overlapping passes or a crash mid-send never wake a workshop twice for one
+ * minute. Several missed occurrences collapse into the newest; one missed by more than the
+ * catch-up window while the daemon was down is skipped.
+ *
+ * A Routine belongs to its workshop. A wake goes to the live clanker there; with none, the
+ * workshop's last session is resumed first. When that fails the occurrence is kept as missed and
+ * the operator is told once; the newest missed occurrence fires once when a clanker is back. A
+ * wake counts only once the session shows it: one unseen after the proof window is typed once
+ * more, and one still unseen after that is a breakage too. A workshop marked done, or gone, ends
+ * its Routines, and says so.
  */
 export async function fireDueRoutines(deps: FireRoutinesDeps): Promise<FiredRoutine[]> {
   const now = deps.now?.() ?? Date.now()
   const catchUpMs = deps.catchUpMs ?? ROUTINE_CATCH_UP_MS
+  const proofMs = deps.proofMs ?? ROUTINE_PROOF_MS
   const results: FiredRoutine[] = []
   const store = RoutineStore.open(deps.storePath)
+  const touched = new Set<string>()
+  let resumesLeft = deps.resumesPerPass ?? ROUTINE_RESUMES_PER_PASS
+
+  const notify = async (routine: Routine, kind: RoutineAlert["kind"], reason: string) => {
+    try { await deps.notify?.({ routine: store.get(routine.routineId) ?? routine, kind, reason, at: now }) }
+    catch (error) { console.error(`Routine ${routine.routineId}: notifying failed: ${errorText(error)}`) }
+  }
+  const end = async (routine: Routine, scheduledAt: number, reason: string) => {
+    store.recordOutcome(routine.routineId, { at: now, outcome: "ended", error: reason, fired: false })
+    store.end(routine.routineId, reason, now)
+    await notify(routine, "ended", reason)
+    results.push({ routineId: routine.routineId, clankerId: routine.clankerId, scheduledAt, outcome: "ended", error: reason, notified: true })
+  }
+  const broke = async (routine: Routine, scheduledAt: number, reason: string, missed: boolean) => {
+    store.recordOutcome(routine.routineId, { at: now, outcome: "failed", error: reason, fired: false })
+    const fresh = store.broke(routine.routineId, { reason, at: now, missedAt: missed ? scheduledAt : null })
+    if (fresh) await notify(routine, "broken", reason)
+    results.push({ routineId: routine.routineId, clankerId: routine.clankerId, scheduledAt, outcome: "failed", error: reason, notified: fresh })
+  }
+
+  /** Deliver one occurrence to the workshop: its live clanker, else (when allowed) its resumed session. */
+  const attempt = async (routine: Routine, scheduledAt: number, options: { resume: boolean; outcome: "fired" | "caught-up"; redeliver?: boolean }) => {
+    touched.add(routine.routineId)
+    let verdict: RoutineWorkshopVerdict
+    try { verdict = deps.workshop ? await deps.workshop(routine) : { kind: "open", workshopId: routine.workshopId } }
+    catch (error) { return broke(routine, scheduledAt, `could not read its workshop: ${errorText(error)}`, true) }
+    if (verdict.kind === "ended") return end(routine, scheduledAt, verdict.reason)
+    if (verdict.workshopId && !routine.workshopId) store.bindWorkshop(routine.routineId, verdict.workshopId)
+    let target: string | undefined
+    try { target = deps.liveClanker ? await deps.liveClanker(routine, verdict.workshopId) : routine.clankerId }
+    catch (error) {
+      // Not knowing who is live (the Multiplexer is unreachable) is no reason to resume or to alarm:
+      // keep the occurrence, and the catch-up delivers it once a clanker can be seen again.
+      const reason = `could not list live clankers: ${errorText(error)}`
+      store.recordOutcome(routine.routineId, { at: now, outcome: "failed", error: reason, fired: false })
+      store.missed(routine.routineId, scheduledAt)
+      results.push({ routineId: routine.routineId, clankerId: routine.clankerId, scheduledAt, outcome: "failed", error: reason, notified: false })
+      return
+    }
+    let resumed = false
+    if (!target) {
+      if (!options.resume) return
+      // A Routine from before workshops owned Routines, whose clanker is gone for good, has nowhere to go.
+      if (!verdict.workshopId && deps.clankerEnded?.(routine.clankerId)) return end(routine, scheduledAt, `clanker ${routine.clankerId} closed and the routine has no workshop`)
+      if (!deps.resume) return broke(routine, scheduledAt, "no clanker is running in its workshop", true)
+      if (resumesLeft <= 0) {
+        const reason = "no clanker is running in its workshop; its resume waits for the next fire (this pass already resumed others)"
+        store.recordOutcome(routine.routineId, { at: now, outcome: "failed", error: reason, fired: false })
+        store.missed(routine.routineId, scheduledAt)
+        results.push({ routineId: routine.routineId, clankerId: routine.clankerId, scheduledAt, outcome: "failed", error: reason, notified: false })
+        return
+      }
+      resumesLeft -= 1
+      try { target = await deps.resume(routine, verdict.workshopId); resumed = true }
+      catch (error) { return broke(routine, scheduledAt, `no clanker is running in its workshop, and resuming its last session failed: ${errorText(error)}`, true) }
+    }
+    try {
+      // A redelivery needs its own request id: the first one names the lost message, and a replay would return it.
+      const sent = await deps.send(routine, `${routine.routineId}:${scheduledAt}${options.redeliver ? `:again-${now}` : ""}`, target)
+      store.recordOutcome(routine.routineId, { at: now, outcome: `${options.outcome}${resumed ? " after resume" : ""} (${sent.delivery})`, messageId: sent.messageId, fired: true })
+      store.delivered(routine.routineId, { clankerId: target, messageId: sent.messageId, scheduledAt, at: now, redelivered: options.redeliver })
+      if (!deps.proof) store.landed(routine.routineId, now)
+      results.push({ routineId: routine.routineId, clankerId: target, scheduledAt, outcome: resumed ? "resumed" : options.outcome, messageId: sent.messageId })
+    } catch (error) {
+      const message = errorText(error)
+      // A Routine from before workshops owned Routines, whose clanker is gone for good, has nowhere to go.
+      if (!verdict.workshopId && errorCode(error) === "NOT_FOUND" && deps.clankerEnded?.(target)) return end(routine, scheduledAt, `clanker ${target} closed and the routine has no workshop`)
+      return broke(routine, scheduledAt, `delivery to ${target} failed: ${message}`, true)
+    }
+  }
+
   try {
     for (const routine of store.due(now)) {
       const scheduledAt = routine.nextFireAt!
@@ -495,21 +741,47 @@ export async function fireDueRoutines(deps: FireRoutinesDeps): Promise<FiredRout
         results.push({ ...base, outcome: "skipped-queued", error })
         continue
       }
-      try {
-        const sent = await deps.send(routine, `${routine.routineId}:${newest}`)
-        store.recordOutcome(routine.routineId, { at: now, outcome: `fired (${sent.delivery})`, messageId: sent.messageId, fired: true })
-        results.push({ ...base, outcome: "fired", messageId: sent.messageId })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (errorCode(error) === "NOT_FOUND" && deps.clankerEnded?.(routine.clankerId)) {
-          store.recordOutcome(routine.routineId, { at: now, outcome: "ended", error: message, fired: false })
-          store.end(routine.routineId, "clanker closed", now)
-          results.push({ ...base, outcome: "ended", error: message })
+      await attempt(routine, newest, { resume: true, outcome: "fired" })
+    }
+
+    for (const routine of store.unsettled()) {
+      if (touched.has(routine.routineId)) continue
+      if (routine.proof && deps.proof) {
+        const proof = routine.proof
+        const base = { routineId: routine.routineId, clankerId: proof.clankerId, scheduledAt: proof.scheduledAt, messageId: proof.messageId }
+        let seen: RoutineDeliveryProof
+        try { seen = await deps.proof(proof.clankerId, proof.messageId) }
+        catch { continue }
+        if (seen === "landed") {
+          store.landed(routine.routineId, now)
+          results.push({ ...base, outcome: "landed" })
           continue
         }
-        store.recordOutcome(routine.routineId, { at: now, outcome: "failed", error: message, fired: false })
-        results.push({ ...base, outcome: "failed", error: message })
+        if (seen === "queued") { store.proofRestarted(routine.routineId, now, false); continue }
+        if (seen === "lost") {
+          store.clearProof(routine.routineId)
+          // Lost twice: something keeps dropping it, so say so rather than loop.
+          if (proof.redelivered) { await broke(routine, proof.scheduledAt, `its wake was dropped twice (last ${proof.messageId} to ${proof.clankerId})`, false); continue }
+          // The wake went down with its clanker: deliver the occurrence again, once, resuming if need be.
+          await attempt(routine, proof.scheduledAt, { resume: true, outcome: "fired", redeliver: true })
+          continue
+        }
+        if (now - proof.since < proofMs) continue
+        if (!proof.retyped && deps.retype) {
+          let typed = false
+          try { typed = await deps.retype(proof.clankerId, proof.messageId) } catch {}
+          if (typed) {
+            store.proofRestarted(routine.routineId, now, true)
+            store.recordOutcome(routine.routineId, { at: now, outcome: "retyped", error: `wake ${proof.messageId} did not reach the session within ${Math.round(proofMs / 1000)}s; typed it again`, fired: false })
+            results.push({ ...base, outcome: "retyped" })
+          }
+          continue
+        }
+        store.clearProof(routine.routineId)
+        await broke(routine, proof.scheduledAt, `its wake ${proof.messageId} was handed to ${proof.clankerId} but never reached the session${proof.retyped ? ", even after typing it again" : ""}`, false)
+        continue
       }
+      if (routine.missedAt !== null && !routine.proof) await attempt(routine, routine.missedAt, { resume: false, outcome: "caught-up" })
     }
     return results
   } finally { store.close() }

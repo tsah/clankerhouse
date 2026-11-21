@@ -140,6 +140,24 @@ export class StatusHookRuntime {
     }
   }
 
+  /**
+   * Publish events that come from no observation of the herd (a Routine's alert) to the sinks that
+   * want them, through the same outbox and retries. The number of sinks it went to; 0 with hooks off.
+   */
+  publish(drafts: readonly DraftEvent[]) {
+    if (this.stopped) return 0
+    const config = this.loadConfig()
+    if (!config?.sinks.length) return 0
+    const events = drafts.flatMap((draft) => {
+      const sinks = config.sinks.filter((sink) => sinkWants(sink, draft.type)).map((sink) => sink.name)
+      return sinks.length ? [{ event: this.publishable(draft), sinks }] : []
+    })
+    if (!events.length) return 0
+    this.open().enqueue(events, this.now())
+    void this.drain()
+    return events.reduce((total, entry) => total + entry.sinks.length, 0)
+  }
+
   private publishable(draft: DraftEvent): StatusEvent { return publishableEvent(draft, { id: randomUUID(), host: this.host }) }
 
   private async drain() {

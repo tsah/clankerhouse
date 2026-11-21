@@ -286,3 +286,49 @@ export const needsMeEntry = (row: SessionRow, position: number, registry: { labe
     createdAt: registry.createdAt ?? null,
   }
 }
+
+/** What a Routine alert row needs: the Routine and, when known, its Workshop and that Workshop's open row. */
+export interface RoutineAlertFacts {
+  routineId: string
+  name: string | null
+  clankerId: string
+  workshopId: string | null
+  alert: { kind: "broken" | "ended"; reason: string; at: number }
+  /** The Workshop's path and branch from the registry, when it still has the Workshop. */
+  workshop?: { path: string; branch: string }
+  /** The Workshop's open row in the snapshot, so Enter lands on it. */
+  row?: SessionRow
+}
+
+/**
+ * A broken or ended Routine as a needs-me row (reason `routine-broken` or `routine-ended`). It is
+ * listed even when its Workshop has no open session, which is the usual case: the session that
+ * should have taken the wake is the one that did not come back.
+ */
+export const routineNeedsMeEntry = (facts: RoutineAlertFacts, position: number, registry: { labels?: Record<string, string>; createdAt?: number } = {}): NeedsMeEntry => {
+  const path = facts.row?.path ?? facts.workshop?.path ?? ""
+  const label = facts.name ?? facts.routineId
+  return {
+    position,
+    workshopId: facts.workshopId,
+    name: facts.row?.name ?? (path ? path.split("/").pop() ?? label : label),
+    session: facts.row && facts.row.target.type !== "directory" ? facts.row.target.session : "",
+    title: facts.row?.title ?? null,
+    project: facts.row?.project ?? null,
+    branch: facts.row?.branch ?? facts.workshop?.branch ?? "",
+    path,
+    pane: null,
+    clankerId: facts.clankerId,
+    state: null,
+    target: facts.row?.target ?? { type: "directory", path },
+    reason: `routine-${facts.alert.kind}`,
+    since: facts.alert.at,
+    detail: label,
+    excerpt: firstLine(`Routine ${label} (${facts.routineId}) ${facts.alert.kind === "ended" ? "ended" : "is broken"}: ${facts.alert.reason}`, 240) ?? null,
+    deferred: false,
+    snoozedUntil: null,
+    waitingOn: null,
+    labels: { ...registry.labels },
+    createdAt: registry.createdAt ?? null,
+  }
+}

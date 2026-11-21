@@ -23,11 +23,11 @@ import { refreshProjectionSnapshot, setSnapshotReadOnly } from "./snapshot"
 import { parseMutationIntent, type MutationIntent } from "./mutation-intent"
 import { mutationStages } from "./mutation-stages"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
-import { needsMeCounts, needsMeEntry, needsMeList, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
+import { needsMeCounts, needsMeEntry, needsMeList, routineNeedsMeEntry, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
 import { SETTLED_ORDERS, orderSettled, settledEntry, settledKey, settledSessions, type SettledOrder } from "./settled"
 import { lastMessages } from "./last-messages"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
-import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
+import { addRoutine, cancelRoutine, dismissRoutineAlert, listRoutines, routineAlerts, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
 
@@ -407,7 +407,8 @@ const routineUsage = `Usage:
   clankers routine list [--clanker ID | --all] [--include-ended]
   clankers routine show ROUTINE_ID
   clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
-  clankers routine cancel ROUTINE_ID [--clanker ID]`
+  clankers routine cancel ROUTINE_ID [--clanker ID]
+  clankers routine dismiss ROUTINE_ID [--clanker ID]   clear its broken/ended alert from needs-me`
 
 const runRoutineCommand = async (parsed: ParsedArgs) => {
   const action = parsed.shift()
@@ -435,6 +436,7 @@ const runRoutineCommand = async (parsed: ParsedArgs) => {
   if (action === "show") return console.log(JSON.stringify(showRoutine(routineId)))
   if (action === "update") return console.log(JSON.stringify(updateRoutine(routineId, { cron, message: messageFlag, name, timeZone }, await routineCaller(), { clanker })))
   if (action === "cancel") return console.log(JSON.stringify(cancelRoutine(routineId, await routineCaller(), { clanker })))
+  if (action === "dismiss") return console.log(JSON.stringify(dismissRoutineAlert(routineId, await routineCaller(), { clanker })))
   throw new Error(routineUsage)
 }
 
@@ -480,7 +482,7 @@ export const usage = `Usage:
   clankers routine add --cron "MIN HOUR DOM MON DOW" --message TEXT [--name NAME] [--tz ZONE] [--clanker ID]
   clankers routine list [--clanker ID | --all] [--include-ended] | show ROUTINE_ID
   clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
-  clankers routine cancel ROUTINE_ID [--clanker ID]
+  clankers routine cancel ROUTINE_ID [--clanker ID] | dismiss ROUTINE_ID
   clankers hooks status [--json] [--limit N]
   clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
@@ -510,8 +512,11 @@ same repository. Both default to the current Workshop and keep its subtree, clan
 and branch; they need the daemon, and a parent inside the Workshop's own subtree is rejected.
 
 A routine wakes a clanker on a cron schedule with a message, delivered by the daemon like
-\`clankers send\` (queued while the clanker is busy). It belongs to the calling clanker unless
---clanker names another. The five cron fields are read in --tz, else CLANKERHOUSE_TIMEZONE, else TZ,
+\`clankers send\` (queued while the clanker is busy). It belongs to the calling clanker's Workshop
+(--clanker names another clanker's): a fire goes to the Workshop's live clanker, else resumes its
+last session first. When that fails, or the wake never reaches the session, the routine is broken:
+one routine.broken Status Event and a needs-me row, and its last missed fire runs once a clanker is
+back. A Workshop marked done or removed ends its routines with a routine.ended event. The five cron fields are read in --tz, else CLANKERHOUSE_TIMEZONE, else TZ,
 else the host's zone, resolved when the routine is added and stored with it.`
 
 const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
@@ -624,7 +629,22 @@ const runNeedsMeCommand = async (parsed: ParsedArgs) => {
     labels: row.workshopId ? visibleLabels(labels.get(row.workshopId)) : {},
     createdAt: row.workshopId ? createdAt.get(row.workshopId) : undefined,
   }))
+  // A broken or ended Routine needs the operator whether or not its Workshop is open: listed first.
+  const alerts = routineAlerts().flatMap((routine) => routine.alert ? [{ routine, alert: routine.alert }] : [])
+  if (alerts.length) {
+    const routineRows = alerts.map(({ routine, alert }, index) => {
+      const record = routine.workshopId ? (() => { try { return workshopForId(routine.workshopId!) } catch { return undefined } })() : undefined
+      const row = routine.workshopId ? snapshot.sessions.find((session) => session.workshopId === routine.workshopId && session.target.type !== "directory") : undefined
+      return routineNeedsMeEntry({ ...routine, alert, workshop: record ? { path: record.canonicalPath, branch: record.branch } : undefined, row }, index + 1, {
+        labels: routine.workshopId ? visibleLabels(labels.get(routine.workshopId)) : {},
+        createdAt: routine.workshopId ? createdAt.get(routine.workshopId) : undefined,
+      })
+    })
+    rows.splice(0, 0, ...routineRows)
+    rows.forEach((row, index) => { row.position = index + 1 })
+  }
   const counts = needsMeCounts(snapshot.sessions)
+  counts.needsMe += alerts.length
   if (json) return console.log(JSON.stringify({ version: 1, order, generatedAt: snapshot.generatedAt, counts, rows }, null, 2))
   const now = Date.now()
   console.log(`${counts.needsMe} need you · ${counts.open} open`)

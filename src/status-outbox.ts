@@ -93,6 +93,11 @@ export class StatusOutbox {
     }).immediate()
   }
 
+  /** Record events for their sinks without moving the cursor: events from outside the herd's observation. */
+  enqueue(events: ReadonlyArray<{ event: StatusEvent; sinks: readonly string[] }>, now = Date.now()) {
+    this.db.transaction(() => { for (const { event, sinks } of events) this.insert(event, sinks, now) }).immediate()
+  }
+
   private insert(event: StatusEvent, sinks: readonly string[], now: number) {
     const inserted = this.db.query("INSERT OR IGNORE INTO events (event_id, dedupe_key, type, at, payload) VALUES (?1, ?2, ?3, ?4, ?5)")
       .run(event.id, event.dedupeKey, event.type, event.at, JSON.stringify(event))

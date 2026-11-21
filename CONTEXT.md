@@ -52,7 +52,7 @@ The durable record of every Pi, Claude, and OpenCode Clanker that Clankerhouse l
 
 ## Routine
 
-A Clanker's own wake-up schedule: a five-field cron expression read in a stored IANA time zone, plus the message the Clanker receives when it fires. A Clanker registers Routines for itself; naming another Clanker is explicit. The daemon delivers each occurrence once through the ordinary send path and queue, never by typing over the operator's input. Routines are Declarations kept with the orchestration store; one ends when its Clanker is closed in the Clanker Ledger.
+A Clanker's own wake-up schedule: a five-field cron expression read in a stored IANA time zone, plus the message the Clanker receives when it fires. A Clanker registers Routines for itself; naming another Clanker is explicit. The daemon delivers each occurrence once through the ordinary send path and queue, never by typing over the operator's input. Routines are Declarations kept with the orchestration store. A Routine belongs to its Clanker's Workshop, so it outlives the Clanker: a fire goes to the live Clanker in that Workshop, else the Workshop's last session is resumed first. A wake counts once the session shows it. A Routine that cannot be delivered is broken: the operator is told once (a `routine.broken` Status Event and a needs-me row), and its newest missed occurrence fires once when a Clanker is back. A Routine ends, loudly (`routine.ended`), only when its Workshop is marked done or no longer exists.
 
 ## Interrupted Clanker
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { ClankerState, DetailRow, SessionRow } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
-import { firstLine, needsMe, needsMeCounts, needsMeEntry, needsMeList, parseSnooze, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
+import { firstLine, needsMe, needsMeCounts, needsMeEntry, needsMeList, parseSnooze, routineNeedsMeEntry, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
 
 const repo = resolve(import.meta.dir, "..")
 /** The picker's own order for one snapshot; native-client tests needs_me_sessions against the same file. */
@@ -283,5 +283,15 @@ describe("clankers needs-me", () => {
     const view = await run([join(repo, "bin/clankerhouse-rex"), "--needs-me"], env)
     expect(view.code).toBe(2)
     expect(view.stderr).toContain("clankerhouse-rex --needs-me --json")
+  })
+})
+
+describe("routine alerts", () => {
+  test("a broken routine is a needs-me row even when its workshop has no open session", () => {
+    const entry = routineNeedsMeEntry({ routineId: "routine-1", name: "linear-sweep", clankerId: "clanker-a", workshopId: "ws-1", alert: { kind: "broken", reason: "resuming its last session failed: quota", at: 1000 }, workshop: { path: "/w/task-manager", branch: "task-manager" } }, 1)
+    expect(entry).toMatchObject({ reason: "routine-broken", since: 1000, detail: "linear-sweep", name: "task-manager", path: "/w/task-manager", target: { type: "directory", path: "/w/task-manager" }, clankerId: "clanker-a", deferred: false })
+    expect(entry.excerpt).toBe("Routine linear-sweep (routine-1) is broken: resuming its last session failed: quota")
+    const ended = routineNeedsMeEntry({ routineId: "routine-2", name: null, clankerId: "clanker-a", workshopId: null, alert: { kind: "ended", reason: "its workshop is marked done", at: 5 } }, 2)
+    expect(ended).toMatchObject({ reason: "routine-ended", detail: "routine-2", name: "routine-2", position: 2 })
   })
 })

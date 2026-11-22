@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } 
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 import { clankerHealth, type ClankerHealth } from "./clanker-health"
+import { supersededInstall } from "./installation"
 import { withReportedStatus, type ClankerState, type ReportedRuntimeStatus } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
@@ -706,6 +707,8 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
   const failed: Array<{ messageId: string; error: string }> = []
   const fenced: string[] = []
   const undelivered: string[] = []
+  // A process of a superseded version (a long watch started before an upgrade) leaves delivery to the current one.
+  if (supersededInstall()) return { delivered, acked, failed, fenced, undelivered }
   const store = OrchestrationStore.open()
   try {
     if (!store.hasPendingMessages()) return { delivered, acked, failed, fenced, undelivered }

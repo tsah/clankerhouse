@@ -179,6 +179,22 @@ fn run(args: &[String]) -> Result<(), String> {
             state = "working".into();
         }
     }
+    // A turn that ends on an API error fires StopFailure instead of Stop. Without it the clanker
+    // stayed `working` until its next prompt, and its queued messages waited that long.
+    // https://code.claude.com/docs/en/hooks#stopfailure
+    let turn_error = if harness == "claude" && hook_event.as_deref() == Some("StopFailure") {
+        let error = text(&payload, "error");
+        let message = [text(&payload, "error_details"), text(&payload, "last_assistant_message")]
+            .into_iter()
+            .find(|value| !value.is_empty())
+            .unwrap_or_default();
+        state = if needs_a_person(&error) { "blocked" } else { "done" }.into();
+        json!({ "error": error, "message": message.chars().take(500).collect::<String>(), "at": now_ms() })
+    } else if matches!(hook_event.as_deref(), Some("UserPromptSubmit" | "SessionStart" | "PreToolUse")) {
+        Value::Null
+    } else {
+        previous.get("turnError").cloned().unwrap_or(Value::Null)
+    };
     let prompt_id = text(&payload, "prompt_id");
     let previous_prompts: &[Value] = previous.get("prompts").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     // Claude runs every matching hook entry, so with the lifecycle hooks registered from two settings
@@ -273,6 +289,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "incarnation": or_previous(&if wrapper_incarnation.is_empty() { messaging_socket.clone() } else { wrapper_incarnation }, "incarnation"),
         // Claude's own cross-session inbox; clankerhouse delivers messages through it.
         "messagingSocket": or_previous(&messaging_socket, "messagingSocket"),
+        // The API error the last turn ended on (StopFailure), until the next prompt or tool call.
+        "turnError": turn_error,
     });
     write_atomic(&target, record.to_string().as_bytes())?;
     if hook_event.as_deref() == Some("UserPromptSubmit")
@@ -429,6 +447,15 @@ fn joins_running_turn(previous_state: &str, previous_prompt_id: &str, prompt_id:
 
 const RESTART_CONTEXT: &str = "clankerhouse interrupted your previous turn in order to deliver this message (the sender asked for a restart). The interruption came from clankerhouse, not from the user declining your work.";
 
+/// A StopFailure error no retry can clear: the account is out of usage or credit, or signed out.
+/// The clanker is `blocked` on a person; other errors (overloaded, server) just end the turn.
+fn needs_a_person(error: &str) -> bool {
+    matches!(
+        error,
+        "rate_limit" | "billing_error" | "account_on_hold" | "authentication_failed" | "oauth_org_not_allowed" | "verification_required" | "cloud_credential_error"
+    )
+}
+
 /// A clankerhouse message sent with `--delivery restart`: its opening tag ends `, restart]`.
 fn restart_tagged(prompt: &str) -> bool {
     let Some(rest) = prompt.trim_start().strip_prefix("[clankerhouse msg-") else { return false };
@@ -517,7 +544,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{joins_running_turn, message_ids, prompt_sha256, redelivered, restart_tagged, same_submission, sha256_hex};
+    use super::{joins_running_turn, message_ids, needs_a_person, prompt_sha256, redelivered, restart_tagged, same_submission, sha256_hex};
 
     #[test]
     fn only_a_prompt_with_the_running_turns_id_joins_it() {
@@ -529,6 +556,16 @@ mod tests {
         assert!(!joins_running_turn("idle", "p1", "p1"));
         assert!(!joins_running_turn("working", "", ""));
         assert!(!joins_running_turn("working", "p1", ""));
+    }
+
+    #[test]
+    fn only_account_errors_block_on_a_person() {
+        assert!(needs_a_person("rate_limit"));
+        assert!(needs_a_person("billing_error"));
+        assert!(needs_a_person("authentication_failed"));
+        assert!(!needs_a_person("overloaded"));
+        assert!(!needs_a_person("server_error"));
+        assert!(!needs_a_person(""));
     }
 
     #[test]

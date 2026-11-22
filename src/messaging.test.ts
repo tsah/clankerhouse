@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { deliverQueuedMessages, inboxAck, inboxList, inboxRead, messageEvents, sendClanker, sendStatus } from "./clanker-api"
+import { DELIVERY_WATCH_SENDER, deliveryWatchActions, runDeliveryWatch } from "./delivery-watch"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import type { AgentInterruptOutcome } from "./multiplexer/interface"
 import { OrchestrationStore, orchestrationStatePath, promptFor, promptSha256 } from "./orchestration"
@@ -176,7 +177,11 @@ describe("ambiguous hand-offs", () => {
     }
     expect(pane.prompts).toHaveLength(3)
     expect(new Set(pane.prompts).size).toBe(1)
-    expect(await sendStatus(receipt.messageId, multiplexer)).toMatchObject({ stage: "typed", attempts: 3 })
+    // Retries used up with the clanker idle and nothing in its transcript: undelivered, so the queue moves on and
+    // the delivery watch can tell the sender. It no longer holds the queue silently.
+    expect(await sendStatus(receipt.messageId, multiplexer)).toMatchObject({ stage: "orphaned", state: "orphaned", orphanReason: "undelivered", attempts: 3, proof: "lost" })
+    const next = await sendClanker(CLANKER, "after it", {}, multiplexer)
+    expect(next).toMatchObject({ status: "handed-over" })
   })
 })
 
@@ -426,5 +431,107 @@ describe("native hook", () => {
     const late = run("working", { hook_event_name: "UserPromptSubmit", session_id: "s1", prompt_id: "p1", prompt })
     expect(JSON.parse(late.stdout)).toMatchObject({ decision: "block" })
     expect(record().prompts).toHaveLength(1)
+  })
+})
+
+describe("the delivery watch", () => {
+  const LIMIT = "You've hit your weekly limit · resets Nov 26, 11am (UTC)"
+  const limited = { hookEvent: "StopFailure", turnError: { error: "rate_limit", message: LIMIT, at: 1 } }
+
+  test("a message held behind a usage limit tells its sender why, then the operator once per recipient, then that it landed", async () => {
+    const { multiplexer, report, submitted } = setup()
+    report("blocked", 1, 0, limited)
+    const first = await sendClanker(CLANKER, "merge it", { sender: "clanker-parent" }, multiplexer)
+    expect(first).toMatchObject({ delivery: "queued", status: "queued" })
+    expect(first.heldBecause).toContain(LIMIT)
+    const second = await sendClanker(CLANKER, "and then this", { sender: "clanker-parent" }, multiplexer)
+    const sent: Array<{ to: string; text: string; requestId: string }> = []
+    const escalated: Array<{ messageId: string; pushed: boolean }> = []
+    const pass = (atMs: number) => runDeliveryWatch({
+      multiplexer, now: () => first.acceptedAt + atMs,
+      send: async (to, text, requestId) => { sent.push({ to, text, requestId }) },
+      escalate: (escalations) => { escalated.push(...escalations.map((entry) => ({ messageId: entry.message.messageId, pushed: entry.pushed }))) },
+    })
+    await pass(60_000)
+    expect(sent).toEqual([])
+    await pass(11 * 60_000)
+    expect(sent.map((notice) => notice.requestId)).toEqual([`delivery-held:${first.messageId}`, `delivery-held:${second.messageId}`])
+    expect(sent[0]!.to).toBe("clanker-parent")
+    expect(sent[0]!.text).toContain(LIMIT)
+    // The one behind it is held by the same limit, and says so rather than only that it waits its turn.
+    expect(sent[1]!.text).toContain(LIMIT)
+    await pass(12 * 60_000)
+    expect(sent).toHaveLength(2)
+    // Waiting will not lift a usage limit: the operator hears, one push for the recipient, a needs-me row per message.
+    await pass(50 * 60_000)
+    expect(escalated).toEqual([{ messageId: first.messageId, pushed: true }, { messageId: second.messageId, pushed: false }])
+    const rows = withStore((store) => store.escalatedMessages(0).map((message) => message.messageId).sort())
+    expect(rows).toEqual([first.messageId, second.messageId].sort())
+    // The limit lifts and the queue drains: the sender hears the held message landed after all.
+    report("idle", 1, 1)
+    await deliverQueuedMessages(multiplexer)
+    report("working", 2, 1, { prompts: [submitted(promptFor({ messageId: first.messageId, sender: "clanker-parent", text: "merge it" }).prompt, 2)] })
+    await deliverQueuedMessages(multiplexer)
+    await pass(51 * 60_000)
+    expect(sent.at(-1)!.requestId).toBe(`delivery-landed:${first.messageId}`)
+    expect(withStore((store) => store.escalatedMessages(0).map((message) => message.messageId))).toEqual([second.messageId])
+  })
+
+  test("an undelivered message tells its sender it failed and reaches the operator; the watch's own notices are never watched", () => {
+    const base = { messageId: "msg-1", clankerId: CLANKER, text: "x", sha256: "", delivery: "queued" as const, createdAt: 0, afterGeneration: 0, deliveredAt: 1, ackedAt: null, startedGeneration: null, requestId: null, source: "cli", incarnation: null, attempts: 3, handledAt: null, requestedMode: null, orphanedAt: 5, noticeKind: null, noticeAt: null, escalatedAt: null, escalationReason: null, dismissedAt: null }
+    const failed = deliveryWatchActions({ ...base, state: "orphaned", orphanReason: "undelivered", sender: "clanker-parent" }, undefined, "repo", 10)
+    expect(failed.map((action) => action.kind)).toEqual(["notice", "escalate"])
+    expect(failed[0]).toMatchObject({ notice: "failed", to: "clanker-parent" })
+    // A Workshop stopped on purpose only tells the sender; a routine proves its own wakes.
+    expect(deliveryWatchActions({ ...base, state: "orphaned", orphanReason: "stopped", sender: "clanker-parent" }, undefined, "repo", 10).map((action) => action.kind)).toEqual(["notice"])
+    expect(deliveryWatchActions({ ...base, state: "orphaned", orphanReason: "undelivered", sender: "routine:r1" }, undefined, "repo", 10)).toEqual([{ kind: "notice", notice: "failed", to: null, text: expect.any(String) }])
+    expect(deliveryWatchActions({ ...base, state: "orphaned", orphanReason: "undelivered", sender: DELIVERY_WATCH_SENDER }, undefined, "repo", 10)).toEqual([])
+  })
+
+  test("a Report to a clanker that no watch showed is delivered to it as a message, once", async () => {
+    const { multiplexer } = setup()
+    const now = Date.now()
+    const asked = withStore((store) => store.appendReport({ clankerId: "clanker-child", workshopId: "w-child", to: CLANKER, state: "question", message: "a, b or c?", payload: null, at: now - 120_000 }))
+    const watched = withStore((store) => store.appendReport({ clankerId: "clanker-child", workshopId: "w-child", to: CLANKER, state: "done", message: "seen", payload: null, at: now - 120_000 }))
+    withStore((store) => store.markReportsSeen([watched.seq]))
+    withStore((store) => store.appendReport({ clankerId: "clanker-child", workshopId: "w-child", to: CLANKER, state: "working", message: "progress", payload: null, at: now - 120_000 }))
+    const sent: Array<{ to: string; text: string; requestId: string; sender?: string }> = []
+    const send = async (to: string, text: string, requestId: string, sender?: string) => { sent.push({ to, text, requestId, sender }) }
+    await runDeliveryWatch({ multiplexer, send })
+    await runDeliveryWatch({ multiplexer, send })
+    expect(sent).toEqual([{ to: CLANKER, requestId: `report:${asked.seq}`, sender: "clanker-child", text: expect.stringContaining("a, b or c?") }])
+  })
+
+  test("restart to a turn that ended with background work still running goes straight in, with no interrupt", async () => {
+    const { pane, multiplexer, report } = setup({ interruptOutcome: "still_working" })
+    report("working", 2, 1, { hookEvent: "Stop" })
+    const receipt = await sendClanker(CLANKER, "steer now", { delivery: "restart" }, multiplexer)
+    expect(pane.interrupts).toBe(0)
+    expect(pane.prompts).toHaveLength(1)
+    expect(receipt).toMatchObject({ status: "handed-over", delivery: "immediate" })
+  })
+})
+
+const withStore = <T>(work: (store: OrchestrationStore) => T) => {
+  const store = OrchestrationStore.open(orchestrationStatePath())
+  try { return work(store) } finally { store.close() }
+}
+
+describe("refused hand-offs", () => {
+  test("a draft in the input box queues the message with that reason, and repeated refusals become a broken hold", async () => {
+    const { pane, multiplexer } = setup()
+    pane.failWith.push("a draft is in the input box (\"half a thought\"); typing would mix with it")
+    const receipt = await sendClanker(CLANKER, "merge it", { sender: "clanker-parent" }, multiplexer)
+    expect(receipt).toMatchObject({ status: "queued", delivery: "queued" })
+    expect(receipt.heldBecause).toContain("draft")
+    // `send-status` runs a delivery pass of its own, so it meets the third refusal.
+    pane.failWith.push("a draft is in the input box", "a draft is in the input box")
+    await deliverQueuedMessages(multiplexer)
+    const status = await sendStatus(receipt.messageId, multiplexer)
+    expect(status).toMatchObject({ state: "queued", proof: "queued", attempts: 0 })
+    expect(status.heldBecause).toContain("failed 3 times")
+    // Once the box is clear it goes in, with its full retry budget: refusals were not delivery attempts.
+    await deliverQueuedMessages(multiplexer)
+    expect(withStore((store) => store.message(receipt.messageId))).toMatchObject({ state: "delivered", attempts: 1 })
   })
 })

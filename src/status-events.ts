@@ -13,7 +13,7 @@ import type { ClankerReportRecord, StoredMessage } from "./orchestration"
 
 export const EVENT_VERSION = 1
 
-export type StatusEventType = "clanker.settled" | "clanker.blocked" | "clanker.exited" | "clanker.crashed" | "message.stuck" | "hooks.test" | "routine.broken" | "routine.ended" | `report.${string}` | `marker.${string}`
+export type StatusEventType = "clanker.settled" | "clanker.blocked" | "clanker.exited" | "clanker.crashed" | "message.stuck" | "message.undelivered" | "hooks.test" | "routine.broken" | "routine.ended" | `report.${string}` | `marker.${string}`
 
 /** The clanker facts every event carries; an exited clanker's come from the cursor. */
 export interface ClankerFacts {

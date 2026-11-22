@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
-import { psProcessGroups, REX_POPUP_LABEL_PREFIX, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
+import { inputBoxOf, limitDialogShown, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
 const scratch = () => mkdtempSync(join(tmpdir(), "ch-rex-test-"))
 const observeScript = join(import.meta.dir, "..", "..", "share", "rex", "observe.lua")
@@ -189,11 +189,60 @@ describe("Rex adapter, scripted", () => {
     const adapter = new RexAdapter({ run, claims, observeScript, env: {}, sleep: async () => {} })
     const pane = paneLocation("session:s1", "window:w1", "block:b1")
     await adapter.promptAgent(pane, "Review this")
-    expect(calls.map((call) => call.params.event)).toEqual([{ type: "paste", payload: { text: "Review this" } }, { type: "key", payload: { key: "enter" } }])
+    expect(calls.map((call) => call.params.event)).toEqual([{ type: "key", payload: { key: "ctrl+u" } }, { type: "paste", payload: { text: "Review this" } }, { type: "key", payload: { key: "enter" } }])
     expect(await adapter.interruptAgent(pane)).toBe("stopped")
     expect(await adapter.interruptAgent(pane)).toBe("not_working")
     state = ""
     expect(await adapter.interruptAgent(pane)).toBe("sent")
+  })
+
+  test("reads Claude's input box back after Enter: a lost Enter is pressed again, a suggestion is not text, a draft is never touched", async () => {
+    const rule = "─".repeat(40)
+    const claude = (box: string, extra = "") => `● Done.\n${extra}\n${rule}\n❯ ${box}\n${rule}\n  -- INSERT -- bypass permissions on\n`
+    const prompt = "[clankerhouse msg-abc-1 from clanker-x]\nMerge it."
+    // Claude greys a suggested next prompt into an empty box (SGR 2); it is neither a draft nor the message.
+    const suggestion = claude("\x1b[0m\x1b[2mrun the tests again\x1b[0m")
+    expect(inputBoxOf(claude(""))).toBe("")
+    expect(inputBoxOf(suggestion)).toBe("")
+    expect(inputBoxOf("plain shell $ ")).toBeUndefined()
+    expect(unsentPrompt(inputBoxOf(claude("[clankerhouse msg-abc-1 from clanker-x] Merge it."))!, prompt)).toBe(true)
+    // A narrow pane wraps the tag.
+    expect(unsentPrompt(inputBoxOf(claude("[clankerhouse msg-ab\n  c-1 from clanker-x] Merge it."))!, prompt)).toBe(true)
+    expect(unsentPrompt(inputBoxOf(claude("[Pasted text #1 +4 lines]"))!, prompt)).toBe(true)
+    const dialog = "You've hit your limit · resets 3pm\n\n❯ 1. Stop and wait for limit to reset\n  2. Switch to extra usage\n"
+    expect(limitDialogShown(dialog)).toBe(true)
+    // The words in Claude's own output are not the dialog.
+    expect(limitDialogShown(claude("", "I will add a Stop and wait for limit to reset option"))).toBe(false)
+
+    const typing = (screens: string[]) => {
+      const keys: string[] = []
+      const run: RexRun = async (args, options) => {
+        if (args[0] === "do") return { exitCode: 0, stdout: JSON.stringify(oneSession([])), stderr: "" }
+        if (args.includes("capture")) return { exitCode: 0, stdout: screens.length > 1 ? screens.shift()! : screens[0]!, stderr: "" }
+        if (args[0] === "api" && args[1] === "call") {
+          const event = JSON.parse(options?.stdin ?? "{}").event
+          keys.push(event.type === "paste" ? "paste" : event.payload.key)
+          return { exitCode: 0, stdout: "{}", stderr: "" }
+        }
+        return { exitCode: 2, stdout: "", stderr: "unexpected" }
+      }
+      return { keys, adapter: new RexAdapter({ run, claims: new RexClaimStore(scratch()), observeScript, env: {} , sleep: async () => {} }) }
+    }
+    const pane = paneLocation("session:s1", "window:w1", "block:b1")
+    // The dialog has taken the box's place: dismissed. The first Enter is lost: pressed again.
+    const lost = typing([dialog, claude(prompt.replace("\n", " ")), claude("")])
+    await lost.adapter.promptAgent(pane, prompt)
+    expect(lost.keys).toEqual(["escape", "ctrl+u", "paste", "enter", "enter"])
+    const suggested = typing([suggestion, claude("")])
+    await suggested.adapter.promptAgent(pane, prompt)
+    expect(suggested.keys).toEqual(["ctrl+u", "paste", "enter"])
+    // Someone's draft: nothing is typed, and the refusal is not ambiguous, so the message waits.
+    const drafted = typing([claude("half a thought about the merge")])
+    await expect(drafted.adapter.promptAgent(pane, prompt)).rejects.toThrow("a draft is in the input box")
+    expect(drafted.keys).toEqual([])
+    // A prompt that never leaves the box is reported as stalled, which the sender treats as unconfirmed.
+    const stuck = typing([claude(""), claude("[clankerhouse msg-abc-1 from clanker-x] Merge it.")])
+    await expect(stuck.adapter.promptAgent(pane, prompt)).rejects.toThrow("stalled")
   })
 
   test("classifies event lines, ignoring the clients every CLI call brings", () => {

@@ -139,7 +139,7 @@ describe("Claude hook installation", () => {
     mkdirSync(f.bin)
     writeFileSync(reporter, '#!/bin/sh\nprintf "%s\\n%s\\n" "$1" "$2" > "$HOOK_RESULT"\ncat >> "$HOOK_RESULT"\n', { mode: 0o755 })
     const installed = f.install()
-    const states = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", SessionEnd: "unknown" }
+    const states = { SessionStart: "idle", PermissionRequest: "blocked", PreToolUse: "working", UserPromptSubmit: "working", Stop: "done", StopFailure: "done", SessionEnd: "unknown" }
     for (const paneEnv of [{ REX_BLOCK: "block:p1" }]) {
       for (const [event, state] of Object.entries(states)) {
         const input = '{"session_id":"test-session","hook_event_name":"' + event + '"}'

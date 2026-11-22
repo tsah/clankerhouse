@@ -9,6 +9,7 @@
 import { existsSync, realpathSync, writeSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { ClankerApiError, deliverQueuedMessages, listClankers, type ClankerInfo } from "./clanker-api"
+import { openClankerLedger } from "./clanker-ledger"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import {
   DEFAULT_STALE_AFTER_MS, OrchestrationStore, advanceWatchCursor, computeWatchEvents, initialWatchCursor, readWatchCursor, settleWatchCursor, writeWatchCursor,
@@ -146,6 +147,15 @@ export interface LiveWatchDependencies {
   openStore?: () => OrchestrationStore
   deliver?: () => Promise<unknown>
   now?: () => number
+  /** Clanker ids ever recorded in a Workshop, for Reports addressed to one of them. */
+  clankersOf?: (workshopId: string) => string[]
+}
+
+const workshopClankerIds = (workshopId: string) => {
+  try {
+    const ledger = openClankerLedger()
+    try { return ledger.list({ workshopId }).map((row) => row.clankerId) } finally { ledger.close() }
+  } catch { return [] }
 }
 
 export const liveWatchView = (scope: WatchScope, dependencies: LiveWatchDependencies = {}) => {
@@ -178,9 +188,15 @@ export const liveWatchView = (scope: WatchScope, dependencies: LiveWatchDependen
     })
     const store = openStore()
     try {
+      // A Report may name the orchestrator by its Workshop or by one of its clankers (`--to clanker-...`).
+      const addressedTo = scope.kind === "children" ? [scope.workshopId, ...(dependencies.clankersOf ?? workshopClankerIds)(scope.workshopId)] : []
       const reports = seq === undefined ? [] : scope.kind === "children"
-        ? store.reportsAfter(seq, { workshopIds: [...watched!], to: [scope.workshopId] })
+        ? store.reportsAfter(seq, { workshopIds: [...watched!], to: addressedTo })
         : store.reportsAfter(seq, { clankerIds: [...ids!] })
+      // Shown to their addressee here, so the delivery watch need not push them as messages. A watch on other
+      // clankers' scope does not count: it is not the addressee.
+      const mine = new Set(addressedTo)
+      store.markReportsSeen(reports.filter((report) => report.to !== null && mine.has(report.to)).map((report) => report.seq))
       return { now: now(), clankers, reports, latestSeq: store.latestSeq() }
     } finally { store.close() }
   }

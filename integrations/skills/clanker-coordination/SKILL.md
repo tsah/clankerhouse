@@ -30,9 +30,10 @@ printf '%s' "$message" | clankers send "$clanker_id"
 printf '%s' "$message" | clankers send "$clanker_id" --delivery follow-up
 printf '%s' "$message" | clankers send "$clanker_id" --delivery steer
 printf '%s' "$message" | clankers send "$clanker_id" --wait --timeout 600
+printf '%s' "$message" | clankers send "$clanker_id" --wait-delivered --timeout 120   # until it is proven in the session
 printf '%s' "$message" | clankers send "$clanker_id" --request-id "$key"   # safe to retry
 printf '%s' "$message" | clankers send "$clanker_id" --delivery restart    # Claude on hc: interrupt, then deliver
-clankers send-status "$message_id"   # stage: queued|typed|started|settled|handled|orphaned
+clankers send-status "$message_id"   # stage: queued|typed|started|settled|handled|orphaned; proof: landed|queued|unconfirmed|lost; heldBecause
 clankers inbox read "$message_id"    # as the recipient: the full text of a pointer prompt (typed delivery only)
 clankers inbox ack "$message_id"     # as the recipient: after acting on it
 clankers wait "$clanker_id" --message "$message_id" --timeout 600
@@ -68,6 +69,15 @@ Rules:
    avoids returning on the turn that was already running. When retrying after a
    timeout or error, resend with the same `--request-id`: it returns the first
    message (`replayed: true`) instead of sending twice.
+   Every send says where it stands in `status`: `queued` (with `heldBecause`,
+   why it is held), `handed-over` (written to the session, not proven yet), or
+   `delivered`. `--wait-delivered` waits until the message is proven in the
+   recipient's session (its hook saw it submitted, or its transcript has it),
+   exits 3 if it was lost, and 124 with the hold reason on timeout. A message
+   held 10 minutes gets you a `[clankerhouse delivery]` notice saying why, and
+   another when it lands or fails; one that waiting will not fix (the recipient
+   is out of usage, gone, silent, or never took the hand-off) also reaches the
+   operator's phone and needs-me list. Do not resend on a held notice.
 7a. A prompt beginning `[clankerhouse msg-… from …]` is a message from another
    clanker or the operator. If it says to read it with `clankers inbox read`,
    do so, act on it, then run `clankers inbox ack` with that id.
@@ -100,6 +110,11 @@ clankers report --state question --message "Which retention?" \
 clankers report --state done --message "Merged" --payload-file result.json
 printf '%s' '{"error":"tests red"}' | clankers report --state failed
 ```
+
+A `question`, `blocked`, `failed` or `done` Report that no `clankers watch`
+shows the addressee within a minute is delivered to the addressee's live clanker
+as a message (`[clankerhouse report SEQ from …]`), so it arrives even when the
+addressee is not watching, or is not your parent (`--to CLANKER_ID`).
 
 States are `question`, `blocked`, `done`, `failed`, and `working`. The payload is
 one JSON object of at most 64 KiB. A Report is your declaration; it never

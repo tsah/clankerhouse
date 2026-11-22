@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto"
 import { existsSync, fstatSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { format } from "node:util"
 import { join, resolve } from "node:path"
-import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
-import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
+import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForDelivery, waitForMessage, type ClankerDelivery } from "./clanker-api"
+import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState, withOrchestrationStore } from "./orchestration"
 import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
@@ -23,7 +23,7 @@ import { refreshProjectionSnapshot, setSnapshotReadOnly } from "./snapshot"
 import { parseMutationIntent, type MutationIntent } from "./mutation-intent"
 import { mutationStages } from "./mutation-stages"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
-import { needsMeCounts, needsMeEntry, needsMeList, routineNeedsMeEntry, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
+import { messageNeedsMeEntry, needsMeCounts, needsMeEntry, needsMeList, routineNeedsMeEntry, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
 import { SETTLED_ORDERS, orderSettled, settledEntry, settledKey, settledSessions, type SettledOrder } from "./settled"
 import { lastMessages } from "./last-messages"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
@@ -277,8 +277,14 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
   if (command === "report") return runReport(parsed)
   if (command === "watch") return runWatchCommand(parsed)
   if (command === "send-status") {
+    const dismiss = parsed.has("--dismiss")
     const messageId = parsed.take("--message") || parsed.shift()
     if (!messageId) throw new Error("MESSAGE_ID is required")
+    if (dismiss) {
+      const dismissed = withOrchestrationStore((store) => store.dismissEscalation(messageId))
+      if (!dismissed) throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was never escalated, so there is nothing to dismiss`, 3)
+      return console.log(JSON.stringify({ messageId, dismissed: true }))
+    }
     return console.log(JSON.stringify(await sendStatus(messageId)))
   }
   if (command === "wait") {
@@ -316,14 +322,22 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     const requestId = parsed.take("--request-id")
     const source = parsed.take("--source") ?? "cli"
     const wait = parsed.has("--wait")
+    const waitDelivered = parsed.has("--wait-delivered")
     const timeoutSeconds = nonNegativeNumber(parsed.take("--timeout"), "--timeout")
     const textFlag = parsed.take("--text")
     const id = requiredClankerId(parsed)
     const text = textFlag ?? await Bun.stdin.text()
     const sender = await reportingClankerId().catch(() => "operator")
+    if (wait && waitDelivered) throw new Error("--wait and --wait-delivered are mutually exclusive")
     const receipt = await sendClanker(id, text, { delivery, requestId, sender, source })
-    if (!wait) return console.log(JSON.stringify(receipt))
     const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
+    if (waitDelivered) {
+      if (receipt.status === "delivered") return console.log(JSON.stringify(receipt))
+      // Print the receipt even when the wait fails, so the caller keeps the message id.
+      try { return console.log(JSON.stringify({ ...receipt, ...await waitForDelivery(id, receipt.messageId, { timeoutMs }) })) }
+      catch (error) { console.log(JSON.stringify(receipt)); throw error }
+    }
+    if (!wait) return console.log(JSON.stringify(receipt))
     const status = await clankerCapabilities(id)
     if (status.capabilities.send === "multiplexer-prompt" || status.capabilities.send === "messaging-socket") {
       // A Claude message may queue, so wait for the turn it started; the turn's
@@ -472,8 +486,8 @@ export const usage = `Usage:
   clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
-  clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait] [--text TEXT]
-  clankers send-status MESSAGE_ID
+  clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait | --wait-delivered] [--timeout SECONDS] [--text TEXT]
+  clankers send-status MESSAGE_ID [--dismiss]   where a message stands, with proof and why it is held; --dismiss clears its needs-me row
   clankers inbox [list [--all] | read MESSAGE_ID [--json] | ack MESSAGE_ID] [--clanker ID]
   clankers messages [--after SEQ] [--clanker ID...]
   clankers result CLANKER_ID [--generation GENERATION]
@@ -643,8 +657,27 @@ const runNeedsMeCommand = async (parsed: ParsedArgs) => {
     rows.splice(0, 0, ...routineRows)
     rows.forEach((row, index) => { row.position = index + 1 })
   }
+  // A message the delivery watch could not get through, until it lands or is dismissed: listed after the Routines.
+  const undelivered = (() => { try { return withOrchestrationStore((store) => store.escalatedMessages()) } catch { return [] } })()
+  if (undelivered.length) {
+    const ledger = (() => { try { return openClankerLedger() } catch { return undefined } })()
+    try {
+      const messageRows = undelivered.map((message, index) => {
+        const workshopId = ledger?.get(message.clankerId)?.workshopId
+        const record = workshopId ? (() => { try { return workshopForId(workshopId) } catch { return undefined } })() : undefined
+        const row = workshopId ? snapshot.sessions.find((session) => session.workshopId === workshopId && session.target.type !== "directory") : undefined
+        const name = record ? record.canonicalPath.split("/").pop()! : message.clankerId
+        return messageNeedsMeEntry({ messageId: message.messageId, clankerId: message.clankerId, sender: message.sender, name, reason: message.escalationReason ?? "not delivered", at: message.escalatedAt ?? message.createdAt, workshop: record ? { id: record.workshopId, path: record.canonicalPath, branch: record.branch } : undefined, row }, index + 1, {
+          labels: workshopId ? visibleLabels(labels.get(workshopId)) : {},
+          createdAt: workshopId ? createdAt.get(workshopId) : undefined,
+        })
+      })
+      rows.splice(alerts.length, 0, ...messageRows)
+      rows.forEach((row, index) => { row.position = index + 1 })
+    } finally { ledger?.close() }
+  }
   const counts = needsMeCounts(snapshot.sessions)
-  counts.needsMe += alerts.length
+  counts.needsMe += alerts.length + undelivered.length
   if (json) return console.log(JSON.stringify({ version: 1, order, generatedAt: snapshot.generatedAt, counts, rows }, null, 2))
   const now = Date.now()
   console.log(`${counts.needsMe} need you · ${counts.open} open`)

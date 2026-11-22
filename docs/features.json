@@ -500,6 +500,29 @@
         "Spawn a Claude Workshop with Alt-B; confirm its state follows the turn (working, blocked on a permission prompt, done) and that clankers send --wait returns its reply",
         "Restart the Rex server; confirm the Workshop's tabs come back as shells, the clanker is listed as interrupted, and clankers resume brings it back"
       ]
+    },
+    {
+      "id": "message-delivery-watch",
+      "title": "Every send lands in the recipient's session or someone hears why: delivery status, proof, sender notices, operator escalation, pushed Reports",
+      "core": true,
+      "unit": [
+        "src/messaging.test.ts",
+        "src/multiplexer/rex.test.ts",
+        "src/claude-background-tasks.test.ts",
+        "src/claude-hooks.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-orchestration"
+      ],
+      "manual": [
+        "Send to a working Claude clanker; confirm the receipt has `status: queued` and a `heldBecause` naming the running turn, and `send-status` shows the same with `proof: queued`",
+        "Send with `--wait-delivered --timeout 120` to an idle Claude; confirm it returns `status: delivered` once the prompt is in the transcript",
+        "Leave a message held over 10 minutes from a clanker sender; confirm the sender gets one `[clankerhouse delivery]` notice with the reason, and another when the message lands",
+        "Let a Claude turn end on a usage limit; confirm the clanker shows `blocked` with Claude's limit text, a message to it is held with that reason, and after 45 minutes one `message.undelivered` push and a `message-undelivered` needs-me row appear (one push for several messages to it)",
+        "With a usage-limit dialog up in a typed-delivery Claude, send to it once the clanker reads ready; confirm the dialog is dismissed and the message submitted, and that a greyed suggestion in an empty input box is not taken for unsent text",
+        "Report `--state question --to CLANKER_ID` to a clanker that runs no watch; confirm it receives `[clankerhouse report SEQ ...]` within about two minutes, and that a watching orchestrator does not get it twice",
+        "Send `--delivery restart` to a Claude whose turn ended with background tasks still running; confirm no Escape is sent and the message goes straight in"
+      ]
     }
   ]
 }

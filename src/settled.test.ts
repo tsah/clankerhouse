@@ -147,7 +147,7 @@ describe("clankers settled", () => {
       const one = (await run(["--json", "--messages", "1", "--order", "eldest"], env)).json()
       expect(one.rows.find((row: { name: string }) => row.name === "asked").lastMessages).toHaveLength(1)
     } finally { stop() }
-  })
+  }, SPAWNS_CLI_TIMEOUT_MS)
 
   test("hands them out one by one", async () => {
     const { env, stop } = setup()

@@ -357,6 +357,39 @@ describe("Rex semantic prompt transport", () => {
     expect((await sendStatus(second.messageId, multiplexer)).state).toBe("orphaned")
     await expect(waitForMessage(clankerId, second.messageId, { timeoutMs: 0 }, multiplexer)).rejects.toMatchObject({ code: "NOT_FOUND", exitCode: 3 })
   })
+
+  test("a Claude whose turn ended with background work still running takes a queued message", async () => {
+    const reports = isolate()
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = "clanker-claude-background"
+    const paneId = "block:p9"
+    const pane = { focused: false, present: true }
+    const multiplexer = fakeRex(clankerId, paneId, prompts, pane)
+    const report = (state: string, hookEvent: string, generation: number, settledGeneration: number, submitted: string[] = []) => writeFileSync(join(reports, "block_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: paneId, state, generation, settledGeneration, updatedAt: Date.now(), hookEvent,
+      prompts: submitted.map((text) => ({ sha256: promptSha256(text), generation })),
+    }))
+    // Mid-turn: the message waits.
+    report("working", "PreToolUse", 3, 0)
+    const sent = await sendClanker(clankerId, "the ruling", {}, multiplexer)
+    expect(sent.delivery).toBe("queued")
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts).toEqual([])
+    // The turn ended at Stop with a background monitor running: still unsettled, but no turn runs, so it goes in.
+    report("working", "Stop", 3, 0)
+    pane.focused = true
+    await deliverQueuedMessages(multiplexer)
+    // Typed delivery still leaves the operator's pane alone.
+    expect(prompts).toEqual([])
+    pane.focused = false
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts.map((prompt) => untagged(prompt.text))).toEqual(["the ruling"])
+    // It started a turn, which ended again with the background work still going: a new send goes in at once.
+    report("working", "Stop", 4, 0, ["the ruling"])
+    expect((await sendStatus(sent.messageId, multiplexer)).state).toBe("acked")
+    const next = await sendClanker(clankerId, "a follow-up", {}, multiplexer)
+    expect(next.delivery).not.toBe("queued")
+  })
 })
 
 describe("Pi native transport", () => {

@@ -521,8 +521,20 @@ const handOff = async (multiplexer: ManagedMultiplexer, clanker: ClankerRecord, 
  * inbox leaves a human's draft alone, so focus does not matter there. A running turn always
  * holds the message: Claude would merge it into that turn and the turn's own reply can be lost.
  */
-const busyFor = (clanker: ClankerRecord) => viaInbox(clanker) ? clanker.state === "working" || clanker.state === "blocked" : clankerBusy(clanker)
-const readyFor = (clanker: ClankerRecord) => viaInbox(clanker) ? clanker.state === "done" || clanker.state === "idle" : readyForDelivery(clanker)
+/**
+ * Claude's turn has ended but its background tasks (a shell, a monitor, a subagent) still run: the hook
+ * reports `working` at that Stop so the clanker does not settle, yet no turn is running. A message now
+ * starts a new turn rather than merging into one, so it may be delivered. A worker that always keeps
+ * background work going would otherwise never take a queued message.
+ */
+export const awaitingBackground = (clanker: Pick<ClankerRecord, "harness" | "state"> & { report?: { hookEvent?: unknown } }) =>
+  clanker.harness === "claude" && clanker.state === "working" && clanker.report?.hookEvent === "Stop"
+const busyFor = (clanker: ClankerRecord) => awaitingBackground(clanker)
+  ? !viaInbox(clanker) && clanker.focused
+  : viaInbox(clanker) ? clanker.state === "working" || clanker.state === "blocked" : clankerBusy(clanker)
+const readyFor = (clanker: ClankerRecord) => awaitingBackground(clanker)
+  ? viaInbox(clanker) || !clanker.focused
+  : viaInbox(clanker) ? clanker.state === "done" || clanker.state === "idle" : readyForDelivery(clanker)
 
 const reportIncarnation = (clanker: ClankerRecord) => typeof clanker.report?.incarnation === "string" && clanker.report.incarnation ? clanker.report.incarnation : null
 
@@ -705,7 +717,7 @@ export async function retypeMessage(clankerId: string, messageId: string, multip
   if (!message || message.clankerId !== clankerId || message.state !== "delivered") return false
   const clanker = await findRecord(clankerId, multiplexer)
   if (clanker.capabilities.send !== "messaging-socket" && clanker.capabilities.send !== "multiplexer-prompt") return false
-  if (!readyForDelivery(clanker)) return false
+  if (!(readyForDelivery(clanker) || (awaitingBackground(clanker) && !clanker.focused))) return false
   const result = await promptClaimedPane(multiplexer ?? openManagedMultiplexer(), clanker, promptFor(message).prompt)
   return result.confirmed
 }

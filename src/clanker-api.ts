@@ -244,12 +244,19 @@ export const turnErrorOf = (report: { turnError?: unknown; hookEvent?: unknown }
   return { error: typeof error === "string" ? error : "", message: typeof message === "string" ? message : "" }
 }
 
-/** A clanker blocked because its turn ended on a usage limit or an account error says so, in Claude's words. */
-const withTurnError = <T extends { state: ClankerState; blockedKind?: string; blockedMessage?: string }>(merged: T, report: ClankerReport | undefined): T => {
+/**
+ * A turn that ended on an API error, seen by the StopFailure hook after Claude last reported its own status, is the
+ * truth: a usage limit or account error is `blocked` in Claude's words, another error ended the turn. Claude's own
+ * status (OSC 7501) does not say so, and on 2026-11-21 left a limited clanker reading `working` for hours.
+ */
+const withTurnError = <T extends { state: ClankerState; blockedKind?: string; blockedMessage?: string }>(merged: T, report: ClankerReport | undefined, hookState: ClankerState, runtime: ReportedRuntimeStatus | undefined): T => {
   const failure = report?.hookEvent === "StopFailure" ? turnErrorOf(report) : undefined
-  if (merged.state !== "blocked" || !failure || merged.blockedMessage) return merged
+  if (!failure) return merged
+  const at = number((report?.turnError as Record<string, unknown> | undefined)?.at)
+  if (runtime && runtime.reportedAt > at) return merged
+  if (hookState !== "blocked") return { ...merged, state: hookState }
   const kind = failure.error === "rate_limit" || failure.error === "billing_error" ? "usage-limit" : "account"
-  return { ...merged, blockedKind: kind, blockedMessage: failure.message || failure.error }
+  return { ...merged, state: "blocked", blockedKind: kind, blockedMessage: failure.message || failure.error }
 }
 
 /** Pane metadata rows of one Multiplexer observation (harness-bearing panes only). */
@@ -316,7 +323,7 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
     const updatedAt = number(report?.updatedAt)
     const generation = report?.generation === undefined ? updatedAt : number(report.generation)
     const settledGeneration = number(report?.settledGeneration) || (terminalReport(report ?? {}, hookState) ? generation : 0)
-    const { state, ...blocked } = withTurnError(withReportedStatus({ state: hookState, updatedAt }, row.runtime), report)
+    const { state, ...blocked } = withTurnError(withReportedStatus({ state: hookState, updatedAt }, row.runtime), report, hookState, row.runtime)
     const online = socketIsOnline(row.socketPath)
     return {
       id,
@@ -738,7 +745,7 @@ export interface HoldReason { code: string; text: string; broken: boolean }
 /** A `working` clanker silent this long is not mid-turn: its turn ended on an error, or the session hung. */
 export const SILENT_TURN_MS = 30 * 60_000
 
-const minutes = (ms: number) => `${Math.max(1, Math.round(ms / 60_000))} min`
+const minutes = (ms: number) => ms < 60_000 ? `${Math.max(0, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`
 const clock = (at: number) => new Date(at).toISOString().slice(11, 16) + " UTC"
 
 /** The API error an older Claude's turn ended on, from the transcript's last entry (no StopFailure hook then). */

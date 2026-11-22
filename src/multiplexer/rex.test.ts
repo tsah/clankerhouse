@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
-import { inputBoxOf, limitDialogShown, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
+import { inputBoxOf, limitDialogShown, visibleText, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
 /** Each real-server test starts several rex processes; a cold start takes seconds on a loaded box (bun's default is 5 s). */
 const REAL_SERVER_TIMEOUT_MS = 30_000
@@ -208,6 +208,11 @@ describe("Rex adapter, scripted", () => {
     expect(inputBoxOf(claude(""))).toBe("")
     expect(inputBoxOf(suggestion)).toBe("")
     expect(inputBoxOf("plain shell $ ")).toBeUndefined()
+    // As `rex capture --format=vt` writes a real Claude box: truecolor rules, spaces as cursor moves.
+    const vt = (box: string) => `\x1b[0m\x1b[38;2;136;136;136m${rule}\r\n❯\xa0${box}\r\n\x1b[0m\x1b[38;2;136;136;136m${rule}\r\n\x1b[2C\x1b[0m\x1b[38;2;153;153;153m-- INSERT --\x1b[0m\r\n`
+    expect(inputBoxOf(vt("half\x1b[1Ca\x1b[1Cthought"))).toBe("half a thought")
+    expect(inputBoxOf(vt("\x1b[0m\x1b[2mship it\x1b[0m"))).toBe("")
+    expect(visibleText("\x1b[38;2;2;2;2mkeep\x1b[2mdrop\x1b[22m back")).toBe("keep back")
     expect(unsentPrompt(inputBoxOf(claude("[clankerhouse msg-abc-1 from clanker-x] Merge it."))!, prompt)).toBe(true)
     // A narrow pane wraps the tag.
     expect(unsentPrompt(inputBoxOf(claude("[clankerhouse msg-ab\n  c-1 from clanker-x] Merge it."))!, prompt)).toBe(true)
@@ -243,6 +248,14 @@ describe("Rex adapter, scripted", () => {
     const drafted = typing([claude("half a thought about the merge")])
     await expect(drafted.adapter.promptAgent(pane, prompt)).rejects.toThrow("a draft is in the input box")
     expect(drafted.keys).toEqual([])
+    // The message pasted onto someone's draft is still a draft: refused, never submitted with it.
+    const merged = typing([claude("a draft Tsah is still writing[clankerhouse msg-abc-1 from clanker-x] Merge it.")])
+    await expect(merged.adapter.promptAgent(pane, prompt)).rejects.toThrow("a draft is in the input box")
+    expect(merged.keys).toEqual([])
+    // A retry finds the earlier copy still in the box: Enter, no second paste.
+    const retried = typing([claude("[clankerhouse msg-abc-1 from clanker-x] Merge it."), claude("")])
+    await retried.adapter.promptAgent(pane, prompt)
+    expect(retried.keys).toEqual(["enter"])
     // A prompt that never leaves the box is reported as stalled, which the sender treats as unconfirmed.
     const stuck = typing([claude(""), claude("[clankerhouse msg-abc-1 from clanker-x] Merge it.")])
     await expect(stuck.adapter.promptAgent(pane, prompt)).rejects.toThrow("stalled")

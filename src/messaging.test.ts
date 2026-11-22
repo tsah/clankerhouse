@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { deliverQueuedMessages, inboxAck, inboxList, inboxRead, messageEvents, sendClanker, sendStatus } from "./clanker-api"
+import { clankerStatus, deliverQueuedMessages, inboxAck, inboxList, inboxRead, messageEvents, sendClanker, sendStatus } from "./clanker-api"
 import { DELIVERY_WATCH_SENDER, deliveryWatchActions, runDeliveryWatch } from "./delivery-watch"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import type { AgentInterruptOutcome } from "./multiplexer/interface"
@@ -42,6 +42,8 @@ interface Pane {
   focused: boolean
   /** Make the next prompt hand-offs fail with this message. */
   failWith: string[]
+  /** Claude's own status report through Rex (OSC 7501), if any. */
+  agentStatus?: { agent: string; status: string; reportedAt: number }
 }
 
 const CLANKER = "clanker-msg"
@@ -58,6 +60,7 @@ const fakeRex = (pane: Pane) => new ManagedMultiplexer(Object.assign({
         id: "w1:t1", index: "1", nativeName: "claude", active: true, panes: [{
           id: PANE, index: "1", pid: "123", command: "claude", title: "", currentPath: "/repo", activity: 0, active: true, focused: pane.focused,
           claims: { clankerId: CLANKER, harness: "claude" },
+          ...(pane.agentStatus ? { agentStatus: pane.agentStatus } : {}),
         }],
       }],
     }],
@@ -533,5 +536,17 @@ describe("refused hand-offs", () => {
     // Once the box is clear it goes in, with its full retry budget: refusals were not delivery attempts.
     await deliverQueuedMessages(multiplexer)
     expect(withStore((store) => store.message(receipt.messageId))).toMatchObject({ state: "delivered", attempts: 1 })
+  })
+})
+
+describe("a turn that ended on an API error", () => {
+  test("is the clanker's state when it is newer than Claude's own status report, and not when it is older", async () => {
+    const { pane, multiplexer, report } = setup()
+    const now = Date.now()
+    pane.agentStatus = { agent: "claude", status: "done", reportedAt: now - 60_000 }
+    report("blocked", 3, 2, { hookEvent: "StopFailure", turnError: { error: "rate_limit", message: "You've hit your weekly limit", at: now } })
+    expect(await clankerStatus(CLANKER, multiplexer)).toMatchObject({ state: "blocked", blockedKind: "usage-limit", blockedMessage: "You've hit your weekly limit" })
+    pane.agentStatus = { agent: "claude", status: "working", reportedAt: now + 1_000 }
+    expect(await clankerStatus(CLANKER, multiplexer)).toMatchObject({ state: "working" })
   })
 })

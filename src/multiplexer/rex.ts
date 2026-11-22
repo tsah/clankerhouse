@@ -46,10 +46,33 @@ export const REX_PROMPT_SUBMIT_CHECKS = 3
 /** Box detection reads only the screen's tail, not the whole scrollback. */
 const SCREEN_TAIL_LINES = 80
 const RULE = /^\s*─{8,}/
-// SGR sequences; dim text (SGR 2, ended by 0 or 22) is Claude's suggestion, not typed text.
-const SGR = /\x1b\[[0-9;?]*[A-Za-z]/g
-const DIM_RUN = /\x1b\[(?:[0-9;]*;)?2(?:;[0-9;]*)?m[^\x1b]*(?:\x1b\[(?:0|22)?m)?/g
-const visible = (line: string) => line.replace(DIM_RUN, "").replace(SGR, "").replace(/\r/g, "")
+/**
+ * A screen line as a person reads it: styling dropped, cursor-forward moves (how the VT capture writes runs of
+ * spaces) turned back into spaces, and dim text (SGR 2, which is how Claude draws its suggestion) left out. Colour
+ * parameters are skipped whole, so the `2` in a truecolor `38;2;r;g;b` is not taken for dim.
+ */
+export const visibleText = (line: string) => {
+  let out = ""
+  let dim = false
+  const escape = /\x1b\[([0-9;?]*)([A-Za-z])/g
+  let at = 0
+  for (let match = escape.exec(line); match; match = escape.exec(line)) {
+    if (!dim) out += line.slice(at, match.index)
+    at = match.index + match[0].length
+    if (match[2] === "C") { if (!dim) out += " ".repeat(Number(match[1] || 1)); continue }
+    if (match[2] !== "m") continue
+    const params = (match[1] || "0").split(";").map((value) => Number(value || 0))
+    for (let index = 0; index < params.length; index += 1) {
+      const param = params[index]!
+      if (param === 38 || param === 48 || param === 58) { index += params[index + 1] === 5 ? 2 : params[index + 1] === 2 ? 4 : 0; continue }
+      if (param === 2) dim = true
+      else if (param === 0 || param === 22) dim = false
+    }
+  }
+  if (!dim) out += line.slice(at)
+  return out.replace(/\r/g, "")
+}
+const visible = visibleText
 
 /**
  * The typed text in Claude's input box: the lines between the last two horizontal rules on the screen, with the
@@ -75,6 +98,15 @@ export const unsentPrompt = (box: string, prompt: string) => {
   if (tag) return box.replace(/\s+/g, "").includes(tag)
   const first = prompt.trim().split("\n")[0]!.trim().slice(0, 40)
   return first.length > 0 && box.includes(first)
+}
+
+/**
+ * Whether the box holds this prompt and nothing else (an earlier copy whose Enter was lost), as opposed to someone's
+ * draft, which may even contain the prompt pasted onto it. Whitespace is ignored, since the box wraps lines.
+ */
+export const onlyThisPrompt = (box: string, prompt: string) => {
+  const squeeze = (value: string) => value.replace(/\s+/g, "")
+  return squeeze(box) === squeeze(prompt) || /^\[Pasted text #\d+[^\]]*\]$/.test(box.trim())
 }
 
 /** Claude's usage-limit dialog ("Stop and wait for limit to reset" / "Switch to extra usage"), which takes typed keys. */
@@ -638,9 +670,9 @@ export class RexAdapter implements Multiplexer {
 
   /**
    * Paste, then Enter as a key of its own, as a person would. Before typing: a draft someone left in the input box is
-   * never touched (the hand-off is refused, and the message waits with that reason); Claude's usage-limit dialog, when
-   * it has taken the box's place, is dismissed; and the input line is cleared (ctrl+u) of a stale copy of this
-   * message. After Enter the box is read back: the prompt still sitting there (Enter lost, as after a compaction) gets
+   * never touched (the hand-off is refused, and the message waits with that reason); an unsent copy of this same
+   * prompt (a lost Enter) is submitted rather than pasted again; and Claude's usage-limit dialog, when it has taken
+   * the box's place, is dismissed. After Enter the box is read back: the prompt still sitting there (Enter lost, as after a compaction) gets
    * Enter again, and one that never leaves is reported as stalled, which the sender treats as unconfirmed and retries.
    * Claude's greyed-out suggestion is dim text and never counts as a draft or as unsent text.
    */
@@ -651,15 +683,21 @@ export class RexAdapter implements Multiplexer {
     const key = (name: string) => this.call("block.event", { ...target, event: { type: "key", payload: { key: name } } })
     const before = await this.screen(location)
     const draft = before === undefined ? undefined : inputBoxOf(before)
-    if (draft && !unsentPrompt(draft, text)) throw new Error(`a draft is in the input box ("${draft.slice(0, 60)}"); typing would mix with it`)
-    if (before !== undefined && draft === undefined && limitDialogShown(before)) {
-      await key("escape")
+    if (draft && !onlyThisPrompt(draft, text)) throw new Error(`a draft is in the input box ("${draft.slice(0, 60)}"); typing would mix with it`)
+    if (draft) {
+      // An earlier copy of this very prompt is still sitting there (its Enter was lost): submit it, do not paste twice.
+      await key("enter")
+    } else {
+      if (before !== undefined && draft === undefined && limitDialogShown(before)) {
+        await key("escape")
+        await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+      }
+      // Clears a line Claude left behind where it honours ctrl+u; a dim suggestion needs nothing, the paste replaces it.
+      await key("ctrl+u")
+      await this.call("block.event", { ...target, event: { type: "paste", payload: { text } } })
       await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+      await key("enter")
     }
-    await key("ctrl+u")
-    await this.call("block.event", { ...target, event: { type: "paste", payload: { text } } })
-    await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
-    await key("enter")
     if (before === undefined) return
     for (let check = 0; check < REX_PROMPT_SUBMIT_CHECKS; check += 1) {
       await this.sleep(REX_PROMPT_CONFIRM_MS)

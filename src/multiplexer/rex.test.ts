@@ -10,6 +10,9 @@ import { join } from "node:path"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
 import { inputBoxOf, limitDialogShown, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
+/** Each real-server test starts several rex processes; a cold start takes seconds on a loaded box (bun's default is 5 s). */
+const REAL_SERVER_TIMEOUT_MS = 30_000
+
 const scratch = () => mkdtempSync(join(tmpdir(), "ch-rex-test-"))
 const observeScript = join(import.meta.dir, "..", "..", "share", "rex", "observe.lua")
 
@@ -306,7 +309,7 @@ describe.skipIf(!started)("Rex adapter against a real server", () => {
     expect(after.windows.map((window) => window.nativeName)).toEqual(["renamed"])
     await adapter.kill(sessionLocation(created.nativeSessionId))
     expect((await adapter.observe()).sessions.some((candidate) => candidate.id === created.nativeSessionId)).toBe(false)
-  })
+  }, REAL_SERVER_TIMEOUT_MS)
 
   test("submits a prompt to a terminal", async () => {
     const out = join(home, "prompt.out")
@@ -316,7 +319,7 @@ describe.skipIf(!started)("Rex adapter against a real server", () => {
     for (let tries = 0; tries < 40 && !existsSync(out); tries += 1) await Bun.sleep(50)
     expect(await Bun.file(out).text()).toBe("got:hello rex\n")
     await adapter.kill(sessionLocation(echo.nativeSessionId))
-  })
+  }, REAL_SERVER_TIMEOUT_MS)
 
   test("streams changes and keeps instanceId but not serverEpoch across a restart, which leaves a shell in place of the harness", async () => {
     const created = await adapter.spawn({ scope: "session", name: "restart", cwd: "/tmp", launch: { kind: "argv", argv: ["sleep", "600"] } })
@@ -344,5 +347,5 @@ describe.skipIf(!started)("Rex adapter against a real server", () => {
     expect(restored.nativeName).toBe("restarted")
     expect(restored.windows[0]!.panes[0]).toMatchObject({ id: created.nativePaneId, harness: "claude", harnessGone: true })
     await adapter.kill(sessionLocation(created.nativeSessionId))
-  })
+  }, REAL_SERVER_TIMEOUT_MS)
 })

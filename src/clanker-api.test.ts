@@ -9,6 +9,9 @@ import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
 import { advanceProjection } from "./projection"
 import { FAKE_REX_HOST, fakeRex, writeRexClaims } from "./fixtures/fake-rex"
 
+// Tests that start bin/clankers several times: a cold start on a loaded box takes seconds each, more than bun's 5 s default.
+const SPAWNS_CLI_TIMEOUT_MS = 30_000
+
 /** The text a prompt carried, without the `[clankerhouse msg-... from ...]` tag. */
 const untagged = (prompt: string) => prompt.replace(/^\[clankerhouse msg-[A-Za-z0-9-]+ from [^\]]+\] /, "")
 
@@ -125,7 +128,7 @@ describe("report generations", () => {
     const error = await new Response(send.stderr).text()
     expect(await send.exited).toBe(4)
     expect(JSON.parse(error)).toMatchObject({ apiVersion: 1, error: { code: "UNSUPPORTED", message: expect.stringMatching(/does not support send.*no verified native transport/) } })
-  })
+  }, SPAWNS_CLI_TIMEOUT_MS)
 })
 
 describe("Rex semantic prompt transport", () => {
@@ -593,6 +596,7 @@ printf '%s\n' "$*" >> "$CLANKERS_LOG"
     const script = join(root, "rex-claims-test.ts")
     writeFileSync(script, `
 import extension from ${JSON.stringify(extension)}
+
 const handlers = new Map<string, Function>()
 const pi = {
   events: { on: () => () => {} },

@@ -6,6 +6,9 @@ import { join, resolve } from "node:path"
 import type { DetailRow, SessionRow } from "./model"
 import { orderSettled, prInText, settledEntry, settledSessions, ticketOf, type SettledDependencies } from "./settled"
 
+// Tests that start bin/clankers several times: a cold start on a loaded box takes seconds each, more than bun's 5 s default.
+const SPAWNS_CLI_TIMEOUT_MS = 30_000
+
 const repo = resolve(import.meta.dir, "..")
 
 const clanker = (state: DetailRow["state"], pane: string, updatedAt: number, clankerId = `c-${pane}`): DetailRow => ({
@@ -169,5 +172,5 @@ describe("clankers settled", () => {
       const launcher = Bun.spawn([join(repo, "bin/clankerhouse-rex"), "--settled", "--json", "--limit", "1"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
       expect(JSON.parse(await new Response(launcher.stdout).text()).rows[0].name).toBe("first-created")
     } finally { stop() }
-  })
+  }, SPAWNS_CLI_TIMEOUT_MS)
 })

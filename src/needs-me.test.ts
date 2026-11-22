@@ -7,6 +7,9 @@ import type { ClankerState, DetailRow, SessionRow } from "./model"
 import type { ClankerReportRecord } from "./orchestration"
 import { firstLine, needsMe, needsMeCounts, needsMeEntry, needsMeList, parseSnooze, routineNeedsMeEntry, yourMoveLabels, type NeedsMeFacts } from "./needs-me"
 
+// Tests that start bin/clankers several times: a cold start on a loaded box takes seconds each, more than bun's 5 s default.
+const SPAWNS_CLI_TIMEOUT_MS = 30_000
+
 const repo = resolve(import.meta.dir, "..")
 /** The picker's own order for one snapshot; native-client tests needs_me_sessions against the same file. */
 const fixture = JSON.parse(readFileSync(join(repo, "src/fixtures/needs-me-order.json"), "utf8")) as { sessions: SessionRow[]; freshest: string[]; eldest: string[]; flat: string[]; counts: { needsMe: number; open: number } }
@@ -272,7 +275,7 @@ describe("clankers needs-me", () => {
       expect(text.stdout.split("\n")[0]).toBe(`${fixture.counts.needsMe} need you · ${fixture.counts.open} open`)
       expect(text.stdout).toContain("1. asked late  asked")
     } finally { stop() }
-  })
+  }, SPAWNS_CLI_TIMEOUT_MS)
 
   test("the Rex launcher's help and its needs-me view need no terminal and start nothing", async () => {
     const { env, stop } = await daemon()

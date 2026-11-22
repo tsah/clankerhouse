@@ -168,6 +168,8 @@ describe("status hook runtime", () => {
     const second = start()
     await second.observed()
     await until(() => sink.received.length === 1)
+    // Stopping before the delivery is recorded leaves it pending, and the next start sends it again.
+    await until(() => outboxOf(outboxPath).totals[0]?.delivered === 1)
     second.stop()
 
     const third = start()

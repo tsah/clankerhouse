@@ -547,7 +547,8 @@ mkdir -p -m 700 "$fixture_runtime"
 printf '{"version":1,"entries":{}}\n' > "$fixture_runtime/repositories.json"
 LINEAGE_ROOT_SESSION="$lineage_root_session" LINEAGE_FIX_COVERAGE_SESSION="$lineage_fix_coverage_session" LINEAGE_FIX_JAVA_SESSION="$lineage_fix_java_session" write_fixture_cache lineage-visual
 # They never poll JSON, and their watched snapshot never delivers, so only the cache paints.
-picker_command="env CLANKERHOUSE_RUNTIME_DIR='$fixture_runtime' CLANKERS='$root/bin/fixture-clankers' CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/native-client/target/release/clankerhouse-native'"
+# Lineages start collapsed except the current Workshop's, so the picker opens from inside this one.
+picker_command="env CLANKERHOUSE_RUNTIME_DIR='$fixture_runtime' CLANKERS='$root/bin/fixture-clankers' CLANKERHOUSE_CURRENT_SESSION='$lineage_fix_java_session' '$repo/native-client/target/release/clankerhouse-native'"
 open_picker_window lineage-visual
 wait_for_text "$lineage_root_session"
 # The newest child is initially selected. Searching and clearing must return
@@ -596,10 +597,15 @@ if [[ "${CLANKERHOUSE_QA_VISUAL:-0}" == "1" ]]; then
 fi
 close_picker
 rm -f "$cache_file"
+picker_command="env CLANKERHOUSE_RUNTIME_DIR='$fixture_runtime' CLANKERS='$root/bin/fixture-clankers' CLANKERHOUSE_CURRENT_SESSION='$session' '$repo/native-client/target/release/clankerhouse-native'"
 
 write_fixture_cache neutral-sort
 open_picker_window neutral-sort
 wait_for_selected_row "qa-workshop-tree"
+# Lineages other than the current one start collapsed: open sort-root's to see its children's order.
+send_keys up
+wait_for_selected_row "sort-root"
+send_keys right
 wait_for_row_glyph "sort-idle-child" "✓"
 neutral_sort_frame=$(capture_screen)
 printf '%s\n' "$neutral_sort_frame" > "$root/neutral-sort-render.txt"

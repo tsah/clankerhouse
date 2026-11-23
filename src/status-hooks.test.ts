@@ -219,7 +219,8 @@ describe("status hook runtime", () => {
     set([clanker("working")])
     await runtime.observed()
     const good = await Bun.file(configPath).text()
-    writeFileSync(configPath, "not [valid")
+    // Bun 1.3 parses some broken TOML (`not [valid` reads as {not: "valid"}); an unterminated string fails on every version.
+    writeFileSync(configPath, "x = \"unterminated")
     utimesSync(configPath, new Date(), new Date(Date.now() + 1_000))
     await runtime.observed()
     await runtime.observed()

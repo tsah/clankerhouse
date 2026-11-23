@@ -4,7 +4,8 @@
  */
 import { unsetDaemonInternalArgs } from "./client-environment"
 import { binPath, libexecPath } from "./installation"
-import { launchModel, launchResourceClass, validateModelName, type LaunchSpec, type LedgerClanker, type LedgerHarness, type ResourceClass } from "./clanker-ledger"
+import { launchAccount, launchModel, launchResourceClass, validateModelName, withLaunchAccount, type LaunchSpec, type LedgerClanker, type LedgerHarness, type ResourceClass } from "./clanker-ledger"
+import { claudeAccountEnvironment, launchAccounts, type ClaudeAccount } from "./claude-accounts"
 
 const lifecycleWrapper = binPath("clankerhouse-harness-lifecycle")
 const opencode2Launcher = Bun.env.CLANKERHOUSE_OPENCODE_LAUNCHER || binPath("clankerhouse-opencode2")
@@ -66,6 +67,8 @@ export interface HarnessLaunch {
   prompt?: string
   /** Continue `harnessSessionId` instead of starting it. */
   resume?: boolean
+  /** The Claude account registry; read from its file when absent. */
+  claudeAccounts?: readonly ClaudeAccount[]
 }
 
 /** The scope a launch runs in; the numeric suffix orders a clanker's launches. */
@@ -86,7 +89,10 @@ export const harnessCommand = (input: HarnessLaunch, unit: string) => {
     command = ["env", ...env, lifecycleWrapper, "--", "pi", resume ? "--session" : "--session-id", session, ...piProfileArgs(input.cwd, profile, model), ...modelArgs, ...prompt]
   } else if (harness === "claude") {
     if (!session) throw new Error("Claude requires a session id")
-    command = ["env", "-u", "ANTHROPIC_API_KEY", ...env, lifecycleWrapper, "--", "claude", resume ? "--resume" : "--session-id", session, ...(profile ? ["--agent", profile] : []), ...modelArgs, ...prompt]
+    // A launch on a named account gets that account's config directory, never a token (src/claude-accounts.ts).
+    const account = launchAccount(launchSpec)
+    const accountEnv = claudeAccountEnvironment(account, account === undefined ? [] : input.claudeAccounts ?? launchAccounts())
+    command = ["env", "-u", "ANTHROPIC_API_KEY", ...accountEnv.unset.flatMap((name) => ["-u", name]), ...env, ...accountEnv.set, lifecycleWrapper, "--", "claude", resume ? "--resume" : "--session-id", session, ...(profile ? ["--agent", profile] : []), ...modelArgs, ...prompt]
   } else {
     if (resume && !session) throw new Error("OpenCode resume requires a session id")
     command = ["env", ...env, lifecycleWrapper, "--", opencode2Launcher, ...(profile ? ["--profile", profile] : []), ...(resume ? ["--session", session!] : []), "--", input.cwd, ...prompt]
@@ -94,13 +100,13 @@ export const harnessCommand = (input: HarnessLaunch, unit: string) => {
   return ownedScopeCommand(command, unit, launchResourceClass(launchSpec))
 }
 
-/** A ledger clanker's launch that continues its exact session. */
-export const resumeLaunch = (clanker: LedgerClanker, workshop: WorkshopLaunchIdentity, prompt?: string): HarnessLaunch => ({
+/** A ledger clanker's launch that continues its exact session, on another Claude account when `account` names one. */
+export const resumeLaunch = (clanker: LedgerClanker, workshop: WorkshopLaunchIdentity, prompt?: string, account?: string): HarnessLaunch => ({
   harness: clanker.harness,
   cwd: clanker.cwd,
   clankerId: clanker.clankerId,
   harnessSessionId: clanker.harnessSessionId,
-  launchSpec: clanker.launchSpec,
+  launchSpec: account === undefined ? clanker.launchSpec : withLaunchAccount(clanker.launchSpec, account),
   workshop,
   prompt,
   resume: true,

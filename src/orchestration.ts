@@ -466,6 +466,14 @@ export class OrchestrationStore {
   }
 
   /**
+   * Hand a clanker's queued messages to its next launch: used when the same session is resumed on purpose (a move to
+   * another Claude account), so the relaunch does not fence them. Returns how many were readdressed.
+   */
+  readdressQueued(clankerId: string): number {
+    return this.db.query("UPDATE messages SET incarnation = NULL WHERE clanker_id = ?1 AND state = 'queued' AND incarnation IS NOT NULL").run(clankerId).changes
+  }
+
+  /**
    * Fence a relaunched harness: pending messages addressed to an earlier launch in the same pane
    * are orphaned instead of typed into the new one. Either side unknown (an older wrapper) fences nothing.
    */

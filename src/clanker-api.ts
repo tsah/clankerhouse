@@ -400,6 +400,8 @@ export interface ClankerReportFacts {
   transcriptPath: string
   /** Reply of the newest settled result, for harnesses that report results. */
   latestReply: string | null
+  /** The API error Claude's last turn ended on (its StopFailure hook), with when; cleared by the next prompt. */
+  turnError?: { error: string; message: string; at: number }
 }
 
 /** Rows with the report facts `clankers list` derives its detail from. */
@@ -410,7 +412,9 @@ export async function listClankerReportFacts(options: ListOptions = {}): Promise
       .filter((result): result is ClankerResult => !!result)
       .sort((a, b) => b.generation - a.generation)[0]
     const text = (value: unknown) => typeof value === "string" ? value : ""
-    return { clanker: publicInfo(record), harnessSessionId: text(record.report?.harnessSessionId), transcriptPath: text(record.report?.transcriptPath), latestReply: latest?.reply ?? null }
+    const failure = record.report?.hookEvent === "StopFailure" ? turnErrorOf(record.report) : undefined
+    const turnError = failure ? { ...failure, at: number((record.report?.turnError as Record<string, unknown>).at) } : undefined
+    return { clanker: publicInfo(record), harnessSessionId: text(record.report?.harnessSessionId), transcriptPath: text(record.report?.transcriptPath), latestReply: latest?.reply ?? null, ...(turnError ? { turnError } : {}) }
   })
 }
 

@@ -1,12 +1,13 @@
 /**
  * The Rex lane's one background process, for timed work only: queued message delivery, Routines, Status Event sinks,
- * the done-Workshop reaper and directory rediscovery. It keeps the snapshot cache (state.json) warm for the picker's
+ * the done-Workshop reaper, Claude account switching and directory rediscovery. It keeps the snapshot cache (state.json) warm for the picker's
  * first paint and the clanker ledger in step with Rex, but serves nothing: no socket, no projection authority.
  * Runs as the systemd user service `clankerhouse-runner-<instance>` (bin/clankerhouse-rex --ensure-runner).
  */
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { deliverQueuedMessages } from "./clanker-api"
 import { openClankerLedger } from "./clanker-ledger"
+import { runAccountSwitchPass } from "./claude-account-switch"
 import { deliveryEscalationEvent, runDeliveryWatch, type DeliveryEscalation } from "./delivery-watch"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { reapDoneWorkshops, resumeUnfinishedMutations } from "./mutations"
@@ -117,10 +118,35 @@ const recipientWorkshop = (clankerId: string) => {
   } catch { return undefined }
 }
 
+// Claude account switching: a clanker whose turn ended on a usage limit resumes on another account. A pass runs when a
+// clanker's state changes (a StopFailure is one) and on a slow timer, which also catches an account's reset. With
+// fewer than two accounts configured a pass returns before observing anything.
+const ACCOUNT_SWITCH_MS = Number(Bun.env.CLANKERHOUSE_ACCOUNT_SWITCH_MS ?? 60_000) || 60_000
+let accountSwitchRunning = false
+let accountSwitchFailure = ""
+const runAccountSwitch = () => {
+  if (accountSwitchRunning) return
+  accountSwitchRunning = true
+  void runAccountSwitchPass({ multiplexer: daemonMultiplexer() })
+    .then(() => { accountSwitchFailure = "" })
+    .catch((error) => {
+      const failure = error instanceof Error ? error.message : String(error)
+      if (failure !== accountSwitchFailure) console.error(`Claude account switch pass failed: ${failure}`)
+      accountSwitchFailure = failure
+    })
+    .finally(() => { accountSwitchRunning = false })
+}
+const startAccountSwitch = () => {
+  const timer = setInterval(runAccountSwitch, ACCOUNT_SWITCH_MS)
+  return () => clearInterval(timer)
+}
+
 const applyHookStateRequest = async (request: HookStateRequest) => {
   // A request means the clanker's state changed; show it now rather than on the next poll.
   scheduleProjectionRefresh()
   if (hasPendingMessagesFor(request.clankerId)) runQueuedDelivery()
+  // A usage limit leaves a Claude clanker blocked; other hook events wait for the timer.
+  if (request.state === "blocked" && (request.harness ?? "claude") === "claude") runAccountSwitch()
 }
 
 
@@ -163,6 +189,7 @@ export const runRunner = async () => {
   stops.push(startQueuedDelivery())
   stops.push(startRoutines())
   stops.push(startDeliveryWatch())
+  stops.push(startAccountSwitch())
   void (async () => {
     try {
       for await (const change of daemonMultiplexer().changes(changeSignal.signal)) {

@@ -225,7 +225,7 @@ A row is `open` while its clanker runs. The runner closes it once the clanker ha
 
 ```sh
 clankers ledger --interrupted        # what was running when the host or Rex went down
-clankers resume CLANKER_ID [--prompt TEXT]
+clankers resume CLANKER_ID [--prompt TEXT] [--account LABEL]
 clankers ledger close CLANKER_ID     # not coming back; also stops its harness if it runs
 clankers ledger [--state open|closed] [--workshop ID]
 ```
@@ -235,6 +235,21 @@ clankers ledger [--state open|closed] [--workshop ID]
 On first start the ledger imports the records of the retired Recovery store, `recovery.sqlite3`, which is left in place.
 
 Tracked harnesses run in per-Clanker systemd scopes under `clankerhouse-clankers.slice`, which always receives low CPU and I/O weights; `scripts/install --systemd` renders its aggregate budget, which may use every core but one (clankers launched before 2026-11-23 stay in the retired `clankerhouse-recovery.slice` until they are relaunched). New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
+
+## Claude accounts: moving a limited clanker to another login
+
+With two or more Claude accounts listed in `~/.config/clankerhouse/claude-accounts.toml`, a Claude clanker whose turn
+ends on a usage limit is resumed, within seconds, on the next account whose limit has not been hit: same clanker id,
+same conversation, a new tab, and a prompt saying why. New Claude clankers start on the first such account. With fewer
+than two accounts nothing changes. Each account is its own `CLAUDE_CONFIG_DIR` sharing `projects/`, settings and
+instructions with `~/.claude`; you log in to each one yourself, once. Setup, the registry format, how it decides and
+what it never touches: [docs/claude-accounts.md](docs/claude-accounts.md).
+
+```sh
+clankers claude-accounts setup LABEL   # make ~/.claude-acct/LABEL and print the login step
+clankers claude-accounts status        # accounts, which are out of usage until when, recent moves
+clankers claude-accounts clear LABEL   # offer an account again before its recorded reset
+```
 
 ## Titles and fading
 

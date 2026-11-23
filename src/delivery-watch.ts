@@ -43,6 +43,7 @@ const orphanText = (reason: string | null) => {
     case "recipient-missing": return "the recipient stopped running and did not come back within 30 minutes"
     case "stopped": return "the recipient's Workshop was stopped"
     case "harness-replaced": return "the recipient's harness was relaunched; the message was addressed to the earlier launch"
+    case "cancelled": return "it was cancelled (clankers send-status --cancel) before it landed"
     default: return reason ?? "unknown reason"
   }
 }
@@ -66,7 +67,8 @@ export const deliveryWatchActions = (message: WatchedMessage, hold: HoldReason |
   }
   if (message.state === "orphaned") {
     if (message.noticeKind === "failed") return []
-    const actions: DeliveryWatchAction[] = [{ kind: "notice", notice: "failed", to, text: `[clankerhouse delivery] ${what}, was NOT delivered: ${orphanText(message.orphanReason)}. Resend it if it still matters. ${check}` }]
+    const resend = message.orphanReason === "cancelled" ? "" : " Resend it if it still matters."
+    const actions: DeliveryWatchAction[] = [{ kind: "notice", notice: "failed", to, text: `[clankerhouse delivery] ${what}, was NOT delivered: ${orphanText(message.orphanReason)}.${resend} ${check}` }]
     // A routine proves and reports its own wakes.
     if (ESCALATED_FAILURES.has(message.orphanReason ?? "") && message.escalatedAt === null && !message.sender.startsWith("routine:")) actions.push({ kind: "escalate", reason: orphanText(message.orphanReason) })
     return actions

@@ -278,8 +278,17 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
   if (command === "watch") return runWatchCommand(parsed)
   if (command === "send-status") {
     const dismiss = parsed.has("--dismiss")
+    const cancel = parsed.has("--cancel")
     const messageId = parsed.take("--message") || parsed.shift()
     if (!messageId) throw new Error("MESSAGE_ID is required")
+    if (cancel) {
+      const before = withOrchestrationStore((store) => store.message(messageId))
+      if (!before) throw new ClankerApiError("NOT_FOUND", `Unknown message id: ${messageId}`, 3)
+      const cancelled = withOrchestrationStore((store) => store.cancelMessage(messageId))
+      if (!cancelled) throw new ClankerApiError("CONFLICT", `Message ${messageId} is ${before.state === "acked" ? "already delivered" : `${before.state}${before.orphanReason ? ` (${before.orphanReason})` : ""}`}, so there is nothing to cancel`, 2)
+      if (dismiss) withOrchestrationStore((store) => store.dismissEscalation(messageId))
+      return console.log(JSON.stringify({ messageId, clankerId: cancelled.clankerId, cancelled: true, wasHandedOver: before.state === "delivered", sender: cancelled.sender }))
+    }
     if (dismiss) {
       const dismissed = withOrchestrationStore((store) => store.dismissEscalation(messageId))
       if (!dismissed) throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was never escalated, so there is nothing to dismiss`, 3)
@@ -487,7 +496,7 @@ export const usage = `Usage:
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
   clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait | --wait-delivered] [--timeout SECONDS] [--text TEXT]
-  clankers send-status MESSAGE_ID [--dismiss]   where a message stands, with proof and why it is held; --dismiss clears its needs-me row
+  clankers send-status MESSAGE_ID [--dismiss] [--cancel]   where a message stands, with proof and why it is held; --dismiss clears its needs-me row; --cancel withdraws one not yet landed (its sender is told)
   clankers inbox [list [--all] | read MESSAGE_ID [--json] | ack MESSAGE_ID] [--clanker ID]
   clankers messages [--after SEQ] [--clanker ID...]
   clankers result CLANKER_ID [--generation GENERATION]

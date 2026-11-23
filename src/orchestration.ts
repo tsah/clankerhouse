@@ -559,8 +559,22 @@ export class OrchestrationStore {
   /** Messages the operator was told about and has not dismissed, that have not landed since, newest first. */
   escalatedMessages(since = Date.now() - ESCALATION_SHOWN_MS): Array<StoredMessage & DeliveryWatchFields> {
     // A message stopped, superseded or addressed to a replaced launch on purpose no longer needs the operator.
-    const rows = this.db.query("SELECT * FROM messages WHERE escalated_at IS NOT NULL AND escalated_at >= ?1 AND dismissed_at IS NULL AND state <> 'acked' AND NOT (state = 'orphaned' AND orphan_reason IN ('stopped', 'superseded', 'harness-replaced')) ORDER BY escalated_at DESC").all(since) as Array<MessageRow & WatchRow>
+    const rows = this.db.query("SELECT * FROM messages WHERE escalated_at IS NOT NULL AND escalated_at >= ?1 AND dismissed_at IS NULL AND state <> 'acked' AND NOT (state = 'orphaned' AND orphan_reason IN ('stopped', 'superseded', 'harness-replaced', 'cancelled')) ORDER BY escalated_at DESC").all(since) as Array<MessageRow & WatchRow>
     return rows.map((row) => ({ ...messageFromRow(row), ...watchFieldsOf(row) }))
+  }
+
+  /**
+   * Withdraw a message that has not landed: queued, or handed over without an acknowledgement (no retry types it again).
+   * It is orphaned as `cancelled`, so its needs-me row clears and the delivery watch tells its sender. Undefined when
+   * there is no such message or it already landed or failed.
+   */
+  cancelMessage(messageId: string, now = Date.now()): StoredMessage | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'cancelled', orphaned_at = ?2 WHERE message_id = ?1 AND state IN ('queued', 'delivered') RETURNING *").get(messageId, now) as MessageRow | null
+      if (!row) return undefined
+      this.recordEvent(messageId, row.clanker_id, "orphaned", "cancelled", now)
+      return messageFromRow(row)
+    }).immediate()
   }
 
   dismissEscalation(messageId: string, now = Date.now()) {

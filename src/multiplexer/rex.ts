@@ -112,6 +112,20 @@ export const onlyThisPrompt = (box: string, prompt: string) => {
 /** Claude's usage-limit dialog ("Stop and wait for limit to reset" / "Switch to extra usage"), which takes typed keys. */
 export const limitDialogShown = (screen: string) =>
   /^\s*(❯\s*)?\d\.\s+(Stop and wait|Wait for (the )?limit)/im.test(screen.split("\n").slice(-16).map(visible).join("\n"))
+/**
+ * Claude's question menu (AskUserQuestion) on screen: the number of its free-text option ("N. Type something."), or
+ * undefined when no such menu is showing. Permission prompts have no free-text option, so they never match.
+ */
+export const questionMenuOf = (screen: string): number | undefined => {
+  const lines = screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible)
+  if (!lines.some((line) => /Enter to select/.test(line))) return undefined
+  const option = lines.map((line) => /^\s*(?:❯\s*)?(\d)\.\s+Type something\.?\s*$/.exec(line)).findLast(Boolean)
+  return option ? Number(option[1]) : undefined
+}
+/** The review step of a menu with several questions, with "Submit answers" selected. */
+const answersReviewShown = (screen: string) => /^\s*❯\s*\d\.\s+Submit answers/m.test(screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible).join("\n"))
+/** A menu with several questions shows them as tabs ending in "Submit". */
+const questionTabsShown = (screen: string) => screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible).some((line) => /☐|☒/.test(line) && /Submit/.test(line))
 /** How long an app gets to switch to a session before focus gives up on it. */
 export const REX_CLIENT_TIMEOUT_MS = 3_000
 const SELF_REPORTING_HARNESSES = new Set(["claude", "pi"])
@@ -706,6 +720,34 @@ export class RexAdapter implements Multiplexer {
       if (check < REX_PROMPT_SUBMIT_CHECKS - 1) await key("enter")
     }
     throw new Error("prompt stalled in the input box: Enter did not submit it")
+  }
+
+  /**
+   * Answer Claude's open question menu as a person would: pick its free-text option by number, paste the text, Enter.
+   * A menu with several questions then moves to its next question; Tab steps through to the review and its selected
+   * "Submit answers" is pressed, leaving the other questions unanswered. Refused (nothing typed) when no question menu
+   * shows; reported as stalled when the menu does not go away.
+   */
+  async answerAgentQuestion(location: NativeLocation, text: string) {
+    location = await this.located(location)
+    if (!location.nativePaneId) throw new Error("Agent question answer requires a pane location")
+    const target = { session_id: location.nativeSessionId, block_id: location.nativePaneId }
+    const key = (name: string) => this.call("block.event", { ...target, event: { type: "key", payload: { key: name } } })
+    const option = questionMenuOf(await this.screen(location) ?? "")
+    if (option === undefined) throw new Error("no question menu is on the screen")
+    await key(String(option))
+    await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+    await this.call("block.event", { ...target, event: { type: "paste", payload: { text: text.replace(/\s*\n\s*/g, " ") } } })
+    await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+    await key("enter")
+    for (let check = 0; check < 6; check += 1) {
+      await this.sleep(REX_PROMPT_CONFIRM_MS)
+      const screen = await this.screen(location) ?? ""
+      if (answersReviewShown(screen)) await key("enter")
+      else if (questionMenuOf(screen) !== undefined && questionTabsShown(screen)) await key("tab")
+      else if (questionMenuOf(screen) === undefined) return
+    }
+    throw new Error("question answer stalled: the menu is still open")
   }
 
   private async leadStatus(location: NativeLocation) {

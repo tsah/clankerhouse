@@ -43,7 +43,9 @@ interface Pane {
   /** Make the next prompt hand-offs fail with this message. */
   failWith: string[]
   /** Claude's own status report through Rex (OSC 7501), if any. */
-  agentStatus?: { agent: string; status: string; reportedAt: number }
+  agentStatus?: { agent: string; status: string; reportedAt: number; blockedKind?: string; message?: string }
+  /** Text typed as the answer to Claude's question menu. */
+  answers: string[]
 }
 
 const CLANKER = "clanker-msg"
@@ -71,13 +73,14 @@ const fakeRex = (pane: Pane) => new ManagedMultiplexer(Object.assign({
     pane.prompts.push(text)
     if (failure) throw new Error(failure)
   },
+  answerAgentQuestion: async (_location: unknown, text: string) => { pane.answers.push(text) },
 }, pane.interruptOutcome === undefined ? {} : {
   interruptAgent: async () => { pane.interrupts += 1; return pane.interruptOutcome },
 }) as unknown as Multiplexer)
 
 const setup = (options: { interruptOutcome?: AgentInterruptOutcome; focused?: boolean } = {}) => {
   const reports = isolate()
-  const pane: Pane = { prompts: [], interrupts: 0, interruptOutcome: options.interruptOutcome, focused: options.focused ?? false, failWith: [] }
+  const pane: Pane = { prompts: [], interrupts: 0, interruptOutcome: options.interruptOutcome, focused: options.focused ?? false, failWith: [], answers: [] }
   const multiplexer = fakeRex(pane)
   const report = (state: string, generation: number, settledGeneration: number, extra: Record<string, unknown> = {}) =>
     writeFileSync(join(reports, "block_p7.json"), JSON.stringify({ harness: "claude", clankerId: CLANKER, pane: PANE, state, generation, settledGeneration, updatedAt: Date.now(), ...extra }))
@@ -548,5 +551,109 @@ describe("a turn that ended on an API error", () => {
     expect(await clankerStatus(CLANKER, multiplexer)).toMatchObject({ state: "blocked", blockedKind: "usage-limit", blockedMessage: "You've hit your weekly limit" })
     pane.agentStatus = { agent: "claude", status: "working", reportedAt: now + 1_000 }
     expect(await clankerStatus(CLANKER, multiplexer)).toMatchObject({ state: "working" })
+  })
+})
+
+describe("a turn Claude reports ended on an API error", () => {
+  test("is a settled turn, not a person's: a send goes straight in, and one held before it goes in on the next pass", async () => {
+    const { pane, multiplexer, report } = setup()
+    const now = Date.now()
+    const lost = { agent: "claude", status: "blocked", blockedKind: "error", message: "API Error: Connection lost mid-response. The response above may be incomplete.", reportedAt: now }
+    // Held while the turn ran; then the connection dropped and Claude said so.
+    report("working", 1, 0)
+    const held = await sendClanker(CLANKER, "carry on", {}, multiplexer)
+    expect(held).toMatchObject({ status: "queued" })
+    pane.agentStatus = lost
+    report("done", 1, 1, { hookEvent: "StopFailure", turnError: { error: "server_error", message: lost.message, at: now - 1_000 } })
+    const status = await sendStatus(held.messageId, multiplexer)
+    expect(status.heldBecause ?? "").not.toContain("waiting on a person")
+    expect(pane.prompts).toEqual([`[clankerhouse ${held.messageId} from operator] carry on`])
+  })
+
+  test("Claude's own report of the error is enough when no StopFailure came (the hook still says working)", async () => {
+    const { pane, multiplexer, report } = setup()
+    pane.agentStatus = { agent: "claude", status: "blocked", blockedKind: "error", message: "API Error: Connection lost mid-response.", reportedAt: Date.now() }
+    report("working", 1, 0)
+    const receipt = await sendClanker(CLANKER, "carry on", {}, multiplexer)
+    expect(receipt).toMatchObject({ status: "handed-over" })
+    expect(pane.prompts).toHaveLength(1)
+  })
+
+  test("a usage limit stays held on a person", async () => {
+    const { pane, multiplexer, report } = setup()
+    const now = Date.now()
+    pane.agentStatus = { agent: "claude", status: "blocked", blockedKind: "error", message: "You've hit your weekly limit", reportedAt: now }
+    report("blocked", 1, 1, { hookEvent: "StopFailure", turnError: { error: "rate_limit", message: "You've hit your weekly limit", at: now - 1_000 } })
+    const receipt = await sendClanker(CLANKER, "carry on", {}, multiplexer)
+    expect(receipt).toMatchObject({ status: "queued" })
+    expect(pane.prompts).toEqual([])
+  })
+})
+
+describe("a Claude clanker on its question menu", () => {
+  const menu = () => ({ agent: "claude", status: "blocked", blockedKind: "question", message: "answer: Pick a colour (Red · Blue)", reportedAt: Date.now() })
+
+  test("gets a send as the menu's free-text answer, acknowledged once its tag is in the transcript", async () => {
+    const { pane, multiplexer, report } = setup()
+    const transcript = join(roots.at(-1)!, "session.jsonl")
+    writeFileSync(transcript, "")
+    pane.agentStatus = menu()
+    report("working", 1, 0, { transcriptPath: transcript })
+    const receipt = await sendClanker(CLANKER, "Green, please", { sender: "clanker-parent" }, multiplexer)
+    expect(receipt).toMatchObject({ status: "handed-over", confirmed: true })
+    expect(pane.answers).toEqual([`[clankerhouse ${receipt.messageId} from clanker-parent] Green, please`])
+    expect(pane.prompts).toEqual([])
+    // Claude records the answer as the tool's result; no hook sees a prompt.
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: `User has answered your questions: "Pick a colour"="${pane.answers[0]}"` }] } }) + "\n")
+    pane.agentStatus = { agent: "claude", status: "done", reportedAt: Date.now() + 1_000 }
+    report("done", 1, 1, { transcriptPath: transcript })
+    const after = await deliverQueuedMessages(multiplexer)
+    expect(after.acked).toEqual([receipt.messageId])
+    expect(await sendStatus(receipt.messageId, multiplexer)).toMatchObject({ state: "acked", proof: "landed" })
+    expect(pane.prompts).toEqual([])
+  })
+
+  test("a message held behind a turn goes in as the answer when the menu opens; not while the operator's focus is on it", async () => {
+    const { pane, multiplexer, report } = setup({ focused: true })
+    report("working", 1, 0)
+    const receipt = await sendClanker(CLANKER, "Blue", {}, multiplexer)
+    pane.agentStatus = menu()
+    expect((await sendStatus(receipt.messageId, multiplexer)).heldBecause).toContain("question menu")
+    expect(pane.answers).toEqual([])
+    pane.focused = false
+    await deliverQueuedMessages(multiplexer)
+    expect(pane.answers).toEqual([`[clankerhouse ${receipt.messageId} from operator] Blue`])
+  })
+
+  test("a permission prompt is never answered", async () => {
+    const { pane, multiplexer, report } = setup()
+    pane.agentStatus = { agent: "claude", status: "blocked", blockedKind: "permission", message: "Bash: rm -rf build", reportedAt: Date.now() }
+    report("blocked", 1, 0)
+    const receipt = await sendClanker(CLANKER, "yes", {}, multiplexer)
+    expect(receipt).toMatchObject({ status: "queued" })
+    await deliverQueuedMessages(multiplexer)
+    expect(pane.answers).toEqual([])
+    expect(pane.prompts).toEqual([])
+  })
+})
+
+describe("cancelling a message", () => {
+  test("a queued message is withdrawn, never delivered, and its sender is told; a landed one cannot be", async () => {
+    const { pane, multiplexer, report, submitted } = setup()
+    report("working", 1, 0)
+    const stale = await sendClanker(CLANKER, "stale duplicate", { sender: "clanker-parent" }, multiplexer)
+    const cancelled = withStore((store) => store.cancelMessage(stale.messageId))
+    expect(cancelled).toMatchObject({ state: "orphaned", orphanReason: "cancelled" })
+    report("done", 1, 1)
+    await deliverQueuedMessages(multiplexer)
+    expect(pane.prompts).toEqual([])
+    const watched = withStore((store) => store.deliveryWatchCandidates()).find((message) => message.messageId === stale.messageId)!
+    const actions = deliveryWatchActions(watched, undefined, "repo", Date.now())
+    expect(actions).toEqual([{ kind: "notice", notice: "failed", to: "clanker-parent", text: expect.stringContaining("was NOT delivered: it was cancelled") }])
+    // Delivered and acknowledged: nothing left to cancel.
+    const landed = await sendClanker(CLANKER, "fresh", {}, multiplexer)
+    report("working", 2, 1, { prompts: [submitted(pane.prompts[0]!, 2)] })
+    await sendStatus(landed.messageId, multiplexer)
+    expect(withStore((store) => store.cancelMessage(landed.messageId))).toBeUndefined()
   })
 })

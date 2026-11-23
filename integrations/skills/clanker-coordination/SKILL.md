@@ -34,6 +34,7 @@ printf '%s' "$message" | clankers send "$clanker_id" --wait-delivered --timeout 
 printf '%s' "$message" | clankers send "$clanker_id" --request-id "$key"   # safe to retry
 printf '%s' "$message" | clankers send "$clanker_id" --delivery restart    # Claude on hc: interrupt, then deliver
 clankers send-status "$message_id"   # stage: queued|typed|started|settled|handled|orphaned; proof: landed|queued|unconfirmed|lost; heldBecause
+clankers send-status "$message_id" --cancel   # withdraw a stale message that has not landed; its sender is told
 clankers inbox read "$message_id"    # as the recipient: the full text of a pointer prompt (typed delivery only)
 clankers inbox ack "$message_id"     # as the recipient: after acting on it
 clankers wait "$clanker_id" --message "$message_id" --timeout 600

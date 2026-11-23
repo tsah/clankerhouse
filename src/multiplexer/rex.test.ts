@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { paneLocation, sessionLocation, windowLocation } from "./interface"
-import { inputBoxOf, limitDialogShown, visibleText, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
+import { inputBoxOf, limitDialogShown, questionMenuOf, visibleText, psProcessGroups, REX_POPUP_LABEL_PREFIX, unsentPrompt, REX_STARTUP_SILENCE_MS, REX_UNSET_ON_SPAWN, RexAdapter, RexClaimStore, rexChangeKind, rexLabel, rexLaunchCommand, type RexRun } from "./rex"
 
 /** Each real-server test starts several rex processes; a cold start takes seconds on a loaded box (bun's default is 5 s). */
 const REAL_SERVER_TIMEOUT_MS = 30_000
@@ -197,6 +197,47 @@ describe("Rex adapter, scripted", () => {
     expect(await adapter.interruptAgent(pane)).toBe("not_working")
     state = ""
     expect(await adapter.interruptAgent(pane)).toBe("sent")
+  })
+
+  test("answers Claude's question menu through its free-text option, submitting a menu of several questions", async () => {
+    const rule = "─".repeat(40)
+    // As Claude 2.1.330 draws AskUserQuestion (captured 2026-11-23).
+    const menu = (tabs: string) => `${rule}\n${tabs}\n\nPick a colour\n\n❯ 1. Red\n     Red\n  2. Blue\n     Blue\n  3. Type something.\n${rule}\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n`
+    const review = `${rule}\n←  ☒ Colour  ☐ Size  ✔ Submit  →\n\nReview your answers\n\n ● Pick a colour\n   → Green\n\n❯ 1. Submit answers\n  2. Cancel\n`
+    const answered = `● Answered Claude's questions:\n${rule}\n❯ \n${rule}\n  -- INSERT --\n`
+    const permission = `Bash command\n  rm -rf build\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel\n`
+    expect(questionMenuOf(menu(" ☐ Colour"))).toBe(3)
+    expect(questionMenuOf(permission)).toBeUndefined()
+    expect(questionMenuOf(answered)).toBeUndefined()
+    const answering = (screens: string[]) => {
+      const keys: string[] = []
+      const run: RexRun = async (args, options) => {
+        if (args[0] === "do") return { exitCode: 0, stdout: JSON.stringify(oneSession([])), stderr: "" }
+        if (args.includes("capture")) return { exitCode: 0, stdout: screens.length > 1 ? screens.shift()! : screens[0]!, stderr: "" }
+        if (args[0] === "api" && args[1] === "call") {
+          const event = JSON.parse(options?.stdin ?? "{}").event
+          keys.push(event.type === "paste" ? `paste:${event.payload.text}` : event.payload.key)
+          return { exitCode: 0, stdout: "{}", stderr: "" }
+        }
+        return { exitCode: 2, stdout: "", stderr: "unexpected" }
+      }
+      return { keys, adapter: new RexAdapter({ run, claims: new RexClaimStore(scratch()), observeScript, env: {}, sleep: async () => {} }) }
+    }
+    const pane = paneLocation("session:s1", "window:w1", "block:b1")
+    const single = answering([menu(" ☐ Colour"), answered])
+    await single.adapter.answerAgentQuestion(pane, "[clankerhouse msg-1 from x] Green\nplease")
+    expect(single.keys).toEqual(["3", "paste:[clankerhouse msg-1 from x] Green please", "enter"])
+    // Several questions: the next one opens, Tab steps to the review, Enter submits.
+    const several = answering([menu("←  ☐ Colour  ☐ Size  ✔ Submit  →"), menu("←  ☒ Colour  ☐ Size  ✔ Submit  →"), review, answered])
+    await several.adapter.answerAgentQuestion(pane, "Green")
+    expect(several.keys).toEqual(["3", "paste:Green", "enter", "tab", "enter"])
+    // No question menu (a permission prompt): nothing is typed.
+    const refused = answering([permission])
+    await expect(refused.adapter.answerAgentQuestion(pane, "yes")).rejects.toThrow("no question menu")
+    expect(refused.keys).toEqual([])
+    // A menu that never closes is stalled, which the sender treats as unconfirmed.
+    const stuck = answering([menu(" ☐ Colour")])
+    await expect(stuck.adapter.answerAgentQuestion(pane, "Green")).rejects.toThrow("stalled")
   })
 
   test("reads Claude's input box back after Enter: a lost Enter is pressed again, a suggestion is not text, a draft is never touched", async () => {

@@ -219,8 +219,11 @@ if [[ "$with_systemd" == true ]]; then
         python3 - "$template" "$temporary" "$active" "$bin_dir" <<'PY'
 from pathlib import Path
 import sys
+import os
 source, destination, active, bin_dir = sys.argv[1:]
-text = Path(source).read_text().replace("@CLANKERHOUSE_HOME@", active).replace("@CLANKERHOUSE_BIN@", bin_dir)
+# The clankers' slice may use every core but one.
+cpu_quota = f"{max(1, (os.cpu_count() or 1) - 1) * 100}%"
+text = Path(source).read_text().replace("@CLANKERHOUSE_HOME@", active).replace("@CLANKERHOUSE_BIN@", bin_dir).replace("@CLANKERHOUSE_SLICE_CPU_QUOTA@", cpu_quota)
 Path(destination).write_text(text)
 PY
         chmod 600 "$temporary"

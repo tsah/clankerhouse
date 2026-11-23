@@ -171,6 +171,8 @@ for skill_root in "$home/.agents/skills" "$home/.claude/skills" "$home/.codex/sk
     done
 done
 check "user units are rendered" bash -c "ls '$config/systemd/user/'clankerhouse-* >/dev/null 2>&1"
+check "the clankers' slice caps them at all cores but one" grep -qFx -- "CPUQuota=$(( ($(nproc) - 1) * 100 ))%" "$config/systemd/user/clankerhouse-clankers.slice"
+check "and no Recovery slice is rendered" test ! -e "$config/systemd/user/clankerhouse-recovery.slice"
 opencode_plugin="$config/opencode/plugins/clankerhouse-lifecycle.ts"
 opencode_skill="$config/opencode/skills/clanker-coordination"
 plugin_stamp=$(stat -c %i:%Y "$opencode_plugin")

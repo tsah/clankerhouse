@@ -1,8 +1,0 @@
-[Unit]
-Description=Clankerhouse aggregate clanker workload budget
-
-[Slice]
-CPUWeight=20
-CPUQuota=400%
-IOWeight=10
-MemoryHigh=50%

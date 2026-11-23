@@ -24,6 +24,9 @@ cd ~/clankerhouse && env -u CLANKERHOUSE_HOME -u CLANKERHOUSE_BIN_DIR -u CLANKER
   scripts/install --prefix "$HOME/.local" --integrations --rex
 ```
 
+On puffin (Linux) add `--systemd`: it renders `clankerhouse-clankers.slice`, the CPU and memory budget all clankers share,
+sized to the host's cores. Without it a slice file left by an older install stays as it was.
+
 The installer stages, tests and activates a version under `~/.local/lib/clankerhouse`; `--rex` links
 `~/.config/rex/clankerhouse-rex`, points `~/.config/rex/init.lua` at the installed module, reloads Rex's config and
 restarts the runner. Running clankers and open pickers need nothing else.

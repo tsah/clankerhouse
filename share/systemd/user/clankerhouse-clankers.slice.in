@@ -1,0 +1,10 @@
+[Unit]
+Description=Clankerhouse clankers' aggregate workload budget
+
+# Every clanker's scope runs here. The low weights let the operator's own work win any contention; the quota leaves
+# one core free (the installer sets it from this host's core count); MemoryHigh throttles, it never kills.
+[Slice]
+CPUWeight=20
+CPUQuota=@CLANKERHOUSE_SLICE_CPU_QUOTA@
+IOWeight=10
+MemoryHigh=75%

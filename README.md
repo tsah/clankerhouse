@@ -234,7 +234,7 @@ clankers ledger [--state open|closed] [--workshop ID]
 
 On first start the ledger imports the records of the retired Recovery store, `recovery.sqlite3`, which is left in place.
 
-Tracked harnesses run in per-Clanker systemd scopes under `clankerhouse-recovery.slice` (a historical name), which always receives low CPU and I/O weights. New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
+Tracked harnesses run in per-Clanker systemd scopes under `clankerhouse-clankers.slice`, which always receives low CPU and I/O weights; `scripts/install --systemd` renders its aggregate budget, which may use every core but one (clankers launched before 2026-11-23 stay in the retired `clankerhouse-recovery.slice` until they are relaunched). New clankers can declare `--resource-class interactive|validation-heavy|untrusted`; undeclared and migrated workloads use the conservative `untrusted` budget. When delegated by systemd, `CLANKERHOUSE_IO_READ_BANDWIDTH_MAX='/dev/DEVICE 60M'` adds a hard per-scope device limit. The server must keep the user systemd manager running after logout (normally via `loginctl enable-linger $USER`).
 
 ## Titles and fading
 

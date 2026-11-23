@@ -108,10 +108,12 @@ export const resumeLaunch = (clanker: LedgerClanker, workshop: WorkshopLaunchIde
 
 export const safeUnitPart = (value: string) => value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 160) || "unknown"
 
-/**
- * Runs a command in its own transient scope under the clanker budget, never in the caller's
- * cgroup. The slice keeps its historical name so running clankers stay in one budget.
- */
+/** The slice every clanker scope runs in; its aggregate budget is `share/systemd/user/clankerhouse-clankers.slice.in`. */
+export const CLANKERS_SLICE = "clankerhouse-clankers.slice"
+/** Where clankers launched before 2026-11-23 still run: the retired Recovery feature's slice, capped at 4 cores. */
+export const LEGACY_CLANKERS_SLICE = "clankerhouse-recovery.slice"
+
+/** Runs a command in its own transient scope under the clanker budget, never in the caller's cgroup. */
 export const ownedScopeCommand = (command: string[], unit: string, resourceClass: ResourceClass = "untrusted") => {
   if (Bun.env.CLANKERHOUSE_PROCESS_OWNER === "disabled") return command
   const budget = resourceClass === "interactive"
@@ -121,7 +123,7 @@ export const ownedScopeCommand = (command: string[], unit: string, resourceClass
       : { cpuQuota: "300%", ioWeight: 10, memoryHigh: "6G" }
   return [
     "systemd-run", "--user", "--scope", "--quiet", `--unit=${unit}`,
-    "--property=Slice=clankerhouse-recovery.slice",
+    `--property=Slice=${CLANKERS_SLICE}`,
     "--property=KillMode=control-group",
     "--property=TimeoutStopSec=10s",
     "--property=SendSIGKILL=yes",

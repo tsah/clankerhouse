@@ -157,6 +157,8 @@ describe("clanker process ownership", () => {
     expect(argv.slice(0, 4)).toEqual(["systemd-run", "--user", "--scope", "--quiet"])
     expect(argv).toContain("--unit=clankerhouse-clanker-a-b-17.scope")
     expect(argv).toContain("--property=KillMode=control-group")
+    // The clankers' own slice, not the retired Recovery feature's (its 4-core cap throttled every clanker).
+    expect(argv).toContain("--property=Slice=clankerhouse-clankers.slice")
     expect(argv).toContain("--property=IOWeight=10")
     expect(argv.at(-3)).toBe("pi")
     const validation = ownedScopeCommand(["pi"], "clankerhouse-clanker-heavy-18.scope", "validation-heavy")

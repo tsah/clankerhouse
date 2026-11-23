@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { basename } from "node:path"
-import { safeUnitPart } from "./harness-launch"
+import { CLANKERS_SLICE, LEGACY_CLANKERS_SLICE, safeUnitPart } from "./harness-launch"
 
 /** Resource facts about a clanker's process scope; each field is absent when it cannot be read. */
 export interface ClankerHealth {
@@ -15,6 +15,8 @@ export interface ClankerHealth {
 export interface HealthRoots {
   /** The cgroup v2 directory holding clanker scopes. */
   slice: string
+  /** The slice older launches still run in, searched too. */
+  legacySlice?: string
   proc: string
 }
 
@@ -24,8 +26,10 @@ const MAX_CMD = 200
 
 const defaultRoots = (): HealthRoots => {
   const uid = process.getuid?.() ?? 0
+  const parent = `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/clankerhouse.slice`
   return {
-    slice: `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/clankerhouse.slice/clankerhouse-recovery.slice`,
+    slice: `${parent}/${CLANKERS_SLICE}`,
+    legacySlice: `${parent}/${LEGACY_CLANKERS_SLICE}`,
     proc: "/proc",
   }
 }
@@ -33,15 +37,16 @@ const defaultRoots = (): HealthRoots => {
 const read = (path: string) => { try { return readFileSync(path, "utf8") } catch { return undefined } }
 
 /** The newest launch's scope directory for a clanker, matching `clankerUnitName`. */
-const scopeFor = (clankerId: string, slice: string) => {
+const scopeFor = (clankerId: string, ...slices: Array<string | undefined>) => {
   const prefix = `clankerhouse-${safeUnitPart(clankerId)}-`
-  let entries: string[]
-  try { entries = readdirSync(slice) } catch { return undefined }
-  const attempts = entries
-    .filter((name) => name.startsWith(prefix) && name.endsWith(".scope") && /^\d+$/.test(name.slice(prefix.length, -".scope".length)))
-    .map((name) => ({ name, attempt: Number(name.slice(prefix.length, -".scope".length)) }))
-    .sort((a, b) => b.attempt - a.attempt)
-  return attempts[0] ? `${slice}/${attempts[0].name}` : undefined
+  const attempts = slices.filter((slice): slice is string => !!slice).flatMap((slice) => {
+    let entries: string[]
+    try { entries = readdirSync(slice) } catch { return [] }
+    return entries
+      .filter((name) => name.startsWith(prefix) && name.endsWith(".scope") && /^\d+$/.test(name.slice(prefix.length, -".scope".length)))
+      .map((name) => ({ path: `${slice}/${name}`, attempt: Number(name.slice(prefix.length, -".scope".length)) }))
+  }).sort((a, b) => b.attempt - a.attempt)
+  return attempts[0]?.path
 }
 
 interface ProcStat { pid: number; ppid: number; state: string; startTicks: number }
@@ -64,7 +69,7 @@ const cmdline = (proc: string, pid: number) =>
 /** Health of a clanker's scope. Read-only and Linux-only; elsewhere it is empty. */
 export function clankerHealth(clankerId: string, roots: HealthRoots = defaultRoots()): ClankerHealth {
   if (process.platform !== "linux" && roots.proc === "/proc") return {}
-  const scope = scopeFor(clankerId, roots.slice)
+  const scope = scopeFor(clankerId, roots.slice, roots.legacySlice)
   if (!scope) return {}
   const health: ClankerHealth = {}
 

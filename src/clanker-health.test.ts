@@ -21,7 +21,12 @@ const fakeHost = () => {
     writeFileSync(join(proc, String(pid), "stat"), `${pid} (odd) name) ${fields.join(" ")}\n`)
     writeFileSync(join(proc, String(pid), "cmdline"), `${argv.join("\0")}\0`)
   }
-  return { roots: { slice, proc }, scope, process }
+  const legacySlice = join(root, "legacy-slice")
+  const legacyScope = (name: string, files: Record<string, string>) => {
+    mkdirSync(join(legacySlice, name), { recursive: true })
+    for (const [file, text] of Object.entries(files)) writeFileSync(join(legacySlice, name, file), text)
+  }
+  return { roots: { slice, legacySlice, proc }, scope, legacyScope, process }
 }
 
 describe("clanker health", () => {
@@ -48,6 +53,14 @@ describe("clanker health", () => {
     host.scope("clankerhouse-clanker-b-1.scope", { "memory.current": "5\n", "memory.high": "max\n", "cgroup.procs": "200\n" })
     host.process(200, 1, "S", 10, ["pi"])
     expect(clankerHealth("clanker-b", host.roots)).toEqual({ memory: { current: 5, high: null }, dState: [] })
+  })
+
+  test("finds a clanker launched before the slice was renamed, and prefers its newer launch in the new slice", () => {
+    const host = fakeHost()
+    host.legacyScope("clankerhouse-clanker-c-5.scope", { "memory.current": "3\n", "memory.high": "max\n", "cgroup.procs": "" })
+    expect(clankerHealth("clanker-c", host.roots)).toEqual({ memory: { current: 3, high: null }, dState: [] })
+    host.scope("clankerhouse-clanker-c-6.scope", { "memory.current": "4\n", "memory.high": "max\n", "cgroup.procs": "" })
+    expect(clankerHealth("clanker-c", host.roots)).toEqual({ memory: { current: 4, high: null }, dState: [] })
   })
 
   test("is empty when the clanker has no scope", () => {

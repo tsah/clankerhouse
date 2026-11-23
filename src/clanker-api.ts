@@ -260,6 +260,13 @@ const withTurnError = <T extends { state: ClankerState; blockedKind?: string; bl
   return { ...merged, state: "blocked", blockedKind: kind, blockedMessage: failure.message || failure.error }
 }
 
+/**
+ * A clanker's name is its window's label, unless that is the label Rex makes up for an unlabeled window ("Window " and
+ * the id's last 8 hex digits): then it is the session's, the name the operator sees and renames.
+ */
+const clankerName = (window: { id: string; nativeName: string }, session: string) =>
+  window.nativeName && window.nativeName !== `Window ${window.id.replace(/-/g, "").slice(-8)}` ? window.nativeName : session || window.nativeName
+
 /** Pane metadata rows of one Multiplexer observation (harness-bearing panes only). */
 export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMetadata[] =>
   snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.flatMap((pane) => {
@@ -273,7 +280,7 @@ export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMet
       sessionId: session.id,
       session: session.nativeName,
       window: window.id,
-      name: window.nativeName,
+      name: clankerName(window, session.nativeName),
       pane: pane.id,
       cwd: pane.currentPath,
       worktreePath: claims.worktreePath || session.worktreePath || "",

@@ -3,9 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { clankerStatus, deliverQueuedMessages, resultForClanker, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
+import { clankerStatus, deliverQueuedMessages, paneMetadataFromSnapshot, resultForClanker, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
 import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
+import type { MultiplexerSnapshot } from "./multiplexer/interface"
 import { advanceProjection } from "./projection"
 import { FAKE_REX_HOST, fakeRex, writeRexClaims } from "./fixtures/fake-rex"
 
@@ -686,3 +687,16 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
 
 })
 
+
+describe("clanker names", () => {
+  test("an unlabeled Rex window's clanker is named by its session; a labeled one keeps its window label", () => {
+    const window = (id: string, nativeName: string) => ({ id, index: "1", nativeName, active: true, panes: [{ id: `block:${id}`, harness: "claude", currentPath: "/repo", claims: {} }] })
+    const snapshot = { kind: "rex", instanceId: "rex", sessions: [{
+      id: "session:s1", nativeName: "mac-manager", worktreePath: "", windows: [
+        window("window:01a1e8a3-828d-7ae5-b7b5-eea080c64075", "Window 80c64075"),
+        window("window:01a2087a-4de1-7b7d-9fd4-623abc0aa040", "launch-test"),
+      ],
+    }] } as unknown as MultiplexerSnapshot
+    expect(paneMetadataFromSnapshot(snapshot).map((row) => row.name)).toEqual(["mac-manager", "launch-test"])
+  })
+})

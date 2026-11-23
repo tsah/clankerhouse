@@ -803,28 +803,6 @@ fn subtree_recency(
     recency
 }
 
-fn expanded_lineage_row_count(
-    index: usize,
-    sessions: &[SessionRow],
-    by_parent: &HashMap<Option<String>, Vec<usize>>,
-    visiting: &mut HashSet<usize>,
-) -> usize {
-    if !visiting.insert(index) {
-        return 0;
-    }
-    let session = &sessions[index];
-    let children = session
-        .workshop_id
-        .as_ref()
-        .and_then(|id| by_parent.get(&Some(id.clone())))
-        .into_iter()
-        .flatten()
-        .map(|child| expanded_lineage_row_count(*child, sessions, by_parent, visiting))
-        .sum::<usize>();
-    visiting.remove(&index);
-    1 + children
-}
-
 fn subtree_has_clanker(
     index: usize,
     sessions: &[SessionRow],
@@ -1398,7 +1376,7 @@ impl App {
         host.error.clear();
         let shown = self.tab == 0 || self.tab == index + 1;
         if shown || initial {
-            self.show_tab(initial);
+            self.show_tab();
         }
         Ok(())
     }
@@ -1423,12 +1401,9 @@ impl App {
         }
     }
 
-    fn show_tab(&mut self, initial: bool) {
+    fn show_tab(&mut self) {
         let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
         self.sessions = self.tab_sessions();
-        if initial {
-            self.initialize_expansion();
-        }
         self.rebuild(selected_key.as_deref());
     }
 
@@ -1447,7 +1422,6 @@ impl App {
         // The new tab opens like the picker does: on the current Workshop when this tab has it, otherwise on the row
         // nearest the prompt, scrolled from there.
         self.sessions = self.tab_sessions();
-        self.initialize_expansion();
         self.rebuild(None);
         self.list_start = None;
     }
@@ -1462,27 +1436,6 @@ impl App {
             .and_then(|label| self.hosts.iter().find(|host| host.label == label))
             .map(|host| host.ssh.clone())
             .unwrap_or_default()
-    }
-
-    fn initialize_expansion(&mut self) {
-        let mut by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
-        for (index, session) in self.sessions.iter().enumerate() {
-            by_parent.entry(session.parent_workshop_id.clone()).or_default().push(index);
-        }
-        for (index, session) in self.sessions.iter().enumerate() {
-            let children = session
-                .workshop_id
-                .as_ref()
-                .and_then(|id| by_parent.get(&Some(id.clone())))
-                .map_or(0, Vec::len);
-            let state = subtree_state(index, &self.sessions, &by_parent, &mut HashSet::new());
-            let expanded_rows = expanded_lineage_row_count(index, &self.sessions, &by_parent, &mut HashSet::new());
-            if children > 0
-                && (expanded_rows < 10 || matches!(state, ClankerState::Working | ClankerState::Done))
-            {
-                self.expanded_lineage.insert(session.name.clone());
-            }
-        }
     }
 
     fn rebuild(&mut self, selected_key: Option<&str>) {
@@ -1573,8 +1526,8 @@ impl App {
             if !current_lineage.insert(index) {
                 break;
             }
-            // Size defaults and manual collapse must never hide the current
-            // Workshop. Reapply on refresh too, since lineage/names may change.
+            // Lineages start collapsed, but neither that nor a manual collapse may
+            // hide the current Workshop. Reapply on refresh too, since lineage/names may change.
             self.expanded_lineage.insert(self.sessions[index].name.clone());
             current = self.sessions[index]
                 .parent_workshop_id
@@ -4290,30 +4243,25 @@ mod tests {
     }
 
     #[test]
-    fn failed_lineage_with_fewer_than_ten_rows_starts_expanded() {
-        let snapshot: Snapshot = serde_json::from_str(r#"{
-            "version": 11,
-            "sessions": [
-                {
-                    "name": "failed-root", "path": "/tmp/root", "workshopId": "root",
-                    "target": {"type": "directory", "path": "/tmp/root"}
-                },
-                {
-                    "name": "failed-child", "path": "/tmp/failed", "workshopId": "failed-child", "parentWorkshopId": "root",
-                    "target": {"type": "directory", "path": "/tmp/failed"},
-                    "details": [{"kind": "clanker", "status": "failed", "state": "failed", "target": {"type": "directory", "path": "/tmp/failed"}}]
-                },
-                {
-                    "name": "neutral-child", "path": "/tmp/neutral", "workshopId": "neutral-child", "parentWorkshopId": "root",
-                    "target": {"type": "directory", "path": "/tmp/neutral"}
-                }
-            ]
-        }"#).unwrap();
-        let app = App::from_snapshot(PathBuf::from("/tmp/unused"), String::new(), snapshot).unwrap();
+    fn lineages_start_collapsed_except_the_current_one() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({"version": CACHE_VERSION, "sessions": [
+            {"name":"other-root", "path":"/other-root", "workshopId":"other-root", "target":{"type":"session","session":"other-root"}},
+            {"name":"failed-child", "path":"/failed-child", "workshopId":"failed-child", "parentWorkshopId":"other-root", "target":{"type":"session","session":"failed-child"},
+             "details":[{"kind":"clanker","status":"failed","state":"failed","target":{"type":"session","session":"failed-child"}}]},
+            {"name":"working-child", "path":"/working-child", "parentWorkshopId":"other-root", "target":{"type":"session","session":"working-child"},
+             "details":[{"kind":"clanker","status":"working","state":"working","target":{"type":"session","session":"working-child"}}]},
+            {"name":"current-root", "path":"/current-root", "workshopId":"current-root", "target":{"type":"session","session":"current-root"}},
+            {"name":"current", "path":"/current", "workshopId":"current", "parentWorkshopId":"current-root", "target":{"type":"session","session":"current"}},
+            {"name":"current-child", "path":"/current-child", "parentWorkshopId":"current", "target":{"type":"session","session":"current-child"}}
+        ]})).unwrap();
+        let app = App::from_snapshot(PathBuf::from("/nonexistent/state.json"), "current".into(), snapshot).unwrap();
 
-        assert!(app.expanded_lineage.contains("failed-root"));
-        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(), vec!["failed-child", "neutral-child", "failed-root"]);
-        let root = app.rows.iter().find(|row| row.session.name == "failed-root").unwrap();
+        let shown = |name: &str| app.rows.iter().any(|row| row.session.name == name);
+        assert!(shown("other-root"));
+        assert!(!shown("failed-child") && !shown("working-child"), "a lineage that is not current starts collapsed, whatever its state");
+        assert!(shown("current-root") && shown("current") && shown("current-child"), "the current Workshop's lineage starts expanded");
+        // A collapsed lineage still shows what its descendants are doing.
+        let root = app.rows.iter().find(|row| row.session.name == "other-root").unwrap();
         assert_eq!(row_glyph(root, "", 0), ("×", Color::Rgb(248, 113, 113)));
     }
 
@@ -4844,8 +4792,9 @@ mod tests {
         assert_eq!(row_glyph(parent, "", 0), ("·", Color::LightMagenta));
     }
 
+    /// An app over these rows with every lineage expanded, as a user who opened them all would see it.
     fn app_with_sessions(json: &str) -> App {
-        App::from_snapshot(
+        let mut app = App::from_snapshot(
             PathBuf::from("/nonexistent/state.json"),
             String::new(),
             Snapshot {
@@ -4853,7 +4802,14 @@ mod tests {
                 sessions: serde_json::from_str(json).unwrap(),
             },
         )
-        .unwrap()
+        .unwrap();
+        expand_all(&mut app);
+        app
+    }
+
+    fn expand_all(app: &mut App) {
+        app.expanded_lineage.extend(app.sessions.iter().map(|session| session.name.clone()));
+        app.rebuild(None);
     }
 
     fn apply_mutation_result(
@@ -6179,7 +6135,7 @@ mod tests {
         app.hosts[0].sessions = vec![host_session("local-one", false)];
         app.hosts[0].seen = true;
         app.hosts.push(HostTab { label: "puffin".into(), ssh: vec!["tsah@puffin".into()], sessions: vec![host_session("remote-one", true), host_session("remote-two", false)], seen: true, ..HostTab::default() });
-        app.show_tab(true);
+        app.show_tab();
         assert_eq!(app.sessions.iter().map(|session| session.name.as_str()).collect::<Vec<_>>(), vec!["local-one"]);
         assert_eq!(app.sessions[0].host, None);
         assert!(app.selected_host_ssh().is_empty());

@@ -39,6 +39,93 @@ export const REX_STARTUP_SILENCE_MS = 30_000
 export const REX_INTERRUPT_STEP_MS = 400
 /** Claude reads a paste before it takes the Enter that submits it. */
 export const REX_PROMPT_SUBMIT_DELAY_MS = 150
+/** How long after Enter the input box is read back, and how many reads (each but the last followed by Enter again). */
+export const REX_PROMPT_CONFIRM_MS = 800
+export const REX_PROMPT_SUBMIT_CHECKS = 3
+
+/** Box detection reads only the screen's tail, not the whole scrollback. */
+const SCREEN_TAIL_LINES = 80
+const RULE = /^\s*─{8,}/
+/**
+ * A screen line as a person reads it: styling dropped, cursor-forward moves (how the VT capture writes runs of
+ * spaces) turned back into spaces, and dim text (SGR 2, which is how Claude draws its suggestion) left out. Colour
+ * parameters are skipped whole, so the `2` in a truecolor `38;2;r;g;b` is not taken for dim.
+ */
+export const visibleText = (line: string) => {
+  let out = ""
+  let dim = false
+  const escape = /\x1b\[([0-9;?]*)([A-Za-z])/g
+  let at = 0
+  for (let match = escape.exec(line); match; match = escape.exec(line)) {
+    if (!dim) out += line.slice(at, match.index)
+    at = match.index + match[0].length
+    if (match[2] === "C") { if (!dim) out += " ".repeat(Number(match[1] || 1)); continue }
+    if (match[2] !== "m") continue
+    const params = (match[1] || "0").split(";").map((value) => Number(value || 0))
+    for (let index = 0; index < params.length; index += 1) {
+      const param = params[index]!
+      if (param === 38 || param === 48 || param === 58) { index += params[index + 1] === 5 ? 2 : params[index + 1] === 2 ? 4 : 0; continue }
+      if (param === 2) dim = true
+      else if (param === 0 || param === 22) dim = false
+    }
+  }
+  if (!dim) out += line.slice(at)
+  return out.replace(/\r/g, "")
+}
+const visible = visibleText
+
+/**
+ * The typed text in Claude's input box: the lines between the last two horizontal rules on the screen, with the
+ * prompt glyph and dim suggestion text removed. Undefined when the screen shows no such box (another program, or a
+ * dialog in its place). Takes plain or VT-styled screen text.
+ */
+export const inputBoxOf = (screen: string): string | undefined => {
+  const lines = screen.split("\n").map(visible)
+  const rules = lines.flatMap((line, index) => RULE.test(line) ? [index] : [])
+  if (rules.length < 2) return undefined
+  const [top, bottom] = [rules.at(-2)!, rules.at(-1)!]
+  return lines.slice(top + 1, bottom).map((line) => line.replace(/^\s*[❯>]\s?/, "").trimEnd()).join("\n").trim()
+}
+
+/**
+ * Whether the box holds this prompt: its clankerhouse tag (looked for across wrapped lines), its first line, or
+ * Claude's placeholder for a long paste.
+ */
+export const unsentPrompt = (box: string, prompt: string) => {
+  if (!box) return false
+  if (/\[Pasted text #\d+/.test(box)) return true
+  const tag = /\[clankerhouse (msg-[A-Za-z0-9-]+)/.exec(prompt)?.[1]
+  if (tag) return box.replace(/\s+/g, "").includes(tag)
+  const first = prompt.trim().split("\n")[0]!.trim().slice(0, 40)
+  return first.length > 0 && box.includes(first)
+}
+
+/**
+ * Whether the box holds this prompt and nothing else (an earlier copy whose Enter was lost), as opposed to someone's
+ * draft, which may even contain the prompt pasted onto it. Whitespace is ignored, since the box wraps lines.
+ */
+export const onlyThisPrompt = (box: string, prompt: string) => {
+  const squeeze = (value: string) => value.replace(/\s+/g, "")
+  return squeeze(box) === squeeze(prompt) || /^\[Pasted text #\d+[^\]]*\]$/.test(box.trim())
+}
+
+/** Claude's usage-limit dialog ("Stop and wait for limit to reset" / "Switch to extra usage"), which takes typed keys. */
+export const limitDialogShown = (screen: string) =>
+  /^\s*(❯\s*)?\d\.\s+(Stop and wait|Wait for (the )?limit)/im.test(screen.split("\n").slice(-16).map(visible).join("\n"))
+/**
+ * Claude's question menu (AskUserQuestion) on screen: the number of its free-text option ("N. Type something."), or
+ * undefined when no such menu is showing. Permission prompts have no free-text option, so they never match.
+ */
+export const questionMenuOf = (screen: string): number | undefined => {
+  const lines = screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible)
+  if (!lines.some((line) => /Enter to select/.test(line))) return undefined
+  const option = lines.map((line) => /^\s*(?:❯\s*)?(\d)\.\s+Type something\.?\s*$/.exec(line)).findLast(Boolean)
+  return option ? Number(option[1]) : undefined
+}
+/** The review step of a menu with several questions, with "Submit answers" selected. */
+const answersReviewShown = (screen: string) => /^\s*❯\s*\d\.\s+Submit answers/m.test(screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible).join("\n"))
+/** A menu with several questions shows them as tabs ending in "Submit". */
+const questionTabsShown = (screen: string) => screen.split("\n").slice(-SCREEN_TAIL_LINES).map(visible).some((line) => /☐|☒/.test(line) && /Submit/.test(line))
 /** How long an app gets to switch to a session before focus gives up on it. */
 export const REX_CLIENT_TIMEOUT_MS = 3_000
 const SELF_REPORTING_HARNESSES = new Set(["claude", "pi"])
@@ -587,14 +674,80 @@ export class RexAdapter implements Multiplexer {
     }
   }
 
-  /** Paste, then Enter as a key of its own, as a person would. */
+  /** The tail of the pane's screen with its terminal styling (dim suggestion text stays tellable), or undefined. */
+  private async screen(location: NativeLocation): Promise<string | undefined> {
+    try {
+      const result = await this.run(["capture", "-s", location.nativeSessionId, "-b", location.nativePaneId!, "--format=vt"], { timeoutMs: 5_000 })
+      return result.exitCode === 0 ? result.stdout.split("\n").slice(-SCREEN_TAIL_LINES).join("\n") : undefined
+    } catch { return undefined }
+  }
+
+  /**
+   * Paste, then Enter as a key of its own, as a person would. Before typing: a draft someone left in the input box is
+   * never touched (the hand-off is refused, and the message waits with that reason); an unsent copy of this same
+   * prompt (a lost Enter) is submitted rather than pasted again; and Claude's usage-limit dialog, when it has taken
+   * the box's place, is dismissed. After Enter the box is read back: the prompt still sitting there (Enter lost, as after a compaction) gets
+   * Enter again, and one that never leaves is reported as stalled, which the sender treats as unconfirmed and retries.
+   * Claude's greyed-out suggestion is dim text and never counts as a draft or as unsent text.
+   */
   async promptAgent(location: NativeLocation, text: string) {
     location = await this.located(location)
     if (!location.nativePaneId) throw new Error("Agent prompt requires a pane location")
     const target = { session_id: location.nativeSessionId, block_id: location.nativePaneId }
-    await this.call("block.event", { ...target, event: { type: "paste", payload: { text } } })
+    const key = (name: string) => this.call("block.event", { ...target, event: { type: "key", payload: { key: name } } })
+    const before = await this.screen(location)
+    const draft = before === undefined ? undefined : inputBoxOf(before)
+    if (draft && !onlyThisPrompt(draft, text)) throw new Error(`a draft is in the input box ("${draft.slice(0, 60)}"); typing would mix with it`)
+    if (draft) {
+      // An earlier copy of this very prompt is still sitting there (its Enter was lost): submit it, do not paste twice.
+      await key("enter")
+    } else {
+      if (before !== undefined && draft === undefined && limitDialogShown(before)) {
+        await key("escape")
+        await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+      }
+      // Clears a line Claude left behind where it honours ctrl+u; a dim suggestion needs nothing, the paste replaces it.
+      await key("ctrl+u")
+      await this.call("block.event", { ...target, event: { type: "paste", payload: { text } } })
+      await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+      await key("enter")
+    }
+    if (before === undefined) return
+    for (let check = 0; check < REX_PROMPT_SUBMIT_CHECKS; check += 1) {
+      await this.sleep(REX_PROMPT_CONFIRM_MS)
+      const box = inputBoxOf(await this.screen(location) ?? "")
+      if (box === undefined || !unsentPrompt(box, text)) return
+      if (check < REX_PROMPT_SUBMIT_CHECKS - 1) await key("enter")
+    }
+    throw new Error("prompt stalled in the input box: Enter did not submit it")
+  }
+
+  /**
+   * Answer Claude's open question menu as a person would: pick its free-text option by number, paste the text, Enter.
+   * A menu with several questions then moves to its next question; Tab steps through to the review and its selected
+   * "Submit answers" is pressed, leaving the other questions unanswered. Refused (nothing typed) when no question menu
+   * shows; reported as stalled when the menu does not go away.
+   */
+  async answerAgentQuestion(location: NativeLocation, text: string) {
+    location = await this.located(location)
+    if (!location.nativePaneId) throw new Error("Agent question answer requires a pane location")
+    const target = { session_id: location.nativeSessionId, block_id: location.nativePaneId }
+    const key = (name: string) => this.call("block.event", { ...target, event: { type: "key", payload: { key: name } } })
+    const option = questionMenuOf(await this.screen(location) ?? "")
+    if (option === undefined) throw new Error("no question menu is on the screen")
+    await key(String(option))
     await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
-    await this.call("block.event", { ...target, event: { type: "key", payload: { key: "enter" } } })
+    await this.call("block.event", { ...target, event: { type: "paste", payload: { text: text.replace(/\s*\n\s*/g, " ") } } })
+    await this.sleep(REX_PROMPT_SUBMIT_DELAY_MS)
+    await key("enter")
+    for (let check = 0; check < 6; check += 1) {
+      await this.sleep(REX_PROMPT_CONFIRM_MS)
+      const screen = await this.screen(location) ?? ""
+      if (answersReviewShown(screen)) await key("enter")
+      else if (questionMenuOf(screen) !== undefined && questionTabsShown(screen)) await key("tab")
+      else if (questionMenuOf(screen) === undefined) return
+    }
+    throw new Error("question answer stalled: the menu is still open")
   }
 
   private async leadStatus(location: NativeLocation) {

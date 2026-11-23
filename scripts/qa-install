@@ -166,7 +166,9 @@ check "the pre-rename Pi link is gone" bash -c "[[ ! -e '$home/.pi/agent/extensi
 check "the Pi extension links through the active path" test "$(readlink "$home/.pi/agent/extensions/clanker-lifecycle.ts")" = "$active/integrations/pi/clanker-lifecycle.ts"
 check "the OpenCode plugin is linked" test -L "$config/opencode/plugins/clankerhouse-lifecycle.ts"
 for skill_root in "$home/.agents/skills" "$home/.claude/skills" "$home/.codex/skills" "$home/.pi/agent/skills" "$config/opencode/skills"; do
-    check "the coordination skill is linked under ${skill_root#"$root/"}" test -L "$skill_root/clanker-coordination"
+    for skill in clanker-coordination handoff; do
+        check "the $skill skill is linked under ${skill_root#"$root/"}" test "$(readlink "$skill_root/$skill")" = "$active/integrations/skills/$skill"
+    done
 done
 check "user units are rendered" bash -c "ls '$config/systemd/user/'clankerhouse-* >/dev/null 2>&1"
 opencode_plugin="$config/opencode/plugins/clankerhouse-lifecycle.ts"
@@ -229,7 +231,8 @@ assert backup.stat().st_mode & 0o777 == 0o600
 # A plain Claude terminal must not invoke even an installed reporter.
 env = {k: v for k, v in os.environ.items() if k not in ("REX_BLOCK", "REX_SESSION", "HERDR_PANE_ID", "HC_TERMINAL_ID")}
 owned = [h["command"] for entries in data["hooks"].values() for entry in entries for h in entry["hooks"] if sys.argv[2] in h.get("command", "")]
-assert len(owned) == 6, owned
+# One per lifecycle event: SessionStart, PermissionRequest, PreToolUse, UserPromptSubmit, Stop, StopFailure, SessionEnd.
+assert len(owned) == 7, owned
 payload = '{"hook_event_name":"PreToolUse"}'
 def run_hook(command, environment):
     result = subprocess.run(["sh", "-c", command], input=payload, text=True, capture_output=True, env=environment, timeout=5)

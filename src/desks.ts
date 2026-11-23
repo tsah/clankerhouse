@@ -54,14 +54,15 @@ export const annotateDesks = (rows: SessionRow[], facts: DeskFacts) => {
     desks.set(row.workshopId, { routines: 0, ...(report ? { report, reportAt: facts.reportAt(row.workshopId) } : {}) })
   }
   if (desks.size === 0) return
-  // A Routine belongs to a clanker; the clanker's Workshop is on screen, or else in the ledger.
+  // A Routine belongs to its Workshop. One from before Workshops owned Routines (workshopId null until its first fire)
+  // is placed through the clanker that took its last wake: on screen, or else in the ledger.
   const onScreen = new Map<string, string>()
   for (const row of rows) {
     for (const detail of row.details) if (detail.clankerId && row.workshopId) onScreen.set(detail.clankerId, row.workshopId)
   }
   for (const routine of facts.routines) {
     if (routine.state !== "active") continue
-    const workshopId = onScreen.get(routine.clankerId) ?? facts.clankerWorkshop(routine.clankerId)
+    const workshopId = routine.workshopId ?? onScreen.get(routine.clankerId) ?? facts.clankerWorkshop(routine.clankerId)
     const desk = workshopId ? desks.get(workshopId) : undefined
     if (!desk) continue
     desk.routines += 1

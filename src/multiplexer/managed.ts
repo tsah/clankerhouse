@@ -74,6 +74,12 @@ export class ManagedMultiplexer {
     if (!this.capabilities().agentPrompt || !this.adapter.promptAgent) throw new UnsupportedMultiplexerOperation(this.kind, "agent prompt")
     return this.adapter.promptAgent(location, text)
   }
+  /** Whether the runtime can answer a harness's question menu (Claude's AskUserQuestion) with free text. */
+  supportsQuestionAnswer() { return this.capabilities().agentPrompt && typeof this.adapter.answerAgentQuestion === "function" }
+  answerAgentQuestion(location: NativeLocation, text: string) {
+    if (!this.supportsQuestionAnswer()) throw new UnsupportedMultiplexerOperation(this.kind, "question answer")
+    return this.adapter.answerAgentQuestion!(location, text)
+  }
   /** Whether the runtime can stop a harness's turn and say whether it stopped. */
   supportsInterrupt() { return typeof this.adapter.interruptAgent === "function" }
   interruptAgent(location: NativeLocation) {

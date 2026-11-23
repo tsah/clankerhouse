@@ -286,3 +286,92 @@ export const needsMeEntry = (row: SessionRow, position: number, registry: { labe
     createdAt: registry.createdAt ?? null,
   }
 }
+
+/** What a Routine alert row needs: the Routine and, when known, its Workshop and that Workshop's open row. */
+export interface RoutineAlertFacts {
+  routineId: string
+  name: string | null
+  clankerId: string
+  workshopId: string | null
+  alert: { kind: "broken" | "ended"; reason: string; at: number }
+  /** The Workshop's path and branch from the registry, when it still has the Workshop. */
+  workshop?: { path: string; branch: string }
+  /** The Workshop's open row in the snapshot, so Enter lands on it. */
+  row?: SessionRow
+}
+
+/**
+ * A broken or ended Routine as a needs-me row (reason `routine-broken` or `routine-ended`). It is
+ * listed even when its Workshop has no open session, which is the usual case: the session that
+ * should have taken the wake is the one that did not come back.
+ */
+export const routineNeedsMeEntry = (facts: RoutineAlertFacts, position: number, registry: { labels?: Record<string, string>; createdAt?: number } = {}): NeedsMeEntry => {
+  const path = facts.row?.path ?? facts.workshop?.path ?? ""
+  const label = facts.name ?? facts.routineId
+  return {
+    position,
+    workshopId: facts.workshopId,
+    name: facts.row?.name ?? (path ? path.split("/").pop() ?? label : label),
+    session: facts.row && facts.row.target.type !== "directory" ? facts.row.target.session : "",
+    title: facts.row?.title ?? null,
+    project: facts.row?.project ?? null,
+    branch: facts.row?.branch ?? facts.workshop?.branch ?? "",
+    path,
+    pane: null,
+    clankerId: facts.clankerId,
+    state: null,
+    target: facts.row?.target ?? { type: "directory", path },
+    reason: `routine-${facts.alert.kind}`,
+    since: facts.alert.at,
+    detail: label,
+    excerpt: firstLine(`Routine ${label} (${facts.routineId}) ${facts.alert.kind === "ended" ? "ended" : "is broken"}: ${facts.alert.reason}`, 240) ?? null,
+    deferred: false,
+    snoozedUntil: null,
+    waitingOn: null,
+    labels: { ...registry.labels },
+    createdAt: registry.createdAt ?? null,
+  }
+}
+
+/** What an undelivered-message row needs: the message, why, and its recipient's Workshop when known. */
+export interface MessageAlertFacts {
+  messageId: string
+  clankerId: string
+  sender: string
+  name: string
+  reason: string
+  at: number
+  workshop?: { id: string; path: string; branch: string }
+  row?: SessionRow
+}
+
+/**
+ * A message the delivery watch escalated (reason `message-undelivered`): it has neither landed nor been dismissed.
+ * Listed whether or not the recipient's Workshop is open, since a recipient that is gone is one of the reasons.
+ */
+export const messageNeedsMeEntry = (facts: MessageAlertFacts, position: number, registry: { labels?: Record<string, string>; createdAt?: number } = {}): NeedsMeEntry => {
+  const path = facts.row?.path ?? facts.workshop?.path ?? ""
+  return {
+    position,
+    workshopId: facts.workshop?.id ?? facts.row?.workshopId ?? null,
+    name: facts.row?.name ?? (path ? path.split("/").pop() ?? facts.name : facts.name),
+    session: facts.row && facts.row.target.type !== "directory" ? facts.row.target.session : "",
+    title: facts.row?.title ?? null,
+    project: facts.row?.project ?? null,
+    branch: facts.row?.branch ?? facts.workshop?.branch ?? "",
+    path,
+    pane: null,
+    clankerId: facts.clankerId,
+    state: null,
+    target: facts.row?.target ?? { type: "directory", path },
+    reason: "message-undelivered",
+    since: facts.at,
+    detail: facts.messageId,
+    excerpt: firstLine(`Message ${facts.messageId} from ${facts.sender} to ${facts.name} not delivered: ${facts.reason}. Dismiss: clankers send-status ${facts.messageId} --dismiss`, 300) ?? null,
+    deferred: false,
+    snoozedUntil: null,
+    waitingOn: null,
+    labels: { ...registry.labels },
+    createdAt: registry.createdAt ?? null,
+  }
+}

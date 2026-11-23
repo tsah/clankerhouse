@@ -40,12 +40,17 @@ local function open_popup(ctx, mode)
   local focus = table.concat({ ctx.session_id or "", window or "", ctx.block_id or "" }, " ")
   local command = { "sh", "-c", find_launcher, launcher or "", "--popup", "--focus", focus, "--client", ctx.client_id or "" }
   if mode then table.insert(command, mode) end
+  local block = { flavor = terminal, label = popup_label, options = { command = command } }
   local _, err = rex.session.new_layer{
     window_id = window,
     bounds = { 0.06, 0.05, 0.88, 0.9 },
     focus = true,
-    layout = { block = { flavor = terminal, label = popup_label, options = { command = command } } },
+    layout = { block = block },
   }
+  if err ~= nil and window == nil then
+    -- A session with no tab has no window to float over: the picker gets a tab of its own, which closes with it.
+    _, err = rex.session.new_window{ session_id = ctx.session_id, window_label = popup_label, focus = true, layout = { block = block } }
+  end
   if err ~= nil then error(err, 0) end
 end
 

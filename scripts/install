@@ -125,16 +125,18 @@ for command in "$stage"/bin/*; do
     [[ -f "$command" && -x "$command" ]] || continue
     refuse_unmanaged "$bin_dir/$(basename "$command")" "command"
 done
+# Every skill under integrations/skills is linked into each harness's skills directory.
+skill_roots=("$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" "$HOME/.codex/skills")
+skills=()
+for skill in "$stage"/integrations/skills/*/SKILL.md; do skills+=("$(basename "$(dirname "$skill")")"); done
 if [[ "$with_integrations" == true ]]; then
     declare -a integration_destinations=(
         "$HOME/.pi/agent/extensions/clanker-lifecycle.ts"
         "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/clankerhouse-lifecycle.ts"
-        "$HOME/.agents/skills/clanker-coordination"
-        "$HOME/.claude/skills/clanker-coordination"
-        "$HOME/.pi/agent/skills/clanker-coordination"
-        "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/clanker-coordination"
-        "$HOME/.codex/skills/clanker-coordination"
     )
+    for skill_root in "${skill_roots[@]}"; do
+        for skill in "${skills[@]}"; do integration_destinations+=("$skill_root/$skill"); done
+    done
     for destination in "${integration_destinations[@]}"; do refuse_unmanaged "$destination" "integration"; done
 fi
 if [[ "$with_systemd" == true ]]; then
@@ -204,9 +206,8 @@ if [[ "$with_integrations" == true ]]; then
     if [[ -L "$legacy_pi_extension" && "$(readlink -- "$legacy_pi_extension")" == "$active/integrations/pi/tmux-clanker-lifecycle.ts" ]]; then
         rm -f -- "$legacy_pi_extension"
     fi
-    for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" "$HOME/.codex/skills"; do
-        destination="$skill_root/clanker-coordination"
-        install_symlink "$active/integrations/skills/clanker-coordination" "$destination"
+    for skill_root in "${skill_roots[@]}"; do
+        for skill in "${skills[@]}"; do install_symlink "$active/integrations/skills/$skill" "$skill_root/$skill"; done
     done
 fi
 

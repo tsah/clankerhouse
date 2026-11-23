@@ -208,6 +208,8 @@ export interface Multiplexer {
   focus(location: NativeLocation): Promise<void>
   /** Submit text through the runtime's validated interactive-harness prompt operation when `agentPrompt` is declared. */
   promptAgent?(location: NativeLocation, text: string): Promise<void>
+  /** Answer the harness's open question menu with free text, as a person would, when `agentPrompt` is declared. */
+  answerAgentQuestion?(location: NativeLocation, text: string): Promise<void>
   /** Stop the harness's current turn, keeping the harness. */
   interruptAgent?(location: NativeLocation): Promise<AgentInterruptOutcome>
   /** Mirror a harness lifecycle state into the runtime's `agentStatus`, holding the pane for that harness. */

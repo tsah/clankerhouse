@@ -3,10 +3,11 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } 
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 import { clankerHealth, type ClankerHealth } from "./clanker-health"
+import { supersededInstall } from "./installation"
 import { withReportedStatus, type ClankerState, type ReportedRuntimeStatus } from "./model"
 import { openManagedMultiplexer, type ManagedMultiplexer } from "./multiplexer"
 import { paneLocation, type MultiplexerSnapshot } from "./multiplexer/interface"
-import { MessageConflictError, OrchestrationStore, clankerBusy, generatedMessageId, promptFor, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type MessageEvent, type PromptObservation, type SendStatus, type StoredMessage } from "./orchestration"
+import { MAX_DELIVERY_ATTEMPTS, MessageConflictError, OrchestrationStore, clankerBusy, generatedMessageId, promptFor, readyForDelivery, sendStatusOf, withOrchestrationStore, type ClankerReportRecord, type MessageEvent, type PromptObservation, type SendStatus, type StoredMessage } from "./orchestration"
 import { runtimeDirFor } from "./paths"
 
 export type ClankerHarness = "pi" | "claude" | "opencode" | "codex" | string
@@ -87,6 +88,8 @@ interface ClankerReport {
   harnessSessionId?: unknown
   incarnation?: unknown
   messagingSocket?: unknown
+  /** The API error Claude's last turn ended on (its StopFailure hook), until the next prompt. */
+  turnError?: unknown
 }
 
 interface ClankerRecord extends ClankerInfo {
@@ -116,6 +119,12 @@ export interface SendReceipt {
   confirmed?: boolean
   /** For restart: whether the Multiplexer saw the turn stop. Unconfirmed, the message waits for idle. */
   interrupted?: "confirmed" | "unconfirmed"
+  /**
+   * Where the message stands: `queued` (held; `heldBecause` says why), `handed-over` (written to the session, its
+   * landing not proven yet; `--wait-delivered` waits for the proof), or `delivered` (proven in the session).
+   */
+  status?: "queued" | "handed-over" | "delivered"
+  heldBecause?: string
 }
 
 export interface SendOptions {
@@ -228,6 +237,36 @@ export async function ensurePaneClankerId(pane: string, preferredId?: string, mu
   })
 }
 
+/** The API error a Claude turn ended on, from its StopFailure hook. */
+export const turnErrorOf = (report: { turnError?: unknown; hookEvent?: unknown } | undefined): { error: string; message: string } | undefined => {
+  const value = report?.turnError
+  if (!value || typeof value !== "object") return undefined
+  const { error, message } = value as Record<string, unknown>
+  return { error: typeof error === "string" ? error : "", message: typeof message === "string" ? message : "" }
+}
+
+/**
+ * A turn that ended on an API error, seen by the StopFailure hook after Claude last reported its own status, is the
+ * truth: a usage limit or account error is `blocked` in Claude's words, another error ended the turn. Claude's own
+ * status (OSC 7501) does not say so, and on 2026-11-21 left a limited clanker reading `working` for hours.
+ */
+const withTurnError = <T extends { state: ClankerState; blockedKind?: string; blockedMessage?: string }>(merged: T, report: ClankerReport | undefined, hookState: ClankerState, runtime: ReportedRuntimeStatus | undefined): T => {
+  const failure = report?.hookEvent === "StopFailure" ? turnErrorOf(report) : undefined
+  if (!failure) return merged
+  const at = number((report?.turnError as Record<string, unknown> | undefined)?.at)
+  if (runtime && runtime.reportedAt > at) return merged
+  if (hookState !== "blocked") return { ...merged, state: hookState }
+  const kind = failure.error === "rate_limit" || failure.error === "billing_error" ? "usage-limit" : "account"
+  return { ...merged, state: "blocked", blockedKind: kind, blockedMessage: failure.message || failure.error }
+}
+
+/**
+ * A clanker's name is its window's label, unless that is the label Rex makes up for an unlabeled window ("Window " and
+ * the id's last 8 hex digits): then it is the session's, the name the operator sees and renames.
+ */
+const clankerName = (window: { id: string; nativeName: string }, session: string) =>
+  window.nativeName && window.nativeName !== `Window ${window.id.replace(/-/g, "").slice(-8)}` ? window.nativeName : session || window.nativeName
+
 /** Pane metadata rows of one Multiplexer observation (harness-bearing panes only). */
 export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMetadata[] =>
   snapshot.sessions.flatMap((session) => session.windows.flatMap((window) => window.panes.flatMap((pane) => {
@@ -241,7 +280,7 @@ export const paneMetadataFromSnapshot = (snapshot: MultiplexerSnapshot): PaneMet
       sessionId: session.id,
       session: session.nativeName,
       window: window.id,
-      name: window.nativeName,
+      name: clankerName(window, session.nativeName),
       pane: pane.id,
       cwd: pane.currentPath,
       worktreePath: claims.worktreePath || session.worktreePath || "",
@@ -292,7 +331,7 @@ const discoverRecordsFrom = async (injected: ManagedMultiplexer | undefined, str
     const updatedAt = number(report?.updatedAt)
     const generation = report?.generation === undefined ? updatedAt : number(report.generation)
     const settledGeneration = number(report?.settledGeneration) || (terminalReport(report ?? {}, hookState) ? generation : 0)
-    const { state, ...blocked } = withReportedStatus({ state: hookState, updatedAt }, row.runtime)
+    const { state, ...blocked } = withTurnError(withReportedStatus({ state: hookState, updatedAt }, row.runtime), report, hookState, row.runtime)
     const online = socketIsOnline(row.socketPath)
     return {
       id,
@@ -482,6 +521,21 @@ const promptClaimedPane = async (multiplexer: ManagedMultiplexer, clanker: Clank
 }
 
 /**
+ * Type the message as the free-text answer to the clanker's open question menu, after revalidating its pane claim. No
+ * hook sees an answer submitted: the tag in the session transcript (the tool's result) is the proof.
+ */
+const answerClaimedQuestion = async (multiplexer: ManagedMultiplexer, clanker: ClankerRecord, text: string): Promise<{ confirmed: boolean }> => {
+  try {
+    await revalidateClaim(multiplexer, clanker)
+    await multiplexer.answerAgentQuestion(claimedLocation(clanker), text)
+    return { confirmed: true }
+  } catch (error) {
+    if (ambiguousHandOff(error)) return { confirmed: false }
+    throw new ClankerApiError("UNAVAILABLE", `Clanker ${clanker.id} rejected the answer to its question menu: ${error instanceof Error ? error.message : String(error)}`, 5)
+  }
+}
+
+/**
  * Write one user message to Claude's messaging socket. The socket answers nothing; the hook's ack
  * is the receipt. Once the line is with the kernel the connection is dropped: a session that is
  * busy, or hung, may not read it for a while, and must not hold the sender open meanwhile.
@@ -506,6 +560,7 @@ const viaInbox = (clanker: ClankerRecord) => clanker.capabilities.send === "mess
  * a pointer. Resolves `confirmed: false` when a typed hand-off was ambiguous.
  */
 const handOff = async (multiplexer: ManagedMultiplexer, clanker: ClankerRecord, message: StoredMessage): Promise<{ confirmed: boolean }> => {
+  if (answersQuestion(multiplexer, clanker)) return answerClaimedQuestion(multiplexer, clanker, promptFor(message).prompt)
   if (!viaInbox(clanker)) return promptClaimedPane(multiplexer, clanker, promptFor(message).prompt)
   try {
     await revalidateClaim(multiplexer, clanker)
@@ -521,8 +576,42 @@ const handOff = async (multiplexer: ManagedMultiplexer, clanker: ClankerRecord, 
  * inbox leaves a human's draft alone, so focus does not matter there. A running turn always
  * holds the message: Claude would merge it into that turn and the turn's own reply can be lost.
  */
-const busyFor = (clanker: ClankerRecord) => viaInbox(clanker) ? clanker.state === "working" || clanker.state === "blocked" : clankerBusy(clanker)
-const readyFor = (clanker: ClankerRecord) => viaInbox(clanker) ? clanker.state === "done" || clanker.state === "idle" : readyForDelivery(clanker)
+/**
+ * Claude's turn has ended but its background tasks (a shell, a monitor, a subagent) still run: the hook
+ * reports `working` at that Stop so the clanker does not settle, yet no turn is running. A message now
+ * starts a new turn rather than merging into one, so it may be delivered. A worker that always keeps
+ * background work going would otherwise never take a queued message.
+ */
+export const awaitingBackground = (clanker: Pick<ClankerRecord, "harness" | "state"> & { report?: { hookEvent?: unknown } }) =>
+  clanker.harness === "claude" && clanker.state === "working" && clanker.report?.hookEvent === "Stop"
+/**
+ * Claude reported its turn ended on an API error (a lost connection, an overloaded server) that its lifecycle hook
+ * did not call a person's problem (a usage limit or a sign-in, which the hook reports `blocked`). The turn is over
+ * and nobody needs to act: for delivery that is a settled turn, not a clanker waiting on a person.
+ */
+export const stoppedOnApiError = (clanker: Pick<ClankerRecord, "state" | "blockedKind" | "blockedMessage"> & { report?: { state?: unknown } }) =>
+  clanker.state === "blocked" && clanker.blockedKind === "error" && clanker.report?.state !== "blocked"
+  && !/usage limit|limit (will )?reset|out of (usage|credit)|billing|log ?in|sign ?in|authenticat/i.test(clanker.blockedMessage ?? "")
+/** The clanker as delivery sees it: one stopped on an API error is settled. */
+const forDelivery = (clanker: ClankerRecord): ClankerRecord => stoppedOnApiError(clanker) ? { ...clanker, state: "done" } : clanker
+/**
+ * Claude is waiting on its question menu (AskUserQuestion) and the Multiplexer can answer it: a message is typed
+ * there as the free-text answer, as a person would. Not while the operator's focus is on the pane.
+ */
+const answersQuestion = (mux: ManagedMultiplexer, clanker: ClankerRecord) =>
+  clanker.harness === "claude" && clanker.state === "blocked" && clanker.blockedKind === "question" && !clanker.focused && mux.supportsQuestionAnswer()
+const busyFor = (target: ClankerRecord) => {
+  const clanker = forDelivery(target)
+  return awaitingBackground(clanker)
+    ? !viaInbox(clanker) && clanker.focused
+    : viaInbox(clanker) ? clanker.state === "working" || clanker.state === "blocked" : clankerBusy(clanker)
+}
+const readyFor = (target: ClankerRecord) => {
+  const clanker = forDelivery(target)
+  return awaitingBackground(clanker)
+    ? viaInbox(clanker) || !clanker.focused
+    : viaInbox(clanker) ? clanker.state === "done" || clanker.state === "idle" : readyForDelivery(clanker)
+}
 
 const reportIncarnation = (clanker: ClankerRecord) => typeof clanker.report?.incarnation === "string" && clanker.report.incarnation ? clanker.report.incarnation : null
 
@@ -556,7 +645,9 @@ export async function sendClanker(id: string, text: string, options: SendOptions
     // silently becoming a follow-up or an interrupt.
     if (requested === "steer" && !viaInbox(clanker)) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support steer delivery: it has no messaging socket; use --delivery restart to interrupt the turn, or follow-up`, 4)
     if (requested === "restart" && !clanker.capabilities.deliveryModes.includes("restart")) throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support restart delivery: its Multiplexer cannot interrupt a turn`, 4)
-    if (requested === "restart" && clanker.state === "blocked") throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} is waiting on a permission prompt; restart would answer it, so it is refused`, 5)
+    if (requested === "restart" && clanker.state === "blocked") throw new ClankerApiError("UNAVAILABLE", clanker.blockedKind === "usage-limit" || clanker.blockedKind === "account"
+      ? `Clanker ${id} is blocked on a person (${clanker.blockedMessage ?? clanker.blockedKind}); a restart cannot clear that, so it is refused. A plain send queues until the clanker runs again`
+      : `Clanker ${id} is waiting on a permission prompt; restart would answer it, so it is refused`, 5)
     const mux = multiplexer ?? openManagedMultiplexer()
     const acceptedAt = Date.now()
     const incarnation = reportIncarnation(clanker)
@@ -567,7 +658,10 @@ export async function sendClanker(id: string, text: string, options: SendOptions
       const previous = (() => { try { return store.replayedRequest(id, origin.requestId, text) } catch (error) { return conflict(error) } })()
       if (previous) return replayReceipt(previous, requested, clanker.generation, transportOf(clanker, previous))
       let interrupted: "confirmed" | "unconfirmed" | undefined
-      if (requested === "restart" && clanker.state === "working") {
+      // A turn that ended with background work still running is not running: there is nothing to interrupt, and
+      // Escape there only flips vim mode or opens the rewind menu. The message goes straight in.
+      if (requested === "restart" && awaitingBackground(clanker)) origin.requestedMode = "auto"
+      if (requested === "restart" && clanker.state === "working" && !awaitingBackground(clanker)) {
         await revalidateClaim(mux, clanker).catch((error) => { throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} rejected the interrupt: ${error instanceof Error ? error.message : String(error)}`, 5) })
         const outcome = await mux.interruptAgent(claimedLocation(clanker)).catch((error) => { throw new ClankerApiError("UNAVAILABLE", `Clanker ${id} could not be interrupted: ${error instanceof Error ? error.message : String(error)}`, 5) })
         interrupted = outcome === "stopped" || outcome === "not_working" ? "confirmed" : "unconfirmed"
@@ -582,14 +676,38 @@ export async function sendClanker(id: string, text: string, options: SendOptions
       if (message.state === "queued" && interrupted === "confirmed") {
         // The interrupted turn is over: hand the queue's head over now, in order.
         const next = await deliverNext(store, mux, clanker)
-        if (next === message.messageId) return { ...receipt, delivery: "immediate", appliedMode: "restart", ...restart, confirmed: true }
+        if (next === message.messageId) return { ...receipt, delivery: "immediate", appliedMode: "restart", ...restart, confirmed: true, status: "handed-over" }
       }
-      if (message.state === "queued") return { ...receipt, delivery: "queued", appliedMode: interrupted ? "restart" : "queued", ...restart }
+      if (message.state === "queued" && interrupted === undefined && answersQuestion(mux, clanker)) {
+        // Claude waits on its question menu: the message, if first in line, goes in as the answer.
+        const claimed = store.claimNextDelivery(id, clanker.generation)
+        if (claimed?.messageId === message.messageId) {
+          try {
+            const { confirmed } = await handOff(mux, clanker, claimed)
+            return { ...receipt, delivery: "immediate", appliedMode: "immediate", confirmed, status: "handed-over" }
+          } catch (error) { store.requeue(claimed.messageId, error instanceof Error ? error.message : String(error)) }
+        } else if (claimed) {
+          await handOff(mux, clanker, claimed).catch((error) => store.requeue(claimed.messageId, error instanceof Error ? error.message : String(error)))
+        }
+      }
+      if (message.state === "queued") {
+        const ahead = store.pendingMessages(id).find((pending) => pending.messageId !== message.messageId)
+        return { ...receipt, delivery: "queued", appliedMode: interrupted ? "restart" : "queued", ...restart, status: "queued", heldBecause: holdReasonOf(message, clanker, ahead).text }
+      }
       let confirmed: boolean
       try { confirmed = (await handOff(mux, clanker, message)).confirmed }
-      catch (error) { store.deleteMessage(message.messageId); throw error }
+      catch (error) {
+        const why = error instanceof Error ? error.message : String(error)
+        // Someone's draft in the input box: the message waits its turn rather than failing or mixing with it.
+        if (/a draft is in the input box/.test(why) && message.delivery !== "steer") {
+          store.requeue(message.messageId, why)
+          return { ...receipt, delivery: "queued", appliedMode: "queued", ...restart, status: "queued", heldBecause: `the recipient's input box holds a draft; it goes in once the box is clear (${why})` }
+        }
+        store.deleteMessage(message.messageId)
+        throw error
+      }
       const delivery = message.delivery === "steer" ? "steer" : "immediate"
-      return { ...receipt, delivery, appliedMode: interrupted ? "restart" : delivery, ...restart, confirmed }
+      return { ...receipt, delivery, appliedMode: interrupted ? "restart" : delivery, ...restart, confirmed, status: "handed-over" }
     } finally { store.close() }
   }
   if (requested === "restart") throw new ClankerApiError("UNSUPPORTED", `Clanker ${id} does not support restart delivery`, 4)
@@ -617,6 +735,7 @@ export async function sendClanker(id: string, text: string, options: SendOptions
     appliedMode: delivery,
     transport: "socket",
     replayed: false,
+    status: "delivered",
   }
 }
 
@@ -626,7 +745,7 @@ const deliverNext = async (store: OrchestrationStore, mux: ManagedMultiplexer, c
   if (!claimed) return undefined
   try { await handOff(mux, clanker, claimed) }
   catch (error) {
-    store.requeue(claimed.messageId)
+    store.requeue(claimed.messageId, error instanceof Error ? error.message : String(error))
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { messageId: claimed.messageId })
   }
   return claimed.messageId
@@ -644,9 +763,12 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
   const acked: string[] = []
   const failed: Array<{ messageId: string; error: string }> = []
   const fenced: string[] = []
+  const undelivered: string[] = []
+  // A process of a superseded version (a long watch started before an upgrade) leaves delivery to the current one.
+  if (supersededInstall()) return { delivered, acked, failed, fenced, undelivered }
   const store = OrchestrationStore.open()
   try {
-    if (!store.hasPendingMessages()) return { delivered, acked, failed, fenced }
+    if (!store.hasPendingMessages()) return { delivered, acked, failed, fenced, undelivered }
     const records = await discoverRecords(multiplexer, true)
     store.reconcileRecipients(new Set(records.map((record) => record.id)))
     for (const clankerId of new Set(store.pendingMessages().map((message) => message.clankerId))) {
@@ -656,17 +778,166 @@ export async function deliverQueuedMessages(multiplexer?: ManagedMultiplexer) {
       fenced.push(...store.fenceIncarnation(clankerId, reportIncarnation(clanker)).map((message) => message.messageId))
       acked.push(...store.acknowledge(clankerId, promptObservations(clanker.report)).map((message) => message.messageId))
       if (clanker.capabilities.send !== "messaging-socket" && clanker.capabilities.send !== "multiplexer-prompt") continue
-      if (!readyFor(clanker)) continue
+      const mux = multiplexer ?? openManagedMultiplexer()
+      if (!readyFor(clanker) && !answersQuestion(mux, clanker)) continue
+      const transcript = typeof clanker.report?.transcriptPath === "string" ? clanker.report.transcriptPath : ""
+      // A hand-off no hook acknowledges (an answer to a question menu, or a submit the hook missed) whose tag is in the
+      // session transcript landed: it is acknowledged, never typed again.
+      const unacked = store.pendingMessages(clankerId).filter((message) => message.state === "delivered")
+      if (unacked.length && transcript) {
+        const tail = fileTail(transcript)
+        for (const message of unacked) if (tail.includes(message.messageId) && store.settleUnconfirmed(message.messageId, true)) acked.push(message.messageId)
+      }
       store.retryUnacknowledged(clankerId)
+      // Retries used up and the clanker idle again: the transcript decides whether it landed after all. One that did
+      // not is `undelivered`, so it stops holding the queue and the delivery watch tells its sender.
+      for (const exhausted of store.exhaustedDeliveries(clankerId)) {
+        const settled = store.settleUnconfirmed(exhausted.messageId, !!transcript && fileTail(transcript).includes(exhausted.messageId))
+        if (settled?.state === "acked") acked.push(settled.messageId)
+        else if (settled) undelivered.push(settled.messageId)
+      }
       try {
-        const next = await deliverNext(store, multiplexer ?? openManagedMultiplexer(), clanker)
+        const next = await deliverNext(store, mux, clanker)
         if (next) delivered.push(next)
       } catch (error) {
         failed.push({ messageId: (error as { messageId?: string }).messageId ?? "", error: error instanceof Error ? error.message : String(error) })
       }
     }
-    return { delivered, acked, failed, fenced }
+    return { delivered, acked, failed, fenced, undelivered }
   } finally { store.close() }
+}
+
+/** Why a message has not landed yet, in words its sender can act on. `broken` means waiting will not fix it. */
+export interface HoldReason { code: string; text: string; broken: boolean }
+
+/** A `working` clanker silent this long is not mid-turn: its turn ended on an error, or the session hung. */
+export const SILENT_TURN_MS = 30 * 60_000
+
+const minutes = (ms: number) => ms < 60_000 ? `${Math.max(0, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`
+const clock = (at: number) => new Date(at).toISOString().slice(11, 16) + " UTC"
+
+/** The API error an older Claude's turn ended on, from the transcript's last entry (no StopFailure hook then). */
+const transcriptTurnError = (transcript: string): string | undefined => {
+  const lines = fileTail(transcript, 64 * 1024).trimEnd().split("\n").reverse()
+  for (const line of lines) {
+    let entry: { type?: string; isApiErrorMessage?: boolean; error?: string; message?: { content?: unknown } }
+    try { entry = JSON.parse(line) } catch { continue }
+    if (entry.type !== "assistant" && entry.type !== "user") continue
+    if (entry.type !== "assistant" || !entry.isApiErrorMessage) return undefined
+    const text = Array.isArray(entry.message?.content) ? entry.message.content.map((block: any) => typeof block?.text === "string" ? block.text : "").join(" ").trim() : ""
+    return text || entry.error || "an API error"
+  }
+  return undefined
+}
+
+/**
+ * Why `message` is still pending, judged from its recipient's live record (undefined: not running) and the message
+ * ahead of it in that clanker's queue, if any.
+ */
+export const holdReasonOf = (message: StoredMessage, recipient: ClankerRecord | undefined, ahead: StoredMessage | undefined, now = Date.now()): HoldReason => {
+  const clanker = recipient && forDelivery(recipient)
+  if (!clanker) return { code: "recipient-missing", text: "the recipient is not running: no live pane claims it (closed, or its harness exited)", broken: true }
+  if (message.state === "delivered") {
+    const exhausted = message.attempts >= MAX_DELIVERY_ATTEMPTS
+    return { code: "unconfirmed", text: `it was handed over ${message.attempts} time${message.attempts === 1 ? "" : "s"} (last at ${clock(message.deliveredAt ?? message.createdAt)}) but the recipient's hook never saw it submitted`, broken: exhausted }
+  }
+  if (clanker.state === "blocked") {
+    const why = clanker.blockedMessage ? `: ${clanker.blockedMessage}` : ""
+    if (clanker.blockedKind === "usage-limit" || clanker.blockedKind === "account") return { code: "usage-limit", text: `the recipient's last turn ended on ${clanker.blockedKind === "usage-limit" ? "a usage limit" : "an account error"}${why}; it takes messages again once it runs`, broken: true }
+    if (clanker.blockedKind === "question" && clanker.harness === "claude") return ahead
+      ? { code: "behind", text: `it waits behind ${ahead.messageId}, which has not landed yet`, broken: false }
+      : clanker.focused
+      ? { code: "question-focused", text: "the recipient is on a question menu and the operator's input focus is on its pane; it goes in as the menu's answer once focus moves", broken: false }
+      : { code: "question", text: "the recipient is on a question menu; the next delivery pass types this message as its answer", broken: false }
+    return { code: "blocked", text: `the recipient is waiting on a person (a permission prompt or a question${why ? why : ""})`, broken: true }
+  }
+  if (clanker.state === "working" && !awaitingBackground(clanker)) {
+    const silent = now - (clanker.lastEventAt ?? 0)
+    if (clanker.lastEventAt && silent >= SILENT_TURN_MS) {
+      const transcript = typeof clanker.report?.transcriptPath === "string" ? clanker.report.transcriptPath : ""
+      const error = transcript ? transcriptTurnError(transcript) : undefined
+      return error
+        ? { code: "turn-error", text: `the recipient's turn ended on an API error ("${error.slice(0, 160)}") and Claude reported no end of turn; it still reads as working`, broken: true }
+        : { code: "silent", text: `the recipient reads as working but has reported nothing for ${minutes(silent)} (a hung session, or a turn that ended without a Stop)`, broken: true }
+    }
+    const started = typeof clanker.report === "object" && typeof (clanker.report as Record<string, unknown>).generationStartedAt === "number" ? (clanker.report as Record<string, number>).generationStartedAt! : 0
+    return { code: "mid-turn", text: `the recipient is mid-turn${started ? ` (since ${clock(started)})` : ""}, last activity ${minutes(silent)} ago; it goes in when that turn ends`, broken: false }
+  }
+  if (ahead) return { code: "behind", text: `it waits behind ${ahead.messageId}, which has not landed yet`, broken: false }
+  if (message.handoffFailures && message.lastError) {
+    return { code: "handoff-failed", text: `handing it over failed ${message.handoffFailures} time${message.handoffFailures === 1 ? "" : "s"}, last: ${message.lastError.slice(0, 200)}`, broken: message.handoffFailures >= MAX_DELIVERY_ATTEMPTS }
+  }
+  if (!viaInbox(clanker) && clanker.focused) return { code: "focused", text: "the operator's input focus is on the recipient's pane, and typing would mix with their draft; it goes in once focus moves", broken: false }
+  return { code: "pending", text: "the recipient can take it now; the next delivery pass hands it over", broken: false }
+}
+
+/** Hold reasons for these pending messages, from one observation of the live clankers. */
+export async function holdReasons(messages: readonly StoredMessage[], multiplexer?: ManagedMultiplexer, now = Date.now(), observe = messages.length > 0) {
+  const records = observe ? await discoverRecords(multiplexer, true) : []
+  const byId = new Map(records.map((record) => [record.id, record]))
+  const reasons = new Map<string, HoldReason>()
+  const firstPending = new Map<string, StoredMessage>()
+  for (const message of messages) {
+    if (message.state !== "queued" && message.state !== "delivered") continue
+    const ahead = firstPending.get(message.clankerId)
+    reasons.set(message.messageId, holdReasonOf(message, byId.get(message.clankerId), ahead && ahead.messageId !== message.messageId ? ahead : undefined, now))
+    if (!ahead) firstPending.set(message.clankerId, message)
+  }
+  // An `undelivered` message whose tag is in its recipient's transcript landed after all.
+  const landed = new Set(messages.filter((message) => message.state === "orphaned" && message.orphanReason === "undelivered").filter((message) => {
+    const transcript = byId.get(message.clankerId)?.report?.transcriptPath
+    return typeof transcript === "string" && !!transcript && fileTail(transcript).includes(message.messageId)
+  }).map((message) => message.messageId))
+  const nameOf = (clankerId: string) => {
+    const record = byId.get(clankerId)
+    const path = record?.worktreePath || record?.cwd
+    return path ? path.split("/").filter(Boolean).pop()! : clankerId
+  }
+  return { reasons, nameOf, landed, live: new Set(records.map((record) => record.id)), records: records as ClankerInfo[] }
+}
+
+/** The last `limit` bytes of a file, or "" when it cannot be read. */
+const fileTail = (path: string, limit = 4 * 1024 * 1024) => {
+  try {
+    const bytes = readFileSync(path)
+    return bytes.subarray(Math.max(0, bytes.length - limit)).toString("utf8")
+  } catch { return "" }
+}
+
+/**
+ * Whether a handed-over message reached the clanker's session: the hook saw it submitted (acked),
+ * or its tag is in the session transcript. A message sitting typed but unsent in the input box is
+ * neither. `queued` waits behind a turn by design; `lost` was dropped, or its clanker is gone.
+ */
+export async function messageDeliveryProof(clankerId: string, messageId: string, multiplexer?: ManagedMultiplexer): Promise<"landed" | "queued" | "unconfirmed" | "lost"> {
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  if (!message || message.clankerId !== clankerId || (message.state === "orphaned" && message.orphanReason !== "undelivered")) return "lost"
+  if (message.state === "acked" || message.handledAt !== null) return "landed"
+  if (message.state === "queued") return "queued"
+  let clanker: ClankerRecord
+  try { clanker = await findRecord(clankerId, multiplexer) }
+  catch (error) { return error instanceof ClankerApiError && error.code === "NOT_FOUND" ? "lost" : "unconfirmed" }
+  const transcript = typeof clanker.report?.transcriptPath === "string" ? clanker.report.transcriptPath : ""
+  if (transcript && fileTail(transcript).includes(messageId)) {
+    if (message.state === "orphaned") withOrchestrationStore((store) => store.landUndelivered(messageId))
+    return "landed"
+  }
+  return message.state === "orphaned" ? "lost" : "unconfirmed"
+}
+
+/**
+ * Type a handed-over message that never reached the session into the clanker's pane once more,
+ * with its tag, so the hook acknowledges it by id. False when the pane cannot take typing now (a
+ * running turn, or the operator's focus); the message is left as it was.
+ */
+export async function retypeMessage(clankerId: string, messageId: string, multiplexer?: ManagedMultiplexer): Promise<boolean> {
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  if (!message || message.clankerId !== clankerId || message.state !== "delivered") return false
+  const clanker = await findRecord(clankerId, multiplexer)
+  if (clanker.capabilities.send !== "messaging-socket" && clanker.capabilities.send !== "multiplexer-prompt") return false
+  if (!(readyForDelivery(clanker) || (awaitingBackground(clanker) && !clanker.focused))) return false
+  const result = await promptClaimedPane(multiplexer ?? openManagedMultiplexer(), clanker, promptFor(message).prompt)
+  return result.confirmed
 }
 
 /** The clanker running this command: `CLANKER_ID`, else the current pane's claim. */
@@ -714,8 +985,37 @@ const messageStatus = async (messageId: string, multiplexer: ManagedMultiplexer 
   return { status: sendStatusOf(message, matches.length > 0, matches.length === 1 ? matches[0]!.settledGeneration : 0), record: matches.length === 1 ? matches[0] : undefined, afterGeneration: message.afterGeneration }
 }
 
-export async function sendStatus(messageId: string, multiplexer?: ManagedMultiplexer): Promise<SendStatus> {
-  return (await messageStatus(messageId, multiplexer)).status
+export async function sendStatus(messageId: string, multiplexer?: ManagedMultiplexer): Promise<SendStatus & { proof: Awaited<ReturnType<typeof messageDeliveryProof>>; heldBecause?: string }> {
+  const { status } = await messageStatus(messageId, multiplexer)
+  const proof = await messageDeliveryProof(status.clankerId, messageId, multiplexer)
+  if (proof === "landed" || proof === "lost") return { ...status, proof }
+  const message = withOrchestrationStore((store) => store.message(messageId))
+  const pending = withOrchestrationStore((store) => store.pendingMessages(status.clankerId))
+  const { reasons } = await holdReasons(message ? pending : [], multiplexer)
+  return { ...status, proof, ...(reasons.get(messageId) ? { heldBecause: reasons.get(messageId)!.text } : {}) }
+}
+
+/**
+ * Wait until a message is proven in its recipient's session: the hook saw it submitted, or its tag is in the
+ * transcript. Fails at once when it is lost (orphaned, undelivered), and on timeout with why it is still held.
+ */
+export async function waitForDelivery(id: string, messageId: string, options: { timeoutMs?: number; pollMs?: number } = {}, multiplexer?: ManagedMultiplexer) {
+  const timeoutMs = options.timeoutMs ?? 120_000
+  let pollMs = options.pollMs ?? 500
+  const started = Date.now()
+  while (true) {
+    await deliverQueuedMessages(multiplexer).catch(() => undefined)
+    const proof = await messageDeliveryProof(id, messageId, multiplexer)
+    const message = withOrchestrationStore((store) => store.message(messageId))
+    if (proof === "landed") return { messageId, clankerId: id, status: "delivered" as const, deliveredAt: message?.ackedAt ?? Date.now() }
+    if (proof === "lost") throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was not delivered: ${message ? `${message.state}${message.orphanReason ? ` (${message.orphanReason})` : ""}` : "unknown message"}`, 3)
+    if (Date.now() - started >= timeoutMs) {
+      const status = await sendStatus(messageId, multiplexer).catch(() => undefined)
+      throw new ClankerApiError("TIMEOUT", `Message ${messageId} is not delivered yet (${status?.stage ?? proof})${status?.heldBecause ? `: ${status.heldBecause}` : ""}; it stays queued and the delivery watch tells you if it fails`, 124)
+    }
+    await Bun.sleep(pollMs)
+    pollMs = backedOff(pollMs)
+  }
 }
 
 // A wait starts polling at its pollMs and doubles toward this, so a short turn is noticed quickly

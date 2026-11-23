@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto"
 import { existsSync, fstatSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { format } from "node:util"
 import { join, resolve } from "node:path"
-import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForMessage, type ClankerDelivery } from "./clanker-api"
-import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState } from "./orchestration"
+import { ClankerApiError, paneReport, clankerCapabilities, clankerStatusWithReport, inboxAck, inboxList, inboxRead, listClankers, messageEvents, resultForClanker, sendClanker, sendStatus, waitForClanker, waitForDelivery, waitForMessage, type ClankerDelivery } from "./clanker-api"
+import { DEFAULT_STALE_AFTER_MS, parseReportPayload, parseReportState, withOrchestrationStore } from "./orchestration"
 import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
@@ -23,11 +23,11 @@ import { refreshProjectionSnapshot, setSnapshotReadOnly } from "./snapshot"
 import { parseMutationIntent, type MutationIntent } from "./mutation-intent"
 import { mutationStages } from "./mutation-stages"
 import { TITLE_KEY, branchFromTitle, parseLabelAssignment, validLabelKey, validLabelValue, visibleLabels } from "./labels"
-import { needsMeCounts, needsMeEntry, needsMeList, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
+import { messageNeedsMeEntry, needsMeCounts, needsMeEntry, needsMeList, routineNeedsMeEntry, type NeedsMeEntry, type NeedsMeOrder } from "./needs-me"
 import { SETTLED_ORDERS, orderSettled, settledEntry, settledKey, settledSessions, type SettledOrder } from "./settled"
 import { lastMessages } from "./last-messages"
 import { applyWorkshopLabel, completeDone, dispatchLabelsChangedHook, workshopForLabelTarget, type LabelTarget } from "./workshop-hooks"
-import { addRoutine, cancelRoutine, listRoutines, routineCaller, showRoutine, updateRoutine } from "./routine-api"
+import { addRoutine, cancelRoutine, dismissRoutineAlert, listRoutines, routineAlerts, routineCaller, showRoutine, updateRoutine } from "./routine-api"
 
 const progressPrefix = "CLANKERHOUSE_PROGRESS\t"
 
@@ -277,8 +277,23 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
   if (command === "report") return runReport(parsed)
   if (command === "watch") return runWatchCommand(parsed)
   if (command === "send-status") {
+    const dismiss = parsed.has("--dismiss")
+    const cancel = parsed.has("--cancel")
     const messageId = parsed.take("--message") || parsed.shift()
     if (!messageId) throw new Error("MESSAGE_ID is required")
+    if (cancel) {
+      const before = withOrchestrationStore((store) => store.message(messageId))
+      if (!before) throw new ClankerApiError("NOT_FOUND", `Unknown message id: ${messageId}`, 3)
+      const cancelled = withOrchestrationStore((store) => store.cancelMessage(messageId))
+      if (!cancelled) throw new ClankerApiError("CONFLICT", `Message ${messageId} is ${before.state === "acked" ? "already delivered" : `${before.state}${before.orphanReason ? ` (${before.orphanReason})` : ""}`}, so there is nothing to cancel`, 2)
+      if (dismiss) withOrchestrationStore((store) => store.dismissEscalation(messageId))
+      return console.log(JSON.stringify({ messageId, clankerId: cancelled.clankerId, cancelled: true, wasHandedOver: before.state === "delivered", sender: cancelled.sender }))
+    }
+    if (dismiss) {
+      const dismissed = withOrchestrationStore((store) => store.dismissEscalation(messageId))
+      if (!dismissed) throw new ClankerApiError("NOT_FOUND", `Message ${messageId} was never escalated, so there is nothing to dismiss`, 3)
+      return console.log(JSON.stringify({ messageId, dismissed: true }))
+    }
     return console.log(JSON.stringify(await sendStatus(messageId)))
   }
   if (command === "wait") {
@@ -316,14 +331,22 @@ const runClankerApi = async (command: string | undefined, parsed: ParsedArgs) =>
     const requestId = parsed.take("--request-id")
     const source = parsed.take("--source") ?? "cli"
     const wait = parsed.has("--wait")
+    const waitDelivered = parsed.has("--wait-delivered")
     const timeoutSeconds = nonNegativeNumber(parsed.take("--timeout"), "--timeout")
     const textFlag = parsed.take("--text")
     const id = requiredClankerId(parsed)
     const text = textFlag ?? await Bun.stdin.text()
     const sender = await reportingClankerId().catch(() => "operator")
+    if (wait && waitDelivered) throw new Error("--wait and --wait-delivered are mutually exclusive")
     const receipt = await sendClanker(id, text, { delivery, requestId, sender, source })
-    if (!wait) return console.log(JSON.stringify(receipt))
     const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000
+    if (waitDelivered) {
+      if (receipt.status === "delivered") return console.log(JSON.stringify(receipt))
+      // Print the receipt even when the wait fails, so the caller keeps the message id.
+      try { return console.log(JSON.stringify({ ...receipt, ...await waitForDelivery(id, receipt.messageId, { timeoutMs }) })) }
+      catch (error) { console.log(JSON.stringify(receipt)); throw error }
+    }
+    if (!wait) return console.log(JSON.stringify(receipt))
     const status = await clankerCapabilities(id)
     if (status.capabilities.send === "multiplexer-prompt" || status.capabilities.send === "messaging-socket") {
       // A Claude message may queue, so wait for the turn it started; the turn's
@@ -407,7 +430,8 @@ const routineUsage = `Usage:
   clankers routine list [--clanker ID | --all] [--include-ended]
   clankers routine show ROUTINE_ID
   clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
-  clankers routine cancel ROUTINE_ID [--clanker ID]`
+  clankers routine cancel ROUTINE_ID [--clanker ID]
+  clankers routine dismiss ROUTINE_ID [--clanker ID]   clear its broken/ended alert from needs-me`
 
 const runRoutineCommand = async (parsed: ParsedArgs) => {
   const action = parsed.shift()
@@ -435,6 +459,7 @@ const runRoutineCommand = async (parsed: ParsedArgs) => {
   if (action === "show") return console.log(JSON.stringify(showRoutine(routineId)))
   if (action === "update") return console.log(JSON.stringify(updateRoutine(routineId, { cron, message: messageFlag, name, timeZone }, await routineCaller(), { clanker })))
   if (action === "cancel") return console.log(JSON.stringify(cancelRoutine(routineId, await routineCaller(), { clanker })))
+  if (action === "dismiss") return console.log(JSON.stringify(dismissRoutineAlert(routineId, await routineCaller(), { clanker })))
   throw new Error(routineUsage)
 }
 
@@ -470,8 +495,8 @@ export const usage = `Usage:
   clankers list [--cwd PATH] [--children-of [WORKSHOP] [--descendants]] [--state STATE,...]
   clankers status|capabilities CLANKER_ID
   clankers wait CLANKER_ID [--after GENERATION | --message MESSAGE_ID] [--timeout SECONDS]
-  clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait] [--text TEXT]
-  clankers send-status MESSAGE_ID
+  clankers send CLANKER_ID [--delivery auto|queue|follow-up|steer|restart] [--request-id KEY] [--source NAME] [--wait | --wait-delivered] [--timeout SECONDS] [--text TEXT]
+  clankers send-status MESSAGE_ID [--dismiss] [--cancel]   where a message stands, with proof and why it is held; --dismiss clears its needs-me row; --cancel withdraws one not yet landed (its sender is told)
   clankers inbox [list [--all] | read MESSAGE_ID [--json] | ack MESSAGE_ID] [--clanker ID]
   clankers messages [--after SEQ] [--clanker ID...]
   clankers result CLANKER_ID [--generation GENERATION]
@@ -480,7 +505,7 @@ export const usage = `Usage:
   clankers routine add --cron "MIN HOUR DOM MON DOW" --message TEXT [--name NAME] [--tz ZONE] [--clanker ID]
   clankers routine list [--clanker ID | --all] [--include-ended] | show ROUTINE_ID
   clankers routine update ROUTINE_ID [--cron EXPR] [--message TEXT] [--name NAME] [--tz ZONE] [--clanker ID]
-  clankers routine cancel ROUTINE_ID [--clanker ID]
+  clankers routine cancel ROUTINE_ID [--clanker ID] | dismiss ROUTINE_ID
   clankers hooks status [--json] [--limit N]
   clankers hooks test [--sink NAME]
   clankers delete session|worktree --session SESSION [--path PATH] --yes
@@ -510,8 +535,11 @@ same repository. Both default to the current Workshop and keep its subtree, clan
 and branch; they need the daemon, and a parent inside the Workshop's own subtree is rejected.
 
 A routine wakes a clanker on a cron schedule with a message, delivered by the daemon like
-\`clankers send\` (queued while the clanker is busy). It belongs to the calling clanker unless
---clanker names another. The five cron fields are read in --tz, else CLANKERHOUSE_TIMEZONE, else TZ,
+\`clankers send\` (queued while the clanker is busy). It belongs to the calling clanker's Workshop
+(--clanker names another clanker's): a fire goes to the Workshop's live clanker, else resumes its
+last session first. When that fails, or the wake never reaches the session, the routine is broken:
+one routine.broken Status Event and a needs-me row, and its last missed fire runs once a clanker is
+back. A Workshop marked done or removed ends its routines with a routine.ended event. The five cron fields are read in --tz, else CLANKERHOUSE_TIMEZONE, else TZ,
 else the host's zone, resolved when the routine is added and stored with it.`
 
 const claimKeys = new Set<ClaimKey>(["workshopId", "workshopParentId", "worktreePath", "directoryPath", "gitCommonDir", "sessionId", "sessionDisplayName", "windowId", "windowDisplayName", "windowHarness", "terminalId", "terminalDisplayName", "clankerId", "harness", "harnessSessionId", "clankerSocket", "clankerPid", "clankerCapabilities", "paneWorkshopParentId"])
@@ -624,7 +652,41 @@ const runNeedsMeCommand = async (parsed: ParsedArgs) => {
     labels: row.workshopId ? visibleLabels(labels.get(row.workshopId)) : {},
     createdAt: row.workshopId ? createdAt.get(row.workshopId) : undefined,
   }))
+  // A broken or ended Routine needs the operator whether or not its Workshop is open: listed first.
+  const alerts = routineAlerts().flatMap((routine) => routine.alert ? [{ routine, alert: routine.alert }] : [])
+  if (alerts.length) {
+    const routineRows = alerts.map(({ routine, alert }, index) => {
+      const record = routine.workshopId ? (() => { try { return workshopForId(routine.workshopId!) } catch { return undefined } })() : undefined
+      const row = routine.workshopId ? snapshot.sessions.find((session) => session.workshopId === routine.workshopId && session.target.type !== "directory") : undefined
+      return routineNeedsMeEntry({ ...routine, alert, workshop: record ? { path: record.canonicalPath, branch: record.branch } : undefined, row }, index + 1, {
+        labels: routine.workshopId ? visibleLabels(labels.get(routine.workshopId)) : {},
+        createdAt: routine.workshopId ? createdAt.get(routine.workshopId) : undefined,
+      })
+    })
+    rows.splice(0, 0, ...routineRows)
+    rows.forEach((row, index) => { row.position = index + 1 })
+  }
+  // A message the delivery watch could not get through, until it lands or is dismissed: listed after the Routines.
+  const undelivered = (() => { try { return withOrchestrationStore((store) => store.escalatedMessages()) } catch { return [] } })()
+  if (undelivered.length) {
+    const ledger = (() => { try { return openClankerLedger() } catch { return undefined } })()
+    try {
+      const messageRows = undelivered.map((message, index) => {
+        const workshopId = ledger?.get(message.clankerId)?.workshopId
+        const record = workshopId ? (() => { try { return workshopForId(workshopId) } catch { return undefined } })() : undefined
+        const row = workshopId ? snapshot.sessions.find((session) => session.workshopId === workshopId && session.target.type !== "directory") : undefined
+        const name = record ? record.canonicalPath.split("/").pop()! : message.clankerId
+        return messageNeedsMeEntry({ messageId: message.messageId, clankerId: message.clankerId, sender: message.sender, name, reason: message.escalationReason ?? "not delivered", at: message.escalatedAt ?? message.createdAt, workshop: record ? { id: record.workshopId, path: record.canonicalPath, branch: record.branch } : undefined, row }, index + 1, {
+          labels: workshopId ? visibleLabels(labels.get(workshopId)) : {},
+          createdAt: workshopId ? createdAt.get(workshopId) : undefined,
+        })
+      })
+      rows.splice(alerts.length, 0, ...messageRows)
+      rows.forEach((row, index) => { row.position = index + 1 })
+    } finally { ledger?.close() }
+  }
   const counts = needsMeCounts(snapshot.sessions)
+  counts.needsMe += alerts.length + undelivered.length
   if (json) return console.log(JSON.stringify({ version: 1, order, generatedAt: snapshot.generatedAt, counts, rows }, null, 2))
   const now = Date.now()
   console.log(`${counts.needsMe} need you · ${counts.open} open`)

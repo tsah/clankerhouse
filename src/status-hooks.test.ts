@@ -168,6 +168,8 @@ describe("status hook runtime", () => {
     const second = start()
     await second.observed()
     await until(() => sink.received.length === 1)
+    // Stopping before the delivery is recorded leaves it pending, and the next start sends it again.
+    await until(() => outboxOf(outboxPath).totals[0]?.delivered === 1)
     second.stop()
 
     const third = start()
@@ -277,6 +279,23 @@ describe("status hook runtime", () => {
     expect(outboxOf(outboxPath).cursor?.clankers["c-1"]?.phase).toBe("working")
     release!()
     await until(() => outboxOf(outboxPath).totals[0]?.delivered === 1)
+  })
+
+  test("an event from outside the herd (a Routine alert) is published to the sinks that want it", async () => {
+    const sink = receiver()
+    const { start, outboxPath } = fixture(sink.url)
+    const runtime = start()
+    const draft = { dedupeKey: "routine.broken:r-1:1", type: "routine.broken" as const, at: Date.now(), clankerId: "c-1", oldState: "working", newState: "broken", summary: "Routine sweep is broken: resume failed", facts, details: { routineId: "r-1" } }
+    expect(runtime.publish([draft])).toBe(1)
+    await until(() => sink.received.length === 1)
+    expect(sink.received[0]).toMatchObject({ type: "routine.broken", summary: "Routine sweep is broken: resume failed", details: { routineId: "r-1" } })
+    // The same breakage published again is one event: the dedupe key holds.
+    runtime.publish([draft])
+    await Bun.sleep(30)
+    expect(sink.received).toHaveLength(1)
+    await until(() => outboxOf(outboxPath).totals[0]?.delivered === 1)
+    // No cursor was written: the herd's detection still starts from its own baseline.
+    expect(outboxOf(outboxPath).cursor).toBeUndefined()
   })
 
   test("a failing view is logged once and detection carries on", async () => {

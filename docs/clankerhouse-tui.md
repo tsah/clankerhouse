@@ -59,13 +59,14 @@ without folding them.
 
 A Workshop labelled `role=desk` is a **desk**: a standing Workshop that runs on a
 Routine and keeps one long-lived report. Every desk folds under one teal
-`◆ ▾ Desks · N` row (N desks), whatever its own parent was, and keeps its own
+`◆ ▸ Desks · N` row (N desks), whatever its own parent was, and keeps its own
 children beneath it. The group is not pinned: it is a lineage like any other and
 sorts by its freshest desk's last-seen recency (the same newest-descendant rule as
 every lineage), so it rises when a desk is active and sinks when the desks are
 quiet. Only the current-session rule below can lift it, as it lifts any lineage
-holding the current session. It opens unfolded; `Left` folds it and `Right` or
-`Enter` shows it again, as on a `✓ N done` row; no Workshop action applies to it.
+holding the current session. It starts folded like every other lineage (unfolded
+when the current session is a desk); `Right` or `Enter` shows it and `Left` folds
+it again, as on a `✓ N done` row; no Workshop action applies to it.
 Desk rows are tree-indented beneath it with a teal `desk` tag (the reserved colour
 of that tag, never a hashed label colour) followed by their other tags, such as the
 coloured `stage` word. Search shows the group only above matching desks.

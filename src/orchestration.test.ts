@@ -298,3 +298,23 @@ describe("watch loop", () => {
     expect(emitted.map((event) => event.type)).toEqual(["settled"])
   })
 })
+
+describe("superseded installs", () => {
+  test("a process that started on the active version is superseded once another is activated; a staged version and a checkout are not", async () => {
+    const { mkdtempSync, mkdirSync, symlinkSync, rmSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const { supersededInstall } = await import("./installation")
+    const lib = mkdtempSync(join(tmpdir(), "ch-superseded-"))
+    try {
+      for (const version of ["v1", "v2"]) mkdirSync(join(lib, "clankerhouse-versions", version), { recursive: true })
+      symlinkSync(join(lib, "clankerhouse-versions", "v2"), join(lib, "clankerhouse"))
+      expect(supersededInstall(join(lib, "clankerhouse-versions", "v1"), true)).toBe(true)
+      // A version staged and tested before activation never was active: it still delivers.
+      expect(supersededInstall(join(lib, "clankerhouse-versions", "v1"), false)).toBe(false)
+      expect(supersededInstall(join(lib, "clankerhouse-versions", "v2"), true)).toBe(false)
+      expect(supersededInstall(join(lib, "clankerhouse"), true)).toBe(false)
+      expect(supersededInstall(lib, true)).toBe(false)
+    } finally { rmSync(lib, { recursive: true, force: true }) }
+  })
+})

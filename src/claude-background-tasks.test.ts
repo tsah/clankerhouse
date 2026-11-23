@@ -116,6 +116,20 @@ describe("Claude background-task lifecycle", () => {
     expect(f.attestation()).toMatchObject({ pane: "block:p9", clankerId: "clanker-background-test", harnessSessionId: "claude-test-session", state: "working" })
   })
 
+  test("a turn that ends on a usage limit blocks the clanker on a person; an outage just ends the turn", async () => {
+    const f = fixture()
+    await f.emit("working", { hook_event_name: "UserPromptSubmit" })
+    // Claude fires StopFailure, not Stop, when the API refuses the turn.
+    const limited = await f.emit("done", { hook_event_name: "StopFailure", error: "rate_limit", last_assistant_message: "You've hit your weekly limit · resets Nov 26, 11am (UTC)" })
+    expect(limited).toMatchObject({ hookEvent: "StopFailure", state: "blocked", generation: 1, settledGeneration: 0, turnError: { error: "rate_limit", message: "You've hit your weekly limit · resets Nov 26, 11am (UTC)" } })
+    // The next prompt clears it.
+    const resumed = await f.emit("working", { hook_event_name: "UserPromptSubmit" })
+    expect(resumed).toMatchObject({ state: "working", generation: 2, turnError: null })
+    const outage = await f.emit("done", { hook_event_name: "StopFailure", error: "overloaded", error_details: "529 Overloaded" })
+    expect(outage).toMatchObject({ state: "done", generation: 2, settledGeneration: 2, turnError: { error: "overloaded", message: "529 Overloaded" } })
+    expect((await f.emit("working", { hook_event_name: "PreToolUse" })).turnError).toBeNull()
+  })
+
   test("Stop defers completion and Recovery settlement until background work has finished", async () => {
     const f = fixture()
     await f.emit("working", { hook_event_name: "UserPromptSubmit" })

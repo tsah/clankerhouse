@@ -6,12 +6,16 @@
  */
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { deliverQueuedMessages } from "./clanker-api"
+import { openClankerLedger } from "./clanker-ledger"
+import { deliveryEscalationEvent, runDeliveryWatch, type DeliveryEscalation } from "./delivery-watch"
 import { watchHookStateRequests, type HookStateRequest } from "./hook-events"
 import { reapDoneWorkshops, resumeUnfinishedMutations } from "./mutations"
 import { withOrchestrationStore } from "./orchestration"
-import { fireRoutinesThroughSend } from "./routine-api"
+import { fireRoutinesThroughSend, routineNoticeEvent } from "./routine-api"
+import type { RoutineNotice } from "./routines"
 import { daemonMultiplexer, ensurePrivateRuntimeDirectory, invalidateProjectionEnrichment, latestHerdOf, onSnapshot, refreshProjectionSnapshot, refreshStaleDirectories, runtimeDir, scheduleProjectionRefresh } from "./snapshot"
 import { StatusHookRuntime, liveStatusView } from "./status-hooks"
+import { workshopForId } from "./workshop"
 
 const pidPath = `${runtimeDir}/runner.pid`
 const refreshMs = Number(Bun.env.CLANKERHOUSE_REFRESH_MS ?? 15_000) || 15_000
@@ -55,13 +59,14 @@ const startQueuedDelivery = () => {
 const ROUTINE_PASS_MS = Number(Bun.env.CLANKERHOUSE_ROUTINE_PASS_MS ?? 15_000) || 15_000
 let routinePassRunning = false
 let routinePassFailure = ""
+let routineNotify: ((notice: RoutineNotice) => void) | undefined
 const runRoutinePass = () => {
   if (routinePassRunning) return
   routinePassRunning = true
-  void fireRoutinesThroughSend(daemonMultiplexer())
+  void fireRoutinesThroughSend(daemonMultiplexer(), { notify: routineNotify })
     .then((fired) => {
       for (const entry of fired) {
-        if (entry.outcome === "fired") console.error(`Routine ${entry.routineId} woke ${entry.clankerId} (${entry.messageId})`)
+        if (entry.outcome === "fired" || entry.outcome === "resumed" || entry.outcome === "caught-up") console.error(`Routine ${entry.routineId} woke ${entry.clankerId} (${entry.messageId})${entry.outcome === "fired" ? "" : `, ${entry.outcome}`}`)
         else console.error(`Routine ${entry.routineId} for ${entry.clankerId}: ${entry.outcome}${entry.error ? `: ${entry.error}` : ""}`)
       }
       routinePassFailure = ""
@@ -77,6 +82,39 @@ const startRoutines = () => {
   const timer = setInterval(runRoutinePass, ROUTINE_PASS_MS)
   runRoutinePass()
   return () => clearInterval(timer)
+}
+
+// The delivery watch: senders hear why a message is held or failed, and a hold that will not fix itself reaches the
+// operator's phone and needs-me list. It also hands Reports no watch showed to their addressee.
+const DELIVERY_WATCH_MS = Number(Bun.env.CLANKERHOUSE_DELIVERY_WATCH_MS ?? 60_000) || 60_000
+let deliveryWatchRunning = false
+let deliveryWatchFailure = ""
+let deliveryEscalate: ((escalations: DeliveryEscalation[]) => void) | undefined
+const runDeliveryWatchPass = () => {
+  if (deliveryWatchRunning) return
+  deliveryWatchRunning = true
+  void runDeliveryWatch({ multiplexer: daemonMultiplexer(), escalate: deliveryEscalate, log: (line) => console.error(`Delivery watch: ${line}`) })
+    .then(() => { deliveryWatchFailure = "" })
+    .catch((error) => {
+      const failure = error instanceof Error ? error.message : String(error)
+      if (failure !== deliveryWatchFailure) console.error(`Delivery watch failed: ${failure}`)
+      deliveryWatchFailure = failure
+    })
+    .finally(() => { deliveryWatchRunning = false })
+}
+const startDeliveryWatch = () => {
+  const timer = setInterval(runDeliveryWatchPass, DELIVERY_WATCH_MS)
+  return () => clearInterval(timer)
+}
+const recipientWorkshop = (clankerId: string) => {
+  try {
+    const ledger = openClankerLedger()
+    try {
+      const workshopId = ledger.get(clankerId)?.workshopId
+      const record = workshopId ? workshopForId(workshopId) : undefined
+      return record ? { id: record.workshopId, path: record.canonicalPath, branch: record.branch } : undefined
+    } finally { ledger.close() }
+  } catch { return undefined }
 }
 
 const applyHookStateRequest = async (request: HookStateRequest) => {
@@ -106,6 +144,17 @@ export const runRunner = async () => {
     requestObservation: scheduleProjectionRefresh,
   })
   stops.push(() => statusHooks.stop())
+  // A broken or ended Routine goes to the sinks that want `routine.*` (the operator's phone).
+  routineNotify = (notice) => {
+    const sinks = statusHooks.publish([routineNoticeEvent(notice)])
+    console.error(`Routine ${notice.routine.routineId} ${notice.kind}: ${notice.reason} (${sinks ? `sent to ${sinks} sink${sinks === 1 ? "" : "s"}` : "no sink wants routine events"})`)
+  }
+  // An undelivered message goes to the sinks that want `message.*` (the operator's phone), one push per recipient.
+  deliveryEscalate = (escalations) => {
+    const due = escalations.filter((escalation) => escalation.pushed)
+    const sinks = due.length ? statusHooks.publish(due.map((escalation) => deliveryEscalationEvent(escalation, recipientWorkshop(escalation.message.clankerId)))) : 0
+    for (const escalation of escalations) console.error(`Message ${escalation.message.messageId} to ${escalation.name} escalated: ${escalation.reason} (${!escalation.pushed ? "needs-me row only" : sinks ? `sent to ${sinks} sink${sinks === 1 ? "" : "s"}` : "no sink wants message events"})`)
+  }
   stops.push(onSnapshot((sessions) => {
     void statusHooks.observed()
     void reapDoneWorkshops(sessions).catch((error) => console.error(`Done Workshop reaper failed: ${error instanceof Error ? error.message : String(error)}`))
@@ -113,6 +162,7 @@ export const runRunner = async () => {
   stops.push(watchHookStateRequests(`${runtimeDir}/hook-events`, applyHookStateRequest))
   stops.push(startQueuedDelivery())
   stops.push(startRoutines())
+  stops.push(startDeliveryWatch())
   void (async () => {
     try {
       for await (const change of daemonMultiplexer().changes(changeSignal.signal)) {

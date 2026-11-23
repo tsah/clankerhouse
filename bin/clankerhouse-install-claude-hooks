@@ -28,6 +28,8 @@ states = {
     "PreToolUse": "working",
     "UserPromptSubmit": "working",
     "Stop": "done",
+    # A turn that ends on an API error (a usage limit, an outage) fires this instead of Stop.
+    "StopFailure": "done",
     "SessionEnd": "unknown",
 }
 

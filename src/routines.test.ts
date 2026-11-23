@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { addRoutine, cancelRoutine, listRoutines, updateRoutine } from "./routine-api"
-import { RoutineStore, defaultRoutineTimeZone, fireDueRoutines, formatWallClock, nextCronTime, parseCron, wallClock, withRoutineStore, type Routine } from "./routines"
+import { RoutineStore, defaultRoutineTimeZone, fireDueRoutines, formatWallClock, nextCronTime, parseCron, wallClock, withRoutineStore, type FireRoutinesDeps, type Routine, type RoutineDeliveryProof, type RoutineNotice } from "./routines"
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -165,18 +165,230 @@ describe("firing", () => {
     expect(third.map((entry) => entry.outcome)).toEqual(["fired"])
   })
 
-  test("a failed send is recorded and retried at the next occurrence; a closed clanker ends the routine", async () => {
+  test("a failed send is recorded and notified once; a closed clanker with no workshop ends the routine loudly", async () => {
     const { path, routine } = setup("* * * * *", "UTC")
+    const notices: RoutineNotice[] = []
+    const notify = (notice: RoutineNotice) => { notices.push(notice) }
     const unavailable = async () => { throw Object.assign(new Error("Unknown clanker clanker-a"), { code: "NOT_FOUND" }) }
-    const failed = await fireDueRoutines({ send: unavailable, storePath: path, now: () => at("2026-11-10T07:01:00Z"), clankerEnded: () => false })
-    expect(failed.map((entry) => entry.outcome)).toEqual(["failed"])
-    expect(withRoutineStore((store) => store.get(routine.routineId)!, path)).toMatchObject({ state: "active", lastError: "Unknown clanker clanker-a" })
-    const ended = await fireDueRoutines({ send: unavailable, storePath: path, now: () => at("2026-11-10T07:02:00Z"), clankerEnded: () => true })
+    const failed = await fireDueRoutines({ send: unavailable, notify, storePath: path, now: () => at("2026-11-10T07:01:00Z"), clankerEnded: () => false })
+    expect(failed.map((entry) => [entry.outcome, entry.notified])).toEqual([["failed", true]])
+    expect(withRoutineStore((store) => store.get(routine.routineId)!, path)).toMatchObject({ state: "active", lastError: "delivery to clanker-a failed: Unknown clanker clanker-a", alert: { kind: "broken" }, missedAt: at("2026-11-10T07:01:00Z") })
+    // The next fire fails too: still one notification for this breakage.
+    const again = await fireDueRoutines({ send: unavailable, notify, storePath: path, now: () => at("2026-11-10T07:02:00Z"), clankerEnded: () => false })
+    expect(again.map((entry) => [entry.outcome, entry.notified])).toEqual([["failed", false]])
+    expect(notices.map((notice) => notice.kind)).toEqual(["broken"])
+    const ended = await fireDueRoutines({ send: unavailable, notify, storePath: path, now: () => at("2026-11-10T07:03:00Z"), clankerEnded: () => true })
     expect(ended.map((entry) => entry.outcome)).toEqual(["ended"])
-    expect(withRoutineStore((store) => store.get(routine.routineId)!, path)).toMatchObject({ state: "ended", endedReason: "clanker closed", nextFireAt: null })
-    expect(await fireDueRoutines({ send: unavailable, storePath: path, now: () => at("2026-11-10T07:03:00Z") })).toEqual([])
+    expect(notices.map((notice) => notice.kind)).toEqual(["broken", "ended"])
+    expect(notices[1]!.reason).toMatch(/closed and the routine has no workshop/)
+    expect(withRoutineStore((store) => store.get(routine.routineId)!, path)).toMatchObject({ state: "ended", nextFireAt: null, alert: { kind: "ended" }, missedAt: null })
+    expect(await fireDueRoutines({ send: unavailable, storePath: path, now: () => at("2026-11-10T07:04:00Z") })).toEqual([])
     expect(withRoutineStore((store) => store.list({}), path)).toEqual([])
     expect(withRoutineStore((store) => store.list({ includeEnded: true }), path)).toHaveLength(1)
+    expect(withRoutineStore((store) => store.alerts(at("2026-11-10T07:05:00Z")), path).map((entry) => entry.routineId)).toEqual([routine.routineId])
+    expect(withRoutineStore((store) => store.alerts(at("2026-11-20T07:05:00Z")), path)).toEqual([])
+  })
+})
+
+describe("routines follow their workshop", () => {
+  const setup = (cron = "* * * * *") => {
+    const path = storePath()
+    const routine = withRoutineStore((store) => store.add({ clankerId: "clanker-old", workshopId: "ws-1", cron, timeZone: "UTC", message: "sweep", createdBy: "clanker-old", now: at("2026-11-10T07:00:00Z") }), path)
+    const sent: Array<{ requestId: string; clankerId: string }> = []
+    const notices: RoutineNotice[] = []
+    let live: string | undefined = undefined
+    let proof: RoutineDeliveryProof = "landed"
+    const resumes: string[] = []
+    let resumeError: string | undefined
+    const deps = (iso: string): FireRoutinesDeps => ({
+      storePath: path,
+      now: () => at(iso),
+      workshop: (current) => ({ kind: "open", workshopId: current.workshopId }),
+      liveClanker: async () => live,
+      resume: async (current) => {
+        resumes.push(current.routineId)
+        if (resumeError) throw new Error(resumeError)
+        live = "clanker-resumed"
+        return "clanker-resumed"
+      },
+      send: async (_routine, requestId, clankerId) => { sent.push({ requestId, clankerId }); return { messageId: `msg-${sent.length}`, delivery: "immediate" } },
+      proof: async () => proof,
+      retype: async () => true,
+      notify: (notice) => { notices.push(notice) },
+      proofMs: 120_000,
+    })
+    const stored = () => withRoutineStore((store) => store.get(routine.routineId)!, path)
+    return {
+      path, routine, sent, notices, resumes, deps, stored,
+      setLive: (id: string | undefined) => { live = id },
+      setProof: (value: RoutineDeliveryProof) => { proof = value },
+      failResume: (why: string | undefined) => { resumeError = why },
+    }
+  }
+
+  test("a wake goes to the workshop's live clanker, which then owns the routine", async () => {
+    const t = setup()
+    t.setLive("clanker-new")
+    const fired = await fireDueRoutines(t.deps("2026-11-10T07:01:00Z"))
+    expect(fired.map((entry) => [entry.outcome, entry.clankerId])).toEqual([["fired", "clanker-new"]])
+    expect(t.sent).toEqual([{ requestId: `${t.routine.routineId}:${at("2026-11-10T07:01:00Z")}`, clankerId: "clanker-new" }])
+    expect(t.stored()).toMatchObject({ clankerId: "clanker-new", workshopId: "ws-1", proof: { messageId: "msg-1", clankerId: "clanker-new" } })
+    expect(t.resumes).toEqual([])
+    // The next pass sees the wake in the session.
+    const proven = await fireDueRoutines(t.deps("2026-11-10T07:01:20Z"))
+    expect(proven.map((entry) => entry.outcome)).toEqual(["landed"])
+    expect(t.stored()).toMatchObject({ proof: null, lastOutcome: "landed" })
+  })
+
+  test("with no live clanker, the workshop's last session is resumed and then woken", async () => {
+    const t = setup()
+    const fired = await fireDueRoutines(t.deps("2026-11-10T07:01:00Z"))
+    expect(fired.map((entry) => [entry.outcome, entry.clankerId])).toEqual([["resumed", "clanker-resumed"]])
+    expect(t.resumes).toEqual([t.routine.routineId])
+    expect(t.sent.map((entry) => entry.clankerId)).toEqual(["clanker-resumed"])
+    expect(t.stored().lastOutcome).toBe("fired after resume (immediate)")
+    expect(t.notices).toEqual([])
+  })
+
+  test("a failed resume is notified once, and the last missed fire runs once when a clanker is back", async () => {
+    const t = setup()
+    t.failResume("quota exhausted")
+    await fireDueRoutines(t.deps("2026-11-10T07:01:00Z"))
+    await fireDueRoutines(t.deps("2026-11-10T07:02:00Z"))
+    await fireDueRoutines(t.deps("2026-11-10T07:03:00Z"))
+    expect(t.notices.map((notice) => [notice.kind, notice.routine.routineId])).toEqual([["broken", t.routine.routineId]])
+    expect(t.notices[0]!.reason).toMatch(/resuming its last session failed: quota exhausted/)
+    expect(t.stored()).toMatchObject({ alert: { kind: "broken" }, missedAt: at("2026-11-10T07:03:00Z") })
+    expect(t.sent).toEqual([])
+    // Between fires a clanker comes back (the operator resumed it): only the newest missed fire runs, once.
+    t.setLive("clanker-back")
+    const caught = await fireDueRoutines(t.deps("2026-11-10T07:03:30Z"))
+    expect(caught.map((entry) => [entry.outcome, entry.scheduledAt])).toEqual([["caught-up", at("2026-11-10T07:03:00Z")]])
+    expect(t.sent).toEqual([{ requestId: `${t.routine.routineId}:${at("2026-11-10T07:03:00Z")}`, clankerId: "clanker-back" }])
+    expect(t.stored()).toMatchObject({ missedAt: null, clankerId: "clanker-back" })
+    // Its proof lands: the routine works again and the alert clears.
+    const landed = await fireDueRoutines(t.deps("2026-11-10T07:03:45Z"))
+    expect(landed.map((entry) => entry.outcome)).toEqual(["landed"])
+    expect(t.stored()).toMatchObject({ alert: null, proof: null })
+    expect(t.sent).toHaveLength(1)
+  })
+
+  test("a catch-up never resumes: it waits for a clanker to come back", async () => {
+    const t = setup()
+    t.failResume("startup dialog")
+    await fireDueRoutines(t.deps("2026-11-10T07:01:00Z"))
+    expect(t.resumes).toHaveLength(1)
+    await fireDueRoutines(t.deps("2026-11-10T07:01:30Z"))
+    expect(t.resumes).toHaveLength(1)
+    expect(t.stored().missedAt).toBe(at("2026-11-10T07:01:00Z"))
+  })
+
+  test("an unreachable Multiplexer neither resumes nor alarms: the fire waits for catch-up", async () => {
+    const t = setup()
+    const blind = { ...t.deps("2026-11-10T07:01:00Z"), liveClanker: async () => { throw new Error("rex unreachable") } }
+    const fired = await fireDueRoutines(blind)
+    expect(fired.map((entry) => [entry.outcome, entry.notified])).toEqual([["failed", false]])
+    expect(t.resumes).toEqual([])
+    expect(t.notices).toEqual([])
+    expect(t.stored()).toMatchObject({ alert: null, missedAt: at("2026-11-10T07:01:00Z") })
+    t.setLive("clanker-a")
+    const caught = await fireDueRoutines(t.deps("2026-11-10T07:01:30Z"))
+    expect(caught.map((entry) => entry.outcome)).toEqual(["caught-up"])
+  })
+
+  test("a workshop marked done or gone ends the routine, loudly, once", async () => {
+    const t = setup()
+    const done = { ...t.deps("2026-11-10T07:01:00Z"), workshop: () => ({ kind: "ended" as const, reason: "its workshop /w is marked done" }) }
+    const ended = await fireDueRoutines(done)
+    expect(ended.map((entry) => entry.outcome)).toEqual(["ended"])
+    expect(t.notices.map((notice) => [notice.kind, notice.reason])).toEqual([["ended", "its workshop /w is marked done"]])
+    expect(t.stored()).toMatchObject({ state: "ended", endedReason: "its workshop /w is marked done", alert: { kind: "ended" } })
+    expect(await fireDueRoutines({ ...done, now: () => at("2026-11-10T07:02:00Z") })).toEqual([])
+    expect(t.notices).toHaveLength(1)
+    expect(t.sent).toEqual([])
+  })
+
+  test("a wake that never reaches the session is typed once more, then counts as a breakage", async () => {
+    const t = setup("0 9 * * *")
+    t.setLive("clanker-a")
+    t.setProof("unconfirmed")
+    await fireDueRoutines(t.deps("2026-11-10T09:00:05Z"))
+    // Inside the proof window nothing happens.
+    expect((await fireDueRoutines(t.deps("2026-11-10T09:01:00Z"))).map((entry) => entry.outcome)).toEqual([])
+    expect((await fireDueRoutines(t.deps("2026-11-10T09:02:10Z"))).map((entry) => entry.outcome)).toEqual(["retyped"])
+    expect(t.stored()).toMatchObject({ proof: { retyped: true, since: at("2026-11-10T09:02:10Z") } })
+    expect((await fireDueRoutines(t.deps("2026-11-10T09:03:00Z"))).map((entry) => entry.outcome)).toEqual([])
+    const lost = await fireDueRoutines(t.deps("2026-11-10T09:04:20Z"))
+    expect(lost.map((entry) => [entry.outcome, entry.notified])).toEqual([["failed", true]])
+    expect(t.notices[0]!.reason).toMatch(/never reached the session, even after typing it again/)
+    // A message that may still sit in the input box is not sent again.
+    expect(t.stored()).toMatchObject({ proof: null, missedAt: null, alert: { kind: "broken" } })
+    expect(t.sent).toHaveLength(1)
+  })
+
+  test("a queued wake waits without a deadline; a lost one is delivered again", async () => {
+    const t = setup("0 9 * * *")
+    t.setLive("clanker-a")
+    t.setProof("queued")
+    await fireDueRoutines(t.deps("2026-11-10T09:00:05Z"))
+    expect((await fireDueRoutines(t.deps("2026-11-10T09:30:00Z"))).map((entry) => entry.outcome)).toEqual([])
+    t.setProof("lost")
+    t.setLive(undefined)
+    const again = await fireDueRoutines(t.deps("2026-11-10T09:31:00Z"))
+    expect(again.map((entry) => [entry.outcome, entry.clankerId, entry.scheduledAt])).toEqual([["resumed", "clanker-resumed", at("2026-11-10T09:00:00Z")]])
+    // The redelivery has its own request id, so it is not a replay of the lost message.
+    expect(t.sent.map((entry) => entry.requestId)).toEqual([`${t.routine.routineId}:${at("2026-11-10T09:00:00Z")}`, `${t.routine.routineId}:${at("2026-11-10T09:00:00Z")}:again-${at("2026-11-10T09:31:00Z")}`])
+    // Lost again: one alert, no loop.
+    const twice = await fireDueRoutines(t.deps("2026-11-10T09:32:00Z"))
+    expect(twice.map((entry) => [entry.outcome, entry.notified])).toEqual([["failed", true]])
+    expect(t.notices[0]!.reason).toMatch(/dropped twice/)
+    expect(await fireDueRoutines(t.deps("2026-11-10T09:33:00Z"))).toEqual([])
+    expect(t.sent).toHaveLength(2)
+  })
+
+  test("a pass resumes at most a few workshops; the rest wait quietly for their next fire", async () => {
+    const t = setup()
+    const others = [1, 2].map(() => withRoutineStore((store) => store.add({ clankerId: "clanker-x", workshopId: "ws-2", cron: "* * * * *", timeZone: "UTC", message: "m", createdBy: "x", now: at("2026-11-10T07:00:00Z") }), t.path))
+    t.failResume("session gone")
+    const fired = await fireDueRoutines({ ...t.deps("2026-11-10T07:01:00Z"), resumesPerPass: 2 })
+    expect(t.resumes).toHaveLength(2)
+    expect(fired.filter((entry) => entry.notified)).toHaveLength(2)
+    expect(fired.filter((entry) => entry.outcome === "failed" && !entry.notified)).toHaveLength(1)
+    expect(others).toHaveLength(2)
+  })
+
+  test("a closed clanker with no workshop ends its routine instead of being resumed", async () => {
+    const path = storePath()
+    const routine = withRoutineStore((store) => store.add({ clankerId: "clanker-a", cron: "* * * * *", timeZone: "UTC", message: "x", createdBy: "clanker-a", now: at("2026-11-10T07:00:00Z") }), path)
+    const resumes: string[] = []
+    const notices: RoutineNotice[] = []
+    const ended = await fireDueRoutines({ storePath: path, now: () => at("2026-11-10T07:01:00Z"), workshop: () => ({ kind: "open", workshopId: null }), liveClanker: async () => undefined,
+      resume: async () => { resumes.push("x"); return "clanker-a" }, clankerEnded: () => true, notify: (notice) => { notices.push(notice) }, send: async () => ({ messageId: "m", delivery: "immediate" }) })
+    expect(ended.map((entry) => entry.outcome)).toEqual(["ended"])
+    expect(resumes).toEqual([])
+    expect(notices.map((notice) => notice.kind)).toEqual(["ended"])
+    expect(withRoutineStore((store) => store.get(routine.routineId)!, path).state).toBe("ended")
+  })
+
+  test("a routine from before workshops owned routines is bound to its workshop at its first fire", async () => {
+    const path = storePath()
+    const routine = withRoutineStore((store) => store.add({ clankerId: "clanker-a", cron: "* * * * *", timeZone: "UTC", message: "x", createdBy: "clanker-a", now: at("2026-11-10T07:00:00Z") }), path)
+    expect(routine.workshopId).toBeNull()
+    await fireDueRoutines({ storePath: path, now: () => at("2026-11-10T07:01:00Z"), workshop: () => ({ kind: "open", workshopId: "ws-9" }), send: async () => ({ messageId: "m", delivery: "immediate" }) })
+    expect(withRoutineStore((store) => store.get(routine.routineId)!, path).workshopId).toBe("ws-9")
+    expect(withRoutineStore((store) => store.list({ workshopId: "ws-9" }), path).map((entry) => entry.routineId)).toEqual([routine.routineId])
+  })
+
+  test("a store from before workshops owned routines gains the new columns", () => {
+    const path = storePath()
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite")
+    const db = new Database(path, { create: true })
+    db.exec(`CREATE TABLE routines (routine_id TEXT PRIMARY KEY, clanker_id TEXT NOT NULL, name TEXT, cron TEXT NOT NULL, time_zone TEXT NOT NULL, message TEXT NOT NULL, state TEXT NOT NULL,
+      created_at INTEGER NOT NULL, created_by TEXT NOT NULL, updated_at INTEGER NOT NULL, next_fire_at INTEGER, last_scheduled_at INTEGER, last_fired_at INTEGER,
+      last_message_id TEXT, last_outcome TEXT, last_error TEXT, ended_reason TEXT)`)
+    db.exec("INSERT INTO routines VALUES ('routine-old', 'clanker-a', NULL, '* * * * *', 'UTC', 'x', 'active', 1, 'clanker-a', 1, 2, NULL, NULL, NULL, NULL, NULL, NULL)")
+    db.close()
+    expect(withRoutineStore((store) => store.get("routine-old"), path)).toMatchObject({ workshopId: null, alert: null, missedAt: null, proof: null })
   })
 })
 
@@ -207,6 +419,18 @@ describe("routine ownership", () => {
     // The operator, outside any clanker, may manage any routine.
     expect(cancelRoutine(mine.routineId, { self: null }, { storePath: path }).cancelled).toBe(true)
     expect(cancelRoutine(defaulted.routineId, other, { storePath: path, clanker: "clanker-a" }).cancelled).toBe(true)
+  })
+
+  test("a clanker sees and manages its workshop's routines, whichever clanker took their last wake", async () => {
+    const path = storePath()
+    const old = { self: "clanker-old", workshopId: "ws-1" }
+    const added = await addRoutine({ cron: "0 9 * * *", message: "sweep", timeZone: AMS }, old, { storePath: path })
+    expect(added.workshopId).toBe("ws-1")
+    const successor = { self: "clanker-new", workshopId: "ws-1" }
+    expect(listRoutines({}, successor, { storePath: path }).routines.map((routine) => routine.routineId)).toEqual([added.routineId])
+    expect(listRoutines({}, { self: "clanker-x", workshopId: "ws-2" }, { storePath: path }).routines).toEqual([])
+    expect(updateRoutine(added.routineId, { name: "sweep" }, successor, { storePath: path }).name).toBe("sweep")
+    expect(() => cancelRoutine(added.routineId, { self: "clanker-x", workshopId: "ws-2" }, { storePath: path })).toThrow(/belongs to clanker/)
   })
 
   test("the store is shared with the orchestration database", () => {

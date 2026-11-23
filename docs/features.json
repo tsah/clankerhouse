@@ -216,10 +216,12 @@
     },
     {
       "id": "clanker-routines",
-      "title": "Clanker Routines: a clanker's own cron wake-ups delivered through the send queue",
+      "title": "Clanker Routines: a Workshop's own cron wake-ups, delivered through the send queue, surviving the clanker",
       "core": true,
       "unit": [
-        "src/routines.test.ts"
+        "src/needs-me.test.ts",
+        "src/routines.test.ts",
+        "src/status-hooks.test.ts"
       ],
       "standalone": [
         "scripts/qa-orchestration"
@@ -229,7 +231,11 @@
         "Type a draft into that clanker's input box before the next occurrence; confirm the wake queues, the draft is untouched, and the wake arrives after focus moves away",
         "Keep the clanker working across two occurrences; confirm it gets one queued wake, not two, and `routine show` reports skipped-queued",
         "Restart the daemon with a routine registered; confirm `routine list` still shows it and it fires at its next occurrence",
-        "From another clanker, try `clankers routine cancel ROUTINE_ID`; confirm it is refused until `--clanker OWNER` is given, then cancel the routine"
+        "From another clanker, try `clankers routine cancel ROUTINE_ID`; confirm it is refused until `--clanker OWNER` is given, then cancel the routine",
+        "Close the clanker that owns a routine and start a new clanker in the same Workshop; at the next fire confirm the new clanker gets the wake and `routine show` names it as `clankerId`",
+        "Close every clanker in a Workshop with a routine; at the next fire confirm the runner resumes the Workshop's last session and delivers the wake once its input box is up",
+        "Make a Workshop's resume fail (e.g. a throwaway Workshop whose last session id is bogus); confirm one `routine.broken` push and one `routine-broken` row in `clankers needs-me`, and no second push at the following fire",
+        "Mark a Workshop with a routine `status=done`; at the next fire confirm the routine ends with one `routine.ended` push"
       ]
     },
     {
@@ -470,7 +476,7 @@
         "scripts/qa-workshop-labels"
       ],
       "manual": [
-        "Label a few Workshops `clankers workshop label set role=desk`; confirm the flat list shows one teal `◆ ▾ Desks · N` row with every desk tree-indented beneath it, each with a teal `desk` tag followed by its coloured stage word, existing tags such as `retro` kept, and a desk that had another parent now under the group with its own children still beneath it",
+        "Label a few Workshops `clankers workshop label set role=desk`; confirm the flat list shows one teal `◆ ▸ Desks · N` row (folded at start, like every lineage but the current one) with every desk tree-indented beneath it, each with a teal `desk` tag followed by its coloured stage word, existing tags such as `retro` kept, and a desk that had another parent now under the group with its own children still beneath it",
         "Confirm the Desks group is not pinned: it sits among the other rows by its freshest desk's last-seen recency, rises when you visit a desk and sinks below fresher Workshops when the desks are quiet",
         "Select the Desks row; confirm Left folds it to `◆ ▸ Desks · N`, Right or Enter shows it again, as on a `✓ N done` row, and that Alt-R, Alt-A, Alt-L, Alt-D and Alt-S do nothing to it",
         "Type part of one desk's name; confirm the group shows only above the matching desk, and clearing the search restores the list",
@@ -516,6 +522,29 @@
         "Choose a Workshop in another session; confirm the app switches to that session and focuses the clanker's tab (with Remote Control on), or that the session's focus moved (with it off)",
         "Spawn a Claude Workshop with Alt-B; confirm its state follows the turn (working, blocked on a permission prompt, done) and that clankers send --wait returns its reply",
         "Restart the Rex server; confirm the Workshop's tabs come back as shells, the clanker is listed as interrupted, and clankers resume brings it back"
+      ]
+    },
+    {
+      "id": "message-delivery-watch",
+      "title": "Every send lands in the recipient's session or someone hears why: delivery status, proof, sender notices, operator escalation, pushed Reports",
+      "core": true,
+      "unit": [
+        "src/messaging.test.ts",
+        "src/multiplexer/rex.test.ts",
+        "src/claude-background-tasks.test.ts",
+        "src/claude-hooks.test.ts"
+      ],
+      "standalone": [
+        "scripts/qa-orchestration"
+      ],
+      "manual": [
+        "Send to a working Claude clanker; confirm the receipt has `status: queued` and a `heldBecause` naming the running turn, and `send-status` shows the same with `proof: queued`",
+        "Send with `--wait-delivered --timeout 120` to an idle Claude; confirm it returns `status: delivered` once the prompt is in the transcript",
+        "Leave a message held over 10 minutes from a clanker sender; confirm the sender gets one `[clankerhouse delivery]` notice with the reason, and another when the message lands",
+        "Let a Claude turn end on a usage limit; confirm the clanker shows `blocked` with Claude's limit text, a message to it is held with that reason, and after 45 minutes one `message.undelivered` push and a `message-undelivered` needs-me row appear (one push for several messages to it)",
+        "With a usage-limit dialog up in a typed-delivery Claude, send to it once the clanker reads ready; confirm the dialog is dismissed and the message submitted, and that a greyed suggestion in an empty input box is not taken for unsent text",
+        "Report `--state question --to CLANKER_ID` to a clanker that runs no watch; confirm it receives `[clankerhouse report SEQ ...]` within about two minutes, and that a watching orchestrator does not get it twice",
+        "Send `--delivery restart` to a Claude whose turn ended with background tasks still running; confirm no Escape is sent and the message goes straight in"
       ]
     }
   ]

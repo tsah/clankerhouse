@@ -63,10 +63,26 @@ export interface StoredMessage {
   orphanReason: string | null
   /** The dispatch mode the caller asked for. */
   requestedMode: string | null
+  /** Hand-offs the Multiplexer refused, and the last refusal. */
+  handoffFailures?: number
+  lastError?: string | null
 }
 
 /** Stage changes of messages, in order; `seq` lets a caller resume where it stopped. */
 export interface MessageEvent { seq: number; at: number; messageId: string; clankerId: string; stage: string; detail: string | null }
+
+/** What the delivery watch recorded about a message. */
+export interface DeliveryWatchFields { orphanedAt: number | null; noticeKind: string | null; noticeAt: number | null; escalatedAt: number | null; escalationReason: string | null; dismissedAt: number | null }
+interface WatchRow { orphaned_at: number | null; notice_kind: string | null; notice_at: number | null; escalated_at: number | null; escalation_reason: string | null; dismissed_at: number | null }
+const watchFieldsOf = (row: WatchRow): DeliveryWatchFields => ({ orphanedAt: row.orphaned_at ?? null, noticeKind: row.notice_kind ?? null, noticeAt: row.notice_at ?? null, escalatedAt: row.escalated_at ?? null, escalationReason: row.escalation_reason ?? null, dismissedAt: row.dismissed_at ?? null })
+
+/** An escalated message stays on the operator's needs-me list this long unless dismissed or delivered. */
+export const ESCALATION_SHOWN_MS = 3 * 24 * 60 * 60_000
+/** A Report no watch has shown is pushed to its addressee as a message after this long, and given up on after a day. */
+export const REPORT_PUSH_AFTER_MS = 60_000
+export const REPORT_PUSH_GIVE_UP_MS = 24 * 60 * 60_000
+/** Reports that want the addressee's attention; `working` progress notes stay in the store for watches. */
+export const PUSHED_REPORT_STATES: readonly ReportState[] = ["question", "blocked", "failed", "done"]
 
 export const orchestrationStatePath = () => `${stateDirFor()}/orchestration.sqlite3`
 
@@ -118,7 +134,7 @@ export const reportAddressee = (input: ReportAddressInput): string | null => {
 interface ReportRow { seq: number; at: number; clanker_id: string; workshop_id: string | null; to_id: string | null; state: string; message: string | null; payload: string | null }
 interface MessageRow {
   message_id: string; clanker_id: string; text: string; sha256: string; delivery: string; state: string; created_at: number; after_generation: number; delivered_at: number | null; acked_at: number | null; started_generation: number | null
-  request_id: string | null; sender: string | null; source: string | null; incarnation: string | null; attempts: number | null; handled_at: number | null; orphan_reason: string | null; requested_mode: string | null
+  request_id: string | null; sender: string | null; source: string | null; incarnation: string | null; attempts: number | null; handled_at: number | null; orphan_reason: string | null; requested_mode: string | null; handoff_failures?: number | null; last_error?: string | null
 }
 
 const reportFromRow = (row: ReportRow): ClankerReportRecord => ({
@@ -152,6 +168,8 @@ const messageFromRow = (row: MessageRow): StoredMessage => ({
   handledAt: row.handled_at ?? null,
   orphanReason: row.orphan_reason ?? null,
   requestedMode: row.requested_mode ?? null,
+  handoffFailures: row.handoff_failures ?? 0,
+  lastError: row.last_error ?? null,
 })
 
 export class MessageConflictError extends Error {
@@ -238,8 +256,23 @@ export class OrchestrationStore {
     const added: Array<[string, string]> = [
       ["missing_since", "INTEGER"], ["request_id", "TEXT"], ["sender", "TEXT"], ["source", "TEXT"], ["incarnation", "TEXT"],
       ["attempts", "INTEGER NOT NULL DEFAULT 0"], ["handled_at", "INTEGER"], ["orphan_reason", "TEXT"], ["requested_mode", "TEXT"],
+      // The delivery watch: when it was orphaned, what the sender was last told (held, failed, landed), and when the
+      // operator was told and dismissed it.
+      ["orphaned_at", "INTEGER"], ["notice_kind", "TEXT"], ["notice_at", "INTEGER"], ["escalated_at", "INTEGER"], ["escalation_reason", "TEXT"], ["dismissed_at", "INTEGER"],
+      // Hand-offs the Multiplexer refused (a draft in the box, a changed pane claim), and the last refusal.
+      ["handoff_failures", "INTEGER NOT NULL DEFAULT 0"], ["last_error", "TEXT"],
     ]
     for (const [name, type] of added) if (!columns.some((column) => column.name === name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${type}`)
+    db.transaction(() => {
+      // Checked again inside the write lock, so two processes opening an old store do not both migrate.
+      const reportColumns = db.query("PRAGMA table_info(reports)").all() as Array<{ name: string }>
+      if (!reportColumns.some((column) => column.name === "seen_at")) db.exec("ALTER TABLE reports ADD COLUMN seen_at INTEGER")
+      if (!reportColumns.some((column) => column.name === "pushed_at")) {
+        // Reports from before the push existed count as handled, so a first run does not replay history.
+        db.exec("ALTER TABLE reports ADD COLUMN pushed_at INTEGER")
+        db.exec("UPDATE reports SET pushed_at = at")
+      }
+    }).immediate()
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS messages_request_idx ON messages(clanker_id, request_id) WHERE request_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS message_events (
@@ -415,7 +448,7 @@ export class OrchestrationStore {
         } else if (row.missing_since === null) {
           this.db.query("UPDATE messages SET missing_since = ?2 WHERE message_id = ?1").run(row.message_id, now)
         } else if (now - row.missing_since >= orphanAfterMs) {
-          this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'recipient-missing' WHERE message_id = ?1").run(row.message_id)
+          this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'recipient-missing', orphaned_at = ?2 WHERE message_id = ?1").run(row.message_id, now)
           this.recordEvent(row.message_id, row.clanker_id, "orphaned", "recipient-missing", now)
           orphaned.push({ ...messageFromRow(row), state: "orphaned", orphanReason: "recipient-missing" })
         }
@@ -427,7 +460,7 @@ export class OrchestrationStore {
   /** Orphan every pending message to these clankers at once, because they were stopped on purpose. */
   orphanMessagesFor(clankerIds: readonly string[]): StoredMessage[] {
     if (!clankerIds.length) return []
-    const rows = this.db.query(`UPDATE messages SET state = 'orphaned', orphan_reason = 'stopped' WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
+    const rows = this.db.query(`UPDATE messages SET state = 'orphaned', orphan_reason = 'stopped', orphaned_at = ${Date.now()} WHERE state IN ('queued', 'delivered') AND clanker_id IN (${clankerIds.map(() => "?").join(", ")}) RETURNING *`).all(...clankerIds) as MessageRow[]
     for (const row of rows) this.recordEvent(row.message_id, row.clanker_id, "orphaned", "stopped")
     return rows.map(messageFromRow)
   }
@@ -439,7 +472,7 @@ export class OrchestrationStore {
   fenceIncarnation(clankerId: string, incarnation: string | null | undefined, now = Date.now()): StoredMessage[] {
     if (!incarnation) return []
     return this.db.transaction(() => {
-      const rows = this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'harness-replaced' WHERE clanker_id = ?1 AND state IN ('queued', 'delivered') AND incarnation IS NOT NULL AND incarnation <> ?2 RETURNING *").all(clankerId, incarnation) as MessageRow[]
+      const rows = this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'harness-replaced', orphaned_at = ?3 WHERE clanker_id = ?1 AND state IN ('queued', 'delivered') AND incarnation IS NOT NULL AND incarnation <> ?2 RETURNING *").all(clankerId, incarnation, now) as MessageRow[]
       for (const row of rows) this.recordEvent(row.message_id, clankerId, "orphaned", "harness-replaced", now)
       return rows.map(messageFromRow)
     }).immediate()
@@ -480,10 +513,100 @@ export class OrchestrationStore {
     return rows.map(messageFromRow)
   }
 
-  /** Return a claimed message to the head of its queue after a failed hand-off. */
-  requeue(messageId: string) {
-    const row = this.db.query("UPDATE messages SET state = 'queued', delivered_at = NULL WHERE message_id = ?1 AND state = 'delivered' RETURNING clanker_id").get(messageId) as { clanker_id: string } | null
-    if (row) this.recordEvent(messageId, row.clanker_id, "requeued", null)
+  /**
+   * Settle a typed message that used up its retries without an acknowledgement: `landed` (its tag is in the session
+   * transcript after all) acknowledges it, otherwise it is orphaned as `undelivered` so it stops holding the queue and
+   * its sender can be told. A late acknowledgement of an undelivered message still lands it.
+   */
+  settleUnconfirmed(messageId: string, landed: boolean, now = Date.now()): StoredMessage | undefined {
+    return this.db.transaction(() => {
+      const row = landed
+        ? this.db.query("UPDATE messages SET state = 'acked', acked_at = ?2 WHERE message_id = ?1 AND state = 'delivered' RETURNING *").get(messageId, now) as MessageRow | null
+        : this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'undelivered', orphaned_at = ?2 WHERE message_id = ?1 AND state = 'delivered' RETURNING *").get(messageId, now) as MessageRow | null
+      if (!row) return undefined
+      this.recordEvent(messageId, row.clanker_id, landed ? "acked" : "orphaned", landed ? "found in the session transcript" : `undelivered: no acknowledgement after ${row.attempts ?? 0} attempts`, now)
+      return messageFromRow(row)
+    }).immediate()
+  }
+
+  /** Typed messages that used up their retries and have waited `afterMs` since the last one. */
+  exhaustedDeliveries(clankerId: string, now = Date.now(), afterMs = RETRY_UNACKED_AFTER_MS, maxAttempts = MAX_DELIVERY_ATTEMPTS): StoredMessage[] {
+    return (this.db.query("SELECT * FROM messages WHERE clanker_id = ?1 AND state = 'delivered' AND delivered_at <= ?2 AND attempts >= ?3").all(clankerId, now - afterMs, maxAttempts) as MessageRow[]).map(messageFromRow)
+  }
+
+  /**
+   * What the delivery watch looks at: messages still pending, ones orphaned since the watch existed whose sender has
+   * not been told, and ones that landed after their sender was told they were held.
+   */
+  deliveryWatchCandidates(): Array<StoredMessage & DeliveryWatchFields> {
+    const rows = this.db.query(`SELECT * FROM messages WHERE state IN ('queued', 'delivered')
+      OR (state = 'orphaned' AND orphaned_at IS NOT NULL AND COALESCE(notice_kind, '') <> 'failed' AND COALESCE(orphan_reason, '') <> 'superseded' AND COALESCE(sender, '') <> 'clankerhouse')
+      OR (state = 'acked' AND notice_kind IN ('held', 'failed') AND COALESCE(sender, '') <> 'clankerhouse')
+      ORDER BY created_at, rowid`).all() as Array<MessageRow & WatchRow>
+    return rows.map((row) => ({ ...messageFromRow(row), ...watchFieldsOf(row) }))
+  }
+
+  markNotice(messageId: string, kind: "held" | "failed" | "landed", now = Date.now()) {
+    this.db.query("UPDATE messages SET notice_kind = ?2, notice_at = ?3 WHERE message_id = ?1").run(messageId, kind, now)
+    const row = this.db.query("SELECT clanker_id FROM messages WHERE message_id = ?1").get(messageId) as { clanker_id: string } | null
+    if (row) this.recordEvent(messageId, row.clanker_id, "notice", kind, now)
+  }
+
+  markEscalated(messageId: string, reason: string, now = Date.now()) {
+    this.db.query("UPDATE messages SET escalated_at = ?2, escalation_reason = ?3 WHERE message_id = ?1 AND escalated_at IS NULL").run(messageId, now, reason)
+  }
+
+  /** Messages the operator was told about and has not dismissed, that have not landed since, newest first. */
+  escalatedMessages(since = Date.now() - ESCALATION_SHOWN_MS): Array<StoredMessage & DeliveryWatchFields> {
+    // A message stopped, superseded or addressed to a replaced launch on purpose no longer needs the operator.
+    const rows = this.db.query("SELECT * FROM messages WHERE escalated_at IS NOT NULL AND escalated_at >= ?1 AND dismissed_at IS NULL AND state <> 'acked' AND NOT (state = 'orphaned' AND orphan_reason IN ('stopped', 'superseded', 'harness-replaced', 'cancelled')) ORDER BY escalated_at DESC").all(since) as Array<MessageRow & WatchRow>
+    return rows.map((row) => ({ ...messageFromRow(row), ...watchFieldsOf(row) }))
+  }
+
+  /**
+   * Withdraw a message that has not landed: queued, or handed over without an acknowledgement (no retry types it again).
+   * It is orphaned as `cancelled`, so its needs-me row clears and the delivery watch tells its sender. Undefined when
+   * there is no such message or it already landed or failed.
+   */
+  cancelMessage(messageId: string, now = Date.now()): StoredMessage | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.query("UPDATE messages SET state = 'orphaned', orphan_reason = 'cancelled', orphaned_at = ?2 WHERE message_id = ?1 AND state IN ('queued', 'delivered') RETURNING *").get(messageId, now) as MessageRow | null
+      if (!row) return undefined
+      this.recordEvent(messageId, row.clanker_id, "orphaned", "cancelled", now)
+      return messageFromRow(row)
+    }).immediate()
+  }
+
+  dismissEscalation(messageId: string, now = Date.now()) {
+    const row = this.db.query("UPDATE messages SET dismissed_at = ?2 WHERE message_id = ?1 AND escalated_at IS NOT NULL RETURNING message_id").get(messageId, now)
+    return !!row
+  }
+
+  /** Reports addressed to someone, not seen by a watch nor pushed yet, at least `minAgeMs` old. */
+  unpushedReports(now = Date.now(), minAgeMs = REPORT_PUSH_AFTER_MS, states: readonly ReportState[] = PUSHED_REPORT_STATES): ClankerReportRecord[] {
+    const rows = this.db.query(`SELECT * FROM reports WHERE to_id IS NOT NULL AND pushed_at IS NULL AND seen_at IS NULL AND at <= ?1 AND at >= ?2 AND state IN (${states.map(() => "?").join(", ")}) ORDER BY seq`).all(now - minAgeMs, now - REPORT_PUSH_GIVE_UP_MS, ...states) as ReportRow[]
+    return rows.map(reportFromRow)
+  }
+
+  markReportPushed(seq: number, now = Date.now()) { this.db.query("UPDATE reports SET pushed_at = ?2 WHERE seq = ?1").run(seq, now) }
+
+  /** A watch showed these Reports to its orchestrator, so they need no push. */
+  markReportsSeen(seqs: readonly number[], now = Date.now()) {
+    if (!seqs.length) return
+    this.db.query(`UPDATE reports SET seen_at = ? WHERE seen_at IS NULL AND seq IN (${seqs.map(() => "?").join(", ")})`).run(now, ...seqs)
+  }
+
+  /** Return a claimed message to the head of its queue after a refused hand-off, keeping why; a refusal is not a delivery attempt. */
+  requeue(messageId: string, error?: string) {
+    const row = this.db.query("UPDATE messages SET state = 'queued', delivered_at = NULL, handoff_failures = handoff_failures + ?2, attempts = MAX(attempts - ?2, 0), last_error = COALESCE(?3, last_error) WHERE message_id = ?1 AND state = 'delivered' RETURNING clanker_id").get(messageId, error === undefined ? 0 : 1, error ?? null) as { clanker_id: string } | null
+    if (row) this.recordEvent(messageId, row.clanker_id, "requeued", error ?? null)
+  }
+
+  /** An `undelivered` message found in its recipient's transcript after all. */
+  landUndelivered(messageId: string, now = Date.now()) {
+    const row = this.db.query("UPDATE messages SET state = 'acked', acked_at = ?2 WHERE message_id = ?1 AND state = 'orphaned' AND orphan_reason = 'undelivered' RETURNING clanker_id").get(messageId, now) as { clanker_id: string } | null
+    if (row) this.recordEvent(messageId, row.clanker_id, "acked", "found in the session transcript", now)
+    return !!row
   }
 
   /**
@@ -498,7 +621,7 @@ export class OrchestrationStore {
       const acked: StoredMessage[] = []
       for (const prompt of prompts) {
         for (const id of prompt.messageIds ?? []) {
-          const row = this.db.query("UPDATE messages SET state = 'acked', acked_at = ?3, started_generation = ?4 WHERE message_id = ?1 AND clanker_id = ?2 AND state IN ('queued', 'delivered') RETURNING *").get(id, clankerId, now, prompt.generation) as MessageRow | null
+          const row = this.db.query("UPDATE messages SET state = 'acked', acked_at = ?3, started_generation = ?4 WHERE message_id = ?1 AND clanker_id = ?2 AND (state IN ('queued', 'delivered') OR (state = 'orphaned' AND orphan_reason = 'undelivered')) RETURNING *").get(id, clankerId, now, prompt.generation) as MessageRow | null
           if (!row) continue
           this.recordEvent(id, clankerId, "acked", `generation ${prompt.generation}`, now)
           acked.push(messageFromRow(row))

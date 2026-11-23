@@ -3,11 +3,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { clankerStatus, deliverQueuedMessages, resultForClanker, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
+import { clankerStatus, deliverQueuedMessages, paneMetadataFromSnapshot, resultForClanker, generatedClankerId, listClankers, requestUnixSocket, sendClanker, sendStatus, waitForMessage } from "./clanker-api"
 import { promptSha256 } from "./orchestration"
 import { ManagedMultiplexer, type Multiplexer } from "./multiplexer"
+import type { MultiplexerSnapshot } from "./multiplexer/interface"
 import { advanceProjection } from "./projection"
 import { FAKE_REX_HOST, fakeRex, writeRexClaims } from "./fixtures/fake-rex"
+
+// Tests that start bin/clankers several times: a cold start on a loaded box takes seconds each, more than bun's 5 s default.
+const SPAWNS_CLI_TIMEOUT_MS = 30_000
 
 /** The text a prompt carried, without the `[clankerhouse msg-... from ...]` tag. */
 const untagged = (prompt: string) => prompt.replace(/^\[clankerhouse msg-[A-Za-z0-9-]+ from [^\]]+\] /, "")
@@ -125,7 +129,7 @@ describe("report generations", () => {
     const error = await new Response(send.stderr).text()
     expect(await send.exited).toBe(4)
     expect(JSON.parse(error)).toMatchObject({ apiVersion: 1, error: { code: "UNSUPPORTED", message: expect.stringMatching(/does not support send.*no verified native transport/) } })
-  })
+  }, SPAWNS_CLI_TIMEOUT_MS)
 })
 
 describe("Rex semantic prompt transport", () => {
@@ -353,6 +357,39 @@ describe("Rex semantic prompt transport", () => {
     pane.present = false
     expect((await sendStatus(second.messageId, multiplexer)).state).toBe("orphaned")
     await expect(waitForMessage(clankerId, second.messageId, { timeoutMs: 0 }, multiplexer)).rejects.toMatchObject({ code: "NOT_FOUND", exitCode: 3 })
+  })
+
+  test("a Claude whose turn ended with background work still running takes a queued message", async () => {
+    const reports = isolate()
+    const prompts: Array<{ pane: string; text: string }> = []
+    const clankerId = "clanker-claude-background"
+    const paneId = "block:p9"
+    const pane = { focused: false, present: true }
+    const multiplexer = fakeRex(clankerId, paneId, prompts, pane)
+    const report = (state: string, hookEvent: string, generation: number, settledGeneration: number, submitted: string[] = []) => writeFileSync(join(reports, "block_p9.json"), JSON.stringify({
+      harness: "claude", clankerId, pane: paneId, state, generation, settledGeneration, updatedAt: Date.now(), hookEvent,
+      prompts: submitted.map((text) => ({ sha256: promptSha256(text), generation })),
+    }))
+    // Mid-turn: the message waits.
+    report("working", "PreToolUse", 3, 0)
+    const sent = await sendClanker(clankerId, "the ruling", {}, multiplexer)
+    expect(sent.delivery).toBe("queued")
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts).toEqual([])
+    // The turn ended at Stop with a background monitor running: still unsettled, but no turn runs, so it goes in.
+    report("working", "Stop", 3, 0)
+    pane.focused = true
+    await deliverQueuedMessages(multiplexer)
+    // Typed delivery still leaves the operator's pane alone.
+    expect(prompts).toEqual([])
+    pane.focused = false
+    await deliverQueuedMessages(multiplexer)
+    expect(prompts.map((prompt) => untagged(prompt.text))).toEqual(["the ruling"])
+    // It started a turn, which ended again with the background work still going: a new send goes in at once.
+    report("working", "Stop", 4, 0, ["the ruling"])
+    expect((await sendStatus(sent.messageId, multiplexer)).state).toBe("acked")
+    const next = await sendClanker(clankerId, "a follow-up", {}, multiplexer)
+    expect(next.delivery).not.toBe("queued")
   })
 })
 
@@ -593,6 +630,7 @@ printf '%s\n' "$*" >> "$CLANKERS_LOG"
     const script = join(root, "rex-claims-test.ts")
     writeFileSync(script, `
 import extension from ${JSON.stringify(extension)}
+
 const handlers = new Map<string, Function>()
 const pi = {
   events: { on: () => () => {} },
@@ -649,3 +687,16 @@ await handlers.get("session_shutdown")?.({ reason: "quit" }, context)
 
 })
 
+
+describe("clanker names", () => {
+  test("an unlabeled Rex window's clanker is named by its session; a labeled one keeps its window label", () => {
+    const window = (id: string, nativeName: string) => ({ id, index: "1", nativeName, active: true, panes: [{ id: `block:${id}`, harness: "claude", currentPath: "/repo", claims: {} }] })
+    const snapshot = { kind: "rex", instanceId: "rex", sessions: [{
+      id: "session:s1", nativeName: "mac-manager", worktreePath: "", windows: [
+        window("window:01a1e8a3-828d-7ae5-b7b5-eea080c64075", "Window 80c64075"),
+        window("window:01a2087a-4de1-7b7d-9fd4-623abc0aa040", "launch-test"),
+      ],
+    }] } as unknown as MultiplexerSnapshot
+    expect(paneMetadataFromSnapshot(snapshot).map((row) => row.name)).toEqual(["mac-manager", "launch-test"])
+  })
+})

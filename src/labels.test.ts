@@ -32,6 +32,14 @@ describe("workshop labels", () => {
     expect(labelTags({ title: "A new title", status: "done" })).toEqual(["done"])
   })
 
+  test("a desk's report is a URL label that is never a tag, and role=desk is a plain tag", () => {
+    const report = "https://claude.ai/code/artifact/0b5c8a2e-6f1d-4c33-9a2b-7f1e0d9c4a11"
+    expect(parseLabelAssignment(`report=${report}`)).toEqual({ key: "report", value: report })
+    for (const invalid of ["claude.ai/artifact/x", "https://", "https://two words", `https://${"x".repeat(501)}`]) expect(validLabelValue(invalid, "report")).toBe(false)
+    expect(validLabelValue(report)).toBe(false)
+    expect(labelTags({ role: "desk", report, stage: "planning" })).toEqual(["desk", "planning"])
+  })
+
   test("a branch is derived from a title, and branch-shaped input is kept verbatim", () => {
     // The native client implements the same rule; these cases are asserted there too.
     expect(branchFromTitle("Migrate OpenCode adapter to v2")).toBe("migrate-opencode-adapter-to-v2")

@@ -464,6 +464,29 @@
       ]
     },
     {
+      "id": "desks",
+      "title": "Desks: Workshops labelled `role=desk` fold under one unpinned `◆ Desks · N` group in the flat list and are listed one row each, with their next Routine run, report link and need, in the Desks view (Alt-T); a desk links its latest report with the `report=<url>` label, decided once per snapshot",
+      "core": true,
+      "unit": [
+        "src/desks.test.ts",
+        "src/labels.test.ts",
+        "native-client/src/main.rs"
+      ],
+      "standalone": [
+        "scripts/qa-workshop-labels"
+      ],
+      "manual": [
+        "Label a few Workshops `clankers workshop label set role=desk`; confirm the flat list shows one teal `◆ ▸ Desks · N` row (folded at start, like every lineage but the current one) with every desk tree-indented beneath it, each with a teal `desk` tag followed by its coloured stage word, existing tags such as `retro` kept, and a desk that had another parent now under the group with its own children still beneath it",
+        "Confirm the Desks group is not pinned: it sits among the other rows by its freshest desk's last-seen recency, rises when you visit a desk and sinks below fresher Workshops when the desks are quiet",
+        "Select the Desks row; confirm Left folds it to `◆ ▸ Desks · N`, Right or Enter shows it again, as on a `✓ N done` row, and that Alt-R, Alt-A, Alt-L, Alt-D and Alt-S do nothing to it",
+        "Type part of one desk's name; confirm the group shows only above the matching desk, and clearing the search restores the list",
+        "Press Alt-T; confirm one row per desk with its glyph, name, teal desk tag and stage, and on the right what it asks (`asked 1h ago`, `finished … not seen`) or `running now`, its next Routine run in the Routine's zone (`next Sat 20:00 …`) or `no routine`, and `report Nd ago` or `no report`, matching `clankers routine list --all`",
+        "In the Desks view confirm the desks that need you come first, the prompt line reads `N desks · M need you · K with routines`, the line above it shows the selected desk's `report https://…` link, Enter opens the desk, typing filters, and Alt-F, Alt-I and Alt-E switch views while plain t only types",
+        "From a desk's shell run `clankers workshop label set report=<artifact URL>`; confirm the Desks view shows `report 0s ago` and the link, that the URL never appears as a tag in any view, and that `report=not-a-url` is rejected",
+        "With the picker open, judge that redraws stay instant (the desk facts come from the snapshot, not from reading files or the network) and that the teal desk tag never reads as a state or as an ordinary label colour"
+      ]
+    },
+    {
       "id": "status-hooks",
       "title": "Status Events pushed to webhook and exec sinks from a durable outbox",
       "core": true,

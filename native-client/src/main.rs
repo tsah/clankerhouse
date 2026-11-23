@@ -153,6 +153,21 @@ fn snooze_value(reason: &NeedsMe, now_ms: f64) -> Option<String> {
         .then(|| format!("{}:{}:{}", reason.reason, reason.since.round() as i64, (now_ms + SNOOZE_MS).round() as i64))
 }
 
+/// A desk Workshop's facts (`role=desk`), as the daemon decided them once per snapshot (src/desks.ts).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+struct Desk {
+    /// The desk's report link, its `report` label.
+    report: Option<String>,
+    /// When the report label was last set, epoch ms.
+    report_at: Option<f64>,
+    /// Active Routines of the desk's clankers.
+    routines: usize,
+    /// The soonest next run, epoch ms, and how the operator reads it: `Sat 20:00 lint-sweep`.
+    next_run_at: Option<f64>,
+    next_run: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct RuntimeObservation {
     source: String,
@@ -210,6 +225,9 @@ struct SessionRow {
     attachment_candidate_workshop_ids: Option<Vec<String>>,
     #[serde(default, rename = "needsMe")]
     needs_me: Option<NeedsMe>,
+    /// Set on a desk Workshop (`role=desk`): its report link and next Routine run.
+    #[serde(default)]
+    desk: Option<Desk>,
     /// The Rex host this row lives on, when the picker shows more than one; set by the picker, not the snapshot.
     #[serde(skip)]
     host: Option<String>,
@@ -299,11 +317,18 @@ enum View {
     NeedsMe,
     /// Alt-E: the same rows, the longest waiting (eldest) first.
     Eldest,
+    /// Alt-T: one row per desk (`role=desk`), with its schedule and health.
+    Desks,
 }
 
 impl View {
     /// One of the two sorted lists of Workshops that need the operator.
     fn waiting(self) -> bool {
+        matches!(self, View::NeedsMe | View::Eldest)
+    }
+
+    /// A list of one row per Workshop (the needs-me views and the Desks view), rather than the flat tree.
+    fn listed(self) -> bool {
         self != View::Flat
     }
 }
@@ -398,6 +423,8 @@ struct DoneGroup {
 }
 
 struct TreeBuildContext<'a> {
+    /// The rows the tree is built from: the snapshot's, with desks moved under the Desks group.
+    sessions: &'a [SessionRow],
     by_parent: &'a HashMap<Option<String>, Vec<usize>>,
     states: &'a [ClankerState],
     has_clankers: &'a [bool],
@@ -613,6 +640,118 @@ fn needs_me_sessions<'a>(sessions: &'a [SessionRow], query: &str, eldest_first: 
     chosen
 }
 
+/// The Desks group's stand-in Workshop ID: the parent every desk (`role=desk`) folds under in the flat list.
+const DESK_GROUP_ID: &str = "clankerhouse:desks";
+
+fn is_desk(session: &SessionRow) -> bool {
+    session.desk.is_some() && session.workshop_id.is_some()
+}
+
+fn is_desk_group(session: &SessionRow) -> bool {
+    session.workshop_id.as_deref() == Some(DESK_GROUP_ID)
+}
+
+/// How many desk Workshops the rows hold; a Workshop counts once.
+fn desk_count(sessions: &[SessionRow]) -> usize {
+    sessions.iter().filter(|session| is_desk(session)).filter_map(|session| session.workshop_id.as_ref()).collect::<HashSet<_>>().len()
+}
+
+/// The rows the flat tree is built from: every desk moves under one Desks group, a stand-in Workshop that is not pinned
+/// and sorts like any lineage, by its freshest desk. A desk keeps its own subtree; without desks nothing changes.
+fn tree_sessions(sessions: &[SessionRow]) -> Vec<SessionRow> {
+    let count = desk_count(sessions);
+    let mut rows = sessions.to_vec();
+    if count == 0 {
+        return rows;
+    }
+    for row in rows.iter_mut().filter(|row| is_desk(row)) {
+        row.parent_workshop_id = Some(DESK_GROUP_ID.into());
+    }
+    let mut group = done_group_row(DoneGroup { parent: None, count: 0, expanded: false }, 0, true).session;
+    group.name = DESK_GROUP_ID.into();
+    group.title = Some(format!("Desks · {count}"));
+    group.workshop_id = Some(DESK_GROUP_ID.into());
+    group.target = Target::Directory { path: DESK_GROUP_ID.into() };
+    rows.push(group);
+    rows
+}
+
+/// The Desks view (Alt-T): one row per desk. Those that need the operator come first, the freshest reason first, then
+/// the rest by last-seen recency, freshest first. A query only filters.
+fn desk_sessions<'a>(sessions: &'a [SessionRow], query: &str) -> Vec<&'a SessionRow> {
+    let query = query.trim().to_lowercase();
+    let mut chosen: Vec<&SessionRow> = Vec::new();
+    for session in sessions.iter().filter(|session| is_desk(session)) {
+        if !query.is_empty() && search_score(session, &query).is_none() {
+            continue;
+        }
+        // A Workshop shows once, by its live session when it has one.
+        match chosen.iter().position(|known| known.workshop_id == session.workshop_id) {
+            Some(index) => {
+                if matches!(session.target, Target::Session { .. }) && !matches!(chosen[index].target, Target::Session { .. }) {
+                    chosen[index] = session;
+                }
+            }
+            None => chosen.push(session),
+        }
+    }
+    let needing = |session: &SessionRow| session.needs_me.as_ref().filter(|reason| !reason.deferred()).map(|reason| reason.since);
+    chosen.sort_by(|left, right| {
+        needing(right)
+            .is_some()
+            .cmp(&needing(left).is_some())
+            .then_with(|| needing(right).unwrap_or(0.0).total_cmp(&needing(left).unwrap_or(0.0)))
+            .then_with(|| right.recency.cmp(&left.recency))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    chosen
+}
+
+/// A row of a one-row-per-Workshop list: a needs-me view or the Desks view.
+fn listed_row(session: &SessionRow) -> TreeRow {
+    TreeRow {
+        key: target_key(&session.target),
+        depth: 0,
+        state: session_state(session),
+        contains_clanker: session.details.iter().any(|detail| detail.kind == "clanker"),
+        session: session.clone(),
+        detail: None,
+        has_children: false,
+        is_last: true,
+        done_group: None,
+    }
+}
+
+/// The Desks view's right-hand note: what it is doing or asks, its next run, its report.
+/// `running now · no routine · no report`, `next Sat 20:00 lint-sweep · report 2d ago`, `asked 1h ago · no routine · …`.
+fn desk_note(session: &SessionRow, state: ClankerState, now_ms: f64) -> String {
+    let Some(desk) = session.desk.as_ref() else { return String::new() };
+    let activity = match session.needs_me.as_ref() {
+        Some(reason) => Some(needs_me_status(reason, now_ms)),
+        None => (state == ClankerState::Working).then(|| "running now".to_string()),
+    };
+    let routine = match (&desk.next_run, desk.routines) {
+        (_, 0) => "no routine".to_string(),
+        (Some(next), 1) => format!("next {next}"),
+        (Some(next), count) => format!("next {next} (+{})", count - 1),
+        (None, _) => "routine never fires".to_string(),
+    };
+    let report = match (&desk.report, desk.report_at) {
+        (None, _) => "no report".to_string(),
+        (Some(_), Some(at)) => format!("report {} ago", short_age(now_ms - at)),
+        (Some(_), None) => "report ready".to_string(),
+    };
+    [activity, Some(routine), Some(report)].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+/// `6 desks · 2 need you · 3 with routines`.
+fn desk_summary(sessions: &[SessionRow]) -> String {
+    let desks = desk_sessions(sessions, "");
+    let needing = desks_needing_you(sessions);
+    let scheduled = desks.iter().filter(|session| session.desk.as_ref().is_some_and(|desk| desk.routines > 0)).count();
+    format!("{} desk{} · {needing} need you · {scheduled} with routines", desks.len(), if desks.len() == 1 { "" } else { "s" })
+}
+
 /// A short age: 45s, 12m, 3h, 6d.
 fn short_age(milliseconds: f64) -> String {
     let seconds = (milliseconds.max(0.0) / 1000.0) as u64;
@@ -770,6 +909,7 @@ fn done_group_row(group: DoneGroup, depth: usize, is_last: bool) -> TreeRow {
             parent_workshop_id: None,
             attachment_candidate_workshop_ids: None,
             needs_me: None,
+            desk: None,
             host: None,
         },
         detail: None,
@@ -1439,21 +1579,13 @@ impl App {
     }
 
     fn rebuild(&mut self, selected_key: Option<&str>) {
-        if self.view.waiting() {
-            self.rows = needs_me_sessions(&self.sessions, &self.query, self.view == View::Eldest)
-                .into_iter()
-                .map(|session| TreeRow {
-                    key: target_key(&session.target),
-                    depth: 0,
-                    state: session_state(session),
-                    contains_clanker: session.details.iter().any(|detail| detail.kind == "clanker"),
-                    session: session.clone(),
-                    detail: None,
-                    has_children: false,
-                    is_last: true,
-                    done_group: None,
-                })
-                .collect();
+        if self.view.listed() {
+            let sessions = if self.view == View::Desks {
+                desk_sessions(&self.sessions, &self.query)
+            } else {
+                needs_me_sessions(&self.sessions, &self.query, self.view == View::Eldest)
+            };
+            self.rows = sessions.into_iter().map(listed_row).collect();
             self.selected = selected_key
                 .and_then(|key| self.rows.iter().position(|row| row.key == key))
                 .unwrap_or(0)
@@ -1461,11 +1593,18 @@ impl App {
             return;
         }
         let query = self.query.trim().to_lowercase();
+        // Desks fold into one Desks group, which stands in the tree as their parent.
+        let sessions = tree_sessions(&self.sessions);
+        let sessions = sessions.as_slice();
         let mut included = HashSet::new();
         let mut scores = HashMap::new();
-        for session in &self.sessions {
+        for session in sessions {
             if query.is_empty() {
                 included.insert(target_key(&session.target));
+                continue;
+            }
+            // The group shows only for the desks that match.
+            if is_desk_group(session) {
                 continue;
             }
             if let Some(score) = search_score(session, &query) {
@@ -1473,8 +1612,7 @@ impl App {
                 scores.insert(target_key(&session.target), score);
                 let mut parent = session.parent_workshop_id.as_ref();
                 while let Some(parent_id) = parent {
-                    let Some(parent_session) = self
-                        .sessions
+                    let Some(parent_session) = sessions
                         .iter()
                         .find(|candidate| candidate.workshop_id.as_ref() == Some(parent_id))
                     else {
@@ -1486,8 +1624,7 @@ impl App {
             }
         }
         let mut by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
-        let id_counts = self
-            .sessions
+        let id_counts = sessions
             .iter()
             .filter_map(|session| session.workshop_id.clone())
             .fold(HashMap::<String, usize>::new(), |mut counts, id| {
@@ -1501,25 +1638,24 @@ impl App {
             .into_iter()
             .filter_map(|(id, count)| (count == 1).then_some(id))
             .collect::<HashSet<_>>();
-        for (index, session) in self.sessions.iter().enumerate() {
+        for (index, session) in sessions.iter().enumerate() {
             let parent = session
                 .parent_workshop_id
                 .clone()
                 .filter(|id| known_ids.contains(id));
             by_parent.entry(parent).or_default().push(index);
         }
-        let states = (0..self.sessions.len())
-            .map(|index| subtree_state(index, &self.sessions, &by_parent, &mut HashSet::new()))
+        let states = (0..sessions.len())
+            .map(|index| subtree_state(index, sessions, &by_parent, &mut HashSet::new()))
             .collect::<Vec<_>>();
-        let has_clankers = (0..self.sessions.len())
-            .map(|index| subtree_has_clanker(index, &self.sessions, &by_parent, &mut HashSet::new()))
+        let has_clankers = (0..sessions.len())
+            .map(|index| subtree_has_clanker(index, sessions, &by_parent, &mut HashSet::new()))
             .collect::<Vec<_>>();
-        let recencies = (0..self.sessions.len())
-            .map(|index| subtree_recency(index, &self.sessions, &by_parent, &mut HashSet::new()))
+        let recencies = (0..sessions.len())
+            .map(|index| subtree_recency(index, sessions, &by_parent, &mut HashSet::new()))
             .collect::<Vec<_>>();
         let mut current_lineage = HashSet::new();
-        let mut current = self
-            .sessions
+        let mut current = sessions
             .iter()
             .position(|session| target_is_session(&session.target, &self.current_session));
         while let Some(index) = current {
@@ -1528,12 +1664,12 @@ impl App {
             }
             // Lineages start collapsed, but neither that nor a manual collapse may
             // hide the current Workshop. Reapply on refresh too, since lineage/names may change.
-            self.expanded_lineage.insert(self.sessions[index].name.clone());
-            current = self.sessions[index]
+            self.expanded_lineage.insert(sessions[index].name.clone());
+            current = sessions[index]
                 .parent_workshop_id
                 .as_ref()
                 .and_then(|parent| {
-                    self.sessions
+                    sessions
                         .iter()
                         .position(|session| session.workshop_id.as_ref() == Some(parent))
                 });
@@ -1541,8 +1677,8 @@ impl App {
         for (parent, children) in &mut by_parent {
             let roots = parent.is_none();
             children.sort_by(|left_index, right_index| {
-                let left = &self.sessions[*left_index];
-                let right = &self.sessions[*right_index];
+                let left = &sessions[*left_index];
+                let right = &sessions[*right_index];
                 // Roots float by search relevance; lineage children keep structural
                 // (current-lineage, neutral-last, recency, name) order so a descendant's incidental
                 // fuzzy match against ancestor-derived text never reorders the subtree.
@@ -1569,7 +1705,7 @@ impl App {
                         let neutral = |index: usize| {
                             states[index] == ClankerState::Unknown
                                 && !has_clankers[index]
-                                && neutral_session(&self.sessions[index])
+                                && neutral_session(&sessions[index])
                         };
                         if roots {
                             neutral(*left_index).cmp(&neutral(*right_index))
@@ -1589,13 +1725,14 @@ impl App {
         }
         // Search and Alt-. show every done Workshop; otherwise wholly done subtrees fold away.
         let fold = query.is_empty() && !self.show_done;
-        let foldable = (0..self.sessions.len())
+        let foldable = (0..sessions.len())
             .map(|index| {
-                fold && subtree_foldable(index, &self.sessions, &by_parent, &states, &current_lineage, &mut HashSet::new())
+                fold && subtree_foldable(index, &sessions, &by_parent, &states, &current_lineage, &mut HashSet::new())
             })
             .collect::<Vec<_>>();
         let mut rows = Vec::new();
         let context = TreeBuildContext {
+            sessions,
             by_parent: &by_parent,
             states: &states,
             has_clankers: &has_clankers,
@@ -1619,13 +1756,13 @@ impl App {
             .collect();
         // A selected Workshop that just folded away hands the selection to its done group.
         let absorbing_group = selected_key.and_then(|key| {
-            let mut index = self.sessions.iter().position(|session| target_key(&session.target) == key)?;
+            let mut index = sessions.iter().position(|session| target_key(&session.target) == key)?;
             if !foldable[index] {
                 return None;
             }
             loop {
-                let parent = self.sessions[index].parent_workshop_id.clone().filter(|id| known_ids.contains(id));
-                match parent.as_ref().and_then(|id| self.sessions.iter().position(|session| session.workshop_id.as_ref() == Some(id))) {
+                let parent = sessions[index].parent_workshop_id.clone().filter(|id| known_ids.contains(id));
+                match parent.as_ref().and_then(|id| sessions.iter().position(|session| session.workshop_id.as_ref() == Some(id))) {
                     Some(parent_index) if foldable[parent_index] => index = parent_index,
                     _ => return Some(format!("done-group:{}", parent.as_deref().unwrap_or(""))),
                 }
@@ -1659,7 +1796,7 @@ impl App {
             .filter(|index| {
                 context
                     .included
-                    .contains(&target_key(&self.sessions[**index].target))
+                    .contains(&target_key(&context.sessions[**index].target))
             })
             .copied()
             .collect::<Vec<_>>();
@@ -1668,7 +1805,7 @@ impl App {
             parent: parent.clone(),
             count: folded
                 .iter()
-                .map(|index| subtree_size(*index, &self.sessions, context.by_parent, &mut HashSet::new()))
+                .map(|index| subtree_size(*index, &context.sessions, context.by_parent, &mut HashSet::new()))
                 .sum(),
             expanded: self.expanded_done_groups.contains(&parent),
         });
@@ -1682,7 +1819,7 @@ impl App {
             rows.push(done_group_row(group, depth, visible.is_empty()));
         }
         for (position, index) in visible.iter().enumerate() {
-            let session = self.sessions[*index].clone();
+            let session = context.sessions[*index].clone();
             let id = session.workshop_id.clone();
             let children = id
                 .as_ref()
@@ -1774,6 +1911,8 @@ impl App {
                 .rows
                 .iter()
                 .enumerate()
+                // The Desks group only stands above its desks; a search selects a real row.
+                .filter(|(_, row)| row.detail.is_some() || !is_desk_group(&row.session))
                 .filter_map(|(index, row)| {
                     let direct_score = if let Some(detail) = row.detail.as_ref() {
                         detail_search_score(detail, &self.query).map(|score| score + 1)
@@ -1901,7 +2040,7 @@ impl App {
     /// view starts at its first row, and the flat one stays on the Workshop that was selected.
     fn set_view(&mut self, view: View) {
         let within = self.mode == Mode::Jump;
-        let selected = self.selected().filter(|_| within && !view.waiting()).map(|row| target_key(&row.session.target));
+        let selected = self.selected().filter(|_| within && !view.listed()).map(|row| target_key(&row.session.target));
         self.mode = Mode::Jump;
         self.view = view;
         self.scratch = false;
@@ -1913,14 +2052,14 @@ impl App {
         self.clear_action_mode();
         self.rebuild(selected.as_deref());
         self.list_start = None;
-        if view.waiting() {
+        if view.listed() {
             self.selected = 0;
         }
     }
 
     fn enter_repository_mode(&mut self) {
         self.scratch = false;
-        if self.view.waiting() {
+        if self.view.listed() {
             // Esc from the repository step lands on the full map, not a needs-me list.
             self.view = View::Flat;
             self.rebuild(None);
@@ -2229,9 +2368,16 @@ fn project_color(project: &str) -> Color {
     PROJECT_COLORS[name_hash(project) % PROJECT_COLORS.len()]
 }
 
-/// A label keeps one colour everywhere too; "done" is gray like the row it grays out.
+/// The reserved colour of the `desk` tag (`role=desk`) and the Desks group, apart from every hashed label colour.
+const DESK_TEAL: Color = Color::Rgb(45, 212, 191);
+
+/// A label keeps one colour everywhere too; "done" is gray like the row it grays out, and "desk" is always teal.
 fn label_color(label: &str) -> Color {
-    if label == "done" { DONE_GRAY } else { LABEL_COLORS[name_hash(label) % LABEL_COLORS.len()] }
+    match label {
+        "done" => DONE_GRAY,
+        "desk" => DESK_TEAL,
+        _ => LABEL_COLORS[name_hash(label) % LABEL_COLORS.len()],
+    }
 }
 
 /// The root of a lineage names its project as a tag; the rows beneath it only carry the colour.
@@ -2805,6 +2951,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_needs_me(frame, app, &areas);
         return;
     }
+    if app.view == View::Desks {
+        draw_desks(frame, app, &areas);
+        return;
+    }
     frame.render_widget(
         Line::from([vec![
             Span::styled(
@@ -2814,7 +2964,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             )], host_tab_spans(app), vec![
             Span::styled(
-                "  Alt-I needs me · Alt-E eldest · Alt-K branches · Alt-R/A/L/D/S actions · ←/→ expand · Alt-. done · Enter open · Esc close",
+                "  Alt-I needs me · Alt-E eldest · Alt-T desks · Alt-K branches · Alt-R/A/L/D/S actions · ←/→ expand · Alt-. done · Enter open · Esc close",
                 Style::default().fg(Color::DarkGray),
             ),
         ]].concat()),
@@ -2854,6 +3004,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     row.session.name.clone(),
                     Style::default().fg(DONE_GRAY).add_modifier(Modifier::ITALIC),
                 ));
+                return ListItem::new(Line::from(spans));
+            }
+            if row.detail.is_none() && is_desk_group(&row.session) {
+                let fold = if app.expanded_lineage.contains(&row.session.name) { "▾" } else { "▸" };
+                let needing = desks_needing_you(&app.sessions);
+                let mut spans = vec![
+                    Span::styled(" ◆ ", Style::default().fg(DESK_TEAL)),
+                    Span::styled(format!("{fold} "), Style::default().fg(Color::DarkGray)),
+                    Span::styled(row.session.title.clone().unwrap_or_default(), Style::default().fg(DESK_TEAL).add_modifier(Modifier::BOLD)),
+                ];
+                if needing > 0 {
+                    spans.push(Span::styled(format!("  {needing} need you"), Style::default().fg(Color::DarkGray)));
+                }
                 return ListItem::new(Line::from(spans));
             }
             let expand = if row.detail.is_some() {
@@ -2985,6 +3148,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .map(|row| match &row.done_group {
                     Some(group) if group.expanded => format!("{} done Workshops shown · ← fold · Alt-. all done", group.count),
                     Some(group) => format!("{} done Workshops folded · → show · Alt-. all done", group.count),
+                    None if is_desk_group(&row.session) => format!(
+                        "{} · {} · Alt-T desks view",
+                        desk_summary(&app.sessions),
+                        if app.expanded_lineage.contains(&row.session.name) { "← fold" } else { "→ show" },
+                    ),
                     None => row.session.path.clone(),
                 })
                 .unwrap_or_else(|| "No matches".into()),
@@ -3001,7 +3169,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Span::styled("> ", Style::default().fg(Color::LightCyan)),
             Span::raw(&app.query),
             Span::raw("_"),
-            Span::raw(format!("  {} targets · {needing} need you · {open} open", app.rows.iter().filter(|row| row.done_group.is_none()).count())),
+            Span::raw(format!("  {} targets · {needing} need you · {open} open", app.rows.iter().filter(|row| row.done_group.is_none() && !is_desk_group(&row.session)).count())),
         ]),
         areas[3],
     );
@@ -3079,9 +3247,9 @@ fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
             )], host_tab_spans(app), vec![
             Span::styled(
                 if app.view == View::Eldest {
-                    "  eldest first · Alt-I freshest · Alt-F flat · Alt-S snooze · Alt-D done · Enter jump · Esc close"
+                    "  eldest first · Alt-I freshest · Alt-F flat · Alt-T desks · Alt-S snooze · Alt-D done · Enter jump · Esc close"
                 } else {
-                    "  freshest first · Alt-E eldest · Alt-F flat · Alt-S snooze · Alt-D done · Enter jump · Esc close"
+                    "  freshest first · Alt-E eldest · Alt-F flat · Alt-T desks · Alt-S snooze · Alt-D done · Enter jump · Esc close"
                 },
                 Style::default().fg(Color::DarkGray),
             ),
@@ -3140,6 +3308,106 @@ fn draw_needs_me(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
             Span::raw(&app.query),
             Span::raw("_"),
             Span::raw(format!("  {needing} need you · {open} open")),
+        ]),
+        areas[3],
+    );
+}
+
+/// How many desks under the Desks group need the operator.
+fn desks_needing_you(sessions: &[SessionRow]) -> usize {
+    desk_sessions(sessions, "").iter().filter(|session| session.needs_me.as_ref().is_some_and(|reason| !reason.deferred())).count()
+}
+
+/// One Desks-view row (Alt-T): the flat row's glyph, name, project and label tags, and the desk's note on the right.
+fn desk_item(row: &TreeRow, width: usize, now_ms: f64, current: bool, frame: usize) -> ListItem<'static> {
+    let session = &row.session;
+    let (glyph, color) = row_glyph(row, "", frame);
+    let shown = session.title.as_deref().unwrap_or_else(|| name_without_project(session)).to_string();
+    let done = is_done(session);
+    let mut tags = Vec::new();
+    if let Some(project) = session.project.as_deref().filter(|project| *project != shown) {
+        tags.push(Span::styled(format!(" {project}"), Style::default().fg(if done { DONE_GRAY } else { project_color(project) })));
+    }
+    tags.extend(session.labels.iter().map(|label| {
+        let color = label_color(label);
+        Span::styled(format!(" {label}"), Style::default().fg(if done { dimmed(color, 70) } else { color }))
+    }));
+    // A narrow popup keeps the name readable; the note gives way first.
+    let note = ellipsize(&desk_note(session, row.state, now_ms), width.saturating_sub(24).max(12));
+    let tags_width = tags.iter().map(Span::width).sum::<usize>();
+    let fixed = 3 + tags_width + note.width() + 2;
+    let name = ellipsize(&shown, width.saturating_sub(fixed).max(4));
+    let spacing = width.saturating_sub(3 + name.width() + tags_width + note.width()).max(2);
+    let mut spans = vec![
+        Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+        Span::styled(name, row_name_style(row, current, (now_ms / 1000.0) as u64)),
+    ];
+    spans.extend(tags);
+    spans.extend([Span::raw(" ".repeat(spacing)), Span::styled(note, Style::default().fg(Color::Gray))]);
+    ListItem::new(Line::from(spans))
+}
+
+/// The Desks view (Alt-T): one row per desk with its schedule and health, the selected desk's report link beneath.
+fn draw_desks(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    frame.render_widget(
+        Line::from([vec![
+            Span::styled("Clankerhouse · Desks", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        ], host_tab_spans(app), vec![
+            Span::styled(
+                "  schedule and health · Alt-F flat · Alt-I needs me · Alt-S snooze · Alt-D done · Enter open · Esc close",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]].concat()),
+        areas[0],
+    );
+    let list_area = areas[1];
+    let now_ms = std::time::UNIX_EPOCH.elapsed().map_or(0.0, |elapsed| elapsed.as_millis() as f64);
+    let width = list_area.width.saturating_sub(4) as usize;
+    let block = Block::default().borders(Borders::ALL);
+    if app.rows.is_empty() {
+        let message = if app.query.is_empty() { "No desks: label a Workshop role=desk to list it here." } else { "No matches" };
+        frame.render_widget(Paragraph::new(format!(" {message}")).style(Style::default().fg(Color::Gray)).block(block), list_area);
+    } else {
+        // Rows grow upward from the prompt, as in the other lists.
+        let height = list_area.height.saturating_sub(2) as usize;
+        let selected = app.selected.min(app.rows.len() - 1);
+        let start = selected.saturating_sub(height.saturating_sub(1)).min(app.rows.len().saturating_sub(height));
+        let end = (start + height).min(app.rows.len());
+        let items = app.rows[start..end]
+            .iter()
+            .rev()
+            .map(|row| desk_item(row, width, now_ms, target_is_session(&row.session.target, &app.current_session), app.animation_frame))
+            .collect::<Vec<_>>();
+        let mut state = ListState::default().with_selected(Some(end - selected - 1));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(Style::default().bg(Color::Rgb(30, 58, 95)).fg(Color::White))
+                .highlight_symbol("›"),
+            list_area,
+            &mut state,
+        );
+    }
+    let (footer, footer_color) = if !app.error.is_empty() {
+        (app.error.clone(), Color::LightYellow)
+    } else if let Some(pending) = &app.mutation {
+        let (glyph, color) = state_glyph(ClankerState::Working, app.animation_frame);
+        (format!("{glyph} {} · navigation available", pending.progress), color)
+    } else {
+        // The selected desk's report link, where it can be copied from; its path when it has none.
+        let line = app.selected().map(|row| match row.session.desk.as_ref().and_then(|desk| desk.report.as_deref()) {
+            Some(report) => format!("report {report}"),
+            None => row.session.path.clone(),
+        });
+        (line.unwrap_or_default(), Color::DarkGray)
+    };
+    frame.render_widget(Paragraph::new(footer).style(Style::default().fg(footer_color)), areas[2]);
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::LightCyan)),
+            Span::raw(&app.query),
+            Span::raw("_"),
+            Span::raw(format!("  {}", desk_summary(&app.sessions))),
         ]),
         areas[3],
     );
@@ -3271,13 +3539,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     }
 
     // The list's views, from any mode: Alt-I the Workshops that need the operator, freshest first; Alt-E the same
-    // rows, eldest first; Alt-F everything. Alt-K in a needs-me view is Alt-F, as it was before the views merged.
+    // rows, eldest first; Alt-T the desks, one row each; Alt-F everything. Alt-K in a needs-me view is Alt-F, as it was before the views merged.
     if key.modifiers.contains(KeyModifiers::ALT) {
         let view = match key.code {
             KeyCode::Char('i') => Some(View::NeedsMe),
             KeyCode::Char('e') => Some(View::Eldest),
             KeyCode::Char('f') => Some(View::Flat),
-            KeyCode::Char('k') if app.view.waiting() && app.mode == Mode::Jump => Some(View::Flat),
+            KeyCode::Char('t') => Some(View::Desks),
+            KeyCode::Char('k') if app.view.listed() && app.mode == Mode::Jump => Some(View::Flat),
             _ => None,
         };
         if let Some(view) = view {
@@ -3403,7 +3672,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
 
     if key.modifiers.contains(KeyModifiers::ALT) {
         // A needs-me list has no done fold to toggle.
-        if key.code == KeyCode::Char('.') && app.view.waiting() {
+        if key.code == KeyCode::Char('.') && app.view.listed() {
             return None;
         }
         if key.code == KeyCode::Char('.') {
@@ -3412,8 +3681,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             app.rebuild(key.as_deref());
             return None;
         }
-        // A done group stands for many Workshops; no single-Workshop action applies to it.
-        if app.selected().is_some_and(|row| row.done_group.is_some()) {
+        // A done group or the Desks group stands for many Workshops; no single-Workshop action applies to it.
+        if app.selected().is_some_and(|row| row.done_group.is_some() || (row.detail.is_none() && is_desk_group(&row.session))) {
             return None;
         }
         // Alt-S, in every view: down the needs-me lists for a day, or until something new; again to take it back.
@@ -3507,7 +3776,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         }
     }
 
-    if app.view.waiting() {
+    if app.view.listed() {
         match key.code {
             // No lineage or details to unfold in a needs-me list.
             KeyCode::Left | KeyCode::Right => return None,
@@ -3542,6 +3811,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             app.expanded_done_groups.remove(&group.parent);
             let key = app.selected().map(|row| row.key.clone());
             app.rebuild(key.as_deref());
+        }
+        // The Desks group folds and unfolds like a lineage; it has no details and nothing to open.
+        KeyCode::Right | KeyCode::Enter | KeyCode::Left
+            if let Some(row) = app.selected().filter(|row| row.detail.is_none() && is_desk_group(&row.session)).cloned() =>
+        {
+            if key.code == KeyCode::Left {
+                app.expanded_lineage.remove(&row.session.name);
+            } else {
+                app.expanded_lineage.insert(row.session.name.clone());
+            }
+            app.rebuild(Some(&row.key));
         }
         KeyCode::Right => {
             if let Some(row) = app.selected().cloned().filter(|row| row.detail.is_none()) {
@@ -5008,7 +5288,7 @@ mod tests {
         assert!(flat.lines().any(|line| line.matches("snoozed").count() == 2), "{flat}");
         handle_key(&mut app, alt('i'));
         let needs_me = text(&mut app);
-        for expected in ["Clankerhouse · Needs me", "freshest first · Alt-E eldest · Alt-F flat · Alt-S snooze", "1 need you · 3 open", "waiting on pr one · asked"] {
+        for expected in ["Clankerhouse · Needs me", "freshest first · Alt-E eldest · Alt-F flat · Alt-T desks · Alt-S snooze", "1 need you · 3 open", "waiting on pr one · asked"] {
             assert!(needs_me.contains(expected), "{expected}\n{needs_me}");
         }
         handle_key(&mut app, alt('e'));
@@ -5016,6 +5296,169 @@ mod tests {
         for expected in ["Clankerhouse · Waiting longest", "eldest first · Alt-I freshest · Alt-F flat", "1 need you · 3 open"] {
             assert!(eldest.contains(expected), "{expected}\n{eldest}");
         }
+    }
+
+    /// Two desks (`role=desk`) among plain Workshops: desk-a has a parent and a child of its own, and a report;
+    /// desk-b asks the operator something and has no Routine.
+    const DESKS: &str = r#"[
+        {"name":"plain-new","path":"/plain-new","recency":100,"workshopId":"plain-new","target":{"type":"session","session":"plain-new"}},
+        {"name":"parent-x","path":"/parent-x","recency":5,"workshopId":"parent-x","target":{"type":"session","session":"parent-x"}},
+        {"name":"desk-a","path":"/desk-a","recency":50,"availableActions":["open"],"workshopId":"desk-a","parentWorkshopId":"parent-x","labels":["desk","planning"],
+         "target":{"type":"session","session":"desk-a"},
+         "desk":{"routines":1,"nextRunAt":1795287600000,"nextRun":"Sat 20:00 lint-sweep","report":"https://claude.ai/artifact/abc","reportAt":1000}},
+        {"name":"desk-a-child","path":"/desk-a-child","recency":45,"workshopId":"desk-a-child","parentWorkshopId":"desk-a","target":{"type":"session","session":"desk-a-child"}},
+        {"name":"desk-b","path":"/desk-b","recency":20,"availableActions":["open"],"workshopId":"desk-b","labels":["desk","retro"],"target":{"type":"session","session":"desk-b"},
+         "desk":{"routines":0},"needsMe":{"reason":"asked","since":2000}},
+        {"name":"plain-old","path":"/plain-old","recency":10,"workshopId":"plain-old","target":{"type":"session","session":"plain-old"}}
+    ]"#;
+
+    fn desk_group(app: &App) -> Option<(usize, &TreeRow)> {
+        app.rows.iter().enumerate().find(|(_, row)| row.detail.is_none() && is_desk_group(&row.session))
+    }
+
+    fn screen(app: &mut App) -> String {
+        let buffer = rendered_view(app);
+        buffer.content().chunks(100).map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn every_desk_folds_under_one_desks_group_that_sorts_by_its_freshest_desk() {
+        let mut app = app_with_sessions(DESKS);
+        // Like every lineage but the current one, the group starts folded.
+        assert!(row_named(&app, "desk-a").is_none());
+        app.expanded_lineage.insert(DESK_GROUP_ID.into());
+        app.rebuild(None);
+        let (group_index, group) = desk_group(&app).expect("a Desks group");
+        assert_eq!(group.session.title.as_deref(), Some("Desks · 2"));
+        assert_eq!(group.depth, 0);
+        assert!(group.has_children);
+        // Desks sit beneath it, even one whose Workshop has another parent; a desk keeps its own children.
+        for (name, depth) in [("desk-a", 1), ("desk-b", 1), ("desk-a-child", 2)] {
+            assert_eq!(row_named(&app, name).map(|row| row.depth), Some(depth), "{name}");
+        }
+        assert_eq!(row_named(&app, "parent-x").map(|row| row.has_children), Some(false));
+        // Not pinned: the group takes desk-a's recency (50), so it sits below plain-new (100) and above plain-old (10).
+        let roots = app.rows.iter().filter(|row| row.depth == 0).map(|row| row.session.title.clone().unwrap_or(row.session.name.clone())).collect::<Vec<_>>();
+        assert_eq!(roots, ["plain-new", "Desks · 2", "plain-old", "parent-x"]);
+        // Rows render bottom-up, so the group's children come just before it in the list.
+        assert!(app.rows[..group_index].iter().any(|row| row.session.name == "desk-b"));
+    }
+
+    #[test]
+    fn the_desks_group_moves_up_when_a_desk_is_fresher_than_everything_else() {
+        let mut sessions: Vec<serde_json::Value> = serde_json::from_str(DESKS).unwrap();
+        sessions[4]["recency"] = serde_json::json!(500);
+        let app = app_with_sessions(&serde_json::to_string(&sessions).unwrap());
+        assert_eq!(app.rows.iter().find(|row| row.depth == 0).map(|row| is_desk_group(&row.session)), Some(true));
+    }
+
+    #[test]
+    fn without_desks_the_flat_list_has_no_desks_group() {
+        let app = app_with_sessions(r#"[{"name":"plain","path":"/plain","labels":["desk"],"target":{"type":"session","session":"plain"}}]"#);
+        // A desk tag alone (some other key's value) is not a desk: only `role=desk` reaches the picker as `desk`.
+        assert!(desk_group(&app).is_none());
+    }
+
+    #[test]
+    fn left_folds_the_desks_group_and_right_or_enter_unfolds_it() {
+        for open in [KeyCode::Right, KeyCode::Enter] {
+            let mut app = app_with_sessions(DESKS);
+            app.selected = desk_group(&app).unwrap().0;
+            assert_eq!(handle_key(&mut app, KeyEvent::new(open, KeyModifiers::NONE)), None);
+            assert!(row_named(&app, "desk-a").is_some());
+            handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(row_named(&app, "desk-a").is_none());
+            assert!(row_named(&app, "desk-b").is_none());
+            assert!(app.selected().is_some_and(|row| is_desk_group(&row.session)));
+            assert!(screen(&mut app).contains("▸ Desks · 2"));
+            assert_eq!(handle_key(&mut app, KeyEvent::new(open, KeyModifiers::NONE)), None);
+            assert!(row_named(&app, "desk-a").is_some());
+            assert!(screen(&mut app).contains("◆ ▾ Desks · 2"));
+        }
+    }
+
+    #[test]
+    fn workshop_actions_never_apply_to_the_desks_group() {
+        let mut app = app_with_sessions(DESKS);
+        for key in ['r', 'a', 'l', 'd', 's'] {
+            app.selected = desk_group(&app).unwrap().0;
+            assert_eq!(handle_key(&mut app, alt(key)), None, "Alt-{key}");
+            assert_eq!(app.mode, Mode::Jump, "Alt-{key}");
+        }
+    }
+
+    #[test]
+    fn search_shows_the_desks_group_only_above_matching_desks() {
+        let mut app = app_with_sessions(DESKS);
+        app.update_query("desk".into());
+        assert!(!app.selected().is_some_and(|row| is_desk_group(&row.session)));
+        app.update_query("desk-b".into());
+        assert!(desk_group(&app).is_some());
+        assert_eq!(app.selected().map(|row| row.session.name.as_str()), Some("desk-b"));
+        assert!(row_named(&app, "desk-b").is_some());
+        assert!(row_named(&app, "desk-a").is_none());
+        app.update_query("plain-new".into());
+        assert!(desk_group(&app).is_none());
+    }
+
+    #[test]
+    fn the_flat_list_draws_the_desks_group_teal_and_counts_only_real_targets() {
+        let mut app = app_with_sessions(DESKS);
+        let text = screen(&mut app);
+        for expected in ["◆ ▸ Desks · 2", "1 need you", "Alt-T desks", "3 targets"] {
+            assert!(text.contains(expected), "{expected}\n{text}");
+        }
+        assert_eq!(label_color("desk"), DESK_TEAL);
+        assert_ne!(label_color("retro"), DESK_TEAL);
+    }
+
+    #[test]
+    fn alt_t_lists_one_row_per_desk_with_its_schedule_report_and_need() {
+        let mut app = app_with_sessions(DESKS);
+        assert_eq!(handle_key(&mut app, alt('t')), None);
+        assert_eq!(app.view, View::Desks);
+        // The desk that asks comes first (nearest the prompt), then the rest by recency.
+        assert_eq!(app.rows.iter().map(|row| row.session.name.as_str()).collect::<Vec<_>>(), ["desk-b", "desk-a"]);
+        let text = screen(&mut app);
+        for expected in [
+            "Clankerhouse · Desks",
+            "schedule and health · Alt-F flat · Alt-I needs me",
+            "no routine · no report",
+            "next Sat 20:00 lint-sweep · report",
+            "2 desks · 1 need you · 1 with routines",
+            "/desk-b",
+        ] {
+            assert!(text.contains(expected), "{expected}\n{text}");
+        }
+        // The selected desk's report link is on the line above the prompt.
+        app.move_selection(1);
+        assert!(screen(&mut app).contains("report https://claude.ai/artifact/abc"));
+        // Enter opens the desk; Left and Right do nothing; Alt-F goes back to the tree.
+        assert_eq!(handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)), None);
+        assert!(matches!(handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Some(AppCommand::Submit(MutationIntent::Open { .. }))));
+        app.update_query("retro".into());
+        assert_eq!(app.rows.len(), 1);
+        handle_key(&mut app, alt('f'));
+        assert_eq!(app.view, View::Flat);
+        assert!(desk_group(&app).is_some());
+    }
+
+    #[test]
+    fn a_desk_note_says_what_it_does_when_it_next_runs_and_how_old_its_report_is() {
+        let desk = |json: &str| -> SessionRow {
+            serde_json::from_str(&format!(r#"{{"name":"d","path":"/d","workshopId":"d","target":{{"type":"session","session":"d"}},{json}}}"#)).unwrap()
+        };
+        let now = 10.0 * 86_400_000.0;
+        assert_eq!(desk_note(&desk(r#""desk":{"routines":0}"#), ClankerState::Working, now), "running now · no routine · no report");
+        assert_eq!(
+            desk_note(&desk(r#""desk":{"routines":3,"nextRun":"Thu 07:45 linear-sweep","report":"https://x","reportAt":691200000}"#), ClankerState::Idle, now),
+            "next Thu 07:45 linear-sweep (+2) · report 2d ago"
+        );
+        assert_eq!(
+            desk_note(&desk(r#""desk":{"routines":0,"report":"https://x"},"needsMe":{"reason":"asked","since":860400000}"#), ClankerState::Idle, now),
+            "asked 1h ago · no routine · report ready"
+        );
+        assert_eq!(desk_note(&desk(r#""labels":["desk"]"#), ClankerState::Idle, now), "");
     }
 
     #[test]

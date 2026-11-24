@@ -6,7 +6,8 @@ import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer }
 import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { clankerUnitName, harnessCommand, harnessModelArgs, resumeLaunch, stopOwnedHarness, workshopEnvironment, type WorkshopLaunchIdentity } from "./harness-launch"
-import { ClankerLedger, openClankerLedger, pathWorkshopId, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
+import { ClankerLedger, openClankerLedger, pathWorkshopId, withLaunchAccount, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
+import { loadClaudeAccounts, spawnAccount } from "./claude-accounts"
 import { isLinkedWorktreeSync, lineageMode, persistWorkshopLineage, registerWorkshop, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { harnessRunsIn, systemdUnitProbe, type UnitProbe } from "./harness-units"
 import { workshopBase } from "./workshop-base"
@@ -171,9 +172,12 @@ async function launchClanker(harness: Harness, cwd: string, prompt: string, clan
     let ledger: ClankerLedger | undefined
     try {
       ledger = openClankerLedger()
-      const launchSpec: LaunchSpec = model !== undefined
+      const baseSpec: LaunchSpec = model !== undefined
         ? { version: 3, profile: profile || null, model, resourceClass: resourceClass ?? "untrusted" }
         : resourceClass ? { version: 2, profile: profile || null, resourceClass } : { version: 1, profile: profile || null }
+      // With Claude accounts configured, a new Claude clanker starts on one whose limit has not been hit.
+      const account = harness === "claude" ? spawnAccount() : undefined
+      const launchSpec = account === undefined ? baseSpec : withLaunchAccount(baseSpec, account)
       ledger.record({
         clankerId,
         harness: ledgerHarness,
@@ -239,12 +243,16 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
  * Reopens a ledger clanker that is not running: a new window in its Workshop continues its exact
  * harness session under the same clanker id, optionally with a first prompt.
  */
-export async function resumeClanker(clankerId: string, options: { prompt?: string; multiplexer?: ManagedMultiplexer; probe?: UnitProbe } = {}) {
+export async function resumeClanker(clankerId: string, options: { prompt?: string; account?: string; multiplexer?: ManagedMultiplexer; probe?: UnitProbe } = {}) {
   const ledger = openClankerLedger()
   try {
     const clanker = ledger.get(clankerId)
     if (!clanker) throw new Error(`Unknown clanker ${clankerId}`)
     if (!clanker.harnessSessionId) throw new Error(`Clanker ${clankerId} has no harness session to resume`)
+    if (options.account !== undefined) {
+      if (clanker.harness !== "claude") throw new Error(`--account applies to Claude clankers; ${clankerId} runs ${clanker.harness}`)
+      if (!loadClaudeAccounts().some((account) => account.label === options.account)) throw new Error(`Unknown Claude account ${options.account}; accounts are listed in clankers claude-accounts status`)
+    }
     if ((await listClankers()).some((row) => row.id === clankerId)) throw new Error(`Clanker ${clankerId} is already running`)
     // Not seen in Rex, but its harness still runs in its scope: a pane this lane lost. A second harness on one session corrupts it.
     if (clanker.ownerUnit && harnessRunsIn((options.probe ?? systemdUnitProbe)([clanker.ownerUnit]).get(clanker.ownerUnit), clanker.harness)) {
@@ -253,11 +261,13 @@ export async function resumeClanker(clankerId: string, options: { prompt?: strin
     const multiplexer = options.multiplexer ?? openManagedMultiplexer()
     const placement = await clankerPlacement(clanker.workshopPath, clanker.windowLabel, multiplexer)
     const unit = clankerUnitName(clankerId)
-    const location = await openClankerWindow(placement, harnessCommand(resumeLaunch(clanker, placement.launchWorkshop, options.prompt), unit), multiplexer)
+    const launch = resumeLaunch(clanker, placement.launchWorkshop, options.prompt, options.account)
+    const location = await openClankerWindow(placement, harnessCommand(launch, unit), multiplexer)
+    if (options.account !== undefined) ledger.setLaunchSpec(clankerId, launch.launchSpec)
     ledger.reopen(clankerId)
     ledger.setOwnerUnit(clankerId, unit)
     await claimClankerPane(placement, location, clankerId, clanker.harness, multiplexer)
-    return { clankerId, harnessSessionId: clanker.harnessSessionId, session: placement.session, window: location.nativeWindowId, pane: location.nativePaneId, name: placement.name }
+    return { clankerId, harnessSessionId: clanker.harnessSessionId, ...(options.account !== undefined ? { account: options.account } : {}), session: placement.session, window: location.nativeWindowId, pane: location.nativePaneId, name: placement.name }
   } finally { ledger.close() }
 }
 

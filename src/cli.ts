@@ -9,7 +9,10 @@ import { reportingClankerId, submitReport } from "./report"
 import { hooksStatus, sendHooksTest } from "./status-hooks"
 import { listClankerRows, parseStates } from "./clanker-list"
 import { emitJsonLine, liveWatchView, resolveWorkshopSelector, runWatch, type WatchScope } from "./watch"
-import { isAdoptionPlaceholder, openClankerLedger, type LedgerState, type ResourceClass } from "./clanker-ledger"
+import { isAdoptionPlaceholder, launchAccount, openClankerLedger, validateAccountLabel, type LedgerState, type ResourceClass } from "./clanker-ledger"
+import { runAccountSwitchPass } from "./claude-account-switch"
+import { accountHome, claudeAccountsConfigPath, claudeAccountsStatus, clearAccountMark, defaultAccountDir, parseClaudeAccounts, setupAccountDir } from "./claude-accounts"
+import { addAccountToRegistry, addAccountToRegistryText, claudeLoginState, deleteAccountDir, launchClaudeForLogin, readRegistry, removeAccountFromRegistry } from "./claude-login"
 import { harnessModelArgs, stopOwnedHarness } from "./harness-launch"
 import { createMultiplexer, openManagedMultiplexer } from "./multiplexer"
 import { MultiplexerResourceExhaustedError, paneLocation, UnsupportedMultiplexerOperation, type ClaimKey, type NativeLocation } from "./multiplexer/interface"
@@ -147,6 +150,129 @@ export const parseArgs = (argv: string[]): ParsedArgs => {
     return true
   }
   return { args, take, has, shift: () => args.shift() }
+}
+
+const runClaudeAccountsCli = async (parsed: ParsedArgs) => {
+  const subcommand = parsed.shift() ?? "status"
+  if (subcommand === "status") {
+    const status = claudeAccountsStatus()
+    if (parsed.has("--json")) return console.log(JSON.stringify(status))
+    const lines = [`Registry: ${status.registry}${status.error ? ` (invalid: ${status.error})` : ""}`,
+      status.enabled ? "Switching: on" : `Switching: off (${status.accounts.length} account${status.accounts.length === 1 ? "" : "s"}; it needs two or more)`]
+    for (const account of status.accounts) {
+      lines.push(`  ${account.label}  ${account.configDir ?? "Claude's default config"}  [${account.directory}]  ${account.available ? "available" : `out until ${account.outUntil}: ${account.outBecause}`}`)
+    }
+    for (const entry of status.recentSwitches) lines.push(`  moved ${entry.clankerId} from ${entry.from ?? "default"} to ${entry.to} at ${entry.atIso} (${entry.error})`)
+    return console.log(lines.join("\n"))
+  }
+  if (subcommand === "setup") {
+    const label = validateAccountLabel(parsed.shift())
+    const home = accountHome()
+    const requested = parsed.take("--config-dir")
+    const configDir = requested ? resolve(requested) : defaultAccountDir(label, home)
+    const sharedFrom = join(home, ".claude")
+    const setup = setupAccountDir(configDir, sharedFrom)
+    return console.log([
+      `Account directory ${setup.configDir}: linked ${setup.linked.join(", ") || "nothing new"}${setup.kept.length ? `; already linked ${setup.kept.join(", ")}` : ""}${setup.conflicts.length ? `; left alone (not our links): ${setup.conflicts.join(", ")}` : ""}.`,
+      "",
+      "Log in to this account yourself (clankerhouse never logs in or touches credentials):",
+      `  cd ~/dev && CLAUDE_CONFIG_DIR=${setup.configDir} claude`,
+      "  then /login with the account, finish onboarding (accept a trust prompt if shown), and /exit.",
+      "",
+      `Then list it in ${claudeAccountsConfigPath()}:`,
+      "  [[account]]",
+      `  label = "${label}"`,
+      `  config_dir = "${setup.configDir}"`,
+    ].join("\n"))
+  }
+  if (subcommand === "pass") return console.log(JSON.stringify(await runAccountSwitchPass({ multiplexer: openManagedMultiplexer() })))
+  if (subcommand === "clear") {
+    const label = validateAccountLabel(parsed.shift())
+    return console.log(clearAccountMark(label) ? `${label} is offered again.` : `${label} had no usage mark.`)
+  }
+  throw new Error("Usage: clankers claude-accounts [status [--json] | setup LABEL [--config-dir PATH] | clear LABEL | pass]")
+}
+
+const LOGIN_USAGE = "Usage: clankers login [list [--json] | add claude LABEL [--config-dir PATH] [--default-label LABEL] [--no-launch] | remove claude LABEL [--delete-dir]]"
+
+const loginHarness = (parsed: ParsedArgs) => {
+  const harness = parsed.shift()
+  if (harness !== "claude") throw new Error(`Only Claude accounts are supported. ${LOGIN_USAGE}`)
+}
+
+/** `clankers login`: the one command per machine and account; `claude-accounts` stays as the lower-level alias. */
+const runLoginCli = async (parsed: ParsedArgs) => {
+  const subcommand = parsed.shift() ?? "list"
+  if (subcommand === "list" || subcommand === "status") {
+    parsed.args.unshift("status")
+    return runClaudeAccountsCli(parsed)
+  }
+  if (subcommand === "add") {
+    loginHarness(parsed)
+    const label = validateAccountLabel(parsed.shift())
+    const home = accountHome()
+    const requested = parsed.take("--config-dir")
+    const defaultLabel = parsed.take("--default-label")
+    const noLaunch = parsed.has("--no-launch")
+    const configDir = requested ? resolve(requested) : defaultAccountDir(label, home)
+    const registry = claudeAccountsConfigPath()
+    // Refuse a conflicting label or directory before anyone logs in.
+    addAccountToRegistryText(readRegistry(registry), { label, configDir }, home, defaultLabel)
+    const setup = setupAccountDir(configDir, join(home, ".claude"))
+    console.log(`Account directory ${setup.configDir}: linked ${setup.linked.join(", ") || "nothing new"}${setup.kept.length ? `; already linked ${setup.kept.join(", ")}` : ""}${setup.conflicts.length ? `; left alone (not our links): ${setup.conflicts.join(", ")}` : ""}.`)
+    if (!noLaunch) {
+      const cwd = existsSync(join(home, "dev")) ? join(home, "dev") : home
+      console.log([
+        "",
+        `Claude opens now with CLAUDE_CONFIG_DIR=${configDir} in ${cwd}.`,
+        `Run /login and sign in with the account for "${label}", finish onboarding (accept a trust prompt if shown), then /exit.`,
+        "Clankerhouse never logs in and never reads the login.",
+        "",
+      ].join("\n"))
+      launchClaudeForLogin(configDir, cwd)
+    }
+    const login = claudeLoginState(configDir)
+    if (!login.loggedIn) {
+      process.exitCode = 1
+      return console.error(`${label} is not logged in (${login.checkedWith === "claude auth status" ? "claude auth status says loggedIn: false" : "claude auth status gave no answer"}), so ${registry} is unchanged. Run \`clankers login add claude ${label}\` again and /login before /exit.`)
+    }
+    const added = addAccountToRegistry(registry, { label, configDir }, home, defaultLabel)
+    const lines = [`${label} is logged in (${login.authMethod ?? "login found"}).`]
+    if (added.alreadyListed) lines.push(`${label} was already listed in ${registry}; nothing changed.`)
+    else lines.push(`Listed ${added.added.join(" and ")} in ${registry}.`)
+    const defaultAccount = added.accounts.find((account) => account.configDir === null)
+    if (defaultAccount && added.added.includes(defaultAccount.label) && !claudeLoginState(null).loggedIn) {
+      lines.push(`Warning: ${defaultAccount.label} (Claude's default ~/.claude) does not look logged in; run claude and /login there.`)
+    }
+    console.log(lines.join("\n"))
+    parsed.args.splice(0, parsed.args.length, "status")
+    return runClaudeAccountsCli(parsed)
+  }
+  if (subcommand === "remove") {
+    loginHarness(parsed)
+    const label = validateAccountLabel(parsed.shift())
+    const deleteDir = parsed.has("--delete-dir")
+    const home = accountHome()
+    const registry = claudeAccountsConfigPath()
+    if (deleteDir) {
+      const listed = parseClaudeAccounts(readRegistry(registry), home).find((account) => account.label === label)
+      if (listed && !listed.configDir) throw new Error(`${label} is Claude's default config; it is never deleted. Drop --delete-dir to unlist it.`)
+      const ledger = openClankerLedger()
+      let running: string[] = []
+      try { running = ledger.list({ state: "open" }).filter((row) => launchAccount(row.launchSpec) === label).map((row) => row.clankerId) }
+      finally { ledger.close() }
+      if (running.length) throw new Error(`${running.length} open clanker${running.length === 1 ? " runs" : "s run"} on ${label} (${running.join(", ")}); its directory holds their login, so it was not removed. Close them or drop --delete-dir.`)
+    }
+    const result = removeAccountFromRegistry(registry, label, home)
+    if (!result.removed) return console.log(`${label} is not listed in ${registry}; nothing changed.`)
+    clearAccountMark(label)
+    const lines = [`Removed ${label} from ${registry}.`]
+    if (deleteDir && result.removed.configDir) lines.push(deleteAccountDir(result.removed, home) ? `Deleted ${result.removed.configDir}, and the login Claude kept there.` : `${result.removed.configDir} was already gone.`)
+    else if (result.removed.configDir) lines.push(`Kept ${result.removed.configDir} and its login; --delete-dir deletes it.`)
+    if (result.accounts.length < 2) lines.push("Fewer than two accounts are left, so switching is off.")
+    return console.log(lines.join("\n"))
+  }
+  throw new Error(LOGIN_USAGE)
 }
 
 const requiredClankerId = (parsed: ParsedArgs) => {
@@ -511,7 +637,14 @@ export const usage = `Usage:
   clankers delete session|worktree --session SESSION [--path PATH] --yes
   clankers ledger [--state open|closed | --interrupted] [--workshop ID]
   clankers ledger close CLANKER_ID [--reason TEXT] [--if-present]
-  clankers resume CLANKER_ID [--prompt TEXT]
+  clankers resume CLANKER_ID [--prompt TEXT] [--account LABEL]
+  clankers login add claude LABEL [--config-dir PATH] [--default-label LABEL] [--no-launch]   make ~/.claude-acct/LABEL, open Claude there for you to /login, check it, and list it (an empty registry also lists ~/.claude as "work")
+  clankers login list [--json]   the Claude accounts and their state (same as claude-accounts status)
+  clankers login remove claude LABEL [--delete-dir]   unlist an account; --delete-dir also deletes its directory and the login in it
+  clankers claude-accounts [status] [--json]   the Claude accounts a limited clanker can move to, which are out of usage until when, and recent moves
+  clankers claude-accounts setup LABEL [--config-dir PATH]   make an account's config directory (shared projects/, settings, instructions; never a login)
+  clankers claude-accounts clear LABEL   offer an account again before its recorded reset
+  clankers claude-accounts pass   run one switch pass now (the runner runs one a minute and on every newly blocked Claude)
   clankers snapshot [--watch]
   clankers mutate --json INTENT [--idempotency-key KEY]
   clankers runner
@@ -863,9 +996,13 @@ export async function runClankersCli(argv = process.argv.slice(2)) {
 
   if (command === "resume") {
     const prompt = parsed.take("--prompt")
+    const account = parsed.take("--account")
     const id = requiredClankerId(parsed)
-    return console.log(JSON.stringify(await resumeClanker(id, { prompt })))
+    return console.log(JSON.stringify(await resumeClanker(id, { prompt, account })))
   }
+
+  if (command === "claude-accounts") return runClaudeAccountsCli(parsed)
+  if (command === "login") return runLoginCli(parsed)
 
   if (command === "workshop") {
     const subcommand = parsed.shift()

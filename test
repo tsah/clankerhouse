@@ -18,7 +18,7 @@ unit/static:
   feature-catalogue, TypeScript, Rust
 standalone/end-to-end:
   native-hot, Neovim, Clanker API, orchestration, spawn model, runner, process owner,
-  lineage actions, status hooks, workshop labels, Rex lane, installer, full TUI
+  lineage actions, status hooks, Claude accounts, workshop labels, Rex lane, installer, full TUI
 EOF
         exit 0
         ;;
@@ -60,6 +60,8 @@ if [[ "$mode" == all || "$mode" == standalone ]]; then
     run "process ownership scenario" scripts/qa-process-owner
     run "attach and delete-lineage scenario" scripts/qa-lineage-actions
     run "status hooks scenario" scripts/qa-status-hooks
+    # The Rex part skips without rex unless REX_REQUIRED is set.
+    run "Claude account switching scenario" scripts/qa-claude-accounts
     run "workshop labels and repository hooks scenario" scripts/qa-workshop-labels
     # Skips without rex unless REX_REQUIRED is set.
     run "Rex lane scenario" scripts/qa-rex

@@ -16,6 +16,8 @@ export type LaunchSpec =
   | { version: 1; profile: string | null }
   | { version: 2; profile: string | null; resourceClass: ResourceClass }
   | { version: 3; profile: string | null; resourceClass: ResourceClass; model: string }
+  /** A Claude clanker that runs on a named account (src/claude-accounts.ts); written only while switching is configured. */
+  | { version: 4; profile: string | null; resourceClass: ResourceClass; model: string | null; account: string }
 export type LedgerState = "open" | "closed"
 
 export interface LedgerInput {
@@ -81,11 +83,25 @@ export const validateLaunchSpec = (value: unknown): LaunchSpec => {
   if (value.version === 3 && keys === "model,profile,resourceClass,version" && resourceClasses.includes(String(value.resourceClass))) {
     return Object.freeze({ version: 3, profile, resourceClass: value.resourceClass as ResourceClass, model: validateModelName(value.model) })
   }
+  if (value.version === 4 && keys === "account,model,profile,resourceClass,version" && resourceClasses.includes(String(value.resourceClass))) {
+    return Object.freeze({ version: 4, profile, resourceClass: value.resourceClass as ResourceClass, model: value.model === null ? null : validateModelName(value.model), account: validateAccountLabel(value.account) })
+  }
   throw new Error("Invalid launch spec")
 }
 
 export const launchResourceClass = (spec: LaunchSpec): ResourceClass => spec.version === 1 ? "untrusted" : spec.resourceClass
-export const launchModel = (spec: LaunchSpec) => spec.version === 3 ? spec.model : undefined
+export const launchModel = (spec: LaunchSpec) => spec.version === 3 ? spec.model : spec.version === 4 ? spec.model ?? undefined : undefined
+/** The Claude account a launch runs on; undefined for a launch from before accounts, which runs on Claude's default config. */
+export const launchAccount = (spec: LaunchSpec) => spec.version === 4 ? spec.account : undefined
+/** The same launch on another Claude account. */
+export const withLaunchAccount = (spec: LaunchSpec, account: string): LaunchSpec =>
+  validateLaunchSpec({ version: 4, profile: spec.profile, resourceClass: launchResourceClass(spec), model: launchModel(spec) ?? null, account })
+
+/** A Claude account label: also a directory name under ~/.claude-acct. */
+export const validateAccountLabel = (value: unknown): string => {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)) throw new Error("Invalid Claude account label")
+  return value
+}
 
 /**
  * A Multiplexer name as a ledger label: one trimmed line of at most 256 characters, or `fallback`
@@ -259,6 +275,11 @@ export class ClankerLedger {
 
   setOwnerUnit(clankerId: string, ownerUnit: string) {
     this.db.query("UPDATE clankers SET owner_unit = ?2, updated_at = ?3 WHERE clanker_id = ?1").run(clankerId, ownerUnit, this.clock())
+  }
+
+  /** Record a changed launch, as when a clanker is resumed on another Claude account. */
+  setLaunchSpec(clankerId: string, launchSpec: LaunchSpec) {
+    this.db.query("UPDATE clankers SET launch_spec = ?2, updated_at = ?3 WHERE clanker_id = ?1").run(clankerId, JSON.stringify(validateLaunchSpec(launchSpec)), this.clock())
   }
 
   /** Mark a clanker open again, as when it is resumed. */

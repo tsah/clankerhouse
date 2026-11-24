@@ -552,14 +552,16 @@
       "title": "A Claude clanker whose turn ends on a usage limit resumes its exact session on another logged-in Claude account",
       "core": true,
       "unit": [
-        "src/claude-accounts.test.ts"
+        "src/claude-accounts.test.ts",
+        "src/claude-login.test.ts"
       ],
       "standalone": [
         "scripts/qa-claude-accounts"
       ],
       "manual": [
         "With no registry or one account, spawn and resume a Claude clanker; confirm its ledger launchSpec has no account and its launch command has no CLAUDE_CONFIG_DIR",
-        "Run `clankers claude-accounts setup LABEL`; confirm the directory links projects/, settings.json and CLAUDE.md to ~/.claude and holds no .credentials.json or .claude.json until you log in yourself",
+        "Run `clankers login add claude LABEL` in a terminal; confirm Claude opens in ~/dev with CLAUDE_CONFIG_DIR=~/.claude-acct/LABEL, that exiting without /login leaves the registry unchanged, and that after /login the account (and, in an empty registry, the default `work`) is appended and `clankers login list` shows it [ready]",
+        "Run `clankers claude-accounts setup LABEL` (the alias that only makes the directory); confirm the directory links projects/, settings.json and CLAUDE.md to ~/.claude and holds no .credentials.json or .claude.json until you log in yourself",
         "With two logged-in accounts listed, let a Claude clanker hit a usage limit; confirm within a minute it is in a new tab on the next account (`clankers claude-accounts status` lists the move and the first account out until Claude's reset time) and continues the same conversation",
         "With every account out of usage, confirm the clanker stays blocked with Claude's limit text and is moved once `clankers claude-accounts clear LABEL` offers an account again"
       ]

@@ -242,12 +242,13 @@ With two or more Claude accounts listed in `~/.config/clankerhouse/claude-accoun
 are three `[[account]]` tables), a Claude clanker whose turn ends on a usage limit is resumed, within seconds, on the
 next account in the list whose limit has not been hit: same clanker id, same conversation, a new tab, and a prompt
 saying why. New Claude clankers start on the first such account. With fewer than two accounts nothing changes. Each account is its own `CLAUDE_CONFIG_DIR` sharing `projects/`, settings and
-instructions with `~/.claude`; you log in to each one yourself, once. Setup, the registry format, how it decides and
+instructions with `~/.claude`; you log in to each one yourself, once, inside `clankers login add claude LABEL`. Setup, the registry format, how it decides and
 what it never touches: [docs/claude-accounts.md](docs/claude-accounts.md).
 
 ```sh
-clankers claude-accounts setup LABEL   # make ~/.claude-acct/LABEL and print the login step
-clankers claude-accounts status        # accounts, which are out of usage until when, recent moves
+clankers login add claude LABEL        # per extra account, per machine: make ~/.claude-acct/LABEL, open Claude for your /login, check it, list it
+clankers login list                    # accounts, which are out of usage until when, recent moves
+clankers login remove claude LABEL     # unlist it (--delete-dir also deletes its directory and login)
 clankers claude-accounts clear LABEL   # offer an account again before its recorded reset
 ```
 

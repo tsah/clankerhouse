@@ -5,66 +5,71 @@ the same clanker id and conversation, and nobody has to step in. It is off until
 there is no upper limit: list as many accounts as you have, under any labels you like. The examples below use three,
 `work` (Claude's default `~/.claude`, logged in as today), `personal` and `team`.
 
-## One-time setup per extra account (you do this yourself)
+## Setup: one command per extra account, per machine
 
-Clankerhouse never logs in, and never creates, reads, copies or links a credentials file or token. Every account,
-including the default one, needs a real login done by you. Claude Code refuses a symlinked credentials file, so each
-account's login must live in its own directory.
+Clankerhouse never logs in, and never reads, copies or prints a credentials file or token. You log in to each
+account yourself, once. Claude Code refuses a symlinked credentials file, so each account's login lives in its own
+directory.
 
-Do steps 1 and 2 once for each account other than the default one; with three accounts that is twice, for
-`personal` and for `team`. `LABEL` below is the account's label.
+Your default `~/.claude` login is the first account. For each other account, run:
 
-1. Make the account's config directory:
+```sh
+clankers login add claude personal
+clankers login add claude team
+```
 
-   ```sh
-   clankers claude-accounts setup personal
-   clankers claude-accounts setup team
-   ```
+Each run:
 
-   Each creates `~/.claude-acct/LABEL` (mode 700) with symlinks to the parts of `~/.claude` that every account shares:
+1. makes `~/.claude-acct/LABEL` (mode 700) with symlinks to the parts of `~/.claude` that every account shares:
    `projects/` (transcripts, so a session started on one account resumes on another), `settings.json` (with
    Clankerhouse's lifecycle hooks), `CLAUDE.md`, `commands`, `agents`, `skills`, `plugins`, `keybindings.json`,
-   `file-history`, `todos` and `plans`, where they exist. It never links `.credentials.json` or `.claude.json`.
-   `--config-dir PATH` picks another directory.
+   `file-history`, `todos` and `plans`, where they exist. It never links `.credentials.json` or `.claude.json`;
+2. opens Claude in `~/dev` with `CLAUDE_CONFIG_DIR=~/.claude-acct/LABEL`. **You** run `/login`, sign in with that
+   account, finish onboarding (accept a trust prompt if Claude shows one), then `/exit`;
+3. checks the login with `claude auth status`, which says whether a login exists without showing it. Without one,
+   nothing is listed: run the command again;
+4. appends the account to the registry, `~/.config/clankerhouse/claude-accounts.toml`, keeping what is already there.
+   When the registry is empty it first lists Claude's default config as `work` (`--default-label NAME` picks another
+   name), so the first `login add` already turns switching on. Running it again for a listed account changes nothing.
 
-2. Log in to that account from `~/dev`:
+With the two commands above the registry reads:
 
-   ```sh
-   cd ~/dev && CLAUDE_CONFIG_DIR=~/.claude-acct/personal claude
-   ```
+```toml
+[[account]]
+label = "work"
 
-   Run `/login` and sign in with that account, finish onboarding (accept a trust prompt if Claude shows one),
-   then `/exit`. Repeat with `CLAUDE_CONFIG_DIR=~/.claude-acct/team claude` for the next account. On macOS the login goes into the Keychain under an entry tied to this directory. On Linux it goes into
-   `~/.claude-acct/LABEL/.credentials.json`, which Claude writes itself.
+[[account]]
+label = "personal"
+config_dir = "~/.claude-acct/personal"
 
-   User-scope MCP servers (`claude mcp add --scope user`) live in each account's own `.claude.json`, so they are
-   not shared. Add any you need to the new account with `CLAUDE_CONFIG_DIR=~/.claude-acct/LABEL claude mcp add ...`.
+[[account]]
+label = "team"
+config_dir = "~/.claude-acct/team"
+```
 
-3. List the accounts in preference order in `~/.config/clankerhouse/claude-accounts.toml`. An account without
-   `config_dir` is Claude's default config (`~/.claude`, logged in as today):
+A fourth account is one more `clankers login add claude LABEL`. Accounts are tried in the order listed; edit the file
+to reorder them. Only labels and directories go here, never a token. Unknown keys are refused. A broken file
+switches the feature off, with a line in the runner's log, and never stops a clanker from launching.
 
-   ```toml
-   [[account]]
-   label = "work"
+Options: `--config-dir PATH` uses another directory; `--no-launch` skips opening Claude (you logged in already) and
+only checks and lists.
 
-   [[account]]
-   label = "personal"
-   config_dir = "~/.claude-acct/personal"
+`clankers login list` should then say `Switching: on` and show each account `[ready]` (the default one shows
+`[default]`). `clankers login list --json` gives the same as JSON.
 
-   [[account]]
-   label = "team"
-   config_dir = "~/.claude-acct/team"
-   ```
+`clankers login remove claude LABEL` unlists an account and keeps its directory and login. `--delete-dir` also
+deletes `~/.claude-acct/LABEL`, and with it that account's login; it refuses while an open clanker runs on that
+account, and never deletes Claude's default config.
 
-   A fourth account is one more `setup`, one more login and one more `[[account]]` table.
+On macOS the login goes into the Keychain under an entry tied to the account's directory. On Linux it goes into
+`~/.claude-acct/LABEL/.credentials.json`, which Claude writes itself. User-scope MCP servers
+(`claude mcp add --scope user`) live in each account's own `.claude.json`, so they are not shared. Add any you need
+with `CLAUDE_CONFIG_DIR=~/.claude-acct/LABEL claude mcp add ...`.
 
-   Only labels and directories go here, never a token. Unknown keys are refused. A broken file switches the feature
-   off, with a line in the runner's log, and never stops a clanker from launching.
+The registry and logins are per machine: on the Mac, run the same `clankers login add claude LABEL` commands there.
 
-4. Check it: `clankers claude-accounts status` should say `Switching: on` and show each account `[ready]`. The
-   default account shows `[default]`, and `[not-used-yet]` means step 2 has not run.
-
-To deploy on another machine (the Mac), repeat steps 1-3 there. The registry and logins are per machine.
+`clankers claude-accounts` is the older name and still works: `claude-accounts status` is `login list`, and
+`claude-accounts setup LABEL` only makes the directory (no login, no registry entry).
 
 ## What happens on a limit
 

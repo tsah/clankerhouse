@@ -1,7 +1,8 @@
 #!/bin/bash
 # Claude account switching end to end, on a private Rex server under a scratch HOME: account directories, the
 # registry, and a Claude clanker whose turn ends on a usage limit (a real StopFailure through the Rust hook) resuming
-# its exact session on the next account. Claude itself is faked; no login, token or credentials file is ever involved.
+# its exact session on the next account, on to a third when that one is limited too, and staying blocked once every
+# account is out. Claude itself is faked; no login, token or credentials file is ever involved.
 # The Rex part needs rex and the built hook; it skips without rex unless REX_REQUIRED is set.
 set -euo pipefail
 
@@ -44,6 +45,9 @@ check "settings.json is shared" test "$(readlink "$spare/settings.json")" = "$HO
 check "no credentials file is created or linked" test ! -e "$spare/.credentials.json" -a ! -L "$spare/.credentials.json"
 check "the account's own .claude.json is not shared" test ! -e "$spare/.claude.json"
 check "the directory is private" test "$(stat -c %a "$spare")" = 700
+"$clankers" claude-accounts setup third >/dev/null
+third="$HOME/.claude-acct/third"
+check "a third account gets its own directory" test "$(readlink "$third/projects")" = "$HOME/.claude/projects"
 mkdir -p "$XDG_CONFIG_HOME/clankerhouse"
 cat >"$XDG_CONFIG_HOME/clankerhouse/claude-accounts-$CLANKERHOUSE_INSTANCE.toml" <<EOF
 [[account]]
@@ -52,9 +56,13 @@ label = "main"
 [[account]]
 label = "spare"
 config_dir = "~/.claude-acct/spare"
+
+[[account]]
+label = "third"
+config_dir = "~/.claude-acct/third"
 EOF
 status=$("$clankers" claude-accounts status --json)
-check "two accounts: switching is on" test "$(json 'd["enabled"]' <<<"$status")" = True
+check "three accounts: switching is on" test "$(json 'd["enabled"], len(d["accounts"])' <<<"$status")" = "(True, 3)"
 check "the spare account waits for its first login" test "$(json 'd["accounts"][1]["directory"]' <<<"$status")" = not-used-yet
 
 if [[ ! -x "$hook" ]] && command -v cargo >/dev/null; then
@@ -66,17 +74,20 @@ if [[ ! -x "$hook" ]]; then
 fi
 
 # A fake Claude: logs its argv and account, reports SessionStart through the real hook, and on its first launch ends
-# the turn on a usage limit the way Claude's StopFailure hook does.
+# the turn on a usage limit the way Claude's StopFailure hook does. A resumed launch ends its turn on a limit when the
+# test drops a limit.CLANKER_ID.ACCOUNT file.
 cat >"$root/bin/claude" <<'PY'
 #!/usr/bin/env python3
 import json, os, subprocess, sys, time
 argv = sys.argv[1:]
 mode = "resume" if "--resume" in argv else "initial"
 session = argv[argv.index("--resume" if mode == "resume" else "--session-id") + 1]
-log = os.path.join(os.environ["QA_LOG_DIR"], f"{os.environ['CLANKER_ID']}.{mode}.json")
-with open(log + ".tmp", "w") as out:
-    json.dump({"argv": argv, "configDir": os.environ.get("CLAUDE_CONFIG_DIR"), "account": os.environ.get("CLANKERHOUSE_CLAUDE_ACCOUNT")}, out)
-os.replace(log + ".tmp", log)
+account = os.environ.get("CLANKERHOUSE_CLAUDE_ACCOUNT")
+logs = os.environ["QA_LOG_DIR"]
+for log in (os.path.join(logs, f"{os.environ['CLANKER_ID']}.{mode}.json"), os.path.join(logs, f"{os.environ['CLANKER_ID']}.{mode}.{account}.json")):
+    with open(log + ".tmp", "w") as out:
+        json.dump({"argv": argv, "configDir": os.environ.get("CLAUDE_CONFIG_DIR"), "account": account}, out)
+    os.replace(log + ".tmp", log)
 def hook(state, **payload):
     payload.update(session_id=session, cwd=os.getcwd(), transcript_path="")
     subprocess.run([os.environ["QA_HOOK"], "claude", state], input=json.dumps(payload), text=True, check=True, timeout=15)
@@ -84,6 +95,16 @@ hook("idle", hook_event_name="SessionStart")
 if mode == "initial":
     hook("working", hook_event_name="UserPromptSubmit", prompt="task")
     hook("done", hook_event_name="StopFailure", error="rate_limit", last_assistant_message="You've hit your session limit · resets 11:59pm (UTC)")
+else:
+    trigger = os.path.join(logs, f"limit.{os.environ['CLANKER_ID']}.{account}")
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        if os.path.exists(trigger):
+            os.remove(trigger)
+            hook("working", hook_event_name="UserPromptSubmit", prompt="continue")
+            hook("done", hook_event_name="StopFailure", error="rate_limit", last_assistant_message=f"You've hit your weekly limit on {account} · resets 11:58pm (UTC)")
+            break
+        time.sleep(0.2)
 time.sleep(300)
 PY
 chmod +x "$root/bin/claude"
@@ -124,6 +145,38 @@ check "exactly one clanker pane remains" test "$("$clankers" list | grep -c "$id
 check "the same limit is not acted on twice" test "$("$clankers" claude-accounts pass)" = "[]"
 check "a new clanker now starts on spare" test "$(cd "$repo" && bun -e 'import { spawnAccount } from "./src/claude-accounts"; console.log(spawnAccount())')" = spare
 
+echo "== on to the third account when the second is limited too, then blocked once all three are out"
+statefile=$(cd "$repo" && bun -e 'import { claudeAccountStatePath } from "./src/claude-accounts"; console.log(claudeAccountStatePath())')
+# A clanker moves at most once every 5 minutes; age the recorded moves instead of waiting.
+age_moves() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [s.update(at=s["at"]-600000) for s in d["switches"]]; json.dump(d, open(p, "w"))' "$statefile"; }
+limited_on() { "$clankers" status "$id" 2>/dev/null | grep -q "limit on $1"; }
+touch "$root/logs/limit.$id.spare"
+check "the session on spare ends its turn on spare's limit" wait_for 150 limited_on spare
+check "it is blocked again" blocked
+age_moves
+decisions=$("$clankers" claude-accounts pass)
+check "the pass moves it from spare to third" contains "$decisions" '"kind":"switch","clankerId":"'"$id"'","from":"spare","to":"third"'
+check "the resume on third runs" wait_for 150 test -s "$root/logs/$id.resume.third.json"
+resumed=$(cat "$root/logs/$id.resume.third.json")
+check "it resumes the same session again" test "$(json 'd["argv"][d["argv"].index("--resume") + 1]' <<<"$resumed")" = "$session"
+check "it runs on the third account's config directory" test "$(json 'd["configDir"], d["account"]' <<<"$resumed")" = "('$third', 'third')"
+check "the ledger records third" contains "$("$clankers" ledger)" '"account":"third"'
+touch "$root/logs/limit.$id.third"
+check "the session on third ends its turn on third's limit" wait_for 150 limited_on third
+age_moves
+decisions=$("$clankers" claude-accounts pass)
+check "with every account out the pass waits" contains "$decisions" '"kind":"wait","clankerId":"'"$id"'","reason":"every Claude account is out of usage"'
+check "and the clanker stays blocked" blocked
+out=$("$clankers" claude-accounts status --json)
+check "all three accounts show out of usage" test "$(json '[a["available"] for a in d["accounts"]]' <<<"$out")" = "[False, False, False]"
+check "no fourth launch was made" test ! -e "$root/logs/$id.resume.main.json"
+rm -f "$root/logs/$id.resume.spare.json"
+check "clear offers spare again" contains "$("$clankers" claude-accounts clear spare)" "spare is offered again"
+decisions=$("$clankers" claude-accounts pass)
+check "the waiting clanker moves as soon as an account is offered" contains "$decisions" '"kind":"switch","clankerId":"'"$id"'","from":"third","to":"spare"'
+check "it resumes on spare" wait_for 150 test -s "$root/logs/$id.resume.spare.json"
+"$clankers" ledger close "$id" >/dev/null
+
 echo "== the runner moves a limited clanker by itself"
 check "clear offers main again" contains "$("$clankers" claude-accounts clear main)" "main is offered again"
 "$repo/bin/clankerhouse-rex" --ensure-runner
@@ -142,4 +195,4 @@ if ((failures)); then
     printf 'Claude accounts QA: %d check(s) failed\n' "$failures" >&2
     exit 1
 fi
-echo "Claude accounts QA passed: off by default, account directories without logins, and a usage-limited clanker resumed on the next account."
+echo "Claude accounts QA passed: off by default, account directories without logins, and a usage-limited clanker resumed on the next of three accounts, then the third, then held while all were out."

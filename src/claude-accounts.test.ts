@@ -39,6 +39,18 @@ label = "main"
 label = "spare"
 config_dir = "~/.claude-acct/spare"
 `
+const THREE = `
+[[account]]
+label = "work"
+
+[[account]]
+label = "personal"
+config_dir = "~/.claude-acct/personal"
+
+[[account]]
+label = "team"
+config_dir = "~/.claude-acct/team"
+`
 const accounts: ClaudeAccount[] = [{ label: "main", configDir: null }, { label: "spare", configDir: "/home/op/.claude-acct/spare" }, { label: "third", configDir: "/home/op/.claude-acct/third" }]
 
 const ledgerRow = (overrides: Partial<LedgerClanker> = {}): LedgerClanker => ({
@@ -197,6 +209,32 @@ describe("planning a switch", () => {
     expect(first.state.handled["clanker-a"]).toBeUndefined()
     const later = plan([{ clankerId: "clanker-a", turnError: weekly }], { list, state: first.state, now: NOW + 60_000 })
     expect(later.decisions).toEqual([{ kind: "switch", clankerId: "clanker-a", from: "main", to: "spare", error: "rate_limit" }])
+  })
+
+  test("walks any number of accounts in registry order, then waits once every one is out", () => {
+    const three = parseClaudeAccounts(THREE, "/home/op")
+    expect(three.map((account) => account.label)).toEqual(["work", "personal", "team"])
+    expect(switchingEnabled(three)).toBe(true)
+    const on = (account: string): Record<string, LedgerClanker> => ({ "clanker-a": ledgerRow({ launchSpec: { version: 4, profile: null, resourceClass: "untrusted", model: null, account } }) })
+    const limit = (at: number, reset: string) => ({ error: "rate_limit", message: `You've hit your session limit · resets ${reset} (UTC)`, at })
+    const first = planAccountSwitches({ accounts: three, state: emptyAccountState(), candidates: [{ clankerId: "clanker-a", turnError: limit(NOW, "3pm") }], ledger: (id) => on("work")[id], now: NOW })
+    expect(first.decisions).toEqual([{ kind: "switch", clankerId: "clanker-a", from: "work", to: "personal", error: "rate_limit" }])
+    const later = NOW + SWITCH_COOLDOWN_MS
+    const second = planAccountSwitches({ accounts: three, state: first.state, candidates: [{ clankerId: "clanker-a", turnError: limit(later, "4pm") }], ledger: (id) => on("personal")[id], now: later })
+    expect(second.decisions).toEqual([{ kind: "switch", clankerId: "clanker-a", from: "personal", to: "team", error: "rate_limit" }])
+    const last = later + SWITCH_COOLDOWN_MS
+    const third = planAccountSwitches({ accounts: three, state: second.state, candidates: [{ clankerId: "clanker-a", turnError: limit(last, "5pm") }], ledger: (id) => on("team")[id], now: last })
+    expect(third.decisions).toEqual([{ kind: "wait", clankerId: "clanker-a", reason: "every Claude account is out of usage" }])
+    expect(Object.keys(third.state.accounts).sort()).toEqual(["personal", "team", "work"])
+    // The first account to reset takes it: work at 15:00 UTC.
+    const reset = planAccountSwitches({ accounts: three, state: third.state, candidates: [{ clankerId: "clanker-a", turnError: limit(last, "5pm") }], ledger: (id) => on("team")[id], now: Date.UTC(2026, 10, 23, 15) })
+    expect(reset.decisions).toEqual([{ kind: "switch", clankerId: "clanker-a", from: "team", to: "work", error: "rate_limit" }])
+  })
+
+  test("has no upper limit on accounts", () => {
+    const many = Array.from({ length: 8 }, (_, index) => ({ label: `acct-${index}`, configDir: index ? `/home/op/.claude-acct/acct-${index}` : null }))
+    const state = { ...emptyAccountState(), accounts: Object.fromEntries(many.slice(0, 7).map((account) => [account.label, { until: NOW + 60_000, error: "rate_limit", message: "", at: NOW }])) }
+    expect(chooseAccount(many, state, NOW)).toBe("acct-7")
   })
 
   test("never bounces a clanker twice within the cooldown", () => {

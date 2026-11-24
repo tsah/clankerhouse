@@ -1,21 +1,27 @@
 # Claude accounts
 
 A Claude clanker whose turn ends on a usage limit can resume its exact session on another Claude account. It keeps
-the same clanker id and conversation, and nobody has to step in. This is off until two or more accounts are listed.
+the same clanker id and conversation, and nobody has to step in. It is off until two or more accounts are listed, and
+there is no upper limit: list as many accounts as you have, under any labels you like. The examples below use three,
+`work` (Claude's default `~/.claude`, logged in as today), `personal` and `team`.
 
-## One-time setup per account (you do this yourself)
+## One-time setup per extra account (you do this yourself)
 
 Clankerhouse never logs in, and never creates, reads, copies or links a credentials file or token. Every account,
 including the default one, needs a real login done by you. Claude Code refuses a symlinked credentials file, so each
 account's login must live in its own directory.
 
+Do steps 1 and 2 once for each account other than the default one; with three accounts that is twice, for
+`personal` and for `team`. `LABEL` below is the account's label.
+
 1. Make the account's config directory:
 
    ```sh
-   clankers claude-accounts setup spare
+   clankers claude-accounts setup personal
+   clankers claude-accounts setup team
    ```
 
-   This creates `~/.claude-acct/spare` (mode 700) with symlinks to the parts of `~/.claude` that every account shares:
+   Each creates `~/.claude-acct/LABEL` (mode 700) with symlinks to the parts of `~/.claude` that every account shares:
    `projects/` (transcripts, so a session started on one account resumes on another), `settings.json` (with
    Clankerhouse's lifecycle hooks), `CLAUDE.md`, `commands`, `agents`, `skills`, `plugins`, `keybindings.json`,
    `file-history`, `todos` and `plans`, where they exist. It never links `.credentials.json` or `.claude.json`.
@@ -24,27 +30,33 @@ account's login must live in its own directory.
 2. Log in to that account from `~/dev`:
 
    ```sh
-   cd ~/dev && CLAUDE_CONFIG_DIR=~/.claude-acct/spare claude
+   cd ~/dev && CLAUDE_CONFIG_DIR=~/.claude-acct/personal claude
    ```
 
-   Run `/login` and sign in with the other account, finish onboarding (accept a trust prompt if Claude shows one),
-   then `/exit`. On macOS the login goes into the Keychain under an entry tied to this directory. On Linux it goes into
-   `~/.claude-acct/spare/.credentials.json`, which Claude writes itself.
+   Run `/login` and sign in with that account, finish onboarding (accept a trust prompt if Claude shows one),
+   then `/exit`. Repeat with `CLAUDE_CONFIG_DIR=~/.claude-acct/team claude` for the next account. On macOS the login goes into the Keychain under an entry tied to this directory. On Linux it goes into
+   `~/.claude-acct/LABEL/.credentials.json`, which Claude writes itself.
 
    User-scope MCP servers (`claude mcp add --scope user`) live in each account's own `.claude.json`, so they are
-   not shared. Add any you need to the new account with `CLAUDE_CONFIG_DIR=~/.claude-acct/spare claude mcp add ...`.
+   not shared. Add any you need to the new account with `CLAUDE_CONFIG_DIR=~/.claude-acct/LABEL claude mcp add ...`.
 
 3. List the accounts in preference order in `~/.config/clankerhouse/claude-accounts.toml`. An account without
    `config_dir` is Claude's default config (`~/.claude`, logged in as today):
 
    ```toml
    [[account]]
-   label = "main"
+   label = "work"
 
    [[account]]
-   label = "spare"
-   config_dir = "~/.claude-acct/spare"
+   label = "personal"
+   config_dir = "~/.claude-acct/personal"
+
+   [[account]]
+   label = "team"
+   config_dir = "~/.claude-acct/team"
    ```
+
+   A fourth account is one more `setup`, one more login and one more `[[account]]` table.
 
    Only labels and directories go here, never a token. Unknown keys are refused. A broken file switches the feature
    off, with a line in the runner's log, and never stops a clanker from launching.
@@ -61,11 +73,12 @@ To deploy on another machine (the Mac), repeat steps 1-3 there. The registry and
    records that, and the clanker shows `blocked`.
 2. The runner runs a switch pass at once (a newly blocked Claude triggers it) and once a minute. The pass:
    - marks the clanker's account out of usage until the reset time in Claude's text (one hour if there is none);
-   - picks the first account in the registry that is not out of usage;
+   - picks the first account in the registry, in the order listed, that is not out of usage: with the three above, a
+     clanker limited on `work` moves to `personal`, and when `personal` is limited too it moves on to `team`;
    - stops the old harness (its systemd scope) and closes its pane. The turn has already ended, so nothing is lost;
    - resumes the same session with `claude --resume` in a new tab of the same Workshop. The launch sets
      `CLAUDE_CONFIG_DIR` to the new account's directory and adds a prompt: "Your last turn stopped on a Claude usage
-     limit on account main. Clankerhouse resumed this same session on account spare. Continue exactly where you left
+     limit on account work. Clankerhouse resumed this same session on account personal. Continue exactly where you left
      off.";
    - records the new account in the ledger (launch spec version 4), so later resumes stay on it.
 3. New Claude clankers start on the first account that is not out of usage.
@@ -74,8 +87,8 @@ Rules that keep it safe:
 
 - Only `rate_limit` moves a clanker, plus `authentication_failed` and `oauth_org_not_allowed`. A lost login passes
   the account over for 6 hours. Billing, overload and server errors are left alone.
-- Each limit moves a clanker once, and a clanker moves at most once every 5 minutes, so two accounts that both fail
-  cannot bounce it.
+- Each limit moves a clanker once, and a clanker moves at most once every 5 minutes, so accounts that all fail
+  cannot bounce it between them.
 - When every account is out of usage, the clanker stays blocked, as it does today. The next pass after any
   account's reset moves it. `clankers claude-accounts clear LABEL` offers an account again early, for example after
   you raised its limit.

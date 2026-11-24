@@ -238,10 +238,10 @@ Tracked harnesses run in per-Clanker systemd scopes under `clankerhouse-clankers
 
 ## Claude accounts: moving a limited clanker to another login
 
-With two or more Claude accounts listed in `~/.config/clankerhouse/claude-accounts.toml`, a Claude clanker whose turn
-ends on a usage limit is resumed, within seconds, on the next account whose limit has not been hit: same clanker id,
-same conversation, a new tab, and a prompt saying why. New Claude clankers start on the first such account. With fewer
-than two accounts nothing changes. Each account is its own `CLAUDE_CONFIG_DIR` sharing `projects/`, settings and
+With two or more Claude accounts listed in `~/.config/clankerhouse/claude-accounts.toml` (any number; three accounts
+are three `[[account]]` tables), a Claude clanker whose turn ends on a usage limit is resumed, within seconds, on the
+next account in the list whose limit has not been hit: same clanker id, same conversation, a new tab, and a prompt
+saying why. New Claude clankers start on the first such account. With fewer than two accounts nothing changes. Each account is its own `CLAUDE_CONFIG_DIR` sharing `projects/`, settings and
 instructions with `~/.claude`; you log in to each one yourself, once. Setup, the registry format, how it decides and
 what it never touches: [docs/claude-accounts.md](docs/claude-accounts.md).
 

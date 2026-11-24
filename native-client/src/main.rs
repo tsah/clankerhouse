@@ -1623,6 +1623,30 @@ impl App {
                 }
             }
         }
+        // A found Workshop the operator expands shows its whole lineage, not only the children that match too; so
+        // does each child they expand in turn. A parent shown only for a matching descendant keeps to the matches.
+        if !query.is_empty() {
+            let mut opened = sessions
+                .iter()
+                .filter(|session| scores.contains_key(&target_key(&session.target)))
+                .filter(|session| self.expanded_lineage.contains(&session.name))
+                .filter_map(|session| session.workshop_id.clone())
+                .collect::<Vec<_>>();
+            let mut seen = HashSet::new();
+            while let Some(parent_id) = opened.pop() {
+                if !seen.insert(parent_id.clone()) {
+                    continue;
+                }
+                for child in sessions.iter().filter(|session| session.parent_workshop_id.as_ref() == Some(&parent_id)) {
+                    included.insert(target_key(&child.target));
+                    if self.expanded_lineage.contains(&child.name)
+                        && let Some(id) = &child.workshop_id
+                    {
+                        opened.push(id.clone());
+                    }
+                }
+            }
+        }
         let mut by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
         let id_counts = sessions
             .iter()
@@ -1841,7 +1865,9 @@ impl App {
                 for detail in session.details.iter().filter(|detail| {
                     !matches!(detail.kind.as_str(), "directory" | "repository" | "session")
                 }) {
+                    // Expanded by hand, a found Workshop lists every detail, as it would without a query.
                     if context.query.is_empty()
+                        || self.expanded_details.contains(&session.name)
                         || [
                             detail.title.as_str(),
                             detail.kind.as_str(),
@@ -4905,6 +4931,36 @@ mod tests {
         app.update_query("final".into());
 
         assert!(app.selected().unwrap().detail.is_none());
+    }
+
+    #[test]
+    fn a_found_workshop_expanded_by_hand_shows_its_whole_lineage() {
+        let mut app = app_with_sessions(
+            r#"[
+                {"name":"review control flow","path":"/root","workshopId":"root","target":{"type":"session","session":"root"},"details":[{"kind":"clanker","harness":"claude","state":"done","target":{"type":"window","session":"root","windowId":"@1","pane":"%1"}}]},
+                {"name":"tweezr@memory-to-skills","path":"/a","workshopId":"a","parentWorkshopId":"root","target":{"type":"session","session":"a"}},
+                {"name":"tweezr@grandchild","path":"/g","workshopId":"g","parentWorkshopId":"a","target":{"type":"session","session":"g"}},
+                {"name":"unrelated","path":"/u","workshopId":"u","target":{"type":"session","session":"u"}}
+            ]"#,
+        );
+        app.expanded_lineage.clear();
+        app.expanded_details.clear();
+        let names = |app: &App| app.rows.iter().filter(|row| row.detail.is_none()).map(|row| row.session.name.clone()).collect::<HashSet<_>>();
+        app.update_query("review control".into());
+        assert_eq!(names(&app), HashSet::from(["review control flow".to_string()]));
+        // Collapsed, the lineage keeps to the matches; expanded, it shows its children, and a grandchild once its
+        // own parent is expanded.
+        app.expanded_lineage.insert("review control flow".into());
+        app.update_query("review control".into());
+        assert_eq!(names(&app), HashSet::from(["review control flow".to_string(), "tweezr@memory-to-skills".to_string()]));
+        app.expanded_lineage.insert("tweezr@memory-to-skills".into());
+        app.update_query("review control".into());
+        assert!(names(&app).contains("tweezr@grandchild"));
+        assert!(!names(&app).contains("unrelated"));
+        // Its details, expanded by hand, list in full whatever the query.
+        app.expanded_details.insert("review control flow".into());
+        app.update_query("review control".into());
+        assert!(app.rows.iter().any(|row| row.detail.as_ref().is_some_and(|detail| detail.harness == "claude")));
     }
 
     #[test]

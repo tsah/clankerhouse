@@ -136,6 +136,18 @@ const workshopSessionIds = async (workshopId: string) => {
   return listed.rows.filter((row) => row[2] === workshopId).map((row) => row[0]!)
 }
 
+/**
+ * Why a selected repository cannot take a new Workshop, or undefined when it can: a checkout, or the root of a bare
+ * repository whose worktrees sit beside it, which Worktrunk creates Workshops from just as well.
+ */
+export const repositoryProblem = (repository: string) => {
+  const checkout = Bun.spawnSync(["git", "-C", repository, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" })
+  if (checkout.exitCode === 0) return undefined
+  const bare = Bun.spawnSync(["git", "-C", repository, "rev-parse", "--is-bare-repository"], { stdout: "pipe", stderr: "pipe" })
+  if (bare.exitCode === 0 && bare.stdout.toString().trim() === "true") return undefined
+  return checkout.stderr.toString().trim()
+}
+
 const worktreeForBranch = (repository: string, branch: string) => {
   const listed = Bun.spawnSync(["git", "-C", repository, "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "pipe" })
   if (listed.exitCode !== 0) throw new Error(listed.stderr.toString().trim() || `Unable to inspect worktrees for ${repository}`)
@@ -496,8 +508,8 @@ const reconcileMutationStage = async (intent: MutationIntent, stage: string, exe
   if (intent.type === "create") {
     if (stage === "identity.validated") {
       const repository = realpathSync(expandHome(intent.repository))
-      const verified = Bun.spawnSync(["git", "-C", repository, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" })
-      if (verified.exitCode !== 0) throw new Error(verified.stderr.toString().trim() || "Selected repository is invalid")
+      const invalid = repositoryProblem(repository)
+      if (invalid !== undefined) throw new Error(invalid || "Selected repository is invalid")
       return { checkpoint: { ...checkpoint, repository } }
     }
     if (stage === "worktree.ready") {

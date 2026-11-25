@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { parseClaudeAccounts } from "./claude-accounts"
@@ -51,7 +51,8 @@ describe("removing from the registry", () => {
 describe("clankers login", () => {
   /** A scratch machine: HOME, registry and state, and a fake claude whose interactive run "logs in" when told to. */
   const machine = () => {
-    const root = mkdtempSync(join(tmpdir(), "clankerhouse-login-"))
+    // Real path: on macOS the temporary directory is under /var, a link to /private/var, and pwd prints the latter.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "clankerhouse-login-")))
     roots.push(root)
     const home = join(root, "home")
     mkdirSync(join(home, ".claude"), { recursive: true })

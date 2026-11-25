@@ -3912,14 +3912,22 @@ fn clankers_bin() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("clankers"))
 }
 
-/// This machine's name for its host tab.
+/// This machine's name for its host tab. On macOS that is the name the Mac was given (its ComputerName, which Tailscale
+/// also uses), since `hostname` there is a network name macOS derived on its own and may never have been changed.
 fn local_host_label() -> String {
-    Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|name| !name.is_empty())
+    let output = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|name| !name.is_empty())
+    };
+    (if cfg!(target_os = "macos") { output("scutil", &["--get", "ComputerName"]) } else { None })
+        .or_else(|| output("hostname", &["-s"]))
         .unwrap_or_else(|| "this machine".into())
 }
 

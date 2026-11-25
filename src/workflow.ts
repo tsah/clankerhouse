@@ -6,8 +6,9 @@ import { ensureManagedSession, openManagedMultiplexer, type ManagedMultiplexer }
 import { paneLocation, sessionLocation, windowLocation, type MultiplexerSession } from "./multiplexer/interface"
 import { clankerForPane, generatedClankerId, listClankers, resultForClanker, sendClanker, waitForClanker, type ClankerDelivery } from "./clanker-api"
 import { clankerUnitName, harnessCommand, harnessModelArgs, resumeLaunch, stopOwnedHarness, workshopEnvironment, type WorkshopLaunchIdentity } from "./harness-launch"
-import { ClankerLedger, openClankerLedger, pathWorkshopId, withLaunchAccount, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
+import { ClankerLedger, launchAccount, openClankerLedger, pathWorkshopId, withLaunchAccount, type LaunchSpec, type ResourceClass } from "./clanker-ledger"
 import { loadClaudeAccounts, spawnAccount } from "./claude-accounts"
+import { trustFolderForAccount, type TrustResult } from "./claude-trust"
 import { isLinkedWorktreeSync, lineageMode, persistWorkshopLineage, registerWorkshop, type LineageMode, type WorkshopRecord, changeWorkshopLabel, workshopForId, workshopForPath, workshopLabels } from "./workshop"
 import { harnessRunsIn, systemdUnitProbe, type UnitProbe } from "./harness-units"
 import { workshopBase } from "./workshop-base"
@@ -193,6 +194,8 @@ async function launchClanker(harness: Harness, cwd: string, prompt: string, clan
       progress.registered = true
       const unit = clankerUnitName(clankerId)
       ledger.setOwnerUnit(clankerId, unit)
+      // A new account would open on Claude's trust dialog for this folder ("No, exit" by default).
+      reportTrust(clankerId, account, trustFolderForAccount(account, id.path))
       argv = harnessCommand({ harness: ledgerHarness, cwd: id.path, prompt: sendPrompt ? prompt : undefined, clankerId, harnessSessionId, launchSpec, workshop: launchWorkshop }, unit)
     } catch (error) {
       throw new ClankerRegistrationError(error instanceof Error ? error.message : String(error), { cause: error })
@@ -243,6 +246,11 @@ export async function spawnClanker(harness: Harness, cwd: string, prompt: string
  * Reopens a ledger clanker that is not running: a new window in its Workshop continues its exact
  * harness session under the same clanker id, optionally with a first prompt.
  */
+/** A pre-trust that could not be written is worth a line: that launch may stop on Claude's trust dialog. */
+const reportTrust = (clankerId: string, account: string | undefined, result: TrustResult | undefined) => {
+  if (result?.skipped) console.error(`${clankerId}: could not pre-trust its folder for Claude account ${account} in ${result.configFile}: ${result.skipped}`)
+}
+
 export async function resumeClanker(clankerId: string, options: { prompt?: string; account?: string; multiplexer?: ManagedMultiplexer; probe?: UnitProbe } = {}) {
   const ledger = openClankerLedger()
   try {
@@ -262,6 +270,9 @@ export async function resumeClanker(clankerId: string, options: { prompt?: strin
     const placement = await clankerPlacement(clanker.workshopPath, clanker.windowLabel, multiplexer)
     const unit = clankerUnitName(clankerId)
     const launch = resumeLaunch(clanker, placement.launchWorkshop, options.prompt, options.account)
+    // A clanker moved to another account resumes into that account's trust dialog unless its folder is trusted there.
+    const account = clanker.harness === "claude" ? launchAccount(launch.launchSpec) : undefined
+    reportTrust(clankerId, account, trustFolderForAccount(account, clanker.cwd))
     const location = await openClankerWindow(placement, harnessCommand(launch, unit), multiplexer)
     if (options.account !== undefined) ledger.setLaunchSpec(clankerId, launch.launchSpec)
     ledger.reopen(clankerId)

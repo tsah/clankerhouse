@@ -81,6 +81,13 @@ The registry and logins are per machine: on the Mac, run the same `clankers logi
    - picks the first account in the registry, in the order listed, that is not out of usage: with the three above, a
      clanker limited on `work` moves to `personal`, and when `personal` is limited too it moves on to `team`;
    - stops the old harness (its systemd scope) and closes its pane. The turn has already ended, so nothing is lost;
+   - marks the clanker's folder trusted in the new account's Claude config, so it does not resume into Claude's
+     "Yes, I trust this folder" dialog (whose default is "No, exit"). Claude keeps that answer per account, in
+     `projects[<path>].hasTrustDialogAccepted` of `<config dir>/.claude.json` (`~/.claude.json` for the default
+     account), and inside a git repository looks it up on the main repository root, so the folder, its worktree and
+     that root are all marked. Only that flag changes, written atomically under Claude's own `.claude.json.lock`; a
+     config that does not exist yet or cannot be parsed is left alone, with a line in the log. The same happens
+     whenever a Claude clanker starts on an account;
    - resumes the same session with `claude --resume` in a new tab of the same Workshop. The launch sets
      `CLAUDE_CONFIG_DIR` to the new account's directory and adds a prompt: "Your last turn stopped on a Claude usage
      limit on account work. Clankerhouse resumed this same session on account personal. Continue exactly where you left

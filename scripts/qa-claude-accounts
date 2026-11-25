@@ -64,6 +64,10 @@ EOF
 status=$("$clankers" claude-accounts status --json)
 check "three accounts: switching is on" test "$(json 'd["enabled"], len(d["accounts"])' <<<"$status")" = "(True, 3)"
 check "the spare account waits for its first login" test "$(json 'd["accounts"][1]["directory"]' <<<"$status")" = not-used-yet
+# Stand-ins for the config Claude writes on an account's first run; the switch adds trust to it, nothing else.
+printf '{"numStartups": 1}\n' >"$spare/.claude.json"
+printf '{"numStartups": 1}\n' >"$third/.claude.json"
+trusted() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('projects',{}).get(sys.argv[2],{}).get('hasTrustDialogAccepted') is True else 1)" "$1" "$2"; }
 
 if [[ ! -x "$hook" ]] && command -v cargo >/dev/null; then
     cargo build --quiet --manifest-path "$repo/native-client/Cargo.toml" --release --locked --bin clankerhouse-hook
@@ -126,6 +130,7 @@ check "the first launch runs" wait_for 150 test -s "$root/logs/$id.initial.json"
 initial=$(cat "$root/logs/$id.initial.json")
 check "a new clanker starts on the first account, Claude's default config" test "$(json 'd["configDir"], d["account"]' <<<"$initial")" = "(None, 'main')"
 check "the ledger records the account" contains "$("$clankers" ledger)" '"account":"main"'
+check "the spawn trusted the folder in the default account's ~/.claude.json" trusted "$HOME/.claude.json" "$work"
 blocked() { contains "$("$clankers" status "$id" 2>/dev/null)" '"state":"blocked"'; }
 check "the usage limit leaves the clanker blocked" wait_for 150 blocked
 sent=$("$clankers" send "$id" --source qa --text "a message held by the limit")
@@ -137,6 +142,8 @@ resumed=$(cat "$root/logs/$id.resume.json")
 check "it resumes the exact session" test "$(json 'd["argv"][d["argv"].index("--resume") + 1]' <<<"$resumed")" = "$session"
 check "it runs on the spare account's config directory" test "$(json 'd["configDir"], d["account"]' <<<"$resumed")" = "('$spare', 'spare')"
 check "it is told why and to carry on" contains "$(json 'd["argv"][-1]' <<<"$resumed")" "Clankerhouse resumed this same session on account spare"
+check "before resuming, its folder was trusted in spare's config, so Claude skips the trust dialog" trusted "$spare/.claude.json" "$work"
+check "and the rest of spare's config is kept" test "$(json 'd["numStartups"]' <"$spare/.claude.json")" = 1
 check "the ledger records the new account" contains "$("$clankers" ledger)" '"account":"spare"'
 after=$("$clankers" claude-accounts status --json)
 check "main is out until Claude's reset" test "$(json 'd["accounts"][0]["available"], d["accounts"][0]["outUntil"][11:16]' <<<"$after")" = "(False, '23:59')"
@@ -160,6 +167,7 @@ check "the resume on third runs" wait_for 150 test -s "$root/logs/$id.resume.thi
 resumed=$(cat "$root/logs/$id.resume.third.json")
 check "it resumes the same session again" test "$(json 'd["argv"][d["argv"].index("--resume") + 1]' <<<"$resumed")" = "$session"
 check "it runs on the third account's config directory" test "$(json 'd["configDir"], d["account"]' <<<"$resumed")" = "('$third', 'third')"
+check "its folder is trusted in third's config too" trusted "$third/.claude.json" "$work"
 check "the ledger records third" contains "$("$clankers" ledger)" '"account":"third"'
 touch "$root/logs/limit.$id.third"
 check "the session on third ends its turn on third's limit" wait_for 150 limited_on third

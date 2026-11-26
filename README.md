@@ -315,7 +315,7 @@ Useful CLI inspection/repair commands:
 - `clankers workshop bootstrap --cwd PATH`
 
 Controls:
-- Command mode: the Workshop list opens with plain keys as commands, each the same as Alt and that key (`d` done, `r` rename, `a` attach, `l` detach, `s` snooze, `.` done fold, `i`/`e`/`f`/`t` views, `b` repository, `n` scratch), so no modifier is needed; `j`/`k` move and `q` closes. `/` starts a search: typing filters, Enter opens. Esc leaves the search but keeps its filter, whose rows then take commands; Backspace past an empty search leaves it too. Every Alt key works in both modes, and the repository, branch and attach steps always type into their search
+- Command mode: the Workshop list opens typing into its search; Esc switches to command mode, keeping the filter, where a plain key is the command Alt and that key is (`d` done, `r` rename, `a` attach, `l` detach, `s` snooze, `.` done fold, `i`/`e`/`f`/`t` views, `b` repository, `n` scratch), so no modifier is needed; `j`/`k` move, `q` closes and `/` types again. In command mode Esc clears the filter, then closes. Every Alt key works in both modes
 - `Up/Down`: move between workshop rows and nested window/clanker children
 - `Right`: first expand hidden lineage children for the selected session, then expand its exact detail rows
 - `Left`: jump from a detail to its session, collapse exact detail rows first, then collapse lineage children, then jump to the lineage parent
@@ -329,7 +329,7 @@ Controls:
 - `Alt-S`: snooze the selected Workshop's need (below), in any view
 - `Ctrl-R`: refresh remotes while in the branch picker
 - `Alt-D`: on a worktree Workshop, mark it done; on a done Workshop, confirm destruction or reopen it (see Workshop labels). On a pane or plain session, confirm deletion of the selected target. Deletion runs in the background while the picker remains usable: search, select, expand, and press Enter to jump to another Workshop without waiting. Leaving waits only for durable submission; an accepted deletion continues after the picker closes. Only one mutation is started at a time from a picker. Worktree deletion also closes its linked sessions and splices any children to the former parent. Outside Clankerhouse, Alt-D follows the same rule for the invoking Herdr workspace/worktree; cancellation leaves it untouched.
-- `Esc`: leave a search (keeping its filter), clear the filter, move back one flow step, or close
+- `Esc`: switch from typing to command mode (keeping the filter), clear the filter, move back one flow step, or close
 - `Ctrl-C`: close
 
 On startup, the Rex session that opened the popup is selected when it appears in the jump list. Renaming stays inside Clankerhouse and preserves the session's canonical path metadata and included clankers.

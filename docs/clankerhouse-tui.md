@@ -96,10 +96,10 @@ matches by concatenating unrelated fields.
 - `Alt-A`: attach a workshop to another valid parent
 - `Alt-L`: detach a workshop from its parent
 - `Alt-D`: explicitly confirm, then destroy the exact selected pane or session as safely projected; remain in Clankerhouse afterward
-- `Esc`: leave a search (keeping its filter), clear the query, or close the current flow
+- `Esc`: switch from typing to command mode (keeping the filter), clear the query, or close the current flow
 
-The Workshop list opens in command mode: a plain key is the command Alt and that key is (`d`, `r`, `a`, `l`, `s`, `.`,
-`i`, `e`, `f`, `t`, `b`, `n`), `j`/`k` move and `q` closes. `/` starts a search; then letters type the query.
+The Workshop list opens typing into its search. Esc switches to command mode: a plain key is the command Alt and that
+key is (`d`, `r`, `a`, `l`, `s`, `.`, `i`, `e`, `f`, `t`, `b`, `n`), `j`/`k` move, `q` closes and `/` types again.
 
 ## Desks view
 

@@ -465,7 +465,8 @@ struct App {
     delete_label: String,
     done_pending: bool,
     delete_requested: bool,
-    /// The Workshop list takes plain keys as commands until `/` starts a search; then they type into the query.
+    /// The Workshop list starts typing into the query; Esc switches to command mode, where plain keys are commands, and
+    /// `/` switches back.
     searching: bool,
     workshop_title: Option<String>,
     rename_title_path: Option<String>,
@@ -1397,7 +1398,7 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
-            searching: false,
+            searching: true,
             workshop_title: None,
             rename_title_path: None,
             worktree_delete: None,
@@ -1461,7 +1462,7 @@ impl App {
             delete_label: String::new(),
             done_pending: false,
             delete_requested: false,
-            searching: false,
+            searching: true,
             workshop_title: None,
             rename_title_path: None,
             worktree_delete: None,
@@ -2660,8 +2661,12 @@ fn session_meta(session: &SessionRow, current: bool) -> String {
 /// A key hint written with Alt keys, as the Workshop list's mode reads it: while searching the Alt keys, in command mode
 /// the plain keys they stand for (Alt-K branches is `b` there, since `k` moves up) and `/` to search.
 fn key_hint(app: &App, hint: &str) -> String {
-    if app.mode != Mode::Jump || app.searching {
+    if app.mode != Mode::Jump {
         return hint.to_string();
+    }
+    if app.searching {
+        // While typing, Esc switches to command mode instead of closing.
+        return hint.replace("Esc close", "Esc commands");
     }
     let hint = hint.replace("Alt-K branches", "b branches");
     let mut plain = String::new();
@@ -2675,19 +2680,18 @@ fn key_hint(app: &App, hint: &str) -> String {
     }
     plain.push_str(rest);
     let plain = plain.trim_start();
-    format!("  / search · {plain}")
+    format!("  / type · {plain}")
 }
 
 fn query_spans(app: &App) -> Vec<Span<'_>> {
     if app.mode == Mode::Jump && !app.searching {
         let mut spans = vec![Span::styled("> ", Style::default().fg(Color::DarkGray)), Span::raw(&app.query)];
         if app.query.is_empty() {
-            spans.push(Span::styled("/ search", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("/ type", Style::default().fg(Color::DarkGray)));
         }
         return spans;
     }
-    let prompt = if app.mode == Mode::Jump { "/ " } else { "> " };
-    vec![Span::styled(prompt, Style::default().fg(Color::LightCyan)), Span::raw(&app.query), Span::raw("_")]
+    vec![Span::styled("> ", Style::default().fg(Color::LightCyan)), Span::raw(&app.query), Span::raw("_")]
 }
 
 fn draw_flat_picker(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
@@ -3591,8 +3595,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
         return None;
     }
 
-    // Command mode: in the Workshop list a plain key is a command, the same one as Alt and that key, so actions need no
-    // modifier (Option is often a window manager's). `/` starts a search; j/k move; q closes.
+    // Command mode, which Esc enters from typing: in the Workshop list a plain key is a command, the same one as Alt and
+    // that key, so actions need no modifier (Option is often a window manager's). `/` types again; j/k move; q closes.
     if app.mode == Mode::Jump
         && !app.searching
         && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -3606,7 +3610,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
             'i' | 'e' | 'f' | 't' | 'b' | 'n' | '.' | 's' | 'r' | 'a' | 'l' | 'd' => {
                 return handle_key(app, KeyEvent::new(key.code, KeyModifiers::ALT));
             }
-            _ => app.error = "Press / to search, or Esc to close".into(),
+            _ => app.error = "Command mode: press / to type a search".into(),
         }
         return None;
     }
@@ -3864,11 +3868,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppCommand> {
     }
 
     match key.code {
-        // Esc leaves a search but keeps its filter, so its rows can take commands; again clears it; again closes.
+        // Esc switches typing to command mode, keeping the filter so its rows can take commands; in command mode it
+        // clears the filter, then closes.
         KeyCode::Esc if app.searching => app.searching = false,
         KeyCode::Esc if !app.query.is_empty() => app.update_query(String::new()),
         KeyCode::Esc => return Some(AppCommand::Close),
-        KeyCode::Backspace if app.searching && app.query.is_empty() => app.searching = false,
         KeyCode::Up => app.move_selection(1),
         KeyCode::Down => app.move_selection(-1),
         KeyCode::Backspace => {
@@ -5093,22 +5097,21 @@ mod tests {
             for query in ["workshop-49", "shell", "no-match-λ", " "] {
                 for clear_with_escape in [false, true] {
                     let before = rendered_view(&mut app);
-                    handle_key(&mut app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
                     for character in query.chars() {
                         handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
                     }
                     if clear_with_escape {
-                        // The first Esc leaves the search with its filter kept; the second clears it.
+                        // The first Esc switches to command mode with the filter kept; the second clears it; / types again.
                         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
                         assert!(!app.searching && app.query == query);
                         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                        handle_key(&mut app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
                     } else {
-                        // Backspace past the start of an empty search leaves it.
-                        for _ in 0..=query.chars().count() {
+                        for _ in query.chars() {
                             handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
                         }
                     }
-                    assert!(!app.searching);
+                    assert!(app.searching);
                     assert!(app.query.is_empty());
                     assert_eq!(app.selected().unwrap().key, key);
                     assert_eq!(rendered_view(&mut app), before, "query={query:?}, escape={clear_with_escape}");
@@ -5118,23 +5121,33 @@ mod tests {
     }
 
     #[test]
-    fn plain_keys_are_commands_until_slash_starts_a_search() {
+    fn esc_switches_typing_to_command_mode_where_plain_keys_are_commands() {
         let mut app = app_with_sessions(r#"[
             {"name":"main","path":"/main","recency":50,"workshopId":"main","availableActions":["open","delete"],"target":{"type":"session","session":"main"}},
             {"name":"feat","path":"/feat","recency":40,"workshopId":"feat","directorySource":"worktree","availableActions":["open","delete"],"target":{"type":"session","session":"feat"}}
         ]"#);
         let key = |app: &mut App, character: char| handle_key(app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        assert!(!app.searching);
+        let esc = |app: &mut App| handle_key(app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        // A plain letter is the command Alt and that letter is: here `d`, done.
-        let feat = app.rows.iter().position(|row| row.session.name == "feat").unwrap();
-        app.selected = feat;
+        // The list opens typing: letters filter.
+        assert!(app.searching);
+        for character in "feat".chars() {
+            key(&mut app, character);
+        }
+        assert_eq!(app.query, "feat");
+
+        // Esc switches to command mode with the filter kept; a plain letter is the command Alt and that letter is.
+        assert_eq!(esc(&mut app), None);
+        assert!(!app.searching);
+        assert_eq!(app.query, "feat");
+        assert_eq!(app.selected().unwrap().session.name, "feat");
         assert_eq!(key(&mut app, 'd'), Some(AppCommand::Submit(MutationIntent::Done { path: "/feat".into() })));
         app.mutation = None;
         app.clear_action_mode();
-        assert!(app.query.is_empty());
 
-        // j and k move; a letter that is no command types nothing and says how to search.
+        // Esc again clears the filter; j and k move; a letter that is no command types nothing.
+        esc(&mut app);
+        assert!(app.query.is_empty() && !app.searching);
         app.selected = 0;
         key(&mut app, 'k');
         assert_eq!(app.selected, 1);
@@ -5143,26 +5156,16 @@ mod tests {
         key(&mut app, 'z');
         assert!(app.query.is_empty() && app.error.contains("/"));
 
-        // `/` searches; Esc leaves the search with its filter, whose rows then take commands.
+        // `/` types again, and Alt keys work while typing.
         key(&mut app, '/');
-        for character in "feat".chars() {
-            key(&mut app, character);
-        }
-        assert_eq!(app.query, "feat");
-        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.searching);
-        assert_eq!(app.query, "feat");
-        assert_eq!(app.selected().unwrap().session.name, "feat");
-        assert_eq!(key(&mut app, 'd'), Some(AppCommand::Submit(MutationIntent::Done { path: "/feat".into() })));
-        app.mutation = None;
-        app.clear_action_mode();
-
-        // q closes; Alt keys still work while searching.
-        key(&mut app, '/');
+        assert!(app.searching && app.query.is_empty());
         assert_eq!(handle_key(&mut app, alt('i')), None);
         assert_eq!(app.view, View::NeedsMe);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // From command mode, q closes, as does Esc with no filter.
+        esc(&mut app);
         assert_eq!(key(&mut app, 'q'), Some(AppCommand::Close));
+        assert_eq!(esc(&mut app), Some(AppCommand::Close));
     }
 
     #[test]
@@ -5334,7 +5337,6 @@ mod tests {
         assert_eq!(handle_key(&mut app, alt('e')), None);
         assert_eq!((app.view, app.selected), (View::Eldest, 0));
         assert_eq!(names(&app), needs_me_fixture_names("eldest"));
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "late".chars() {
             handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -5450,19 +5452,19 @@ mod tests {
             buffer.content().chunks(100).map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
         };
         let flat = text(&mut app);
-        for expected in ["Clankerhouse · Flat", "/ search · i needs me · e eldest", "3 targets · 1 need you · 3 open", "waiting on pr one"] {
+        for expected in ["Clankerhouse · Flat", "Alt-I needs me · Alt-E eldest", "3 targets · 1 need you · 3 open", "waiting on pr one"] {
             assert!(flat.contains(expected), "{expected}\n{flat}");
         }
         // The snoozed row says so beside its name.
         assert!(flat.lines().any(|line| line.matches("snoozed").count() == 2), "{flat}");
         handle_key(&mut app, alt('i'));
         let needs_me = text(&mut app);
-        for expected in ["Clankerhouse · Needs me", "freshest first · e eldest · f flat · t desks · s snooze", "1 need you · 3 open", "waiting on pr one · asked"] {
+        for expected in ["Clankerhouse · Needs me", "freshest first · Alt-E eldest · Alt-F flat · Alt-T desks · Alt-S snooze", "1 need you · 3 open", "waiting on pr one · asked"] {
             assert!(needs_me.contains(expected), "{expected}\n{needs_me}");
         }
         handle_key(&mut app, alt('e'));
         let eldest = text(&mut app);
-        for expected in ["Clankerhouse · Waiting longest", "eldest first · i freshest · f flat", "1 need you · 3 open"] {
+        for expected in ["Clankerhouse · Waiting longest", "eldest first · Alt-I freshest · Alt-F flat", "1 need you · 3 open"] {
             assert!(eldest.contains(expected), "{expected}\n{eldest}");
         }
     }
@@ -5574,7 +5576,7 @@ mod tests {
     fn the_flat_list_draws_the_desks_group_teal_and_counts_only_real_targets() {
         let mut app = app_with_sessions(DESKS);
         let text = screen(&mut app);
-        for expected in ["◆ ▸ Desks · 2", "1 need you", "t desks", "3 targets"] {
+        for expected in ["◆ ▸ Desks · 2", "1 need you", "Alt-T desks", "3 targets"] {
             assert!(text.contains(expected), "{expected}\n{text}");
         }
         assert_eq!(label_color("desk"), DESK_TEAL);
@@ -5591,7 +5593,7 @@ mod tests {
         let text = screen(&mut app);
         for expected in [
             "Clankerhouse · Desks",
-            "schedule and health · f flat · i needs me",
+            "schedule and health · Alt-F flat · Alt-I needs me",
             "no routine · no report",
             "next Sat 20:00 lint-sweep · report",
             "2 desks · 1 need you · 1 with routines",
@@ -5915,7 +5917,6 @@ mod tests {
         let command = confirm_fixture_delete(&mut app);
         assert!(matches!(dispatch_command(&mut app, command), CommandDispatch::Background(_)));
         assert_eq!(app.mode, Mode::Jump);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "survivor".chars() {
             handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -6518,7 +6519,7 @@ mod tests {
         assert!(lines[main + 1].contains("├─▸  ✓ 3 done"), "{}", lines[main + 1]);
         assert!(lines.iter().any(|line| line.contains("3 done Workshops folded · → show")));
         assert!(!lines.iter().any(|line| line.contains("old-a")));
-        assert!(lines.iter().any(|line| line.contains("> / search  2 targets")));
+        assert!(lines.iter().any(|line| line.contains("> _  2 targets")));
     }
 
     #[test]

@@ -315,6 +315,7 @@ Useful CLI inspection/repair commands:
 - `clankers workshop bootstrap --cwd PATH`
 
 Controls:
+- Command mode: the Workshop list opens with plain keys as commands, each the same as Alt and that key (`d` done, `r` rename, `a` attach, `l` detach, `s` snooze, `.` done fold, `i`/`e`/`f`/`t` views, `b` repository, `n` scratch), so no modifier is needed; `j`/`k` move and `q` closes. `/` starts a search: typing filters, Enter opens. Esc leaves the search but keeps its filter, whose rows then take commands; Backspace past an empty search leaves it too. Every Alt key works in both modes, and the repository, branch and attach steps always type into their search
 - `Up/Down`: move between workshop rows and nested window/clanker children
 - `Right`: first expand hidden lineage children for the selected session, then expand its exact detail rows
 - `Left`: jump from a detail to its session, collapse exact detail rows first, then collapse lineage children, then jump to the lineage parent
@@ -324,11 +325,11 @@ Controls:
 - `Alt-L`: detach the selected workshop from its parent, making its existing subtree top-level
 - Type or paste: structured fuzzy-filter rows and fill the branch/base form; current selection is preserved when it still matches
 - `Alt-K` while Clankerhouse is open: choose a repository, then open an existing worktree/branch or type a new branch name to create it; in a needs-me view, back to the flat list (as Alt-F)
-- `Alt-I`, `Alt-E`, `Alt-F`: the list's three views, from any picker mode (below): the Workshops that need you, freshest first; the same rows, eldest (longest waiting) first; and the flat list of everything. Plain letters always type the query, which carries over between views
+- `Alt-I`, `Alt-E`, `Alt-F`: the list's three views, from any picker mode (below): the Workshops that need you, freshest first; the same rows, eldest (longest waiting) first; and the flat list of everything. While searching, plain letters type the query, which carries over between views
 - `Alt-S`: snooze the selected Workshop's need (below), in any view
 - `Ctrl-R`: refresh remotes while in the branch picker
 - `Alt-D`: on a worktree Workshop, mark it done; on a done Workshop, confirm destruction or reopen it (see Workshop labels). On a pane or plain session, confirm deletion of the selected target. Deletion runs in the background while the picker remains usable: search, select, expand, and press Enter to jump to another Workshop without waiting. Leaving waits only for durable submission; an accepted deletion continues after the picker closes. Only one mutation is started at a time from a picker. Worktree deletion also closes its linked sessions and splices any children to the former parent. Outside Clankerhouse, Alt-D follows the same rule for the invoking Herdr workspace/worktree; cancellation leaves it untouched.
-- `Esc`: clear search, move back one flow step, or close
+- `Esc`: leave a search (keeping its filter), clear the filter, move back one flow step, or close
 - `Ctrl-C`: close
 
 On startup, the Rex session that opened the popup is selected when it appears in the jump list. Renaming stays inside Clankerhouse and preserves the session's canonical path metadata and included clankers.
